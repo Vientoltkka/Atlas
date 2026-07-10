@@ -1,0 +1,8 @@
+﻿ollama
+openai
+python-dotenv
+pydantic
+rich
+typer
+fastapi
+uvicorn
