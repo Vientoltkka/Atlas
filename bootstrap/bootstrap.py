@@ -24,7 +24,7 @@ from tools.project.tree_tool import TreeTool
 
 from use_cases.analyze_project import AnalyzeProjectUseCase
 from use_cases.read_file import ReadFileUseCase
-
+from use_cases.write_file import WriteFileUseCase
 
 class Bootstrap:
     """Build the Atlas application."""
@@ -64,6 +64,10 @@ class Bootstrap:
             tool_executor,
         )
 
+        write_file = WriteFileUseCase(
+            tool_executor,
+)
+
         # -----------------------
         # Agents
         # -----------------------
@@ -78,6 +82,7 @@ class Bootstrap:
             CodingAgent(
                 prompt_client,
                 read_file,
+                write_file,
             )
         )
 

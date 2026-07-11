@@ -33,8 +33,8 @@ class WriteFileTool(BaseTool):
             raise ValueError("Missing parameter 'content'.")
 
         FileService.write(
-            path,
-            content,
+            path=path,
+            content=content,
         )
 
-        return path
+        return f"Archivo '{path}' actualizado correctamente."
