@@ -23,6 +23,7 @@ from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
 
 from use_cases.analyze_project import AnalyzeProjectUseCase
+from use_cases.read_file import ReadFileUseCase
 
 
 class Bootstrap:
@@ -59,6 +60,10 @@ class Bootstrap:
             tool_executor,
         )
 
+        read_file = ReadFileUseCase(
+            tool_executor,
+        )
+
         # -----------------------
         # Agents
         # -----------------------
@@ -70,7 +75,10 @@ class Bootstrap:
         )
 
         registry.register(
-            CodingAgent(prompt_client)
+            CodingAgent(
+                prompt_client,
+                read_file,
+            )
         )
 
         registry.register(
