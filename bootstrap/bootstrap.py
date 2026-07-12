@@ -82,7 +82,7 @@ class Bootstrap:
             CodingAgent(
                 prompt_client,
                 read_file,
-                write_file,
+                
             )
         )
 
@@ -103,4 +103,5 @@ class Bootstrap:
             model_manager=model_manager,
             memory=memory,
             registry=registry,
+            write_file=write_file,
         )

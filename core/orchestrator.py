@@ -9,6 +9,7 @@ from core.planner import Planner
 from core.router import Router
 
 from memory.conversation import ConversationMemory
+from use_cases.write_file import WriteFileUseCase
 
 
 class AtlasOrchestrator:
@@ -21,6 +22,7 @@ class AtlasOrchestrator:
         model_manager: ModelManager,
         memory: ConversationMemory,
         registry: AgentRegistry,
+        write_file: WriteFileUseCase,
     ) -> None:
 
         self._planner = planner
@@ -28,6 +30,7 @@ class AtlasOrchestrator:
         self._model_manager = model_manager
         self._memory = memory
         self._registry = registry
+        self._write_file = write_file
 
     def start(self) -> None:
 
