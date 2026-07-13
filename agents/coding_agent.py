@@ -5,6 +5,7 @@ from __future__ import annotations
 from agents.base_agent import BaseAgent
 from models.prompt_client import PromptClient
 from use_cases.read_file import ReadFileUseCase
+from use_cases.write_file import WriteFileUseCase
 
 
 class CodingAgent(BaseAgent):
@@ -31,10 +32,15 @@ Tu trabajo es:
         self,
         prompt_client: PromptClient,
         read_file: ReadFileUseCase,
+        write_file: WriteFileUseCase,
     ) -> None:
 
         self._client = prompt_client
         self._read_file = read_file
+        self._write_file = write_file
+
+        self._generated_path: str | None = None
+        self._generated_content: str | None = None
 
     @property
     def name(self) -> str:
@@ -105,9 +111,17 @@ Código:
                 },
             ]
 
-            return self._client.ask(
+            generated = self._client.ask(
                 model=model,
                 messages=conversation,
+            )
+
+            self._generated_path = path
+            self._generated_content = generated
+
+            return (
+                f"Se ha generado una nueva versión de '{path}'.\n"
+                "Escribe 'S' para aplicar los cambios."
             )
 
         # -----------------------------------------
@@ -127,3 +141,15 @@ Código:
             model=model,
             messages=conversation,
         )
+
+    @property
+    def generated_path(self) -> str | None:
+        return self._generated_path
+
+    @property
+    def generated_content(self) -> str | None:
+        return self._generated_content
+
+    def clear_generated(self) -> None:
+        self._generated_path = None
+        self._generated_content = None

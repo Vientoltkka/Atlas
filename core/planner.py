@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import unicodedata
 
 
 @dataclass
@@ -17,6 +18,13 @@ class Planner:
     def create_plan(self, prompt: str) -> Plan:
 
         text = prompt.lower()
+        normalized_text = self._normalize_text(prompt)
+
+        if self._is_architecture_query(normalized_text):
+            return Plan(
+                task="project",
+                objective=prompt,
+            )
 
         # ---------------------------------
         # Project analysis
@@ -95,4 +103,36 @@ class Planner:
         return Plan(
             task="chat",
             objective=prompt,
+        )
+
+    def _is_architecture_query(
+        self,
+        text: str,
+    ) -> bool:
+        """Detect deterministic architecture graph queries."""
+        return (
+            "quien usa" in text
+            or "modulos dependen de" in text
+            or "clases importa" in text
+            or (
+                "archivos" in text
+                and "afectados" in text
+                and "modifico" in text
+            )
+        )
+
+    def _normalize_text(
+        self,
+        text: str,
+    ) -> str:
+        """Normalize accents and punctuation for query detection."""
+        normalized = unicodedata.normalize("NFKD", text.lower())
+        without_accents = "".join(
+            character
+            for character in normalized
+            if unicodedata.category(character) != "Mn"
+        )
+
+        return without_accents.translate(
+            str.maketrans("¿?¡!", "    ")
         )

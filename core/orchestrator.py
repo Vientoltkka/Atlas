@@ -41,6 +41,27 @@ class AtlasOrchestrator:
 
             prompt = input("Tú: ")
 
+            coding_agent = self._registry.get("coding")
+
+            if (
+                prompt.strip().lower() == "s"
+                and coding_agent is not None
+                and coding_agent.generated_path is not None
+            ):
+                result = self._write_file.execute(
+                    coding_agent.generated_path,
+                    coding_agent.generated_content,
+                )
+
+                coding_agent.clear_generated()
+
+                print()
+                print("Atlas:")
+                print(result)
+                print()
+
+                continue
+
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
@@ -79,7 +100,7 @@ class AtlasOrchestrator:
             # -----------------------------
 
             model = self._model_manager.choose_model(
-                plan.task
+                agent_name
             )
 
             # -----------------------------

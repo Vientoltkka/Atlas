@@ -22,15 +22,26 @@ from tools.filesystem.write_file_tool import WriteFileTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
 
-from use_cases.analyze_project import AnalyzeProjectUseCase
 from use_cases.read_file import ReadFileUseCase
 from use_cases.write_file import WriteFileUseCase
+from use_cases.list_python_files import ListPythonFilesUseCase
+from use_cases.read_project import ReadProjectUseCase
+from use_cases.read_project_index import ReadProjectIndexUseCase
+from use_cases.find_project_file import FindProjectFileUseCase
+from use_cases.resolve_project_dependencies import ResolveProjectDependenciesUseCase
+from use_cases.build_architecture_graph import BuildArchitectureGraphUseCase
+from use_cases.query_architecture_graph import QueryArchitectureGraphUseCase
+
 
 class Bootstrap:
     """Build the Atlas application."""
 
     @staticmethod
     def build() -> AtlasOrchestrator:
+
+        # -----------------------
+        # Core
+        # -----------------------
 
         planner = Planner()
         router = Router()
@@ -56,17 +67,36 @@ class Bootstrap:
         # Use Cases
         # -----------------------
 
-        analyze_project = AnalyzeProjectUseCase(
-            tool_executor,
-        )
-
         read_file = ReadFileUseCase(
             tool_executor,
         )
 
         write_file = WriteFileUseCase(
             tool_executor,
-)
+        )
+
+        list_python_files = ListPythonFilesUseCase()
+
+        read_project = ReadProjectUseCase(
+            list_python_files,
+            read_file,
+        )
+
+        read_project_index = ReadProjectIndexUseCase()
+
+        find_project_file = FindProjectFileUseCase(
+            read_project_index,
+        )
+
+        resolve_project_dependencies = ResolveProjectDependenciesUseCase()
+
+        architecture_index = read_project_index.execute(".")
+        architecture_graph = BuildArchitectureGraphUseCase().execute(
+            architecture_index,
+        )
+        query_architecture_graph = QueryArchitectureGraphUseCase(
+            architecture_graph,
+        )
 
         # -----------------------
         # Agents
@@ -75,21 +105,28 @@ class Bootstrap:
         registry = AgentRegistry()
 
         registry.register(
-            ChatAgent(prompt_client)
+            ChatAgent(
+                prompt_client,
+            )
         )
 
         registry.register(
             CodingAgent(
                 prompt_client,
                 read_file,
-                
+                write_file,
             )
         )
 
         registry.register(
             ProjectAgent(
                 prompt_client,
-                analyze_project,
+                read_project,
+                read_file,
+                read_project_index,
+                find_project_file,
+                resolve_project_dependencies,
+                query_architecture_graph,
             )
         )
 
