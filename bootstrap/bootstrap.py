@@ -114,6 +114,7 @@ class Bootstrap:
         )
         correction_interaction = CorrectionInteractionUseCase(
             read_file,
+            write_file,
             query_architecture_graph,
             prompt_client,
         )

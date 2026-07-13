@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import ast
+import io
 import re
+import subprocess
+import sys
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -10,6 +15,7 @@ from typing import Callable
 from models.prompt_client import PromptClient
 from use_cases.query_architecture_graph import QueryArchitectureGraphUseCase
 from use_cases.read_file import ReadFileUseCase
+from use_cases.write_file import WriteFileUseCase
 
 
 @dataclass(frozen=True)
@@ -19,22 +25,50 @@ class CorrectionCommand:
     path: str
 
 
+@dataclass(frozen=True)
+class ParsedCorrectionProposal:
+    """Structured correction proposal returned by the model."""
+
+    problem: str
+    risk: str
+    proposed_file: str
+
+
+@dataclass(frozen=True)
+class CorrectionTestResult:
+    """Result of running the project test suite."""
+
+    tests_run: int
+    tests_passed: int
+    tests_failed: int
+    success: bool
+    output: str
+
+
 class CorrectionInteractionUseCase:
-    """Generate correction proposals for one Python file without writing."""
+    """Generate, confirm, apply, validate and rollback one Python correction."""
 
     _COMMAND_PATTERN = re.compile(
         r"^\s*(corrige|arregla|mejora|fix)\s+(?P<path>\S+)\s*$",
         re.IGNORECASE,
+    )
+    _PROPOSAL_PATTERN = re.compile(
+        r"PROBLEM:\s*(?P<problem>.*?)\s+"
+        r"RISK:\s*(?P<risk>low|medium|high)\s+"
+        r"PROPOSED_FILE:\s*```python\s*\n(?P<code>.*?)\n?```",
+        re.IGNORECASE | re.DOTALL,
     )
     _COMMAND_PREFIXES = ("corrige", "arregla", "mejora", "fix")
 
     def __init__(
         self,
         read_file: ReadFileUseCase,
+        write_file: WriteFileUseCase,
         query_architecture_graph: QueryArchitectureGraphUseCase,
         prompt_client: PromptClient,
     ) -> None:
         self._read_file = read_file
+        self._write_file = write_file
         self._query_architecture_graph = query_architecture_graph
         self._prompt_client = prompt_client
 
@@ -43,6 +77,7 @@ class CorrectionInteractionUseCase:
         prompt: str,
         project_root: Path,
         choose_model: Callable[[str], str],
+        confirm: Callable[[str], str],
     ) -> str | None:
         """Handle one correction prompt or return None for unrelated prompts."""
         command, error = self.parse(prompt)
@@ -74,15 +109,43 @@ class CorrectionInteractionUseCase:
                     content=content,
                     dependencies=dependencies.dependencies,
                     affected_files=affected_files,
+                    risk=risk,
                 ),
             )
-
-            return self._format_response(
+            parsed_proposal = self._parse_model_proposal(proposal)
+            proposal_response = self._format_proposal_response(
                 path=relative_path,
                 affected_files=affected_files,
                 risk=risk,
-                proposal=proposal,
+                proposal=parsed_proposal,
             )
+
+            answer = confirm(
+                "\n".join(
+                    [
+                        proposal_response,
+                        "",
+                        "¿Deseas aplicar la corrección? [s/N]: ",
+                    ]
+                )
+            )
+
+            if answer.strip().lower() not in ("s", "si", "sí", "y", "yes"):
+                return "\n".join(
+                    [
+                        "Corrección cancelada.",
+                        "No se modificó ningún archivo.",
+                    ]
+                )
+
+            final_report = self._apply_confirmed_correction(
+                target_path=target_path,
+                original_content=content,
+                proposed_content=parsed_proposal.proposed_file,
+                project_root=root,
+            )
+
+            return final_report
         except Exception as error:
             return f"No se pudo generar la propuesta de corrección: {error}"
 
@@ -141,6 +204,7 @@ class CorrectionInteractionUseCase:
         content: str,
         dependencies: list[str],
         affected_files: list[str],
+        risk: str,
     ) -> list[dict[str, str]]:
         """Build the prompt sent to the configured language model."""
         dependencies_text = self._format_bullets(dependencies)
@@ -156,8 +220,9 @@ class CorrectionInteractionUseCase:
                         "No inventes módulos, archivos, clases ni APIs inexistentes.",
                         "No modifiques otros archivos.",
                         "Conserva el comportamiento público salvo que el código demuestre un bug.",
-                        "Devuelve código Python completo corregido o un diff estructurado.",
-                        "Explica brevemente el problema y la solución.",
+                        "Devuelve exclusivamente la estructura delimitada solicitada.",
+                        "PROPOSED_FILE debe contener el archivo completo corregido.",
+                        "No devuelvas diff ni texto libre fuera de la estructura.",
                     ]
                 ),
             },
@@ -178,11 +243,27 @@ class CorrectionInteractionUseCase:
                         "Archivos dependientes o afectados:",
                         affected_text,
                         "",
+                        "Riesgo inicial calculado:",
+                        risk,
+                        "",
                         "Restricciones:",
                         "- No inventar módulos inexistentes.",
                         "- No modificar otros archivos.",
-                        "- Devolver código Python completo o diff estructurado.",
-                        "- Explicar brevemente el problema y la solución.",
+                        "- Devolver el contenido completo del archivo corregido.",
+                        "- No devolver diff.",
+                        "- No devolver texto fuera de la estructura obligatoria.",
+                        "",
+                        "Estructura obligatoria:",
+                        "PROBLEM:",
+                        "<explicación breve>",
+                        "",
+                        "RISK:",
+                        "low|medium|high",
+                        "",
+                        "PROPOSED_FILE:",
+                        "```python",
+                        "<contenido completo del archivo>",
+                        "```",
                         "",
                         "Contenido completo del archivo:",
                         content,
@@ -191,38 +272,171 @@ class CorrectionInteractionUseCase:
             },
         ]
 
-    def _format_response(
+    def _parse_model_proposal(
+        self,
+        proposal: str,
+    ) -> ParsedCorrectionProposal:
+        """Parse a safe full-file correction proposal."""
+        match = self._PROPOSAL_PATTERN.search(proposal)
+
+        if match is None:
+            raise ValueError(
+                "la propuesta no contiene PROBLEM, RISK y PROPOSED_FILE "
+                "con un archivo Python completo delimitado"
+            )
+
+        return ParsedCorrectionProposal(
+            problem=match.group("problem").strip(),
+            risk=match.group("risk").strip().lower(),
+            proposed_file=match.group("code"),
+        )
+
+    def _format_proposal_response(
         self,
         path: str,
         affected_files: list[str],
         risk: str,
-        proposal: str,
+        proposal: ParsedCorrectionProposal,
     ) -> str:
         """Format the generated correction proposal."""
         return "\n".join(
             [
                 "Propuesta de corrección",
                 "",
-                "Archivo:",
-                path,
+                f"Archivo: {path}",
                 "",
                 "Problema detectado:",
-                "Ver propuesta generada por el modelo.",
+                proposal.problem,
                 "",
-                "Impacto:",
+                "Archivos afectados:",
                 *self._format_bullet_lines(affected_files),
                 "",
-                "Riesgo:",
-                risk,
-                "",
-                "Cambios propuestos:",
-                "Ver vista previa.",
+                f"Riesgo: {risk}",
                 "",
                 "Vista previa:",
-                proposal,
+                "```python",
+                proposal.proposed_file,
+                "```",
                 "",
                 "Cambios todavía no aplicados.",
             ]
+        )
+
+    def _apply_confirmed_correction(
+        self,
+        target_path: Path,
+        original_content: str,
+        proposed_content: str,
+        project_root: Path,
+    ) -> str:
+        """Apply a confirmed correction with syntax validation, tests and rollback."""
+        written = False
+
+        try:
+            self._validate_python_source(proposed_content, target_path)
+            self._write_file.execute(str(target_path), proposed_content)
+            written = True
+            self._validate_written_file(target_path)
+            test_result = self._run_tests(project_root)
+
+            if not test_result.success:
+                raise RuntimeError(self._format_test_failure(test_result))
+        except Exception as error:
+            if written:
+                self._write_file.execute(str(target_path), original_content)
+
+            return "\n".join(
+                [
+                    "Aplicando corrección...",
+                    "",
+                    "La corrección no superó la validación.",
+                    "Se restauró el contenido original.",
+                    "El proyecto no quedó parcialmente modificado.",
+                    f"Motivo: {error}",
+                ]
+            )
+
+        return "\n".join(
+            [
+                "Aplicando corrección...",
+                "Validación de sintaxis: correcta",
+                f"Tests ejecutados: {test_result.tests_run}",
+                f"Tests superados: {test_result.tests_passed}",
+                f"Tests fallidos: {test_result.tests_failed}",
+                "",
+                "Corrección aplicada correctamente.",
+                "Cambios aún sin commit.",
+            ]
+        )
+
+    def _validate_python_source(
+        self,
+        source: str,
+        path: Path,
+    ) -> None:
+        """Validate tokenization and syntax for one Python source."""
+        list(tokenize.generate_tokens(io.StringIO(source).readline))
+        ast.parse(source, filename=str(path))
+
+    def _validate_written_file(
+        self,
+        path: Path,
+    ) -> None:
+        """Validate the file after writing it."""
+        self._validate_python_source(
+            source=self._read_file.execute(str(path)),
+            path=path,
+        )
+
+    def _run_tests(
+        self,
+        project_root: Path,
+    ) -> CorrectionTestResult:
+        """Run the full project test suite."""
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = "\n".join(
+            value
+            for value in (completed.stdout, completed.stderr)
+            if value
+        )
+        tests_passed, tests_failed = self._parse_pytest_counts(output)
+
+        return CorrectionTestResult(
+            tests_run=tests_passed + tests_failed,
+            tests_passed=tests_passed,
+            tests_failed=tests_failed,
+            success=completed.returncode == 0,
+            output=output,
+        )
+
+    def _parse_pytest_counts(
+        self,
+        output: str,
+    ) -> tuple[int, int]:
+        """Extract passed and failed test counts from pytest output."""
+        passed_match = re.search(r"(\d+)\s+passed", output)
+        failed_match = re.search(r"(\d+)\s+failed", output)
+
+        passed = int(passed_match.group(1)) if passed_match else 0
+        failed = int(failed_match.group(1)) if failed_match else 0
+
+        return (passed, failed)
+
+    def _format_test_failure(
+        self,
+        test_result: CorrectionTestResult,
+    ) -> str:
+        """Format a controlled test failure message."""
+        return (
+            "tests fallidos: "
+            f"{test_result.tests_failed}; "
+            f"tests superados: {test_result.tests_passed}"
         )
 
     def _affected_files(

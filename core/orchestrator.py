@@ -81,6 +81,7 @@ class AtlasOrchestrator:
                     prompt=prompt,
                     project_root=self._project_root,
                     choose_model=self._model_manager.choose_model,
+                    confirm=input,
                 )
 
                 if correction_response is not None:
