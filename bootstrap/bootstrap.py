@@ -31,6 +31,9 @@ from use_cases.find_project_file import FindProjectFileUseCase
 from use_cases.resolve_project_dependencies import ResolveProjectDependenciesUseCase
 from use_cases.build_architecture_graph import BuildArchitectureGraphUseCase
 from use_cases.query_architecture_graph import QueryArchitectureGraphUseCase
+from use_cases.plan_refactoring import PlanRefactoringUseCase
+from use_cases.rename_symbol import RenameSymbolUseCase
+from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 
 
 class Bootstrap:
@@ -97,6 +100,17 @@ class Bootstrap:
         query_architecture_graph = QueryArchitectureGraphUseCase(
             architecture_graph,
         )
+        plan_refactoring = PlanRefactoringUseCase(
+            architecture_graph,
+            query_architecture_graph,
+        )
+        rename_symbol = RenameSymbolUseCase(
+            plan_refactoring,
+        )
+        refactoring_interaction = RefactoringInteractionUseCase(
+            plan_refactoring,
+            rename_symbol,
+        )
 
         # -----------------------
         # Agents
@@ -141,4 +155,5 @@ class Bootstrap:
             memory=memory,
             registry=registry,
             write_file=write_file,
+            refactoring_interaction=refactoring_interaction,
         )

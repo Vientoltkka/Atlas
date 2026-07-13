@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agents.registry import AgentRegistry
 
 from core.model_manager import ModelManager
@@ -9,6 +11,7 @@ from core.planner import Planner
 from core.router import Router
 
 from memory.conversation import ConversationMemory
+from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 
 
@@ -23,6 +26,8 @@ class AtlasOrchestrator:
         memory: ConversationMemory,
         registry: AgentRegistry,
         write_file: WriteFileUseCase,
+        refactoring_interaction: RefactoringInteractionUseCase | None = None,
+        project_root: Path | None = None,
     ) -> None:
 
         self._planner = planner
@@ -31,6 +36,8 @@ class AtlasOrchestrator:
         self._memory = memory
         self._registry = registry
         self._write_file = write_file
+        self._refactoring_interaction = refactoring_interaction
+        self._project_root = project_root or Path(".")
 
     def start(self) -> None:
 
@@ -65,6 +72,21 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._refactoring_interaction is not None:
+                refactoring_response = self._refactoring_interaction.execute(
+                    prompt=prompt,
+                    project_root=self._project_root,
+                    confirm=input,
+                )
+
+                if refactoring_response is not None:
+                    print()
+                    print("Atlas:")
+                    print(refactoring_response)
+                    print()
+
+                    continue
 
             # -----------------------------
             # Memory
