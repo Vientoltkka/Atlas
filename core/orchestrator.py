@@ -11,6 +11,7 @@ from core.planner import Planner
 from core.router import Router
 
 from memory.conversation import ConversationMemory
+from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 
@@ -27,6 +28,7 @@ class AtlasOrchestrator:
         registry: AgentRegistry,
         write_file: WriteFileUseCase,
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
+        correction_interaction: CorrectionInteractionUseCase | None = None,
         project_root: Path | None = None,
     ) -> None:
 
@@ -37,6 +39,7 @@ class AtlasOrchestrator:
         self._registry = registry
         self._write_file = write_file
         self._refactoring_interaction = refactoring_interaction
+        self._correction_interaction = correction_interaction
         self._project_root = project_root or Path(".")
 
     def start(self) -> None:
@@ -72,6 +75,21 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._correction_interaction is not None:
+                correction_response = self._correction_interaction.execute(
+                    prompt=prompt,
+                    project_root=self._project_root,
+                    choose_model=self._model_manager.choose_model,
+                )
+
+                if correction_response is not None:
+                    print()
+                    print("Atlas:")
+                    print(correction_response)
+                    print()
+
+                    continue
 
             if self._refactoring_interaction is not None:
                 refactoring_response = self._refactoring_interaction.execute(

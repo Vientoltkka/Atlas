@@ -31,6 +31,7 @@ from use_cases.find_project_file import FindProjectFileUseCase
 from use_cases.resolve_project_dependencies import ResolveProjectDependenciesUseCase
 from use_cases.build_architecture_graph import BuildArchitectureGraphUseCase
 from use_cases.query_architecture_graph import QueryArchitectureGraphUseCase
+from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.plan_refactoring import PlanRefactoringUseCase
 from use_cases.rename_symbol import RenameSymbolUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
@@ -111,6 +112,11 @@ class Bootstrap:
             plan_refactoring,
             rename_symbol,
         )
+        correction_interaction = CorrectionInteractionUseCase(
+            read_file,
+            query_architecture_graph,
+            prompt_client,
+        )
 
         # -----------------------
         # Agents
@@ -156,4 +162,5 @@ class Bootstrap:
             registry=registry,
             write_file=write_file,
             refactoring_interaction=refactoring_interaction,
+            correction_interaction=correction_interaction,
         )
