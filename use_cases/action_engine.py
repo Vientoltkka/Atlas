@@ -8,6 +8,7 @@ from typing import Callable
 
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
+from use_cases.wait_engine import WaitEngine, WaitResult
 
 
 @dataclass(frozen=True)
@@ -15,7 +16,7 @@ class ActionStep:
     """Explicit action step."""
 
     name: str
-    operation: Callable[[], str]
+    operation: Callable[[], str | WaitResult]
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ class ActionEngineUseCase:
 
         for step in steps:
             try:
-                message = step.operation()
+                operation_result = step.operation()
             except Exception as exc:
                 results.append(
                     ActionStepResult(
@@ -68,11 +69,28 @@ class ActionEngineUseCase:
                 )
                 break
 
+            if isinstance(operation_result, WaitResult):
+                results.append(
+                    ActionStepResult(
+                        step_name=step.name,
+                        success=operation_result.completed,
+                        message=self._format_wait_result(operation_result),
+                        error=None
+                        if operation_result.completed
+                        else operation_result.error,
+                    )
+                )
+
+                if not operation_result.completed:
+                    break
+
+                continue
+
             results.append(
                 ActionStepResult(
                     step_name=step.name,
                     success=True,
-                    message=message,
+                    message=operation_result,
                 )
             )
 
@@ -114,6 +132,19 @@ class ActionEngineUseCase:
             f"Pasos fallidos: {failed_steps}."
         )
 
+    def _format_wait_result(
+        self,
+        result: WaitResult,
+    ) -> str:
+        """Return a compact wait result message."""
+        state = "completada" if result.completed else "agotada"
+
+        return (
+            f"Espera {state}: {result.description}. "
+            f"Condicion: {result.condition}. "
+            f"Tiempo: {result.elapsed_time:.2f}/{result.timeout:.2f}s."
+        )
+
 
 class PrepareAtlasWorkspaceUseCase:
     """Prepare Atlas workspace using existing desktop tools."""
@@ -122,9 +153,11 @@ class PrepareAtlasWorkspaceUseCase:
         self,
         executor: ToolExecutor,
         action_engine: ActionEngineUseCase,
+        wait_engine: WaitEngine | None = None,
     ) -> None:
         self._executor = executor
         self._action_engine = action_engine
+        self._wait_engine = wait_engine or WaitEngine(executor)
 
     def execute(
         self,
@@ -145,10 +178,50 @@ class PrepareAtlasWorkspaceUseCase:
                 ),
             ),
             ActionStep(
+                name="Esperar proceso Code.exe",
+                operation=lambda: self._wait_engine.wait_process(
+                    "Code",
+                    timeout=20,
+                    poll_interval=0.2,
+                ),
+            ),
+            ActionStep(
+                name="Esperar ventana Visual Studio Code",
+                operation=lambda: self._wait_engine.wait_window(
+                    "Visual Studio Code",
+                    timeout=20,
+                    poll_interval=0.2,
+                ),
+            ),
+            ActionStep(
+                name="Activar Visual Studio Code",
+                operation=lambda: self._activate_editor_window(
+                    root,
+                    relative_file,
+                    file_path.name,
+                ),
+            ),
+            ActionStep(
+                name="Esperar ventana activa Visual Studio Code",
+                operation=lambda: self._wait_engine.wait_active_window(
+                    "Visual Studio Code",
+                    timeout=20,
+                    poll_interval=0.2,
+                ),
+            ),
+            ActionStep(
                 name="Abrir carpeta Atlas",
                 operation=lambda: self._run_tool(
                     "desktop.open_folder",
                     {"path": str(root)},
+                ),
+            ),
+            ActionStep(
+                name="Esperar carpeta Atlas disponible",
+                operation=lambda: self._wait_engine.wait_file(
+                    root,
+                    timeout=20,
+                    poll_interval=0.2,
                 ),
             ),
             ActionStep(
@@ -162,7 +235,15 @@ class PrepareAtlasWorkspaceUseCase:
                 ),
             ),
             ActionStep(
-                name="Activar Visual Studio Code",
+                name=f"Esperar archivo {relative_file.as_posix()} disponible",
+                operation=lambda: self._wait_engine.wait_file(
+                    file_path,
+                    timeout=20,
+                    poll_interval=0.2,
+                ),
+            ),
+            ActionStep(
+                name="Confirmar Visual Studio Code activo",
                 operation=lambda: self._activate_editor_window(
                     root,
                     relative_file,
@@ -172,7 +253,7 @@ class PrepareAtlasWorkspaceUseCase:
         ]
 
         return self._action_engine.execute(
-            "prepare_atlas_workspace",
+            "open_vscode_workspace",
             steps,
         )
 
@@ -469,9 +550,11 @@ class RestartApplicationUseCase:
         self,
         executor: ToolExecutor,
         action_engine: ActionEngineUseCase,
+        wait_engine: WaitEngine | None = None,
     ) -> None:
         self._executor = executor
         self._action_engine = action_engine
+        self._wait_engine = wait_engine or WaitEngine(executor)
 
     def execute(
         self,
@@ -492,7 +575,12 @@ class RestartApplicationUseCase:
             ),
             ActionStep(
                 name="Verificar cierre",
-                operation=lambda: self._verify_closed(application_name),
+                operation=lambda: self._wait_engine.wait_application(
+                    application_name,
+                    timeout=20,
+                    poll_interval=0.2,
+                    opened=False,
+                ),
             ),
             ActionStep(
                 name="Abrir aplicacion",
@@ -503,7 +591,11 @@ class RestartApplicationUseCase:
             ),
             ActionStep(
                 name="Verificar ejecucion",
-                operation=lambda: self._verify_running(application_name),
+                operation=lambda: self._wait_engine.wait_application(
+                    application_name,
+                    timeout=20,
+                    poll_interval=0.2,
+                ),
             ),
         ]
 

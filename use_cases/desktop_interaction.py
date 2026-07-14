@@ -12,6 +12,7 @@ from use_cases.action_engine import (
     PrepareAtlasWorkspaceUseCase,
     RestartApplicationUseCase,
 )
+from use_cases.wait_engine import WaitEngine, WaitResult
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
 
@@ -30,6 +31,7 @@ class DesktopInteractionUseCase:
         screenshots_dir: Path | None = None,
         prepare_atlas_workspace: PrepareAtlasWorkspaceUseCase | None = None,
         restart_application: RestartApplicationUseCase | None = None,
+        wait_engine: WaitEngine | None = None,
     ) -> None:
         self._executor = executor
         self._project_root = project_root or Path(".")
@@ -40,6 +42,7 @@ class DesktopInteractionUseCase:
         )
         self._prepare_atlas_workspace = prepare_atlas_workspace
         self._restart_application = restart_application
+        self._wait_engine = wait_engine or WaitEngine(executor)
 
     def execute(
         self,
@@ -56,6 +59,11 @@ class DesktopInteractionUseCase:
 
             if normalized.startswith("ejecuta "):
                 raise ValueError("No se aceptan comandos arbitrarios.")
+
+            wait_response = self._execute_wait_command(text, normalized)
+
+            if wait_response is not None:
+                return wait_response
 
             clipboard_response = self._execute_clipboard_command(
                 text,
@@ -279,6 +287,140 @@ class DesktopInteractionUseCase:
         lines.append(f"Pasos fallidos: {result.failed_steps}")
 
         return "\n".join(lines)
+
+    def _execute_wait_command(
+        self,
+        text: str,
+        normalized: str,
+    ) -> str | None:
+        """Execute supported wait commands."""
+        if not normalized.startswith("espera"):
+            return None
+
+        if normalized in {"espera", "esperar"}:
+            raise ValueError("Espera invalida: falta el objetivo.")
+
+        body = self._wait_body(text, normalized)
+        normalized_body = self._normalize(body)
+        disappeared = any(
+            marker in normalized_body
+            for marker in (
+                "desaparezca ",
+                "desaparecer ",
+                "termine ",
+                "cerrada ",
+                "cerrado ",
+            )
+        )
+        body = self._remove_wait_markers(body)
+        normalized_body = self._normalize(body)
+
+        if normalized_body.startswith("proceso "):
+            result = self._wait_engine.wait_process(
+                body[len("proceso ") :].strip(),
+                timeout=20,
+                poll_interval=0.2,
+                exists=not disappeared,
+            )
+            return self._format_wait_result(result)
+
+        if normalized_body.startswith("ventana activa "):
+            result = self._wait_engine.wait_active_window(
+                body[len("ventana activa ") :].strip(),
+                timeout=20,
+                poll_interval=0.2,
+            )
+            return self._format_wait_result(result)
+
+        if normalized_body.startswith("ventana "):
+            result = self._wait_engine.wait_window(
+                body[len("ventana ") :].strip(),
+                timeout=20,
+                poll_interval=0.2,
+                exists=not disappeared,
+            )
+            return self._format_wait_result(result)
+
+        if normalized_body.startswith("archivo "):
+            result = self._wait_engine.wait_file(
+                self._resolve_path(body[len("archivo ") :].strip()),
+                timeout=20,
+                poll_interval=0.2,
+                exists=not disappeared,
+            )
+            return self._format_wait_result(result)
+
+        result = self._wait_engine.wait_application(
+            body,
+            timeout=20,
+            poll_interval=0.2,
+            opened=not disappeared,
+        )
+        return self._format_wait_result(result)
+
+    def _wait_body(
+        self,
+        text: str,
+        normalized: str,
+    ) -> str:
+        """Return the target part of a wait command."""
+        if normalized.startswith("espera hasta que "):
+            return text[len("espera hasta que ") :].strip()
+
+        if normalized.startswith("espera a que "):
+            return text[len("espera a que ") :].strip()
+
+        if normalized.startswith("esperar hasta que "):
+            return text[len("esperar hasta que ") :].strip()
+
+        return text[len("espera ") :].strip()
+
+    def _remove_wait_markers(
+        self,
+        body: str,
+    ) -> str:
+        """Remove natural-language wait state markers."""
+        cleaned = body.strip()
+        normalized = self._normalize(cleaned)
+        prefixes = (
+            "aparezca ",
+            "exista ",
+            "este abierto ",
+            "estÃ© abierto ",
+            "este activa ",
+            "este activa la ",
+            "desaparezca ",
+            "desaparecer ",
+            "termine ",
+            "se cierre ",
+            "cerrada ",
+            "cerrado ",
+        )
+
+        for prefix in prefixes:
+            if normalized.startswith(self._normalize(prefix)):
+                return cleaned[len(prefix) :].strip()
+
+        return cleaned
+
+    def _format_wait_result(
+        self,
+        result: WaitResult,
+    ) -> str:
+        """Format a wait result for the interactive flow."""
+        if result.completed:
+            return (
+                f"{self._CONFIRMATION_PREFIX} {result.description}\n"
+                f"Condicion: {result.condition}\n"
+                f"Tiempo: {result.elapsed_time:.2f}s"
+            )
+
+        return (
+            "Error: timeout agotado.\n"
+            f"Condicion: {result.condition}\n"
+            f"Objetivo: {result.description}\n"
+            f"Tiempo: {result.elapsed_time:.2f}/{result.timeout:.2f}s"
+        )
 
     def _execute_process_command(
         self,

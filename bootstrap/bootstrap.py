@@ -81,6 +81,7 @@ from use_cases.action_engine import (
     PrepareAtlasWorkspaceUseCase,
     RestartApplicationUseCase,
 )
+from use_cases.wait_engine import WaitEngine
 
 
 class Bootstrap:
@@ -201,13 +202,16 @@ class Bootstrap:
             prompt_client,
         )
         action_engine = ActionEngineUseCase()
+        wait_engine = WaitEngine(tool_executor)
         prepare_atlas_workspace = PrepareAtlasWorkspaceUseCase(
             tool_executor,
             action_engine,
+            wait_engine,
         )
         restart_application = RestartApplicationUseCase(
             tool_executor,
             action_engine,
+            wait_engine,
         )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
