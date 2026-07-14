@@ -23,11 +23,19 @@ from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
+    CaptureScreenshotTool,
+    DoubleClickTool,
+    GetCursorPositionTool,
+    GetScreenSizeTool,
+    LeftClickTool,
+    MoveCursorTool,
     OpenApplicationTool,
     OpenFileTool,
     OpenFolderTool,
     PressHotkeyTool,
+    RightClickTool,
     SaveFileTool,
+    ScrollVerticalTool,
     TypeTextTool,
 )
 
@@ -81,6 +89,14 @@ class Bootstrap:
         tool_registry.register(PressHotkeyTool())
         tool_registry.register(SaveFileTool())
         tool_registry.register(ActivateWindowTool())
+        tool_registry.register(GetScreenSizeTool())
+        tool_registry.register(GetCursorPositionTool())
+        tool_registry.register(MoveCursorTool())
+        tool_registry.register(LeftClickTool())
+        tool_registry.register(DoubleClickTool())
+        tool_registry.register(RightClickTool())
+        tool_registry.register(ScrollVerticalTool())
+        tool_registry.register(CaptureScreenshotTool())
 
         tool_executor = ToolExecutor(tool_registry)
 

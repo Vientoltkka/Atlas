@@ -80,7 +80,10 @@ class AtlasOrchestrator:
                 break
 
             if self._desktop_interaction is not None:
-                desktop_response = self._desktop_interaction.execute(prompt)
+                desktop_response = self._desktop_interaction.execute(
+                    prompt,
+                    confirm=input,
+                )
 
                 if desktop_response is not None:
                     print()
