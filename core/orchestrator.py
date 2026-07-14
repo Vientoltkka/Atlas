@@ -14,6 +14,7 @@ from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
+from use_cases.speech_engine import SpeechInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 
 
@@ -31,6 +32,7 @@ class AtlasOrchestrator:
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
         correction_interaction: CorrectionInteractionUseCase | None = None,
         desktop_interaction: DesktopInteractionUseCase | None = None,
+        speech_interaction: SpeechInteractionUseCase | None = None,
         project_root: Path | None = None,
     ) -> None:
 
@@ -43,6 +45,7 @@ class AtlasOrchestrator:
         self._refactoring_interaction = refactoring_interaction
         self._correction_interaction = correction_interaction
         self._desktop_interaction = desktop_interaction
+        self._speech_interaction = speech_interaction
         self._project_root = project_root or Path(".")
 
     def start(self) -> None:
@@ -78,6 +81,17 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._speech_interaction is not None:
+                speech_response = self._speech_interaction.execute(prompt)
+
+                if speech_response is not None:
+                    print()
+                    print("Atlas:")
+                    print(speech_response)
+                    print()
+
+                    continue
 
             if self._desktop_interaction is not None:
                 desktop_response = self._desktop_interaction.execute(

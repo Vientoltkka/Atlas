@@ -83,6 +83,12 @@ from use_cases.action_engine import (
 )
 from use_cases.verified_text_file import CreateVerifiedTextFileUseCase
 from use_cases.wait_engine import WaitEngine
+from use_cases.speech_engine import (
+    FasterWhisperSpeechToTextProvider,
+    SoundDeviceAudioCapture,
+    SpeechEngineUseCase,
+    SpeechInteractionUseCase,
+)
 
 
 class Bootstrap:
@@ -219,6 +225,11 @@ class Bootstrap:
             action_engine,
             wait_engine,
         )
+        speech_engine = SpeechEngineUseCase(
+            SoundDeviceAudioCapture(),
+            FasterWhisperSpeechToTextProvider(),
+        )
+        speech_interaction = SpeechInteractionUseCase(speech_engine)
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
@@ -273,4 +284,5 @@ class Bootstrap:
             refactoring_interaction=refactoring_interaction,
             correction_interaction=correction_interaction,
             desktop_interaction=desktop_interaction,
+            speech_interaction=speech_interaction,
         )

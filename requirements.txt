@@ -6,3 +6,6 @@ rich
 typer
 fastapi
 uvicorn
+numpy
+sounddevice
+faster-whisper
