@@ -460,3 +460,133 @@ class CopyAndPasteTextUseCase:
 
         if not target_window_title.strip():
             raise ValueError("Falta la ventana destino.")
+
+
+class RestartApplicationUseCase:
+    """Restart one application with normal close semantics."""
+
+    def __init__(
+        self,
+        executor: ToolExecutor,
+        action_engine: ActionEngineUseCase,
+    ) -> None:
+        self._executor = executor
+        self._action_engine = action_engine
+
+    def execute(
+        self,
+        application_name: str,
+    ) -> AutomationResult:
+        """Execute the explicit restart workflow."""
+        if not application_name.strip():
+            raise ValueError("Falta la aplicacion.")
+
+        steps = [
+            ActionStep(
+                name="Comprobar aplicacion en ejecucion",
+                operation=lambda: self._check_running(application_name),
+            ),
+            ActionStep(
+                name="Solicitar cierre normal",
+                operation=lambda: self._close_if_running(application_name),
+            ),
+            ActionStep(
+                name="Verificar cierre",
+                operation=lambda: self._verify_closed(application_name),
+            ),
+            ActionStep(
+                name="Abrir aplicacion",
+                operation=lambda: self._run_tool(
+                    "desktop.open_application",
+                    {"application": application_name},
+                ),
+            ),
+            ActionStep(
+                name="Verificar ejecucion",
+                operation=lambda: self._verify_running(application_name),
+            ),
+        ]
+
+        return self._action_engine.execute("restart_application", steps)
+
+    def _run_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, object],
+    ) -> str:
+        """Run a registered tool and return its message."""
+        result = self._executor.execute(
+            tool_name,
+            ToolContext(parameters=parameters),
+        )
+
+        return str(result)
+
+    def _processes(
+        self,
+        application_name: str,
+    ) -> list[dict[str, object]]:
+        """Return process matches for an application."""
+        result = self._executor.execute(
+            "desktop.list_processes",
+            ToolContext(parameters={"query": application_name}),
+        )
+
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de procesos invalida.")
+
+        return result
+
+    def _check_running(
+        self,
+        application_name: str,
+    ) -> str:
+        """Check whether the application is currently running."""
+        processes = self._processes(application_name)
+
+        if not processes:
+            return "La aplicacion no estaba abierta."
+
+        return f"Procesos detectados: {len(processes)}"
+
+    def _close_if_running(
+        self,
+        application_name: str,
+    ) -> str:
+        """Request normal close for the only matching process."""
+        processes = self._processes(application_name)
+
+        if not processes:
+            return "No habia procesos que cerrar."
+
+        if len(processes) != 1:
+            raise RuntimeError("Varias coincidencias; cierre no automatico.")
+
+        pid = processes[0].get("pid")
+
+        if not isinstance(pid, int):
+            raise RuntimeError("PID invalido.")
+
+        return self._run_tool("desktop.close_application", {"pid": pid})
+
+    def _verify_closed(
+        self,
+        application_name: str,
+    ) -> str:
+        """Verify that the application has no running processes."""
+        if self._processes(application_name):
+            raise RuntimeError("La aplicacion continua abierta.")
+
+        return "Aplicacion cerrada."
+
+    def _verify_running(
+        self,
+        application_name: str,
+    ) -> str:
+        """Verify that the application is running."""
+        processes = self._processes(application_name)
+
+        if not processes:
+            raise RuntimeError("La aplicacion no se inicio.")
+
+        return f"Aplicacion en ejecucion. Procesos: {len(processes)}"

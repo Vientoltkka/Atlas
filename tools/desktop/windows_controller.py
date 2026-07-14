@@ -4,17 +4,31 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import csv
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
 import subprocess
+from io import StringIO
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    """Windows process information used by desktop tools."""
+
+    pid: int
+    name: str
+    executable_path: Path | None
+    window_titles: tuple[str, ...]
+    is_running: bool
 
 
 class DesktopController(Protocol):
     """Interface for desktop operations."""
 
-    def open_application(self, application: str) -> None:
+    def open_application(self, application: str) -> int | None:
         """Open an installed application."""
 
     def open_folder(self, path: Path) -> None:
@@ -114,6 +128,21 @@ class DesktopController(Protocol):
     def close_window(self, handle: int) -> None:
         """Request a window close."""
 
+    def list_processes(self, query: str) -> list[ProcessInfo]:
+        """List running processes matching a query."""
+
+    def process_exists(self, pid: int) -> bool:
+        """Return whether a process exists."""
+
+    def get_process(self, pid: int) -> ProcessInfo | None:
+        """Return process information by PID."""
+
+    def close_process_windows(self, pid: int) -> int:
+        """Request normal close for visible windows owned by a process."""
+
+    def terminate_process(self, pid: int) -> None:
+        """Terminate a process by PID."""
+
 
 class WindowsDesktopController:
     """Control Windows desktop using stdlib and Win32 APIs."""
@@ -174,6 +203,23 @@ class WindowsDesktopController:
     )
     _USER32.AttachThreadInput.restype = wintypes.BOOL
     _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
+    _KERNEL32.CreateToolhelp32Snapshot.argtypes = (
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    _KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _KERNEL32.Process32FirstW.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+    )
+    _KERNEL32.Process32FirstW.restype = wintypes.BOOL
+    _KERNEL32.Process32NextW.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+    )
+    _KERNEL32.Process32NextW.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
     _USER32.MoveWindow.argtypes = (
         wintypes.HWND,
         ctypes.c_int,
@@ -237,6 +283,33 @@ class WindowsDesktopController:
     _OLE32.CLSIDFromString.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p)
 
     _KNOWN_APPLICATIONS: dict[str, tuple[str, ...]] = {
+        "chrome": (
+            "chrome",
+            str(
+                Path(os.environ.get("ProgramFiles", "C:\\Program Files"))
+                / "Google"
+                / "Chrome"
+                / "Application"
+                / "chrome.exe"
+            ),
+            str(
+                Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"))
+                / "Google"
+                / "Chrome"
+                / "Application"
+                / "chrome.exe"
+            ),
+        ),
+        "google chrome": (
+            "chrome",
+            str(
+                Path(os.environ.get("ProgramFiles", "C:\\Program Files"))
+                / "Google"
+                / "Chrome"
+                / "Application"
+                / "chrome.exe"
+            ),
+        ),
         "visual studio code": (
             "code",
             str(
@@ -270,6 +343,38 @@ class WindowsDesktopController:
                 / "Code.exe"
             ),
         ),
+        "explorador de archivos": ("explorer",),
+        "explorer": ("explorer",),
+        "bloc de notas": ("notepad",),
+        "notepad": ("notepad",),
+        "calculadora": ("calc",),
+        "calculator": ("calc",),
+    }
+    _KNOWN_PROCESS_NAMES: dict[str, tuple[str, ...]] = {
+        "chrome": ("chrome.exe",),
+        "google chrome": ("chrome.exe",),
+        "visual studio code": ("Code.exe",),
+        "vscode": ("Code.exe",),
+        "vs code": ("Code.exe",),
+        "code": ("Code.exe",),
+        "explorador de archivos": ("explorer.exe",),
+        "explorer": ("explorer.exe",),
+        "bloc de notas": ("notepad.exe",),
+        "notepad": ("notepad.exe",),
+        "calculadora": ("CalculatorApp.exe", "calc.exe"),
+        "calculator": ("CalculatorApp.exe", "calc.exe"),
+    }
+    _PROTECTED_PROCESS_NAMES = {
+        "system",
+        "registry",
+        "smss.exe",
+        "csrss.exe",
+        "wininit.exe",
+        "services.exe",
+        "lsass.exe",
+        "winlogon.exe",
+        "svchost.exe",
+        "explorer.exe",
     }
 
     _VIRTUAL_KEYS: dict[str, int] = {
@@ -300,6 +405,8 @@ class WindowsDesktopController:
     _SW_MAXIMIZE = 3
     _SW_MINIMIZE = 6
     _WM_CLOSE = 0x0010
+    _TH32CS_SNAPPROCESS = 0x00000002
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
     _CF_UNICODETEXT = 13
     _GMEM_MOVEABLE = 0x0002
     _GMEM_ZEROINIT = 0x0040
@@ -311,14 +418,17 @@ class WindowsDesktopController:
     ) -> None:
         self._max_clipboard_text_chars = max_clipboard_text_chars
 
-    def open_application(self, application: str) -> None:
+    def open_application(self, application: str) -> int | None:
         """Open an installed application."""
         executable = self._resolve_application(application)
-        subprocess.Popen(
+        process = subprocess.Popen(
             [executable],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            shell=False,
         )
+
+        return process.pid
 
     def open_folder(self, path: Path) -> None:
         """Open an existing folder."""
@@ -332,6 +442,7 @@ class WindowsDesktopController:
                 [executable, str(path)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                shell=False,
             )
             return
 
@@ -682,9 +793,95 @@ class WindowsDesktopController:
         if not self._USER32.PostMessageW(handle, self._WM_CLOSE, 0, 0):
             raise RuntimeError("No se pudo enviar la solicitud de cierre.")
 
+    def list_processes(self, query: str) -> list[ProcessInfo]:
+        """List running processes matching a query."""
+        normalized = query.strip()
+
+        if not normalized:
+            raise ValueError("Falta el nombre del proceso.")
+
+        process_names = self._process_names_for_query(normalized)
+        all_processes = self._read_tasklist()
+
+        matches = [
+            process
+            for process in all_processes
+            if self._process_matches(process, normalized, process_names)
+        ]
+
+        return sorted(
+            matches,
+            key=lambda process: (process.name.lower(), process.pid),
+        )
+
+    def process_exists(self, pid: int) -> bool:
+        """Return whether a process exists."""
+        self._validate_pid(pid)
+        return any(process.pid == pid for process in self._read_tasklist())
+
+    def get_process(self, pid: int) -> ProcessInfo | None:
+        """Return process information by PID."""
+        self._validate_pid(pid)
+
+        for process in self._read_tasklist():
+            if process.pid == pid:
+                return process
+
+        return None
+
+    def close_process_windows(self, pid: int) -> int:
+        """Request normal close for visible windows owned by a process."""
+        self._validate_pid(pid)
+        handles: list[int] = []
+        enum_windows_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+
+        def callback(
+            handle: int,
+            _: int,
+        ) -> bool:
+            if not self._USER32.IsWindowVisible(handle):
+                return True
+
+            owner_pid = wintypes.DWORD()
+            self._USER32.GetWindowThreadProcessId(
+                handle,
+                ctypes.byref(owner_pid),
+            )
+
+            if int(owner_pid.value) == pid:
+                handles.append(int(handle))
+
+            return True
+
+        self._USER32.EnumWindows(enum_windows_proc(callback), 0)
+
+        for handle in sorted(handles):
+            self.close_window(handle)
+
+        return len(handles)
+
+    def terminate_process(self, pid: int) -> None:
+        """Terminate a process by PID using taskkill."""
+        self._validate_pid(pid)
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
+
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(error or "No se pudo terminar el proceso.")
+
     def _resolve_application(self, application: str) -> str:
         """Resolve an application name to an executable path."""
         normalized = application.strip().lower()
+        self._reject_unsafe_application(application)
         candidates = self._KNOWN_APPLICATIONS.get(
             normalized,
             (application,),
@@ -704,6 +901,189 @@ class WindowsDesktopController:
         raise FileNotFoundError(
             f"No se encontro la aplicacion '{application}'."
         )
+
+    def _reject_unsafe_application(self, application: str) -> None:
+        """Reject command-shaped application input."""
+        if any(token in application for token in ("|", "&", ";", ">", "<")):
+            raise ValueError("No se aceptan comandos arbitrarios.")
+
+        normalized = application.strip().lower()
+
+        if " /c " in f" {normalized} " or normalized.startswith("cmd "):
+            raise ValueError("No se aceptan comandos arbitrarios.")
+
+    def _process_names_for_query(self, query: str) -> tuple[str, ...]:
+        """Return known executable names for an application query."""
+        normalized = query.strip().lower()
+        return self._KNOWN_PROCESS_NAMES.get(normalized, ())
+
+    def _process_matches(
+        self,
+        process: ProcessInfo,
+        query: str,
+        process_names: tuple[str, ...],
+    ) -> bool:
+        """Return whether process matches query or known process names."""
+        normalized_query = query.lower()
+
+        if process.name.lower() in {name.lower() for name in process_names}:
+            return True
+
+        return normalized_query in process.name.lower()
+
+    def _read_tasklist(self) -> list[ProcessInfo]:
+        """Read process information from tasklist."""
+        completed = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/V"],
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
+
+        if completed.returncode != 0:
+            completed = subprocess.run(
+                ["tasklist", "/FO", "CSV"],
+                capture_output=True,
+                text=True,
+                shell=False,
+            )
+
+            if completed.returncode != 0:
+                return self._read_process_snapshot()
+
+        return self._parse_tasklist_csv(completed.stdout)
+
+    def _read_process_snapshot(self) -> list[ProcessInfo]:
+        """Read process information using native Toolhelp APIs."""
+        snapshot = self._KERNEL32.CreateToolhelp32Snapshot(
+            self._TH32CS_SNAPPROCESS,
+            0,
+        )
+
+        if not snapshot or snapshot == self._INVALID_HANDLE_VALUE:
+            raise RuntimeError("No se pudo listar procesos.")
+
+        entry = _ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32)
+        processes: list[ProcessInfo] = []
+
+        try:
+            has_entry = self._KERNEL32.Process32FirstW(
+                snapshot,
+                ctypes.byref(entry),
+            )
+
+            while has_entry:
+                pid = int(entry.th32ProcessID)
+                name = str(entry.szExeFile)
+                processes.append(
+                    ProcessInfo(
+                        pid=pid,
+                        name=name,
+                        executable_path=None,
+                        window_titles=self._window_titles_for_pid(pid),
+                        is_running=True,
+                    )
+                )
+                has_entry = self._KERNEL32.Process32NextW(
+                    snapshot,
+                    ctypes.byref(entry),
+                )
+        finally:
+            self._KERNEL32.CloseHandle(snapshot)
+
+        return sorted(
+            processes,
+            key=lambda process: (process.name.lower(), process.pid),
+        )
+
+    def _window_titles_for_pid(
+        self,
+        pid: int,
+    ) -> tuple[str, ...]:
+        """Return visible window titles owned by a process."""
+        titles: list[str] = []
+        enum_windows_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+
+        def callback(
+            handle: int,
+            _: int,
+        ) -> bool:
+            if not self._USER32.IsWindowVisible(handle):
+                return True
+
+            owner_pid = wintypes.DWORD()
+            self._USER32.GetWindowThreadProcessId(
+                handle,
+                ctypes.byref(owner_pid),
+            )
+
+            if int(owner_pid.value) != pid:
+                return True
+
+            length = self._USER32.GetWindowTextLengthW(handle)
+
+            if length == 0:
+                return True
+
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            self._USER32.GetWindowTextW(handle, buffer, length + 1)
+
+            if buffer.value:
+                titles.append(buffer.value)
+
+            return True
+
+        self._USER32.EnumWindows(enum_windows_proc(callback), 0)
+
+        return tuple(sorted(titles, key=str.lower))
+
+    def _parse_tasklist_csv(self, output: str) -> list[ProcessInfo]:
+        """Parse tasklist CSV output."""
+        rows = csv.DictReader(StringIO(output))
+        processes: list[ProcessInfo] = []
+
+        for row in rows:
+            name = (
+                row.get("Image Name")
+                or row.get("Nombre de imagen")
+                or row.get("Nombre de imagen ")
+                or ""
+            ).strip()
+            raw_pid = (row.get("PID") or "").strip()
+            window_title = (
+                row.get("Window Title")
+                or row.get("Título de ventana")
+                or row.get("Titulo de ventana")
+                or ""
+            ).strip()
+
+            if not name or not raw_pid.isdigit():
+                continue
+
+            title = "" if window_title in {"N/A", "No disponible"} else window_title
+            window_titles = (title,) if title else ()
+
+            processes.append(
+                ProcessInfo(
+                    pid=int(raw_pid),
+                    name=name,
+                    executable_path=None,
+                    window_titles=window_titles,
+                    is_running=True,
+                )
+            )
+
+        return processes
+
+    def _validate_pid(self, pid: int) -> None:
+        """Validate a process ID."""
+        if not isinstance(pid, int) or pid <= 0:
+            raise ValueError("PID invalido.")
 
     def _find_window(self, title: str) -> int:
         """Find a top-level window by partial title."""
@@ -896,6 +1276,23 @@ class _Rect(ctypes.Structure):
         ("top", wintypes.LONG),
         ("right", wintypes.LONG),
         ("bottom", wintypes.LONG),
+    ]
+
+
+class _ProcessEntry32(ctypes.Structure):
+    """Win32 PROCESSENTRY32W structure."""
+
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
     ]
 
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 
 from tools.base_tool import BaseTool
 from tools.desktop.windows_controller import (
     DesktopController,
+    ProcessInfo,
     WindowsDesktopController,
 )
 from tools.tool_context import ToolContext
@@ -123,6 +125,38 @@ class DesktopTool(BaseTool):
         if x + width <= left or y + height <= top or x >= right or y >= bottom:
             raise ValueError("La posicion queda fuera del escritorio.")
 
+    def _process_query(self, context: ToolContext) -> str:
+        """Return a required process query."""
+        query = context.parameters.get("query")
+
+        if not query:
+            raise ValueError("Missing parameter 'query'.")
+
+        return str(query).strip()
+
+    def _pid(self, context: ToolContext) -> int:
+        """Return a validated process ID."""
+        pid = context.parameters.get("pid")
+
+        if not isinstance(pid, int) or pid <= 0:
+            raise ValueError("PID invalido.")
+
+        return pid
+
+    def _format_process(self, process: ProcessInfo) -> dict[str, object]:
+        """Format process information as a plain structure."""
+        return {
+            "pid": process.pid,
+            "name": process.name,
+            "executable_path": (
+                str(process.executable_path)
+                if process.executable_path is not None
+                else None
+            ),
+            "window_titles": process.window_titles,
+            "is_running": process.is_running,
+        }
+
 
 class OpenApplicationTool(DesktopTool):
     """Open an installed application."""
@@ -144,9 +178,158 @@ class OpenApplicationTool(DesktopTool):
         if not application:
             raise ValueError("Missing parameter 'application'.")
 
-        self._controller.open_application(str(application))
+        query = str(application)
+        existing = self._controller.list_processes(query)
 
-        return f"{application} abierto."
+        if existing:
+            pids = ", ".join(str(process.pid) for process in existing)
+            return f"{query} ya estaba abierto. PID: {pids}"
+
+        pid = self._controller.open_application(query)
+
+        if pid is None:
+            return f"{application} abierto."
+
+        return f"{application} abierto. PID: {pid}"
+
+
+class ListProcessesTool(DesktopTool):
+    """List running processes matching a query."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.list_processes"
+
+    @property
+    def description(self) -> str:
+        return "List running processes matching a query."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> list[dict[str, object]]:
+        query = self._process_query(context)
+        processes = self._controller.list_processes(query)
+
+        return [self._format_process(process) for process in processes]
+
+
+class IsProcessRunningTool(DesktopTool):
+    """Return whether a process matching a query is running."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.is_process_running"
+
+    @property
+    def description(self) -> str:
+        return "Return whether a process matching a query is running."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> bool:
+        return bool(self._controller.list_processes(self._process_query(context)))
+
+
+class GetProcessTool(DesktopTool):
+    """Return process information by PID."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.get_process"
+
+    @property
+    def description(self) -> str:
+        return "Return process information by PID."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> dict[str, object] | None:
+        process = self._controller.get_process(self._pid(context))
+
+        if process is None:
+            return None
+
+        return self._format_process(process)
+
+
+class CloseApplicationTool(DesktopTool):
+    """Request normal close for one process by PID."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.close_application"
+
+    @property
+    def description(self) -> str:
+        return "Request normal close for one process by PID."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        pid = self._pid(context)
+        count = self._controller.close_process_windows(pid)
+
+        if count == 0:
+            raise RuntimeError("El proceso no tiene ventanas visibles.")
+
+        return f"Solicitud de cierre enviada a {count} ventana(s)."
+
+
+class TerminateProcessTool(DesktopTool):
+    """Terminate one process by PID."""
+
+    _PROTECTED_NAMES = {
+        "system",
+        "registry",
+        "smss.exe",
+        "csrss.exe",
+        "wininit.exe",
+        "services.exe",
+        "lsass.exe",
+        "winlogon.exe",
+        "svchost.exe",
+        "explorer.exe",
+    }
+
+    @property
+    def name(self) -> str:
+        return "desktop.terminate_process"
+
+    @property
+    def description(self) -> str:
+        return "Terminate one process by PID."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        pid = self._pid(context)
+
+        if pid in {0, 4}:
+            raise ValueError("Proceso protegido.")
+
+        if pid == os.getpid():
+            raise ValueError("No se puede terminar el propio proceso de Atlas.")
+
+        process = self._controller.get_process(pid)
+
+        if process is None:
+            raise RuntimeError(f"No existe un proceso con PID {pid}.")
+
+        if process.name.lower() in self._PROTECTED_NAMES:
+            raise ValueError("Proceso protegido.")
+
+        self._controller.close_process_windows(pid)
+        self._controller.terminate_process(pid)
+
+        if self._controller.process_exists(pid):
+            raise RuntimeError("El proceso continua en ejecucion.")
+
+        return f"Proceso terminado: {process.name} - PID {pid}"
 
 
 class OpenFolderTool(DesktopTool):

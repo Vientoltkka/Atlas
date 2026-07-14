@@ -9,6 +9,7 @@ class FakeToolExecutor:
         self.calls: list[tuple[str, ToolContext]] = []
         self.fail_on_execute = False
         self.clipboard_text: str | None = "Hola Atlas"
+        self.processes: list[dict[str, object]] = []
         self.windows: list[dict[str, object]] = [
             {
                 "handle": 10,
@@ -58,6 +59,35 @@ class FakeToolExecutor:
 
             return self.windows[0]
 
+        if tool_name == "desktop.list_processes":
+            query = str(context.parameters["query"]).lower()
+            query = {
+                "visual studio code": "code",
+                "vs code": "code",
+                "vscode": "code",
+            }.get(query, query)
+            return [
+                process
+                for process in self.processes
+                if query in str(process["name"]).lower()
+                or query in str(process["name"]).lower().replace(".exe", "")
+            ]
+
+        if tool_name == "desktop.get_process":
+            pid = context.parameters["pid"]
+
+            for process in self.processes:
+                if process["pid"] == pid:
+                    return process
+
+            return None
+
+        if tool_name == "desktop.close_application":
+            return "Solicitud de cierre enviada a 1 ventana(s)."
+
+        if tool_name == "desktop.terminate_process":
+            return f"Proceso terminado: example.exe - PID {context.parameters['pid']}"
+
         if tool_name == "desktop.list_windows":
             title = str(context.parameters["title"]).lower()
             return [
@@ -89,6 +119,300 @@ def test_desktop_interaction_opens_application() -> None:
     assert executor.calls[0][1].parameters == {
         "application": "Visual Studio Code"
     }
+
+
+def test_desktop_interaction_opens_application_with_english_alias() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("open Chrome")
+
+    assert result == "\u2713 Chrome abierto."
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "Chrome"}
+
+
+def test_desktop_interaction_rejects_incomplete_open_command() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("abre")
+
+    assert result == "Error: Falta el objetivo a abrir."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_rejects_arbitrary_command_execution() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("ejecuta dir")
+
+    assert result == "Error: No se aceptan comandos arbitrarios."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_checks_process_running() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 4820,
+            "name": "Code.exe",
+            "executable_path": None,
+            "window_titles": ("Atlas - Visual Studio Code",),
+            "is_running": True,
+        },
+        {
+            "pid": 9404,
+            "name": "Code.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("¿está abierto Code?")
+
+    assert result == "\u2713 Code esta abierto.\nProcesos: 2\nPID: 4820, 9404"
+    assert executor.calls[0][0] == "desktop.list_processes"
+
+
+def test_desktop_interaction_reports_process_absent() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("is Chrome running")
+
+    assert result == "Chrome no esta abierto."
+
+
+def test_desktop_interaction_lists_processes() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": ("Chrome",),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("lista los procesos de chrome")
+
+    assert result == (
+        "Procesos encontrados:\n\n"
+        "1. chrome.exe - PID 20 - ventanas visibles: si"
+    )
+
+
+def test_desktop_interaction_shows_process_pids() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("muestra el PID de chrome")
+
+    assert result == "PID: 20"
+
+
+def test_desktop_interaction_close_application_requires_confirmation() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": ("Chrome",),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Chrome")
+
+    assert result == "Cierre cancelado."
+    assert [call[0] for call in executor.calls] == ["desktop.list_processes"]
+
+
+def test_desktop_interaction_close_application_cancels_with_empty_or_no() -> None:
+    for response in ("", "n"):
+        executor = FakeToolExecutor()
+        executor.processes = [
+            {
+                "pid": 20,
+                "name": "chrome.exe",
+                "executable_path": None,
+                "window_titles": ("Chrome",),
+                "is_running": True,
+            }
+        ]
+        use_case = DesktopInteractionUseCase(executor)
+
+        result = use_case.execute("close Chrome", confirm=lambda _: response)
+
+        assert result == "Cierre cancelado."
+        assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_close_application_after_confirmation() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": ("Chrome",),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Chrome", confirm=lambda _: "s")
+
+    assert result == "\u2713 Solicitud de cierre enviada: chrome.exe - PID 20"
+    assert executor.calls[1][0] == "desktop.close_application"
+    assert executor.calls[1][1].parameters == {"pid": 20}
+
+
+def test_desktop_interaction_close_application_requires_explicit_selection() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+        {
+            "pid": 21,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Chrome")
+
+    assert result == "Error: Varias coincidencias. Se requiere seleccion explicita."
+    assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_close_application_selects_process() -> None:
+    answers = iter(["2", "yes"])
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+        {
+            "pid": 21,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Chrome", confirm=lambda _: next(answers))
+
+    assert result == "\u2713 Solicitud de cierre enviada: chrome.exe - PID 21"
+    assert executor.calls[-1][1].parameters == {"pid": 21}
+
+
+def test_desktop_interaction_close_application_rejects_invalid_selection() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+        {
+            "pid": 21,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Chrome", confirm=lambda _: "3")
+
+    assert result == "Error: Seleccion invalida."
+    assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_terminate_process_validates_pid() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute("termina PID abc") == "Error: PID invalido."
+    assert use_case.execute("termina el proceso con PID 0") == "Error: PID invalido."
+    assert use_case.execute("termina el proceso con PID 4") == "Error: Proceso protegido."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_terminate_process_requires_confirmation() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 1234,
+            "name": "example.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("terminate process 1234")
+
+    assert result == "Terminacion cancelada."
+    assert [call[0] for call in executor.calls] == ["desktop.get_process"]
+
+
+def test_desktop_interaction_terminate_process_after_confirmation() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 1234,
+            "name": "example.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mata el proceso 1234", confirm=lambda _: "s")
+
+    assert result == "\u2713 Proceso terminado: example.exe - PID 1234"
+    assert [call[0] for call in executor.calls] == [
+        "desktop.get_process",
+        "desktop.terminate_process",
+    ]
 
 
 def test_desktop_interaction_opens_existing_folder(
@@ -848,7 +1172,10 @@ def test_desktop_interaction_close_requires_confirmation() -> None:
     result = use_case.execute("cierra Visual Studio Code")
 
     assert result == "Acción cancelada."
-    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_windows",
+    ]
 
 
 def test_desktop_interaction_closes_after_yes() -> None:
@@ -858,7 +1185,7 @@ def test_desktop_interaction_closes_after_yes() -> None:
     result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "s")
 
     assert result == "\u2713 Solicitud de cierre enviada."
-    assert executor.calls[1][0] == "desktop.close_window"
+    assert executor.calls[2][0] == "desktop.close_window"
 
 
 def test_desktop_interaction_closes_after_si() -> None:
@@ -868,7 +1195,7 @@ def test_desktop_interaction_closes_after_si() -> None:
     result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "sí")
 
     assert result == "\u2713 Solicitud de cierre enviada."
-    assert executor.calls[1][0] == "desktop.close_window"
+    assert executor.calls[2][0] == "desktop.close_window"
 
 
 def test_desktop_interaction_cancels_close_with_empty_response() -> None:
@@ -878,7 +1205,10 @@ def test_desktop_interaction_cancels_close_with_empty_response() -> None:
     result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "")
 
     assert result == "Acción cancelada."
-    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_windows",
+    ]
 
 
 def test_desktop_interaction_cancels_close_with_no_response() -> None:
@@ -888,4 +1218,7 @@ def test_desktop_interaction_cancels_close_with_no_response() -> None:
     result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "n")
 
     assert result == "Acción cancelada."
-    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_windows",
+    ]

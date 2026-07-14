@@ -8,14 +8,18 @@ from tools.desktop.desktop_tools import (
     CaptureScreenshotTool,
     ClearClipboardTool,
     ClipboardHasTextTool,
+    CloseApplicationTool,
     CloseWindowTool,
     CopyClipboardTextTool,
     DoubleClickTool,
     GetCursorPositionTool,
     GetForegroundWindowTool,
+    GetProcessTool,
     GetScreenSizeTool,
     GetWindowRectTool,
     LeftClickTool,
+    IsProcessRunningTool,
+    ListProcessesTool,
     ListWindowsTool,
     MaximizeWindowTool,
     MinimizeWindowTool,
@@ -33,9 +37,10 @@ from tools.desktop.desktop_tools import (
     RightClickTool,
     SaveFileTool,
     ScrollVerticalTool,
+    TerminateProcessTool,
     TypeTextTool,
 )
-from tools.desktop.windows_controller import WindowsDesktopController
+from tools.desktop.windows_controller import ProcessInfo, WindowsDesktopController
 from tools.tool_context import ToolContext
 
 
@@ -48,6 +53,9 @@ class FakeDesktopController:
         self.fail_capture = False
         self.virtual_desktop = (0, 0, 1920, 1080)
         self.clipboard_text: str | None = "Hola Atlas"
+        self.next_pid = 500
+        self.processes: list[dict[str, object]] = []
+        self.existing_pids: set[int] = set()
         self.window_matches = [
             {
                 "handle": 10,
@@ -63,8 +71,9 @@ class FakeDesktopController:
             },
         ]
 
-    def open_application(self, application: str) -> None:
+    def open_application(self, application: str) -> int:
         self.calls.append(("open_application", application))
+        return self.next_pid
 
     def open_folder(self, path: Path) -> None:
         self.calls.append(("open_folder", path))
@@ -200,6 +209,44 @@ class FakeDesktopController:
     def close_window(self, handle: int) -> None:
         self.calls.append(("close_window", handle))
 
+    def list_processes(self, query: str):
+        self.calls.append(("list_processes", query))
+        normalized = query.lower()
+        aliases = {
+            "visual studio code": "code",
+            "vs code": "code",
+            "vscode": "code",
+        }
+        normalized = aliases.get(normalized, normalized)
+        matches = [
+            process
+            for process in self.processes
+            if normalized in str(process.name).lower()
+            or normalized in str(process.name).lower().replace(".exe", "")
+        ]
+        return sorted(matches, key=lambda process: (process.name.lower(), process.pid))
+
+    def process_exists(self, pid: int) -> bool:
+        self.calls.append(("process_exists", pid))
+        return pid in self.existing_pids
+
+    def get_process(self, pid: int):
+        self.calls.append(("get_process", pid))
+
+        for process in self.processes:
+            if process.pid == pid:
+                return process
+
+        return None
+
+    def close_process_windows(self, pid: int) -> int:
+        self.calls.append(("close_process_windows", pid))
+        return 1
+
+    def terminate_process(self, pid: int) -> None:
+        self.calls.append(("terminate_process", pid))
+        self.existing_pids.discard(pid)
+
 
 def test_open_application_tool() -> None:
     controller = FakeDesktopController()
@@ -209,10 +256,151 @@ def test_open_application_tool() -> None:
         ToolContext(parameters={"application": "Visual Studio Code"})
     )
 
-    assert result == "Visual Studio Code abierto."
+    assert result == "Visual Studio Code abierto. PID: 500"
     assert controller.calls == [
+        ("list_processes", "Visual Studio Code"),
         ("open_application", "Visual Studio Code")
     ]
+
+
+def test_open_application_tool_reports_existing_process() -> None:
+    controller = FakeDesktopController()
+    controller.processes = [
+        ProcessInfo(10, "Code.exe", None, ("Atlas",), True),
+    ]
+    tool = OpenApplicationTool(controller)
+
+    result = tool.execute(
+        ToolContext(parameters={"application": "Visual Studio Code"})
+    )
+
+    assert result == "Visual Studio Code ya estaba abierto. PID: 10"
+    assert controller.calls == [("list_processes", "Visual Studio Code")]
+
+
+def test_list_processes_tool_returns_plain_structures() -> None:
+    controller = FakeDesktopController()
+    controller.processes = [
+        ProcessInfo(20, "chrome.exe", None, ("Chrome",), True),
+        ProcessInfo(10, "chrome.exe", None, (), True),
+    ]
+    tool = ListProcessesTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"query": "chrome"}))
+
+    assert result == [
+        {
+            "pid": 10,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        },
+        {
+            "pid": 20,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": ("Chrome",),
+            "is_running": True,
+        },
+    ]
+
+
+def test_is_process_running_tool() -> None:
+    controller = FakeDesktopController()
+    tool = IsProcessRunningTool(controller)
+
+    assert tool.execute(ToolContext(parameters={"query": "chrome"})) is False
+
+    controller.processes = [
+        ProcessInfo(20, "chrome.exe", None, (), True),
+    ]
+
+    assert tool.execute(ToolContext(parameters={"query": "chrome"})) is True
+
+
+def test_get_process_tool_returns_process_by_pid() -> None:
+    controller = FakeDesktopController()
+    controller.processes = [
+        ProcessInfo(20, "chrome.exe", None, ("Chrome",), True),
+    ]
+    tool = GetProcessTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"pid": 20}))
+
+    assert result == {
+        "pid": 20,
+        "name": "chrome.exe",
+        "executable_path": None,
+        "window_titles": ("Chrome",),
+        "is_running": True,
+    }
+
+
+def test_close_application_tool_sends_normal_close() -> None:
+    controller = FakeDesktopController()
+    tool = CloseApplicationTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"pid": 20}))
+
+    assert result == "Solicitud de cierre enviada a 1 ventana(s)."
+    assert controller.calls == [("close_process_windows", 20)]
+
+
+def test_terminate_process_tool_rejects_pid_zero_and_four() -> None:
+    tool = TerminateProcessTool(FakeDesktopController())
+
+    with pytest.raises(ValueError):
+        tool.execute(ToolContext(parameters={"pid": 0}))
+
+    with pytest.raises(ValueError):
+        tool.execute(ToolContext(parameters={"pid": 4}))
+
+
+def test_terminate_process_tool_blocks_protected_process() -> None:
+    controller = FakeDesktopController()
+    controller.processes = [
+        ProcessInfo(88, "lsass.exe", None, (), True),
+    ]
+    tool = TerminateProcessTool(controller)
+
+    with pytest.raises(ValueError):
+        tool.execute(ToolContext(parameters={"pid": 88}))
+
+
+def test_terminate_process_tool_terminates_after_lookup_and_verification() -> None:
+    controller = FakeDesktopController()
+    controller.processes = [
+        ProcessInfo(99, "example.exe", None, (), True),
+    ]
+    controller.existing_pids = {99}
+    tool = TerminateProcessTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"pid": 99}))
+
+    assert result == "Proceso terminado: example.exe - PID 99"
+    assert controller.calls == [
+        ("get_process", 99),
+        ("close_process_windows", 99),
+        ("terminate_process", 99),
+        ("process_exists", 99),
+    ]
+
+
+def test_terminate_process_tool_reports_still_running() -> None:
+    class StickyController(FakeDesktopController):
+        def terminate_process(self, pid: int) -> None:
+            self.calls.append(("terminate_process", pid))
+
+    controller = StickyController()
+    controller.processes = [
+        ProcessInfo(99, "example.exe", None, (), True),
+    ]
+    controller.existing_pids = {99}
+    tool = TerminateProcessTool(controller)
+
+    with pytest.raises(RuntimeError):
+        tool.execute(ToolContext(parameters={"pid": 99}))
 
 
 def test_open_folder_tool_requires_existing_folder(tmp_path: Path) -> None:
@@ -1016,3 +1204,156 @@ def test_windows_controller_clipboard_has_text_uses_unicode_format() -> None:
     assert controller.clipboard_has_text() is True
 
     assert user32.calls == [("IsClipboardFormatAvailable", 13)]
+
+
+def test_windows_controller_open_application_uses_popen_without_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "demo.exe"
+    executable.write_text("", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        pid = 1234
+
+        def __init__(self, args, stdout, stderr, shell=False):
+            calls.append(
+                {
+                    "args": args,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "shell": shell,
+                }
+            )
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.Popen",
+        FakePopen,
+    )
+    controller = WindowsDesktopController()
+
+    result = controller.open_application(str(executable))
+
+    assert result == 1234
+    assert calls[0]["args"] == [str(executable)]
+    assert calls[0]["shell"] is False
+
+
+def test_windows_controller_rejects_arbitrary_application_command() -> None:
+    controller = WindowsDesktopController()
+
+    with pytest.raises(ValueError):
+        controller.open_application("cmd /c dir")
+
+
+def test_windows_controller_list_processes_uses_tasklist_without_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = (
+            '"Image Name","PID","Session Name","Session#","Mem Usage",'
+            '"Status","User Name","CPU Time","Window Title"\n'
+            '"Code.exe","20","Console","1","10 K","Running",'
+            '"User","0:00:00","Atlas - Visual Studio Code"\n'
+            '"Code.exe","10","Console","1","10 K","Running",'
+            '"User","0:00:00","N/A"\n'
+        )
+        stderr = ""
+
+    def fake_run(args, capture_output, text, shell=False):
+        calls.append(
+            {
+                "args": args,
+                "capture_output": capture_output,
+                "text": text,
+                "shell": shell,
+            }
+        )
+        return Completed()
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.run",
+        fake_run,
+    )
+    controller = WindowsDesktopController()
+
+    result = controller.list_processes("Visual Studio Code")
+
+    assert [process.pid for process in result] == [10, 20]
+    assert result[1].window_titles == ("Atlas - Visual Studio Code",)
+    assert calls[0]["args"] == ["tasklist", "/FO", "CSV", "/V"]
+    assert calls[0]["shell"] is False
+
+
+def test_windows_controller_list_processes_falls_back_when_verbose_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class Denied:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: Acceso denegado"
+
+    class Completed:
+        returncode = 0
+        stdout = (
+            '"Image Name","PID","Session Name","Session#","Mem Usage"\n'
+            '"Code.exe","20","Console","1","10 K"\n'
+        )
+        stderr = ""
+
+    def fake_run(args, capture_output, text, shell=False):
+        calls.append(args)
+        return Denied() if len(calls) == 1 else Completed()
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.run",
+        fake_run,
+    )
+    controller = WindowsDesktopController()
+
+    result = controller.list_processes("Code")
+
+    assert [process.pid for process in result] == [20]
+    assert calls == [
+        ["tasklist", "/FO", "CSV", "/V"],
+        ["tasklist", "/FO", "CSV"],
+    ]
+
+
+def test_windows_controller_terminate_process_uses_taskkill_without_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, capture_output, text, shell=False):
+        calls.append(
+            {
+                "args": args,
+                "capture_output": capture_output,
+                "text": text,
+                "shell": shell,
+            }
+        )
+        return Completed()
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.run",
+        fake_run,
+    )
+    controller = WindowsDesktopController()
+
+    controller.terminate_process(1234)
+
+    assert calls[0]["args"] == ["taskkill", "/PID", "1234", "/F"]
+    assert calls[0]["shell"] is False

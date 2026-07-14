@@ -8,6 +8,7 @@ from use_cases.action_engine import (
     ActionStep,
     CopyAndPasteTextUseCase,
     PrepareAtlasWorkspaceUseCase,
+    RestartApplicationUseCase,
 )
 from use_cases.desktop_interaction import DesktopInteractionUseCase
 
@@ -16,6 +17,15 @@ class FakeToolExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ToolContext]] = []
         self.fail_tool: str | None = None
+        self.processes: list[dict[str, object]] = [
+            {
+                "pid": 20,
+                "name": "chrome.exe",
+                "executable_path": None,
+                "window_titles": ("Chrome",),
+                "is_running": True,
+            }
+        ]
         self.windows: list[dict[str, object]] = [
             {
                 "handle": 20,
@@ -53,6 +63,31 @@ class FakeToolExecutor:
                 for window in self.windows
                 if title in str(window["title"]).lower()
             ]
+
+        if tool_name == "desktop.list_processes":
+            query = str(context.parameters["query"]).lower()
+            return [
+                process
+                for process in self.processes
+                if query in str(process["name"]).lower()
+                or query in str(process["name"]).lower().replace(".exe", "")
+            ]
+
+        if tool_name == "desktop.close_application":
+            self.processes = []
+            return "closed"
+
+        if tool_name == "desktop.open_application":
+            self.processes = [
+                {
+                    "pid": 21,
+                    "name": "chrome.exe",
+                    "executable_path": None,
+                    "window_titles": ("Chrome",),
+                    "is_running": True,
+                }
+            ]
+            return "opened"
 
         return f"{tool_name} ok"
 
@@ -460,6 +495,62 @@ def test_copy_and_paste_text_returns_structured_result() -> None:
         "Activar ventana destino",
         "Pegar contenido del portapapeles",
     ]
+
+
+def test_restart_application_executes_steps_in_order() -> None:
+    executor = FakeToolExecutor()
+    use_case = RestartApplicationUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("chrome")
+
+    assert result.completed is True
+    assert result.workflow_name == "restart_application"
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_processes",
+        "desktop.close_application",
+        "desktop.list_processes",
+        "desktop.open_application",
+        "desktop.list_processes",
+    ]
+    assert all(call[0] != "desktop.terminate_process" for call in executor.calls)
+
+
+def test_restart_application_stops_on_first_failure() -> None:
+    executor = FakeToolExecutor()
+    executor.fail_tool = "desktop.close_application"
+    use_case = RestartApplicationUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("chrome")
+
+    assert result.completed is False
+    assert result.stopped_early is True
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_processes",
+        "desktop.close_application",
+    ]
+
+
+def test_restart_application_does_not_force_close_with_multiple_matches() -> None:
+    executor = FakeToolExecutor()
+    executor.processes.append(
+        {
+            "pid": 21,
+            "name": "chrome.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    )
+    use_case = RestartApplicationUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("chrome")
+
+    assert result.completed is False
+    assert result.step_results[-1].success is False
+    assert "Varias coincidencias" in str(result.step_results[-1].error)
+    assert all(call[0] != "desktop.terminate_process" for call in executor.calls)
 
 
 def test_desktop_interaction_interprets_prepare_commands(

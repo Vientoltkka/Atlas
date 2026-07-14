@@ -26,6 +26,9 @@ class FakeExecutor:
                 }
             ]
 
+        if tool_name == "desktop.list_processes":
+            return []
+
         return "ok"
 
 
@@ -34,6 +37,11 @@ def test_bootstrap_registers_desktop_tools() -> None:
     executor = orchestrator._desktop_interaction._executor
 
     assert executor._registry.exists("desktop.open_application")
+    assert executor._registry.exists("desktop.list_processes")
+    assert executor._registry.exists("desktop.is_process_running")
+    assert executor._registry.exists("desktop.get_process")
+    assert executor._registry.exists("desktop.close_application")
+    assert executor._registry.exists("desktop.terminate_process")
     assert executor._registry.exists("desktop.open_folder")
     assert executor._registry.exists("desktop.open_file")
     assert executor._registry.exists("desktop.type_text")
@@ -93,4 +101,13 @@ def test_window_close_requires_confirmation_in_integration() -> None:
     response = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "n")
 
     assert response == "Acción cancelada."
-    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_processes",
+        "desktop.list_windows",
+    ]
+
+
+def test_bootstrap_injects_restart_application_workflow() -> None:
+    orchestrator = Bootstrap.build()
+
+    assert orchestrator._desktop_interaction._restart_application is not None

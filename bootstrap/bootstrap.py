@@ -29,14 +29,18 @@ from tools.desktop.desktop_tools import (
     CaptureScreenshotTool,
     ClearClipboardTool,
     ClipboardHasTextTool,
+    CloseApplicationTool,
     CloseWindowTool,
     CopyClipboardTextTool,
     DoubleClickTool,
     GetCursorPositionTool,
     GetForegroundWindowTool,
+    GetProcessTool,
     GetScreenSizeTool,
     GetWindowRectTool,
     LeftClickTool,
+    IsProcessRunningTool,
+    ListProcessesTool,
     ListWindowsTool,
     MaximizeWindowTool,
     MinimizeWindowTool,
@@ -54,6 +58,7 @@ from tools.desktop.desktop_tools import (
     RightClickTool,
     SaveFileTool,
     ScrollVerticalTool,
+    TerminateProcessTool,
     TypeTextTool,
 )
 
@@ -74,6 +79,7 @@ from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.action_engine import (
     ActionEngineUseCase,
     PrepareAtlasWorkspaceUseCase,
+    RestartApplicationUseCase,
 )
 
 
@@ -105,6 +111,11 @@ class Bootstrap:
         tool_registry.register(ListDirectoryTool())
         tool_registry.register(TreeTool())
         tool_registry.register(OpenApplicationTool())
+        tool_registry.register(ListProcessesTool())
+        tool_registry.register(IsProcessRunningTool())
+        tool_registry.register(GetProcessTool())
+        tool_registry.register(CloseApplicationTool())
+        tool_registry.register(TerminateProcessTool())
         tool_registry.register(OpenFolderTool())
         tool_registry.register(OpenFileTool())
         tool_registry.register(TypeTextTool())
@@ -194,10 +205,15 @@ class Bootstrap:
             tool_executor,
             action_engine,
         )
+        restart_application = RestartApplicationUseCase(
+            tool_executor,
+            action_engine,
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
             prepare_atlas_workspace=prepare_atlas_workspace,
+            restart_application=restart_application,
         )
 
         # -----------------------

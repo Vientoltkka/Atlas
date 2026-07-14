@@ -10,6 +10,7 @@ import unicodedata
 from use_cases.action_engine import (
     AutomationResult,
     PrepareAtlasWorkspaceUseCase,
+    RestartApplicationUseCase,
 )
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
@@ -28,6 +29,7 @@ class DesktopInteractionUseCase:
         project_root: Path | None = None,
         screenshots_dir: Path | None = None,
         prepare_atlas_workspace: PrepareAtlasWorkspaceUseCase | None = None,
+        restart_application: RestartApplicationUseCase | None = None,
     ) -> None:
         self._executor = executor
         self._project_root = project_root or Path(".")
@@ -37,6 +39,7 @@ class DesktopInteractionUseCase:
             else self._project_root / "artifacts" / "screenshots"
         )
         self._prepare_atlas_workspace = prepare_atlas_workspace
+        self._restart_application = restart_application
 
     def execute(
         self,
@@ -50,6 +53,9 @@ class DesktopInteractionUseCase:
         try:
             if self._is_free_sequence_command(normalized):
                 raise ValueError("No se admiten secuencias libres.")
+
+            if normalized.startswith("ejecuta "):
+                raise ValueError("No se aceptan comandos arbitrarios.")
 
             clipboard_response = self._execute_clipboard_command(
                 text,
@@ -69,6 +75,15 @@ class DesktopInteractionUseCase:
                 )
 
                 return self._format_automation_result(result)
+
+            process_response = self._execute_process_command(
+                text,
+                normalized,
+                confirm,
+            )
+
+            if process_response is not None:
+                return process_response
 
             window_response = self._execute_window_command(
                 text,
@@ -159,6 +174,12 @@ class DesktopInteractionUseCase:
 
             if normalized.startswith("abrir "):
                 return self._open(text[6:].strip())
+
+            if normalized.startswith("open "):
+                return self._open(text[5:].strip())
+
+            if normalized in {"abre", "abrir", "open"}:
+                raise ValueError("Falta el objetivo a abrir.")
 
             if normalized.startswith("activa "):
                 title = text[7:].strip()
@@ -258,6 +279,298 @@ class DesktopInteractionUseCase:
         lines.append(f"Pasos fallidos: {result.failed_steps}")
 
         return "\n".join(lines)
+
+    def _execute_process_command(
+        self,
+        text: str,
+        normalized: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Execute supported process-management commands."""
+        text = text.strip().strip("¿?")
+        normalized = normalized.strip("¿?")
+        terminate_pid = self._extract_terminate_pid(normalized)
+
+        if terminate_pid is not None:
+            return self._terminate_process(terminate_pid, confirm)
+
+        if normalized in {
+            "termina proceso",
+            "termina el proceso",
+            "termina pid",
+            "mata proceso",
+        }:
+            raise ValueError("Orden incompleta: falta el PID.")
+
+        if normalized in {"termina pid abc", "termina proceso abc"}:
+            raise ValueError("PID invalido.")
+
+        if normalized in {"mata todos los procesos", "cierra todo"}:
+            raise ValueError("No se admiten operaciones masivas.")
+
+        if normalized.startswith("lista los procesos de "):
+            query = text[len("lista los procesos de ") :].strip()
+            return self._format_process_list(self._list_processes(query))
+
+        if normalized.startswith("lista procesos "):
+            query = text[len("lista procesos ") :].strip()
+            return self._format_process_list(self._list_processes(query))
+
+        if normalized.startswith("list ") and normalized.endswith(" processes"):
+            query = text[len("list ") : -len(" processes")].strip()
+            return self._format_process_list(self._list_processes(query))
+
+        if normalized.startswith("muestra el pid de "):
+            query = text[len("muestra el PID de ") :].strip()
+            return self._format_process_pids(query, self._list_processes(query))
+
+        if normalized.startswith("esta abierto "):
+            query = text[len("está abierto ") :].strip()
+            return self._format_running_state(query, self._list_processes(query))
+
+        if normalized.startswith("comprueba si ") and normalized.endswith(
+            " esta abierto"
+        ):
+            query = text[len("comprueba si ") : -len(" está abierto")].strip()
+            return self._format_running_state(query, self._list_processes(query))
+
+        if normalized.startswith("is ") and normalized.endswith(" running"):
+            query = text[len("is ") : -len(" running")].strip()
+            return self._format_running_state(query, self._list_processes(query))
+
+        if normalized.startswith("cierra "):
+            query = text[len("cierra ") :].strip()
+            processes = self._list_processes(query)
+
+            if not processes:
+                return None
+
+            return self._close_application(query, processes, confirm)
+
+        if normalized.startswith("close "):
+            query = text[len("close ") :].strip()
+            processes = self._list_processes(query)
+
+            if not processes:
+                return None
+
+            return self._close_application(query, processes, confirm)
+
+        return None
+
+    def _extract_terminate_pid(
+        self,
+        normalized: str,
+    ) -> int | None:
+        """Extract a PID from supported terminate commands."""
+        patterns = (
+            r"^termina el proceso con pid (\S+)$",
+            r"^mata el proceso (\S+)$",
+            r"^terminate process (\S+)$",
+        )
+
+        for pattern in patterns:
+            match = re.match(pattern, normalized)
+
+            if match is None:
+                continue
+
+            value = match.group(1)
+
+            if not value.isdigit():
+                raise ValueError("PID invalido.")
+
+            pid = int(value)
+
+            if pid <= 0:
+                raise ValueError("PID invalido.")
+
+            return pid
+
+        return None
+
+    def _list_processes(
+        self,
+        query: str,
+    ) -> list[dict[str, object]]:
+        """Return process matches."""
+        if not query:
+            raise ValueError("Orden incompleta: falta la aplicacion.")
+
+        result = self._executor.execute(
+            "desktop.list_processes",
+            ToolContext(parameters={"query": query}),
+        )
+
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de procesos invalida.")
+
+        return result
+
+    def _format_process_list(
+        self,
+        processes: list[dict[str, object]],
+    ) -> str:
+        """Format a deterministic process list."""
+        if not processes:
+            return "No se encontraron procesos."
+
+        lines = ["Procesos encontrados:", ""]
+
+        for index, process in enumerate(processes, start=1):
+            line = f"{index}. {process['name']} - PID {process['pid']}"
+            titles = process.get("window_titles", ())
+
+            if titles:
+                line += " - ventanas visibles: si"
+            else:
+                line += " - ventanas visibles: no"
+
+            lines.append(line)
+
+        return "\n".join(lines)
+
+    def _format_process_pids(
+        self,
+        query: str,
+        processes: list[dict[str, object]],
+    ) -> str:
+        """Format PID information for process matches."""
+        if not processes:
+            return f"{query} no esta abierto."
+
+        pids = ", ".join(str(process["pid"]) for process in processes)
+        return f"PID: {pids}"
+
+    def _format_running_state(
+        self,
+        query: str,
+        processes: list[dict[str, object]],
+    ) -> str:
+        """Format whether an application is running."""
+        if not processes:
+            return f"{query} no esta abierto."
+
+        pids = ", ".join(str(process["pid"]) for process in processes)
+        return (
+            f"{self._CONFIRMATION_PREFIX} {query} esta abierto.\n"
+            f"Procesos: {len(processes)}\n"
+            f"PID: {pids}"
+        )
+
+    def _close_application(
+        self,
+        query: str,
+        processes: list[dict[str, object]],
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Request normal application close after explicit confirmation."""
+        process = self._select_process(query, processes, confirm)
+        name = str(process["name"])
+        pid = int(process["pid"])
+
+        if not self._confirmed_close_application(confirm, query, pid):
+            return "Cierre cancelado."
+
+        self._executor.execute(
+            "desktop.close_application",
+            ToolContext(parameters={"pid": pid}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} Solicitud de cierre enviada: {name} - PID {pid}"
+
+    def _select_process(
+        self,
+        query: str,
+        processes: list[dict[str, object]],
+        confirm: Callable[[str], str] | None,
+    ) -> dict[str, object]:
+        """Select a process match without arbitrary choice."""
+        if len(processes) == 1:
+            return processes[0]
+
+        if confirm is None:
+            raise ValueError(
+                "Varias coincidencias. Se requiere seleccion explicita."
+            )
+
+        selection = confirm(
+            self._format_process_list(processes)
+            + f"\nSelecciona un proceso [1-{len(processes)}]: "
+        )
+
+        if not selection.strip().isdigit():
+            raise ValueError("Seleccion invalida.")
+
+        index = int(selection.strip())
+
+        if index < 1 or index > len(processes):
+            raise ValueError("Seleccion invalida.")
+
+        return processes[index - 1]
+
+    def _terminate_process(
+        self,
+        pid: int,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Terminate one process by PID after explicit confirmation."""
+        if pid == 4:
+            raise ValueError("Proceso protegido.")
+
+        process = self._executor.execute(
+            "desktop.get_process",
+            ToolContext(parameters={"pid": pid}),
+        )
+
+        if process is None:
+            raise RuntimeError(f"No existe un proceso con PID {pid}.")
+
+        if not isinstance(process, dict):
+            raise RuntimeError("Respuesta de proceso invalida.")
+
+        name = str(process["name"])
+
+        if not self._confirmed_terminate_process(confirm, name, pid):
+            return "Terminacion cancelada."
+
+        result = self._executor.execute(
+            "desktop.terminate_process",
+            ToolContext(parameters={"pid": pid}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} {result}"
+
+    def _confirmed_close_application(
+        self,
+        confirm: Callable[[str], str] | None,
+        query: str,
+        pid: int,
+    ) -> bool:
+        """Return whether application close was explicitly confirmed."""
+        if confirm is None:
+            return False
+
+        response = confirm(f"Â¿Confirmas cerrar {query} - PID {pid}? [s/N]: ")
+
+        return self._normalize(response) in {"s", "si", "y", "yes"}
+
+    def _confirmed_terminate_process(
+        self,
+        confirm: Callable[[str], str] | None,
+        name: str,
+        pid: int,
+    ) -> bool:
+        """Return whether forced process termination was confirmed."""
+        if confirm is None:
+            return False
+
+        response = confirm(
+            f"Proceso:\n{name} - PID {pid}\n\n"
+            "Â¿Confirmas terminarlo de forma forzada? [s/N]: "
+        )
+
+        return self._normalize(response) in {"s", "si", "y", "yes"}
 
     def _open(
         self,
