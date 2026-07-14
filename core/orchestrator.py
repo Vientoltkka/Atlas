@@ -12,6 +12,7 @@ from core.router import Router
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
+from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 
@@ -29,6 +30,7 @@ class AtlasOrchestrator:
         write_file: WriteFileUseCase,
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
         correction_interaction: CorrectionInteractionUseCase | None = None,
+        desktop_interaction: DesktopInteractionUseCase | None = None,
         project_root: Path | None = None,
     ) -> None:
 
@@ -40,6 +42,7 @@ class AtlasOrchestrator:
         self._write_file = write_file
         self._refactoring_interaction = refactoring_interaction
         self._correction_interaction = correction_interaction
+        self._desktop_interaction = desktop_interaction
         self._project_root = project_root or Path(".")
 
     def start(self) -> None:
@@ -75,6 +78,17 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._desktop_interaction is not None:
+                desktop_response = self._desktop_interaction.execute(prompt)
+
+                if desktop_response is not None:
+                    print()
+                    print("Atlas:")
+                    print(desktop_response)
+                    print()
+
+                    continue
 
             if self._correction_interaction is not None:
                 correction_response = self._correction_interaction.execute(

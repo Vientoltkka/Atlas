@@ -21,6 +21,15 @@ from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
+from tools.desktop.desktop_tools import (
+    ActivateWindowTool,
+    OpenApplicationTool,
+    OpenFileTool,
+    OpenFolderTool,
+    PressHotkeyTool,
+    SaveFileTool,
+    TypeTextTool,
+)
 
 from use_cases.read_file import ReadFileUseCase
 from use_cases.write_file import WriteFileUseCase
@@ -35,6 +44,7 @@ from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.plan_refactoring import PlanRefactoringUseCase
 from use_cases.rename_symbol import RenameSymbolUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
+from use_cases.desktop_interaction import DesktopInteractionUseCase
 
 
 class Bootstrap:
@@ -64,6 +74,13 @@ class Bootstrap:
         tool_registry.register(WriteFileTool())
         tool_registry.register(ListDirectoryTool())
         tool_registry.register(TreeTool())
+        tool_registry.register(OpenApplicationTool())
+        tool_registry.register(OpenFolderTool())
+        tool_registry.register(OpenFileTool())
+        tool_registry.register(TypeTextTool())
+        tool_registry.register(PressHotkeyTool())
+        tool_registry.register(SaveFileTool())
+        tool_registry.register(ActivateWindowTool())
 
         tool_executor = ToolExecutor(tool_registry)
 
@@ -118,6 +135,9 @@ class Bootstrap:
             query_architecture_graph,
             prompt_client,
         )
+        desktop_interaction = DesktopInteractionUseCase(
+            tool_executor,
+        )
 
         # -----------------------
         # Agents
@@ -164,4 +184,5 @@ class Bootstrap:
             write_file=write_file,
             refactoring_interaction=refactoring_interaction,
             correction_interaction=correction_interaction,
+            desktop_interaction=desktop_interaction,
         )
