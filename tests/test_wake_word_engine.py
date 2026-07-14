@@ -1,70 +1,109 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from core.orchestrator import AtlasOrchestrator
 from use_cases.speech_engine import (
-    MicrophoneInfo,
-    SpeechCaptureSettings,
+    AudioCaptureResult,
+    ProviderTranscriptionResult,
     SpeechEngineUseCase,
-    SpeechTranscriptionResult,
     SoundDeviceAudioCapture,
 )
 from use_cases.wake_word_engine import (
+    OpenWakeWordProvider,
     WakeWordDetectionResult,
     WakeWordEngine,
     WakeWordInteractionUseCase,
 )
 
 
-def speech_result(
-    text: str,
-    completed: bool = True,
-    cancelled: bool = False,
-    warnings: tuple[str, ...] = (),
-) -> SpeechTranscriptionResult:
-    return SpeechTranscriptionResult(
-        text=text,
-        language="es" if completed else None,
-        audio_duration_seconds=1.0 if completed else 0.0,
-        processing_duration_seconds=0.2 if completed else 0.0,
-        provider="fake-local",
-        microphone_name="Fake Mic",
-        completed=completed,
-        cancelled=cancelled,
-        no_speech_detected=not completed and not cancelled,
-        warnings=warnings,
-        summary="fake",
-    )
+class CloseableFrames:
+    def __init__(self, frames: list[np.ndarray]) -> None:
+        self._frames = iter(frames)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._frames)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeSpeechEngine:
-    def __init__(self, results: list[SpeechTranscriptionResult]) -> None:
-        self._results = list(results)
-        self.calls = 0
+    def __init__(self, frames: list[np.ndarray] | None = None) -> None:
+        self.frames = CloseableFrames(frames or [])
+        self.frame_requests: list[tuple[int, int]] = []
+        self.transcribe_calls = 0
+        self.active_microphone_name = "Selected Mic"
+        self.active_microphone_index = 1
 
-    def transcribe_once(self) -> SpeechTranscriptionResult:
-        self.calls += 1
+    def iter_pcm_frames(self, sample_rate: int, frame_length: int):
+        self.frame_requests.append((sample_rate, frame_length))
+        return self.frames
 
-        if not self._results:
-            return speech_result("", completed=False, warnings=("sin audio",))
+    def transcribe_once(self):
+        self.transcribe_calls += 1
+        return SimpleNamespace(
+            text="abre el proyecto",
+            language="es",
+            audio_duration_seconds=1.0,
+            processing_duration_seconds=0.2,
+            provider="fake-local",
+            microphone_name=self.active_microphone_name,
+            completed=True,
+            cancelled=False,
+            no_speech_detected=False,
+            warnings=(),
+            summary="fake",
+        )
 
-        return self._results.pop(0)
 
-
-class ConfigAwareFakeSpeechEngine(FakeSpeechEngine):
-    def __init__(self, results: list[SpeechTranscriptionResult]) -> None:
-        super().__init__(results)
-        self.capture_settings: list[SpeechCaptureSettings | None] = []
-
-    def transcribe_once(
+class FakeProvider:
+    def __init__(
         self,
-        capture_settings: SpeechCaptureSettings | None = None,
-    ) -> SpeechTranscriptionResult:
-        self.capture_settings.append(capture_settings)
-        return super().transcribe_once()
+        process_results: list[bool],
+        sample_rate: int = 16_000,
+        frame_length: int = 512,
+        fail_initialize: Exception | None = None,
+        fail_process: Exception | None = None,
+    ) -> None:
+        self._process_results = list(process_results)
+        self._sample_rate = sample_rate
+        self._frame_length = frame_length
+        self.fail_initialize = fail_initialize
+        self.fail_process = fail_process
+        self.initialized = False
+        self.closed = False
+        self.frames_seen: list[np.ndarray] = []
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def frame_length(self) -> int:
+        return self._frame_length
+
+    def initialize(self) -> None:
+        if self.fail_initialize is not None:
+            raise self.fail_initialize
+        self.initialized = True
+
+    def process_frame(self, pcm_frame: np.ndarray) -> bool:
+        if self.fail_process is not None:
+            raise self.fail_process
+        self.frames_seen.append(np.asarray(pcm_frame))
+        return self._process_results.pop(0) if self._process_results else False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeClock:
@@ -79,161 +118,187 @@ class FakeClock:
         return self._last
 
 
-def test_waits_until_wake_word_then_transcribes_phrase() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result("ruido de fondo"),
-            speech_result("Atlas"),
-            speech_result("abre el proyecto"),
-        ]
+def frame(length: int = 512, value: int = 1) -> np.ndarray:
+    return np.full(length, value, dtype=np.int16)
+
+
+def test_openwakeword_configuration_loads_valid_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+    created: dict[str, object] = {}
+
+    class FakeModel:
+        def predict(self, _frame):
+            return {"Atlas": 0.0}
+
+    def factory(**kwargs):
+        created.update(kwargs)
+        return FakeModel()
+
+    monkeypatch.setenv("ATLAS_WAKE_WORD_MODEL_PATH", str(model))
+    monkeypatch.setenv("ATLAS_WAKE_WORD_SENSITIVITY", "0.7")
+    provider = OpenWakeWordProvider.from_environment()
+    provider._model_factory = factory
+
+    provider.initialize()
+
+    assert provider.sample_rate == 16_000
+    assert provider.frame_length == 1280
+    assert created["wakeword_models"] == [str(model.resolve())]
+    assert created["inference_framework"] == "onnx"
+
+
+def test_openwakeword_rejects_missing_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ATLAS_WAKE_WORD_MODEL_PATH", raising=False)
+    provider = OpenWakeWordProvider.from_environment()
+
+    with pytest.raises(RuntimeError) as error:
+        provider.initialize()
+
+    assert str(error.value) == (
+        "Wake word no configurada. "
+        "Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local."
     )
-    engine = WakeWordEngine(speech, wake_word="Atlas", timeout_seconds=10.0)
-
-    result = engine.wait_for_wake_word()
-
-    assert result.detected is True
-    assert result.attempts == 2
-    assert result.phrase is not None
-    assert result.phrase.text == "abre el proyecto"
-    assert speech.calls == 3
 
 
-def test_wake_word_is_configurable_and_accent_insensitive() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result("oye atlassian"),
-            speech_result("hola Átlas"),
-            speech_result("frase final"),
-        ]
+def test_openwakeword_rejects_invalid_model_path_and_extension(tmp_path: Path) -> None:
+    missing = tmp_path / "Atlas.onnx"
+    txt = tmp_path / "Atlas.txt"
+    txt.write_text("bad")
+
+    with pytest.raises(RuntimeError, match="no existe"):
+        OpenWakeWordProvider(missing).initialize()
+
+    with pytest.raises(RuntimeError, match="archivo .onnx"):
+        OpenWakeWordProvider(txt).initialize()
+
+
+@pytest.mark.parametrize("sensitivity", [-0.1, 1.1, "bad"])
+def test_openwakeword_validates_sensitivity(tmp_path: Path, sensitivity) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    with pytest.raises(RuntimeError, match="SENSITIVITY"):
+        OpenWakeWordProvider(model, sensitivity=sensitivity).initialize()
+
+
+def test_openwakeword_does_not_expose_unnecessary_paths(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.txt"
+    model.write_text("bad")
+
+    with pytest.raises(RuntimeError) as error:
+        OpenWakeWordProvider(model).initialize()
+
+    assert str(model) not in str(error.value)
+
+
+def test_openwakeword_initializes_once_and_detects_above_threshold(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.frames: list[np.ndarray] = []
+            self.reset_calls = 0
+
+        def predict(self, frame_value):
+            self.frames.append(np.asarray(frame_value))
+            return {"Atlas": 0.56}
+
+        def reset(self):
+            self.reset_calls += 1
+
+    fake = FakeModel()
+    created = 0
+
+    def factory(**_kwargs):
+        nonlocal created
+        created += 1
+        return fake
+
+    provider = OpenWakeWordProvider(
+        model,
+        model_factory=factory,
     )
-    engine = WakeWordEngine(speech, wake_word="Atlas", timeout_seconds=10.0)
 
-    result = engine.wait_for_wake_word()
+    assert provider._model is None
+    assert provider.process_frame(np.array([[1], [2], [3]], dtype=np.float32)) is True
+    assert provider.process_frame(np.array([1, 2, 3], dtype=np.int16)) is True
+    assert provider._model is fake
+    assert created == 1
+    assert fake.frames[0].dtype == np.int16
 
-    assert result.detected is True
-    assert result.attempts == 2
-    assert result.phrase is not None
-    assert result.phrase.text == "frase final"
+    provider.close()
+    assert fake.reset_calls == 1
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Atlas",
-        "Atlas.",
-        "ATLÁS",
-        "Atlas abre Visual Studio Code",
-    ],
-)
-def test_detects_safe_wake_word_variants(text: str) -> None:
-    speech = FakeSpeechEngine([speech_result(text)])
+def test_openwakeword_rejects_below_threshold(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    class FakeModel:
+        def predict(self, _frame):
+            return {"Atlas": 0.54}
+
+    provider = OpenWakeWordProvider(
+        model,
+        sensitivity=0.55,
+        model_factory=lambda **_kwargs: FakeModel(),
+    )
+
+    assert provider.process_frame(np.ones(1280, dtype=np.int16)) is False
+
+
+def test_openwakeword_rejects_empty_or_invalid_prediction(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    class InvalidModel:
+        def predict(self, _frame):
+            return []
+
+    provider = OpenWakeWordProvider(
+        model,
+        model_factory=lambda **_kwargs: InvalidModel(),
+    )
+
+    with pytest.raises(RuntimeError, match="Frame PCM invalido"):
+        provider.process_frame(np.array([], dtype=np.int16))
+
+    with pytest.raises(RuntimeError, match="Prediccion invalida"):
+        provider.process_frame(np.ones(1280, dtype=np.int16))
+
+
+def test_detects_wake_word_from_provider_and_closes_stream_and_provider() -> None:
+    speech = FakeSpeechEngine([frame(), frame()])
+    provider = FakeProvider([False, True])
     engine = WakeWordEngine(
         speech,
-        wake_word="Atlas",
-        timeout_seconds=10.0,
+        provider=provider,
         capture_phrase_after_detection=False,
     )
 
     result = engine.wait_for_wake_word()
 
     assert result.detected is True
-    assert result.attempts_log[-1].raw_text == text
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "atrás",
-        "altas",
-        "atlassian",
-        "preatlas",
-        "atlasico",
-    ],
-)
-def test_rejects_unsafe_wake_word_matches(text: str) -> None:
-    speech = FakeSpeechEngine([speech_result(text)])
-    clock = FakeClock([0.0, 0.0, 2.0])
-    engine = WakeWordEngine(
-        speech,
-        wake_word="Atlas",
-        timeout_seconds=1.0,
-        capture_phrase_after_detection=False,
-        clock=clock,
-    )
-
-    result = engine.wait_for_wake_word()
-
-    assert result.detected is False
-    assert result.attempts_log[0].reason == "la transcripcion no contiene la wake word"
-
-
-def test_timeout_is_configurable_and_does_not_capture_phrase() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result("hola"),
-            speech_result("sin palabra clave"),
-        ]
-    )
-    clock = FakeClock([0.0, 0.0, 1.0, 2.0])
-    sleeps: list[float] = []
-    engine = WakeWordEngine(
-        speech,
-        wake_word="Atlas",
-        timeout_seconds=1.5,
-        poll_interval_seconds=0.25,
-        clock=clock,
-        sleeper=sleeps.append,
-    )
-
-    result = engine.wait_for_wake_word()
-
-    assert result.detected is False
-    assert result.phrase is None
     assert result.attempts == 2
-    assert sleeps == [0.25, 0.25]
-    assert "timeout de wake word alcanzado" in result.warnings
+    assert speech.frame_requests == [(16_000, 512)]
+    assert speech.frames.closed is True
+    assert provider.closed is True
+    assert len(provider.frames_seen) == 2
+    assert speech.transcribe_calls == 0
 
 
-def test_uses_wake_capture_settings_and_retries_once_after_no_speech() -> None:
-    speech = ConfigAwareFakeSpeechEngine(
-        [
-            speech_result("", completed=False, warnings=("silencio",)),
-            speech_result("Atlas"),
-        ]
-    )
-    statuses: list[str] = []
-    engine = WakeWordEngine(
-        speech,
-        wake_word="Atlas",
-        timeout_seconds=10.0,
-        capture_phrase_after_detection=False,
-    )
-
-    result = engine.wait_for_wake_word(status_sink=statuses.append)
-
-    assert result.detected is True
-    assert speech.calls == 2
-    assert len(speech.capture_settings) == 2
-    assert speech.capture_settings[0] is not None
-    assert speech.capture_settings[0].max_duration == 4.0
-    assert speech.capture_settings[0].initial_silence_timeout == 7.0
-    assert speech.capture_settings[0].trailing_silence == 1.2
-    assert speech.capture_settings[0].speech_threshold == 0.008
-    assert speech.capture_settings[0].minimum_audio_duration == 0.8
-    assert "No te he oido. Repite 'Atlas'." in statuses
-
-
-def test_does_not_retry_empty_more_than_once() -> None:
-    speech = ConfigAwareFakeSpeechEngine(
-        [
-            speech_result("", completed=False, warnings=("silencio",)),
-            speech_result("", completed=False, warnings=("silencio",)),
-        ]
-    )
+def test_continues_when_provider_returns_negative_and_times_out() -> None:
+    speech = FakeSpeechEngine([frame(), frame(), frame()])
+    provider = FakeProvider([False, False, False])
     clock = FakeClock([0.0, 0.0, 0.5, 2.0])
     engine = WakeWordEngine(
         speech,
-        wake_word="Atlas",
+        provider=provider,
         timeout_seconds=1.0,
         capture_phrase_after_detection=False,
         clock=clock,
@@ -242,44 +307,79 @@ def test_does_not_retry_empty_more_than_once() -> None:
     result = engine.wait_for_wake_word()
 
     assert result.detected is False
-    assert speech.calls == 2
+    assert result.warnings == ("timeout de wake word alcanzado",)
+    assert speech.frames.closed is True
+    assert provider.closed is True
 
 
-def test_continues_waiting_after_wrong_phrase_and_reports_diagnostic() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result("altas"),
-            speech_result("Atlas"),
-        ]
-    )
-    statuses: list[str] = []
-    engine = WakeWordEngine(
-        speech,
-        wake_word="Atlas",
-        timeout_seconds=10.0,
-        capture_phrase_after_detection=False,
-    )
+def test_cancels_with_ctrl_c_and_closes_provider() -> None:
+    class InterruptingFrames(CloseableFrames):
+        def __next__(self):
+            raise KeyboardInterrupt
 
-    result = engine.wait_for_wake_word(status_sink=statuses.append)
+    speech = FakeSpeechEngine([])
+    speech.frames = InterruptingFrames([])
+    provider = FakeProvider([])
+    engine = WakeWordEngine(speech, provider=provider)
 
-    assert result.detected is True
-    assert speech.calls == 2
-    assert "Texto bruto: altas" in statuses[0]
-    assert "Motivo: la transcripcion no contiene la wake word" in statuses[0]
+    result = engine.wait_for_wake_word()
+
+    assert result.cancelled is True
+    assert speech.frames.closed is True
+    assert provider.closed is True
 
 
-def test_temporary_wake_settings_preserve_selected_microphone(monkeypatch: pytest.MonkeyPatch) -> None:
-    capture = SoundDeviceAudioCapture()
-    provider = SimpleNamespace(
-        name="fake-local",
-        transcribe=lambda _samples, _sample_rate: SimpleNamespace(
-            text="Atlas",
-            language="es",
-            processing_duration_seconds=0.1,
-            provider="fake-local",
+def test_closes_provider_after_processing_error() -> None:
+    speech = FakeSpeechEngine([frame()])
+    provider = FakeProvider([], fail_process=RuntimeError("boom"))
+    engine = WakeWordEngine(speech, provider=provider)
+
+    result = engine.wait_for_wake_word()
+
+    assert result.detected is False
+    assert result.warnings == ("boom",)
+    assert provider.closed is True
+    assert speech.frames.closed is True
+
+
+def test_configuration_error_does_not_open_stream() -> None:
+    speech = FakeSpeechEngine([frame()])
+    provider = FakeProvider(
+        [],
+        fail_initialize=RuntimeError(
+            "Wake word no configurada. Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local."
         ),
     )
-    engine = SpeechEngineUseCase(capture, provider)
+    engine = WakeWordEngine(speech, provider=provider)
+
+    result = engine.wait_for_wake_word()
+
+    assert result.configuration_error is True
+    assert speech.frame_requests == []
+    assert provider.closed is True
+
+
+def test_standalone_interaction_reports_configuration_error() -> None:
+    result = WakeWordDetectionResult(
+        wake_word="Atlas",
+        detected=False,
+        attempts=0,
+        elapsed_seconds=0.0,
+        configuration_error=True,
+        warnings=("Wake word no configurada. Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local.",),
+    )
+    interaction = WakeWordInteractionUseCase(
+        SimpleNamespace(wait_for_wake_word=lambda: result)
+    )
+
+    assert (
+        interaction.execute("atlas")
+        == "Wake word no configurada. Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local."
+    )
+
+
+def test_capture_can_yield_int16_pcm_from_selected_microphone(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = SoundDeviceAudioCapture()
     fake_sd = SimpleNamespace(
         default=SimpleNamespace(device=(0, None)),
         query_devices=lambda: [
@@ -287,119 +387,52 @@ def test_temporary_wake_settings_preserve_selected_microphone(monkeypatch: pytes
             {"name": "Selected Mic", "max_input_channels": 1},
         ],
     )
+    stream_state: dict[str, object] = {}
+
+    class Stream:
+        def __init__(self, **kwargs) -> None:
+            stream_state.update(kwargs)
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.closed = True
+
+        def read(self, frame_length: int):
+            return np.ones((frame_length, 1), dtype=np.int16), False
+
+    fake_sd.InputStream = Stream
     monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
-    monkeypatch.setattr(
-        capture,
-        "capture_phrase",
-        lambda settings=None: SimpleNamespace(
-            samples=__import__("numpy").ones(10, dtype=__import__("numpy").float32),
-            sample_rate=16_000,
-            duration_seconds=1.0,
-            microphone_name=capture.selected_or_default_microphone().name,
-            completed=True,
-            cancelled=False,
-            no_speech_detected=False,
-            warnings=(),
-        ),
+
+    capture.select_microphone(1)
+    iterator = capture.iter_pcm_frames(sample_rate=16_000, frame_length=512)
+    pcm = next(iterator)
+    iterator.close()
+
+    assert stream_state["device"] == 1
+    assert stream_state["samplerate"] == 16_000
+    assert stream_state["blocksize"] == 512
+    assert stream_state["dtype"] == "int16"
+    assert pcm.dtype == np.int16
+    assert pcm.shape == (512,)
+
+
+def test_detection_can_capture_phrase_after_provider_event() -> None:
+    speech = FakeSpeechEngine([frame()])
+    provider = FakeProvider([True])
+    engine = WakeWordEngine(
+        speech,
+        provider=provider,
+        capture_phrase_after_detection=True,
     )
-
-    selected = engine.select_microphone(1)
-    result = engine.transcribe_once(
-        capture_settings=SpeechCaptureSettings(speech_threshold=0.001),
-    )
-
-    assert selected.name == "Selected Mic"
-    assert result.microphone_name == "Selected Mic"
-
-
-def test_cancelled_detection_stops_waiting() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result(
-                "",
-                completed=False,
-                cancelled=True,
-                warnings=("captura cancelada por el usuario",),
-            )
-        ]
-    )
-    engine = WakeWordEngine(speech, wake_word="Atlas", timeout_seconds=10.0)
 
     result = engine.wait_for_wake_word()
 
-    assert result.cancelled is True
-    assert result.detected is False
-    assert result.attempts == 1
-
-
-def test_invalid_configuration_is_rejected() -> None:
-    speech = FakeSpeechEngine([])
-
-    with pytest.raises(ValueError):
-        WakeWordEngine(speech, wake_word=" ")
-
-    with pytest.raises(ValueError):
-        WakeWordEngine(speech, timeout_seconds=0)
-
-    with pytest.raises(ValueError):
-        WakeWordEngine(speech, poll_interval_seconds=-1)
-
-
-def test_interaction_formats_transcription_without_execution() -> None:
-    speech = FakeSpeechEngine(
-        [
-            speech_result("Atlas"),
-            speech_result("abre visual studio code"),
-        ]
-    )
-    interaction = WakeWordInteractionUseCase(
-        WakeWordEngine(speech, wake_word="Atlas", timeout_seconds=10.0)
-    )
-
-    response = interaction.execute("atlas")
-
-    assert "Wake word detectada: Atlas" in str(response)
-    assert "Transcripcion:" in str(response)
-    assert "abre visual studio code" in str(response)
-    assert "La orden transcrita no se ejecuto." in str(response)
-
-
-def test_interaction_reports_timeout_and_ignores_unknown_command() -> None:
-    timeout_result = WakeWordDetectionResult(
-        wake_word="Atlas",
-        detected=False,
-        attempts=0,
-        elapsed_seconds=30.0,
-        warnings=("timeout de wake word alcanzado",),
-    )
-    interaction = WakeWordInteractionUseCase(
-        SimpleNamespace(wait_for_wake_word=lambda: timeout_result)
-    )
-
-    assert interaction.execute("hola") is None
-    assert (
-        interaction.execute("wake word")
-        == "No se detecto la palabra de activacion Atlas antes del tiempo limite."
-    )
-
-
-def test_interaction_formats_failed_phrase_after_wake_word() -> None:
-    result = WakeWordDetectionResult(
-        wake_word="Atlas",
-        detected=True,
-        attempts=1,
-        elapsed_seconds=1.0,
-        phrase=speech_result("", completed=False, warnings=("modelo no disponible",)),
-    )
-    interaction = WakeWordInteractionUseCase(
-        SimpleNamespace(wait_for_wake_word=lambda: result)
-    )
-
-    response = interaction.execute("modo atlas")
-
-    assert "Wake word detectada: Atlas" in str(response)
-    assert "modelo no disponible" in str(response)
-    assert "La orden transcrita no se ejecuto." in str(response)
+    assert result.detected is True
+    assert result.phrase is not None
+    assert speech.transcribe_calls == 1
 
 
 def test_orchestrator_wake_word_runs_before_router_and_agent(monkeypatch, capsys) -> None:
@@ -407,16 +440,7 @@ def test_orchestrator_wake_word_runs_before_router_and_agent(monkeypatch, capsys
         def route(self, _plan):  # pragma: no cover - must not be called
             raise AssertionError("router should not receive wake word flow")
 
-    response = "\n".join(
-        [
-            "Wake word detectada: Atlas",
-            "",
-            "Transcripcion:",
-            "abre visual studio code",
-            "",
-            "La orden transcrita no se ejecuto.",
-        ]
-    )
+    response = "Wake word no configurada. Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local."
     inputs = iter(["atlas", "salir"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
     orchestrator = AtlasOrchestrator(
@@ -432,8 +456,7 @@ def test_orchestrator_wake_word_runs_before_router_and_agent(monkeypatch, capsys
     orchestrator.start()
     output = capsys.readouterr().out
 
-    assert "Wake word detectada: Atlas" in output
-    assert "La orden transcrita no se ejecuto." in output
+    assert "Wake word no configurada" in output
 
 
 def test_bootstrap_injects_wake_word_interaction() -> None:
@@ -442,3 +465,21 @@ def test_bootstrap_injects_wake_word_interaction() -> None:
     orchestrator = Bootstrap.build()
 
     assert orchestrator._wake_word_interaction is not None
+
+
+def test_no_active_proprietary_wake_provider_references_remain() -> None:
+    root = Path(__file__).resolve().parents[1]
+    forbidden = (
+        "Porcu" + "pine",
+        "pv" + "porcu" + "pine",
+        "ATLAS_" + "PORCUPINE_ACCESS_KEY",
+    )
+    checked_paths = [
+        *root.joinpath("bootstrap").glob("*.py"),
+        *root.joinpath("use_cases").glob("*.py"),
+        root / "requirements.txt",
+    ]
+
+    for path in checked_paths:
+        text = path.read_text(encoding="utf-8")
+        assert not any(item in text for item in forbidden), path

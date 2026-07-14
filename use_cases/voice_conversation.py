@@ -167,6 +167,16 @@ class VoiceConversationUseCase:
                 emit("Conversacion cancelada.")
                 return VoiceConversationResult(session=session, messages=messages)
 
+            if wake_word.configuration_error:
+                self._end_session(
+                    session,
+                    "configuration_error",
+                    wake_word.warnings[0] if wake_word.warnings else "Wake word no configurada.",
+                )
+                emit("Estado: configuration_error.")
+                emit(session.summary)
+                return VoiceConversationResult(session=session, messages=messages)
+
             if not wake_word.detected:
                 self._end_session(
                     session,

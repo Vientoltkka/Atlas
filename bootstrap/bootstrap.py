@@ -90,7 +90,11 @@ from use_cases.speech_engine import (
     SpeechInteractionUseCase,
 )
 from use_cases.voice_conversation import VoiceConversationUseCase
-from use_cases.wake_word_engine import WakeWordEngine, WakeWordInteractionUseCase
+from use_cases.wake_word_engine import (
+    OpenWakeWordProvider,
+    WakeWordEngine,
+    WakeWordInteractionUseCase,
+)
 
 
 class Bootstrap:
@@ -235,6 +239,7 @@ class Bootstrap:
         wake_word_interaction = WakeWordInteractionUseCase(
             WakeWordEngine(
                 speech_engine,
+                provider=OpenWakeWordProvider.from_environment(),
                 wake_word="Atlas",
                 timeout_seconds=30.0,
             )
@@ -243,6 +248,7 @@ class Bootstrap:
             speech_engine=speech_engine,
             wake_word_engine=WakeWordEngine(
                 speech_engine,
+                provider=OpenWakeWordProvider.from_environment(),
                 wake_word="Atlas",
                 timeout_seconds=30.0,
                 capture_phrase_after_detection=False,

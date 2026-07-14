@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from agents.registry import AgentRegistry
@@ -529,9 +530,39 @@ def test_privacy_no_audio_tts_sound_or_cloud() -> None:
 
 
 def test_real_wake_word_engine_can_detect_without_capturing_phrase() -> None:
-    speech = FakeSpeechEngine([speech_result("Atlas"), speech_result("primer turno")])
+    class Provider:
+        sample_rate = 16_000
+        frame_length = 2
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def initialize(self) -> None:
+            pass
+
+        def process_frame(self, _frame) -> bool:
+            return True
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Speech:
+        def __init__(self) -> None:
+            self.transcribe_calls = 0
+
+        def iter_pcm_frames(self, sample_rate: int, frame_length: int):
+            assert sample_rate == 16_000
+            assert frame_length == 2
+            yield np.ones(2, dtype=np.int16)
+
+        def transcribe_once(self):
+            self.transcribe_calls += 1
+            return speech_result("primer turno")
+
+    speech = Speech()
     wake = WakeWordEngine(
         speech,
+        provider=Provider(),
         wake_word="Atlas",
         timeout_seconds=5.0,
         capture_phrase_after_detection=False,
@@ -541,7 +572,7 @@ def test_real_wake_word_engine_can_detect_without_capturing_phrase() -> None:
 
     assert result.detected is True
     assert result.phrase is None
-    assert speech.transcribe_calls == 1
+    assert speech.transcribe_calls == 0
 
 
 def test_orchestrator_integrates_voice_mode_before_router(monkeypatch, capsys) -> None:

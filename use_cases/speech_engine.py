@@ -287,6 +287,26 @@ class SoundDeviceAudioCapture:
         finally:
             self._restore_settings(original)
 
+    def iter_pcm_frames(
+        self,
+        sample_rate: int,
+        frame_length: int,
+    ):
+        """Yield signed 16-bit mono PCM frames from the active microphone."""
+        microphone = self.selected_or_default_microphone()
+        sd = self._sounddevice()
+
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=frame_length,
+            device=microphone.index,
+        ) as stream:
+            while True:
+                data, _overflowed = stream.read(frame_length)
+                yield np.asarray(data, dtype=np.int16).reshape(-1)
+
     def capture_phrase(
         self,
         settings: SpeechCaptureSettings | None = None,
@@ -545,6 +565,19 @@ class SpeechEngineUseCase:
             return prepare_stream(capture_settings)
 
         return self.active_microphone()
+
+    def iter_pcm_frames(
+        self,
+        sample_rate: int,
+        frame_length: int,
+    ):
+        """Yield PCM frames from the selected microphone."""
+        iter_pcm_frames = getattr(self._capture, "iter_pcm_frames", None)
+
+        if not callable(iter_pcm_frames):
+            raise RuntimeError("La captura PCM no esta disponible.")
+
+        return iter_pcm_frames(sample_rate, frame_length)
 
     def transcribe_once(
         self,

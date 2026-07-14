@@ -9,3 +9,4 @@ uvicorn
 numpy
 sounddevice
 faster-whisper
+openwakeword==0.6.0

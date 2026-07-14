@@ -3,32 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+from pathlib import Path
 import time
 import unicodedata
-from typing import Callable
+from typing import Callable, Protocol
 
-from use_cases.speech_engine import (
-    SpeechCaptureSettings,
-    SpeechEngineUseCase,
-    SpeechTranscriptionResult,
-)
+import numpy as np
 
-
-@dataclass(frozen=True)
-class WakeWordAttempt:
-    """Diagnostic information for one wake word attempt."""
-
-    raw_text: str
-    normalized_text: str
-    audio_duration_seconds: float
-    microphone_name: str
-    accepted: bool
-    reason: str
+from use_cases.speech_engine import SpeechEngineUseCase, SpeechTranscriptionResult
 
 
 @dataclass(frozen=True)
 class WakeWordDetectionResult:
-    """Result of waiting for a wake word and capturing one phrase."""
+    """Result of waiting for a wake word and optionally capturing one phrase."""
 
     wake_word: str
     detected: bool
@@ -36,24 +24,171 @@ class WakeWordDetectionResult:
     elapsed_seconds: float
     phrase: SpeechTranscriptionResult | None = None
     cancelled: bool = False
+    configuration_error: bool = False
     warnings: tuple[str, ...] = field(default_factory=tuple)
-    attempts_log: tuple[WakeWordAttempt, ...] = field(default_factory=tuple)
+
+
+class WakeWordProvider(Protocol):
+    """Minimal acoustic wake word provider interface."""
+
+    @property
+    def sample_rate(self) -> int:
+        """Required sample rate."""
+
+    @property
+    def frame_length(self) -> int:
+        """Required frame length."""
+
+    def initialize(self) -> None:
+        """Initialize provider resources."""
+
+    def process_frame(
+        self,
+        pcm_frame: np.ndarray,
+    ) -> bool:
+        """Return True when the wake word is detected."""
+
+    def close(self) -> None:
+        """Release provider resources."""
+
+
+class OpenWakeWordProvider:
+    """openWakeWord-based local wake word provider."""
+
+    _MISSING_CONFIG_MESSAGE = (
+        "Wake word no configurada. "
+        "Define ATLAS_WAKE_WORD_MODEL_PATH con un modelo .onnx local."
+    )
+    _SAMPLE_RATE = 16_000
+    _FRAME_LENGTH = 1_280
+
+    def __init__(
+        self,
+        model_path: str | Path | None = None,
+        sensitivity: float | str | None = None,
+        model_factory: Callable[..., object] | None = None,
+    ) -> None:
+        self._model_path = Path(model_path) if model_path is not None else None
+        self._sensitivity = sensitivity
+        self._model_factory = model_factory
+        self._model = None
+
+    @classmethod
+    def from_environment(cls) -> "OpenWakeWordProvider":
+        """Create provider using environment variables only."""
+        return cls(
+            model_path=os.environ.get("ATLAS_WAKE_WORD_MODEL_PATH"),
+            sensitivity=os.environ.get("ATLAS_WAKE_WORD_SENSITIVITY"),
+        )
+
+    @property
+    def sample_rate(self) -> int:
+        """Required sample rate."""
+        return self._SAMPLE_RATE
+
+    @property
+    def frame_length(self) -> int:
+        """Required frame length."""
+        return self._FRAME_LENGTH
+
+    def initialize(self) -> None:
+        """Initialize openWakeWord lazily."""
+        if self._model is not None:
+            return
+
+        model_path, _sensitivity = self._validated_configuration()
+        factory = self._model_factory or self._load_model_factory()
+        self._model = factory(
+            wakeword_models=[str(model_path)],
+            inference_framework="onnx",
+        )
+
+    def process_frame(
+        self,
+        pcm_frame: np.ndarray,
+    ) -> bool:
+        """Process one mono PCM frame using acoustic score only."""
+        self._ensure_initialized()
+        frame = np.asarray(pcm_frame, dtype=np.int16).reshape(-1)
+        _model_path, sensitivity = self._validated_configuration()
+
+        if len(frame) == 0:
+            raise RuntimeError("Frame PCM invalido para openWakeWord.")
+
+        predictions = self._model.predict(frame)
+
+        if not isinstance(predictions, dict):
+            raise RuntimeError("Prediccion invalida de openWakeWord.")
+
+        scores = [float(score) for score in predictions.values()]
+        return bool(scores) and max(scores) >= sensitivity
+
+    def close(self) -> None:
+        """Reset provider state without unloading the model."""
+        if self._model is None:
+            return
+
+        reset = getattr(self._model, "reset", None)
+
+        if callable(reset):
+            reset()
+
+    def _validated_configuration(self) -> tuple[Path, float]:
+        model_path = self._model_path
+        sensitivity = self._validated_sensitivity()
+
+        if model_path is None:
+            raise RuntimeError(self._MISSING_CONFIG_MESSAGE)
+
+        resolved_model_path = model_path.expanduser().resolve()
+
+        if resolved_model_path.suffix.lower() != ".onnx":
+            raise RuntimeError("ATLAS_WAKE_WORD_MODEL_PATH debe apuntar a un archivo .onnx.")
+
+        if not resolved_model_path.is_file():
+            raise RuntimeError("ATLAS_WAKE_WORD_MODEL_PATH no existe.")
+
+        return resolved_model_path, sensitivity
+
+    def _validated_sensitivity(self) -> float:
+        try:
+            sensitivity = 0.55 if self._sensitivity is None else float(self._sensitivity)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                "ATLAS_WAKE_WORD_SENSITIVITY debe estar entre 0.0 y 1.0."
+            ) from error
+
+        if not 0.0 <= sensitivity <= 1.0:
+            raise RuntimeError("ATLAS_WAKE_WORD_SENSITIVITY debe estar entre 0.0 y 1.0.")
+
+        return sensitivity
+
+    def _load_model_factory(self):
+        try:
+            from openwakeword.model import Model
+        except ImportError as error:
+            raise RuntimeError(
+                "Dependencia no disponible: openwakeword."
+            ) from error
+
+        return Model
+
+    def _ensure_initialized(self) -> None:
+        if self._model is None:
+            self.initialize()
 
 
 class WakeWordEngine:
-    """Wait for a local wake word, then capture one phrase."""
+    """Wait for a local acoustic wake word, then optionally capture one phrase."""
 
     def __init__(
         self,
         speech_engine: SpeechEngineUseCase,
+        provider: WakeWordProvider,
         wake_word: str = "Atlas",
         timeout_seconds: float = 30.0,
         capture_phrase_after_detection: bool = True,
-        capture_settings: SpeechCaptureSettings | None = None,
-        max_empty_retries: int = 1,
-        poll_interval_seconds: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         if not wake_word.strip():
             raise ValueError("La wake word no puede estar vacia.")
@@ -61,28 +196,12 @@ class WakeWordEngine:
         if timeout_seconds <= 0:
             raise ValueError("El timeout debe ser mayor que cero.")
 
-        if poll_interval_seconds < 0:
-            raise ValueError("El intervalo de espera no puede ser negativo.")
-
-        if max_empty_retries < 0:
-            raise ValueError("El maximo de reintentos no puede ser negativo.")
-
         self._speech_engine = speech_engine
+        self._provider = provider
         self._wake_word = wake_word.strip()
         self._timeout_seconds = timeout_seconds
         self._capture_phrase_after_detection = capture_phrase_after_detection
-        self._capture_settings = capture_settings or SpeechCaptureSettings(
-            max_duration=4.0,
-            initial_silence_timeout=7.0,
-            trailing_silence=1.2,
-            chunk_duration=0.1,
-            speech_threshold=0.008,
-            minimum_audio_duration=0.8,
-        )
-        self._max_empty_retries = max_empty_retries
-        self._poll_interval_seconds = poll_interval_seconds
         self._clock = clock
-        self._sleeper = sleeper
 
     @property
     def wake_word(self) -> str:
@@ -98,155 +217,84 @@ class WakeWordEngine:
         self,
         status_sink: Callable[[str], None] | None = None,
     ) -> WakeWordDetectionResult:
-        """Wait until the wake word is detected, then transcribe one phrase."""
+        """Process PCM frames until wake word, timeout, cancellation, or error."""
         started = self._clock()
-        attempts = 0
-        empty_retries = 0
-        attempts_log: list[WakeWordAttempt] = []
+        frames_processed = 0
+        frame_iterator = None
 
-        while True:
-            elapsed = self._clock() - started
-
-            if elapsed >= self._timeout_seconds:
-                return WakeWordDetectionResult(
-                    wake_word=self._wake_word,
-                    detected=False,
-                    attempts=attempts,
-                    elapsed_seconds=elapsed,
-                    warnings=("timeout de wake word alcanzado",),
-                    attempts_log=tuple(attempts_log),
-                )
-
-            attempts += 1
-            candidate = self._transcribe_wake_word()
-
-            if candidate.cancelled:
-                return WakeWordDetectionResult(
-                    wake_word=self._wake_word,
-                    detected=False,
-                    attempts=attempts,
-                    elapsed_seconds=self._clock() - started,
-                    cancelled=True,
-                    warnings=candidate.warnings,
-                    attempts_log=tuple(attempts_log),
-                )
-
-            accepted = candidate.completed and self._contains_wake_word(candidate.text)
-            attempt = self._build_attempt(candidate, accepted)
-            attempts_log.append(attempt)
-
-            if status_sink is not None and not accepted:
-                status_sink(self._format_rejection(attempt))
-
-            if accepted:
-                phrase = (
-                    self._speech_engine.transcribe_once()
-                    if self._capture_phrase_after_detection
-                    else None
-                )
-                return WakeWordDetectionResult(
-                    wake_word=self._wake_word,
-                    detected=True,
-                    attempts=attempts,
-                    elapsed_seconds=self._clock() - started,
-                    phrase=phrase,
-                    attempts_log=tuple(attempts_log),
-                )
-
-            if self._is_empty_or_no_speech(candidate) and empty_retries < self._max_empty_retries:
-                empty_retries += 1
-
-                if status_sink is not None:
-                    status_sink("No te he oido. Repite 'Atlas'.")
-
-                continue
-
-            if self._poll_interval_seconds > 0:
-                self._sleeper(self._poll_interval_seconds)
-
-    def _transcribe_wake_word(self) -> SpeechTranscriptionResult:
         try:
-            return self._speech_engine.transcribe_once(
-                capture_settings=self._capture_settings,
+            self._provider.initialize()
+            frame_iterator = self._speech_engine.iter_pcm_frames(
+                sample_rate=self._provider.sample_rate,
+                frame_length=self._provider.frame_length,
             )
-        except TypeError:
-            return self._speech_engine.transcribe_once()
 
-    def _contains_wake_word(
-        self,
-        text: str,
-    ) -> bool:
-        normalized_text = self._normalize(text)
-        normalized_wake_word = self._normalize(self._wake_word)
-        tokens = normalized_text.split()
+            for frame in frame_iterator:
+                elapsed = self._clock() - started
 
-        return normalized_wake_word in tokens
+                if elapsed >= self._timeout_seconds:
+                    return WakeWordDetectionResult(
+                        wake_word=self._wake_word,
+                        detected=False,
+                        attempts=frames_processed,
+                        elapsed_seconds=elapsed,
+                        warnings=("timeout de wake word alcanzado",),
+                    )
 
-    def _is_empty_or_no_speech(
-        self,
-        candidate: SpeechTranscriptionResult,
-    ) -> bool:
-        return candidate.no_speech_detected or not candidate.text.strip()
+                frames_processed += 1
 
-    def _build_attempt(
-        self,
-        candidate: SpeechTranscriptionResult,
-        accepted: bool,
-    ) -> WakeWordAttempt:
-        normalized = self._normalize(candidate.text)
-        reason = "wake word detectada"
+                if self._provider.process_frame(frame):
+                    phrase = (
+                        self._speech_engine.transcribe_once()
+                        if self._capture_phrase_after_detection
+                        else None
+                    )
+                    return WakeWordDetectionResult(
+                        wake_word=self._wake_word,
+                        detected=True,
+                        attempts=frames_processed,
+                        elapsed_seconds=self._clock() - started,
+                        phrase=phrase,
+                    )
+        except KeyboardInterrupt:
+            return WakeWordDetectionResult(
+                wake_word=self._wake_word,
+                detected=False,
+                attempts=frames_processed,
+                elapsed_seconds=self._clock() - started,
+                cancelled=True,
+                warnings=("espera de wake word cancelada",),
+            )
+        except RuntimeError as error:
+            message = str(error)
+            configuration_error = message.startswith("Wake word no configurada.") or (
+                message.startswith("ATLAS_WAKE_WORD_MODEL_PATH")
+                or message.startswith("ATLAS_WAKE_WORD_SENSITIVITY")
+            )
 
-        if not accepted:
-            if candidate.no_speech_detected:
-                reason = "no se detecto voz"
-            elif not candidate.text.strip():
-                reason = "transcripcion vacia"
-            else:
-                reason = "la transcripcion no contiene la wake word"
+            return WakeWordDetectionResult(
+                wake_word=self._wake_word,
+                detected=False,
+                attempts=frames_processed,
+                elapsed_seconds=self._clock() - started,
+                configuration_error=configuration_error,
+                warnings=(message,),
+            )
+        finally:
+            close_iterator = getattr(frame_iterator, "close", None)
 
-        return WakeWordAttempt(
-            raw_text=candidate.text,
-            normalized_text=normalized,
-            audio_duration_seconds=candidate.audio_duration_seconds,
-            microphone_name=candidate.microphone_name,
-            accepted=accepted,
-            reason=reason,
+            if callable(close_iterator):
+                close_iterator()
+
+            self._provider.close()
+
+        return WakeWordDetectionResult(
+            wake_word=self._wake_word,
+            detected=False,
+            attempts=frames_processed,
+            elapsed_seconds=self._clock() - started,
+            warnings=("flujo de audio finalizado",),
         )
-
-    def _format_rejection(
-        self,
-        attempt: WakeWordAttempt,
-    ) -> str:
-        return "\n".join(
-            [
-                "Wake word no reconocida.",
-                f"Texto bruto: {attempt.raw_text or '<vacio>'}",
-                f"Texto normalizado: {attempt.normalized_text or '<vacio>'}",
-                f"Duracion de audio: {attempt.audio_duration_seconds:.1f} s",
-                f"Microfono: {attempt.microphone_name or '<desconocido>'}",
-                f"Motivo: {attempt.reason}",
-            ]
-        )
-
-    def _normalize(
-        self,
-        text: str,
-    ) -> str:
-        normalized = unicodedata.normalize("NFKD", text.strip().lower())
-        characters: list[str] = []
-
-        for character in normalized:
-            category = unicodedata.category(character)
-
-            if category == "Mn":
-                continue
-
-            if category[0] in {"L", "N"}:
-                characters.append(character)
-            else:
-                characters.append(" ")
-
-        return " ".join("".join(characters).split())
 
 
 class WakeWordInteractionUseCase:
@@ -283,6 +331,9 @@ class WakeWordInteractionUseCase:
     ) -> str:
         if result.cancelled:
             return "Espera de wake word cancelada."
+
+        if result.configuration_error:
+            return result.warnings[0]
 
         if not result.detected:
             return (
