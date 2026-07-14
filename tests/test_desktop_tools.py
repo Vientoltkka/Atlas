@@ -4,16 +4,26 @@ import pytest
 
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
+    BringWindowToFrontTool,
     CaptureScreenshotTool,
+    CloseWindowTool,
     DoubleClickTool,
     GetCursorPositionTool,
     GetScreenSizeTool,
+    GetWindowRectTool,
     LeftClickTool,
+    ListWindowsTool,
+    MaximizeWindowTool,
+    MinimizeWindowTool,
     MoveCursorTool,
+    MoveResizeWindowTool,
+    MoveWindowTool,
     OpenApplicationTool,
     OpenFileTool,
     OpenFolderTool,
     PressHotkeyTool,
+    ResizeWindowTool,
+    RestoreWindowTool,
     RightClickTool,
     SaveFileTool,
     ScrollVerticalTool,
@@ -29,6 +39,21 @@ class FakeDesktopController:
         self.screen_size = (1000, 800)
         self.cursor_position = (12, 34)
         self.fail_capture = False
+        self.virtual_desktop = (0, 0, 1920, 1080)
+        self.window_matches = [
+            {
+                "handle": 10,
+                "title": "Visual Studio Code - Atlas",
+                "rect": (20, 30, 820, 630),
+                "visible": True,
+            },
+            {
+                "handle": 11,
+                "title": "Visual Studio Code - Hidden",
+                "rect": (0, 0, 100, 100),
+                "visible": False,
+            },
+        ]
 
     def open_application(self, application: str) -> None:
         self.calls.append(("open_application", application))
@@ -59,6 +84,10 @@ class FakeDesktopController:
         self.calls.append(("get_screen_size", None))
         return self.screen_size
 
+    def get_virtual_desktop_rect(self) -> tuple[int, int, int, int]:
+        self.calls.append(("get_virtual_desktop_rect", None))
+        return self.virtual_desktop
+
     def get_cursor_position(self) -> tuple[int, int]:
         self.calls.append(("get_cursor_position", None))
         return self.cursor_position
@@ -85,6 +114,58 @@ class FakeDesktopController:
             raise RuntimeError("capture failed")
 
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def list_windows(self, title: str) -> list[dict[str, object]]:
+        self.calls.append(("list_windows", title))
+        return [
+            {
+                "handle": window["handle"],
+                "title": window["title"],
+                "rect": window["rect"],
+            }
+            for window in self.window_matches
+            if window["visible"] and title.lower() in str(window["title"]).lower()
+        ]
+
+    def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
+        self.calls.append(("get_window_rect", handle))
+
+        for window in self.window_matches:
+            if window["handle"] == handle:
+                return window["rect"]
+
+        raise RuntimeError("missing")
+
+    def bring_window_to_front(self, handle: int) -> None:
+        self.calls.append(("bring_window_to_front", handle))
+
+    def maximize_window(self, handle: int) -> None:
+        self.calls.append(("maximize_window", handle))
+
+    def minimize_window(self, handle: int) -> None:
+        self.calls.append(("minimize_window", handle))
+
+    def restore_window(self, handle: int) -> None:
+        self.calls.append(("restore_window", handle))
+
+    def move_window(self, handle: int, x: int, y: int) -> None:
+        self.calls.append(("move_window", (handle, x, y)))
+
+    def resize_window(self, handle: int, width: int, height: int) -> None:
+        self.calls.append(("resize_window", (handle, width, height)))
+
+    def move_resize_window(
+        self,
+        handle: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        self.calls.append(("move_resize_window", (handle, x, y, width, height)))
+
+    def close_window(self, handle: int) -> None:
+        self.calls.append(("close_window", handle))
 
 
 def test_open_application_tool() -> None:
@@ -407,3 +488,180 @@ def test_capture_screenshot_tool_reports_save_failure(
         tool.execute(
             ToolContext(parameters={"output_dir": str(tmp_path)})
         )
+
+
+def test_list_windows_tool_lists_visible_matches() -> None:
+    controller = FakeDesktopController()
+    tool = ListWindowsTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"title": "code"}))
+
+    assert result == [
+        {
+            "handle": 10,
+            "title": "Visual Studio Code - Atlas",
+            "rect": (20, 30, 820, 630),
+        }
+    ]
+
+
+def test_list_windows_tool_ignores_non_matching_or_hidden_windows() -> None:
+    controller = FakeDesktopController()
+    tool = ListWindowsTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"title": "Hidden"}))
+
+    assert result == []
+
+
+def test_get_window_rect_tool() -> None:
+    controller = FakeDesktopController()
+    tool = GetWindowRectTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == (20, 30, 820, 630)
+
+
+def test_bring_window_to_front_tool() -> None:
+    controller = FakeDesktopController()
+    tool = BringWindowToFrontTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == "Ventana activada."
+    assert controller.calls == [("bring_window_to_front", 10)]
+
+
+def test_maximize_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = MaximizeWindowTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == "Ventana maximizada."
+    assert controller.calls == [("maximize_window", 10)]
+
+
+def test_minimize_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = MinimizeWindowTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == "Ventana minimizada."
+    assert controller.calls == [("minimize_window", 10)]
+
+
+def test_restore_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = RestoreWindowTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == "Ventana restaurada."
+    assert controller.calls == [("restore_window", 10)]
+
+
+def test_move_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = MoveWindowTool(controller)
+
+    result = tool.execute(
+        ToolContext(parameters={"handle": 10, "x": 100, "y": 100})
+    )
+
+    assert result == "Ventana movida a (100, 100)."
+    assert controller.calls == [
+        ("get_window_rect", 10),
+        ("get_virtual_desktop_rect", None),
+        ("move_window", (10, 100, 100)),
+    ]
+
+
+def test_move_window_tool_rejects_invalid_coordinates() -> None:
+    controller = FakeDesktopController()
+    tool = MoveWindowTool(controller)
+
+    with pytest.raises(ValueError):
+        tool.execute(
+            ToolContext(parameters={"handle": 10, "x": "abc", "y": 100})
+        )
+
+
+def test_move_window_tool_rejects_position_outside_virtual_desktop() -> None:
+    controller = FakeDesktopController()
+    tool = MoveWindowTool(controller)
+
+    with pytest.raises(ValueError):
+        tool.execute(
+            ToolContext(parameters={"handle": 10, "x": 99999, "y": 99999})
+        )
+
+
+def test_resize_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = ResizeWindowTool(controller)
+
+    result = tool.execute(
+        ToolContext(parameters={"handle": 10, "width": 1200, "height": 800})
+    )
+
+    assert result == "Ventana redimensionada a 1200 x 800."
+    assert controller.calls == [("resize_window", (10, 1200, 800))]
+
+
+def test_resize_window_tool_rejects_zero_dimension() -> None:
+    controller = FakeDesktopController()
+    tool = ResizeWindowTool(controller)
+
+    with pytest.raises(ValueError):
+        tool.execute(
+            ToolContext(parameters={"handle": 10, "width": 0, "height": 800})
+        )
+
+
+def test_resize_window_tool_rejects_negative_dimension() -> None:
+    controller = FakeDesktopController()
+    tool = ResizeWindowTool(controller)
+
+    with pytest.raises(ValueError):
+        tool.execute(
+            ToolContext(parameters={"handle": 10, "width": -1, "height": 800})
+        )
+
+
+def test_move_resize_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = MoveResizeWindowTool(controller)
+
+    result = tool.execute(
+        ToolContext(
+            parameters={
+                "handle": 10,
+                "x": 100,
+                "y": 100,
+                "width": 1200,
+                "height": 800,
+            }
+        )
+    )
+
+    assert result == (
+        "Ventana movida a (100, 100) "
+        "y redimensionada a 1200 x 800."
+    )
+    assert controller.calls == [
+        ("get_virtual_desktop_rect", None),
+        ("move_resize_window", (10, 100, 100, 1200, 800)),
+    ]
+
+
+def test_close_window_tool_requests_close_without_killing_process() -> None:
+    controller = FakeDesktopController()
+    tool = CloseWindowTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"handle": 10}))
+
+    assert result == "Solicitud de cierre enviada."
+    assert controller.calls == [("close_window", 10)]

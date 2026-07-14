@@ -11,11 +11,20 @@ class FakeExecutor:
         self,
         tool_name: str,
         context: ToolContext,
-    ) -> str:
+    ) -> str | tuple[int, int] | list[dict[str, object]]:
         self.calls.append((tool_name, context))
 
         if tool_name == "desktop.get_screen_size":
             return (1920, 1080)
+
+        if tool_name == "desktop.list_windows":
+            return [
+                {
+                    "handle": 10,
+                    "title": "Visual Studio Code - Atlas",
+                    "rect": (20, 30, 820, 630),
+                }
+            ]
 
         return "ok"
 
@@ -39,6 +48,16 @@ def test_bootstrap_registers_desktop_tools() -> None:
     assert executor._registry.exists("desktop.right_click")
     assert executor._registry.exists("desktop.scroll_vertical")
     assert executor._registry.exists("desktop.capture_screenshot")
+    assert executor._registry.exists("desktop.list_windows")
+    assert executor._registry.exists("desktop.get_window_rect")
+    assert executor._registry.exists("desktop.bring_window_to_front")
+    assert executor._registry.exists("desktop.maximize_window")
+    assert executor._registry.exists("desktop.minimize_window")
+    assert executor._registry.exists("desktop.restore_window")
+    assert executor._registry.exists("desktop.move_window")
+    assert executor._registry.exists("desktop.resize_window")
+    assert executor._registry.exists("desktop.move_resize_window")
+    assert executor._registry.exists("desktop.close_window")
 
 
 def test_desktop_interaction_runs_before_agent_routing() -> None:
@@ -59,3 +78,13 @@ def test_desktop_click_requires_confirmation_in_integration() -> None:
 
     assert response == "Acción cancelada."
     assert [call[0] for call in executor.calls] == ["desktop.get_screen_size"]
+
+
+def test_window_close_requires_confirmation_in_integration() -> None:
+    executor = FakeExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    response = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "n")
+
+    assert response == "Acción cancelada."
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]

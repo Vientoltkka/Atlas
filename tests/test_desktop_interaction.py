@@ -8,6 +8,13 @@ class FakeToolExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ToolContext]] = []
         self.fail_on_execute = False
+        self.windows: list[dict[str, object]] = [
+            {
+                "handle": 10,
+                "title": "Visual Studio Code - Atlas",
+                "rect": (20, 30, 820, 630),
+            }
+        ]
 
     def execute(
         self,
@@ -27,6 +34,23 @@ class FakeToolExecutor:
 
         if tool_name == "desktop.capture_screenshot":
             return str(Path(context.parameters["output_dir"]) / "shot.png")
+
+        if tool_name == "desktop.list_windows":
+            title = str(context.parameters["title"]).lower()
+            return [
+                window
+                for window in self.windows
+                if title in str(window["title"]).lower()
+            ]
+
+        if tool_name == "desktop.get_window_rect":
+            handle = context.parameters["handle"]
+
+            for window in self.windows:
+                if window["handle"] == handle:
+                    return window["rect"]
+
+            raise RuntimeError("missing")
 
         return "ok"
 
@@ -376,3 +400,273 @@ def test_desktop_interaction_reports_screenshot_failure() -> None:
     result = use_case.execute("screenshot")
 
     assert result == "Error: tool failed"
+
+
+def test_desktop_interaction_lists_windows() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("lista ventanas de Visual Studio Code")
+
+    assert result == "Se encontraron ventanas:\n1. Visual Studio Code - Atlas"
+    assert executor.calls[0][0] == "desktop.list_windows"
+
+
+def test_desktop_interaction_reports_missing_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza Notepad")
+
+    assert result == "Error: No se encontraron ventanas para 'Notepad'."
+    assert executor.calls[0][0] == "desktop.list_windows"
+
+
+def test_desktop_interaction_detects_multiple_windows_without_selection() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 11,
+            "title": "Visual Studio Code - Tests",
+            "rect": (40, 50, 840, 650),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza Visual Studio Code")
+
+    assert result == (
+        "Error: Varias ventanas coinciden. "
+        "Se requiere seleccion explicita."
+    )
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+
+
+def test_desktop_interaction_selects_ambiguous_window() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 11,
+            "title": "Visual Studio Code - Tests",
+            "rect": (40, 50, 840, 650),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza Visual Studio Code", confirm=lambda _: "2")
+
+    assert result == "\u2713 Ventana maximizada:\nVisual Studio Code - Tests"
+    assert executor.calls[0][0] == "desktop.list_windows"
+    assert executor.calls[1][0] == "desktop.maximize_window"
+    assert executor.calls[1][1].parameters == {"handle": 11}
+
+
+def test_desktop_interaction_rejects_invalid_window_selection() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 11,
+            "title": "Visual Studio Code - Tests",
+            "rect": (40, 50, 840, 650),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza Visual Studio Code", confirm=lambda _: "3")
+
+    assert result == "Error: Seleccion invalida."
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+
+
+def test_desktop_interaction_maximizes_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza Visual Studio Code")
+
+    assert result == "\u2713 Ventana maximizada:\nVisual Studio Code - Atlas"
+    assert executor.calls[1][0] == "desktop.maximize_window"
+
+
+def test_desktop_interaction_minimizes_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("minimiza Visual Studio Code")
+
+    assert result == "\u2713 Ventana minimizada:\nVisual Studio Code - Atlas"
+    assert executor.calls[1][0] == "desktop.minimize_window"
+
+
+def test_desktop_interaction_restores_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("restaura Visual Studio Code")
+
+    assert result == "\u2713 Ventana restaurada:\nVisual Studio Code - Atlas"
+    assert executor.calls[1][0] == "desktop.restore_window"
+
+
+def test_desktop_interaction_brings_window_to_front_with_aliases() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("trae Visual Studio Code al frente")
+
+    assert result == "\u2713 Ventana activada:\nVisual Studio Code - Atlas"
+    assert executor.calls[1][0] == "desktop.bring_window_to_front"
+
+
+def test_desktop_interaction_activates_window_alias() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("activa Visual Studio Code")
+
+    assert result == "\u2713 Ventana activada:\nVisual Studio Code - Atlas"
+    assert executor.calls[1][0] == "desktop.bring_window_to_front"
+
+
+def test_desktop_interaction_moves_window_with_comma_coordinates() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve Visual Studio Code a 100, 100")
+
+    assert result == "\u2713 Ventana movida a (100, 100)."
+    assert executor.calls[1][0] == "desktop.move_window"
+    assert executor.calls[1][1].parameters == {
+        "handle": 10,
+        "x": 100,
+        "y": 100,
+    }
+
+
+def test_desktop_interaction_moves_window_with_space_coordinates() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve Visual Studio Code a 100 100")
+
+    assert result == "\u2713 Ventana movida a (100, 100)."
+    assert executor.calls[1][0] == "desktop.move_window"
+
+
+def test_desktop_interaction_resizes_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "cambia el tamaño de Visual Studio Code a 1200, 800"
+    )
+
+    assert result == "\u2713 Ventana redimensionada a 1200 x 800."
+    assert executor.calls[1][0] == "desktop.resize_window"
+
+
+def test_desktop_interaction_resizes_window_with_alias() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("redimensiona Visual Studio Code a 1200 800")
+
+    assert result == "\u2713 Ventana redimensionada a 1200 x 800."
+    assert executor.calls[1][0] == "desktop.resize_window"
+
+
+def test_desktop_interaction_moves_and_resizes_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "mueve y cambia el tamaño de Visual Studio Code a 100, 100, 1200, 800"
+    )
+
+    assert result == (
+        "\u2713 Ventana movida a (100, 100) "
+        "y redimensionada a 1200 x 800."
+    )
+    assert executor.calls[1][0] == "desktop.move_resize_window"
+
+
+def test_desktop_interaction_rejects_incomplete_window_command() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza")
+
+    assert result == "Error: Orden incompleta: falta el titulo de ventana."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_rejects_invalid_window_coordinates() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve Visual Studio Code a abc, 100")
+
+    assert result == "Error: Los parametros deben ser numericos."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_rejects_incomplete_move_resize() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "mueve y cambia el tamaño de Visual Studio Code a 100, 100, 1200"
+    )
+
+    assert result == "Error: Numero de parametros invalido."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_close_requires_confirmation() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Visual Studio Code")
+
+    assert result == "Acción cancelada."
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+
+
+def test_desktop_interaction_closes_after_yes() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "s")
+
+    assert result == "\u2713 Solicitud de cierre enviada."
+    assert executor.calls[1][0] == "desktop.close_window"
+
+
+def test_desktop_interaction_closes_after_si() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "sí")
+
+    assert result == "\u2713 Solicitud de cierre enviada."
+    assert executor.calls[1][0] == "desktop.close_window"
+
+
+def test_desktop_interaction_cancels_close_with_empty_response() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "")
+
+    assert result == "Acción cancelada."
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]
+
+
+def test_desktop_interaction_cancels_close_with_no_response() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra Visual Studio Code", confirm=lambda _: "n")
+
+    assert result == "Acción cancelada."
+    assert [call[0] for call in executor.calls] == ["desktop.list_windows"]

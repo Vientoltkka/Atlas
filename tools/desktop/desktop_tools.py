@@ -54,6 +54,75 @@ class DesktopTool(BaseTool):
 
         return x, y
 
+    def _window_handle(self, context: ToolContext) -> int:
+        """Return a required window handle."""
+        handle = context.parameters.get("handle")
+
+        if not isinstance(handle, int) or handle <= 0:
+            raise ValueError("Missing or invalid parameter 'handle'.")
+
+        return handle
+
+    def _window_rect(
+        self,
+        context: ToolContext,
+    ) -> tuple[int, int, int, int]:
+        """Return validated window geometry."""
+        x = context.parameters.get("x")
+        y = context.parameters.get("y")
+        width = context.parameters.get("width")
+        height = context.parameters.get("height")
+
+        if not all(isinstance(value, int) for value in (x, y, width, height)):
+            raise ValueError("La geometria de ventana debe ser numerica.")
+
+        assert isinstance(x, int)
+        assert isinstance(y, int)
+        assert isinstance(width, int)
+        assert isinstance(height, int)
+
+        if width <= 0 or height <= 0:
+            raise ValueError("El ancho y el alto deben ser mayores que cero.")
+
+        if width > 100000 or height > 100000:
+            raise ValueError("Dimensiones de ventana absurdas.")
+
+        self._validate_virtual_desktop_intersection(x, y, width, height)
+
+        return x, y, width, height
+
+    def _window_size(
+        self,
+        context: ToolContext,
+    ) -> tuple[int, int]:
+        """Return validated window size."""
+        width = context.parameters.get("width")
+        height = context.parameters.get("height")
+
+        if not isinstance(width, int) or not isinstance(height, int):
+            raise ValueError("Las dimensiones deben ser numericas.")
+
+        if width <= 0 or height <= 0:
+            raise ValueError("El ancho y el alto deben ser mayores que cero.")
+
+        if width > 100000 or height > 100000:
+            raise ValueError("Dimensiones de ventana absurdas.")
+
+        return width, height
+
+    def _validate_virtual_desktop_intersection(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        """Reject rectangles completely outside the virtual desktop."""
+        left, top, right, bottom = self._controller.get_virtual_desktop_rect()
+
+        if x + width <= left or y + height <= top or x >= right or y >= bottom:
+            raise ValueError("La posicion queda fuera del escritorio.")
+
 
 class OpenApplicationTool(DesktopTool):
     """Open an installed application."""
@@ -450,3 +519,234 @@ class CaptureScreenshotTool(DesktopTool):
                 return path
 
             index += 1
+
+
+class ListWindowsTool(DesktopTool):
+    """List visible windows matching a title."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.list_windows"
+
+    @property
+    def description(self) -> str:
+        return "List visible windows matching a title."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> list[dict[str, object]]:
+        title = context.parameters.get("title")
+
+        if not title:
+            raise ValueError("Missing parameter 'title'.")
+
+        return self._controller.list_windows(str(title))
+
+
+class GetWindowRectTool(DesktopTool):
+    """Return a window rectangle."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.get_window_rect"
+
+    @property
+    def description(self) -> str:
+        return "Return a window rectangle."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> tuple[int, int, int, int]:
+        return self._controller.get_window_rect(
+            self._window_handle(context),
+        )
+
+
+class BringWindowToFrontTool(DesktopTool):
+    """Bring a window to the foreground."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.bring_window_to_front"
+
+    @property
+    def description(self) -> str:
+        return "Bring a window to the foreground."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.bring_window_to_front(
+            self._window_handle(context),
+        )
+
+        return "Ventana activada."
+
+
+class MaximizeWindowTool(DesktopTool):
+    """Maximize a window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.maximize_window"
+
+    @property
+    def description(self) -> str:
+        return "Maximize a window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.maximize_window(
+            self._window_handle(context),
+        )
+
+        return "Ventana maximizada."
+
+
+class MinimizeWindowTool(DesktopTool):
+    """Minimize a window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.minimize_window"
+
+    @property
+    def description(self) -> str:
+        return "Minimize a window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.minimize_window(
+            self._window_handle(context),
+        )
+
+        return "Ventana minimizada."
+
+
+class RestoreWindowTool(DesktopTool):
+    """Restore a window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.restore_window"
+
+    @property
+    def description(self) -> str:
+        return "Restore a window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.restore_window(
+            self._window_handle(context),
+        )
+
+        return "Ventana restaurada."
+
+
+class MoveWindowTool(DesktopTool):
+    """Move a window preserving size."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.move_window"
+
+    @property
+    def description(self) -> str:
+        return "Move a window preserving size."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        handle = self._window_handle(context)
+        x = context.parameters.get("x")
+        y = context.parameters.get("y")
+
+        if not isinstance(x, int) or not isinstance(y, int):
+            raise ValueError("Las coordenadas deben ser numericas.")
+
+        left, top, right, bottom = self._controller.get_window_rect(handle)
+        width = right - left
+        height = bottom - top
+        self._validate_virtual_desktop_intersection(x, y, width, height)
+        self._controller.move_window(handle, x, y)
+
+        return f"Ventana movida a ({x}, {y})."
+
+
+class ResizeWindowTool(DesktopTool):
+    """Resize a window preserving position."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.resize_window"
+
+    @property
+    def description(self) -> str:
+        return "Resize a window preserving position."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        handle = self._window_handle(context)
+        width, height = self._window_size(context)
+        self._controller.resize_window(handle, width, height)
+
+        return f"Ventana redimensionada a {width} x {height}."
+
+
+class MoveResizeWindowTool(DesktopTool):
+    """Move and resize a window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.move_resize_window"
+
+    @property
+    def description(self) -> str:
+        return "Move and resize a window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        handle = self._window_handle(context)
+        x, y, width, height = self._window_rect(context)
+        self._controller.move_resize_window(handle, x, y, width, height)
+
+        return (
+            f"Ventana movida a ({x}, {y}) "
+            f"y redimensionada a {width} x {height}."
+        )
+
+
+class CloseWindowTool(DesktopTool):
+    """Request closing a window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.close_window"
+
+    @property
+    def description(self) -> str:
+        return "Request closing a window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.close_window(
+            self._window_handle(context),
+        )
+
+        return "Solicitud de cierre enviada."

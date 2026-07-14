@@ -38,6 +38,9 @@ class DesktopController(Protocol):
     def get_screen_size(self) -> tuple[int, int]:
         """Return the primary screen size."""
 
+    def get_virtual_desktop_rect(self) -> tuple[int, int, int, int]:
+        """Return the virtual desktop rectangle."""
+
     def get_cursor_position(self) -> tuple[int, int]:
         """Return the current cursor position."""
 
@@ -59,6 +62,43 @@ class DesktopController(Protocol):
     def capture_screen(self, path: Path) -> None:
         """Capture the full screen as PNG."""
 
+    def list_windows(self, title: str) -> list[dict[str, object]]:
+        """List visible windows matching title."""
+
+    def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
+        """Return a window rectangle."""
+
+    def bring_window_to_front(self, handle: int) -> None:
+        """Bring a window to the foreground."""
+
+    def maximize_window(self, handle: int) -> None:
+        """Maximize a window."""
+
+    def minimize_window(self, handle: int) -> None:
+        """Minimize a window."""
+
+    def restore_window(self, handle: int) -> None:
+        """Restore a window."""
+
+    def move_window(self, handle: int, x: int, y: int) -> None:
+        """Move a window preserving its current size."""
+
+    def resize_window(self, handle: int, width: int, height: int) -> None:
+        """Resize a window preserving its current position."""
+
+    def move_resize_window(
+        self,
+        handle: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        """Move and resize a window."""
+
+    def close_window(self, handle: int) -> None:
+        """Request a window close."""
+
 
 class WindowsDesktopController:
     """Control Windows desktop using stdlib and Win32 APIs."""
@@ -76,6 +116,40 @@ class WindowsDesktopController:
     _KERNEL32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
     _USER32.SetClipboardData.restype = wintypes.HANDLE
     _USER32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    _USER32.IsWindow.argtypes = (wintypes.HWND,)
+    _USER32.IsWindow.restype = wintypes.BOOL
+    _USER32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    _USER32.IsWindowVisible.restype = wintypes.BOOL
+    _USER32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+    _USER32.GetWindowTextLengthW.restype = ctypes.c_int
+    _USER32.GetWindowTextW.argtypes = (
+        wintypes.HWND,
+        wintypes.LPWSTR,
+        ctypes.c_int,
+    )
+    _USER32.GetWindowTextW.restype = ctypes.c_int
+    _USER32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.c_void_p)
+    _USER32.GetWindowRect.restype = wintypes.BOOL
+    _USER32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+    _USER32.ShowWindow.restype = wintypes.BOOL
+    _USER32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    _USER32.SetForegroundWindow.restype = wintypes.BOOL
+    _USER32.MoveWindow.argtypes = (
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.BOOL,
+    )
+    _USER32.MoveWindow.restype = wintypes.BOOL
+    _USER32.PostMessageW.argtypes = (
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    )
+    _USER32.PostMessageW.restype = wintypes.BOOL
     _USER32.GetDC.restype = wintypes.HDC
     _USER32.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC)
     _GDI32.CreateCompatibleDC.restype = wintypes.HDC
@@ -182,6 +256,10 @@ class WindowsDesktopController:
     _WHEEL_DELTA = 120
     _SRCCOPY = 0x00CC0020
     _PNG_ENCODER = "{557CF406-1A04-11D3-9A73-0000F81EF32E}"
+    _SW_RESTORE = 9
+    _SW_MAXIMIZE = 3
+    _SW_MINIMIZE = 6
+    _WM_CLOSE = 0x0010
 
     def open_application(self, application: str) -> None:
         """Open an installed application."""
@@ -211,17 +289,12 @@ class WindowsDesktopController:
 
     def window_exists(self, title: str) -> bool:
         """Return whether a window matching title exists."""
-        return self._find_window(title) != 0
+        return bool(self.list_windows(title))
 
     def activate_window(self, title: str) -> None:
         """Activate a matching window."""
-        handle = self._find_window(title)
-
-        if handle == 0:
-            raise RuntimeError(f"No existe una ventana con titulo '{title}'.")
-
-        self._USER32.ShowWindow(handle, 9)
-        self._USER32.SetForegroundWindow(handle)
+        handle = self._single_window_handle(title)
+        self.bring_window_to_front(handle)
 
     def type_text(self, text: str) -> None:
         """Type text into the active window."""
@@ -244,6 +317,15 @@ class WindowsDesktopController:
             int(self._USER32.GetSystemMetrics(0)),
             int(self._USER32.GetSystemMetrics(1)),
         )
+
+    def get_virtual_desktop_rect(self) -> tuple[int, int, int, int]:
+        """Return the virtual desktop rectangle."""
+        left = int(self._USER32.GetSystemMetrics(76))
+        top = int(self._USER32.GetSystemMetrics(77))
+        width = int(self._USER32.GetSystemMetrics(78))
+        height = int(self._USER32.GetSystemMetrics(79))
+
+        return left, top, left + width, top + height
 
     def get_cursor_position(self) -> tuple[int, int]:
         """Return the current cursor position."""
@@ -324,6 +406,119 @@ class WindowsDesktopController:
 
             self._USER32.ReleaseDC(None, screen_dc)
 
+    def list_windows(self, title: str) -> list[dict[str, object]]:
+        """List visible windows matching title."""
+        target = title.strip().lower()
+        windows: list[dict[str, object]] = []
+
+        enum_windows_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+
+        def callback(
+            handle: int,
+            _: int,
+        ) -> bool:
+            if not self._USER32.IsWindowVisible(handle):
+                return True
+
+            length = self._USER32.GetWindowTextLengthW(handle)
+
+            if length == 0:
+                return True
+
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            self._USER32.GetWindowTextW(handle, buffer, length + 1)
+            window_title = buffer.value
+
+            if target and target not in window_title.lower():
+                return True
+
+            windows.append(
+                {
+                    "handle": int(handle),
+                    "title": window_title,
+                    "rect": self.get_window_rect(int(handle)),
+                }
+            )
+
+            return True
+
+        self._USER32.EnumWindows(enum_windows_proc(callback), 0)
+
+        return sorted(
+            windows,
+            key=lambda item: (str(item["title"]).lower(), int(item["handle"])),
+        )
+
+    def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
+        """Return a window rectangle."""
+        self._ensure_window(handle)
+        rect = _Rect()
+
+        if not self._USER32.GetWindowRect(handle, ctypes.byref(rect)):
+            raise RuntimeError("No se pudo obtener el rectangulo de ventana.")
+
+        return (
+            int(rect.left),
+            int(rect.top),
+            int(rect.right),
+            int(rect.bottom),
+        )
+
+    def bring_window_to_front(self, handle: int) -> None:
+        """Bring a window to the foreground."""
+        self._ensure_window(handle)
+        self._USER32.ShowWindow(handle, self._SW_RESTORE)
+
+        if not self._USER32.SetForegroundWindow(handle):
+            raise RuntimeError("No se pudo activar la ventana.")
+
+    def maximize_window(self, handle: int) -> None:
+        """Maximize a window."""
+        self._show_window(handle, self._SW_MAXIMIZE)
+
+    def minimize_window(self, handle: int) -> None:
+        """Minimize a window."""
+        self._show_window(handle, self._SW_MINIMIZE)
+
+    def restore_window(self, handle: int) -> None:
+        """Restore a window."""
+        self._show_window(handle, self._SW_RESTORE)
+
+    def move_window(self, handle: int, x: int, y: int) -> None:
+        """Move a window preserving its current size."""
+        left, top, right, bottom = self.get_window_rect(handle)
+        self.move_resize_window(handle, x, y, right - left, bottom - top)
+
+    def resize_window(self, handle: int, width: int, height: int) -> None:
+        """Resize a window preserving its current position."""
+        left, top, _, _ = self.get_window_rect(handle)
+        self.move_resize_window(handle, left, top, width, height)
+
+    def move_resize_window(
+        self,
+        handle: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        """Move and resize a window."""
+        self._ensure_window(handle)
+
+        if not self._USER32.MoveWindow(handle, x, y, width, height, True):
+            raise RuntimeError("No se pudo mover o redimensionar la ventana.")
+
+    def close_window(self, handle: int) -> None:
+        """Request a window close."""
+        self._ensure_window(handle)
+
+        if not self._USER32.PostMessageW(handle, self._WM_CLOSE, 0, 0):
+            raise RuntimeError("No se pudo enviar la solicitud de cierre.")
+
     def _resolve_application(self, application: str) -> str:
         """Resolve an application name to an executable path."""
         normalized = application.strip().lower()
@@ -349,41 +544,24 @@ class WindowsDesktopController:
 
     def _find_window(self, title: str) -> int:
         """Find a top-level window by partial title."""
-        target = title.lower()
-        found = 0
+        windows = self.list_windows(title)
 
-        enum_windows_proc = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HWND,
-            wintypes.LPARAM,
-        )
+        if not windows:
+            return 0
 
-        def callback(
-            handle: int,
-            _: int,
-        ) -> bool:
-            nonlocal found
+        return int(windows[0]["handle"])
 
-            if not self._USER32.IsWindowVisible(handle):
-                return True
+    def _single_window_handle(self, title: str) -> int:
+        """Return a single matching visible window handle."""
+        windows = self.list_windows(title)
 
-            length = self._USER32.GetWindowTextLengthW(handle)
+        if not windows:
+            raise RuntimeError(f"No existe una ventana con titulo '{title}'.")
 
-            if length == 0:
-                return True
+        if len(windows) > 1:
+            raise RuntimeError(f"Varias ventanas coinciden con '{title}'.")
 
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            self._USER32.GetWindowTextW(handle, buffer, length + 1)
-
-            if target in buffer.value.lower():
-                found = handle
-                return False
-
-            return True
-
-        self._USER32.EnumWindows(enum_windows_proc(callback), 0)
-
-        return found
+        return int(windows[0]["handle"])
 
     def _set_clipboard_text(self, text: str) -> None:
         """Put text into the Windows clipboard."""
@@ -430,6 +608,23 @@ class WindowsDesktopController:
     ) -> None:
         """Send a mouse event."""
         self._USER32.mouse_event(event, 0, 0, data, 0)
+
+    def _ensure_window(self, handle: int) -> None:
+        """Validate a native window handle."""
+        if not isinstance(handle, int) or handle <= 0:
+            raise ValueError("Handle de ventana invalido.")
+
+        if not self._USER32.IsWindow(handle):
+            raise RuntimeError("La ventana ya no existe.")
+
+    def _show_window(
+        self,
+        handle: int,
+        command: int,
+    ) -> None:
+        """Run ShowWindow on a valid handle."""
+        self._ensure_window(handle)
+        self._USER32.ShowWindow(handle, command)
 
     def _save_bitmap_as_png(
         self,
@@ -489,6 +684,17 @@ class _Point(ctypes.Structure):
     _fields_ = [
         ("x", wintypes.LONG),
         ("y", wintypes.LONG),
+    ]
+
+
+class _Rect(ctypes.Structure):
+    """Win32 RECT structure."""
+
+    _fields_ = [
+        ("left", wintypes.LONG),
+        ("top", wintypes.LONG),
+        ("right", wintypes.LONG),
+        ("bottom", wintypes.LONG),
     ]
 
 

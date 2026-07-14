@@ -42,6 +42,15 @@ class DesktopInteractionUseCase:
         normalized = self._normalize(text)
 
         try:
+            window_response = self._execute_window_command(
+                text,
+                normalized,
+                confirm,
+            )
+
+            if window_response is not None:
+                return window_response
+
             if self._is_screen_size_command(normalized):
                 width, height = self._execute_tuple(
                     "desktop.get_screen_size",
@@ -262,6 +271,345 @@ class DesktopInteractionUseCase:
             raise RuntimeError("Respuesta de herramienta invalida.")
 
         return result
+
+    def _execute_window_command(
+        self,
+        text: str,
+        normalized: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Execute a supported window-management command."""
+        if normalized in {"mueve el raton", "mueve el cursor"}:
+            return None
+
+        if normalized.startswith("lista ventanas de "):
+            title = text[len("lista ventanas de ") :].strip()
+            matches = self._list_windows(title)
+            return self._format_window_matches(matches)
+
+        if normalized.startswith("maximiza "):
+            title = text[len("maximiza ") :].strip()
+            return self._window_state_action(
+                title,
+                "desktop.maximize_window",
+                "Ventana maximizada",
+                confirm,
+            )
+
+        if normalized.startswith("minimiza "):
+            title = text[len("minimiza ") :].strip()
+            return self._window_state_action(
+                title,
+                "desktop.minimize_window",
+                "Ventana minimizada",
+                confirm,
+            )
+
+        if normalized.startswith("restaura "):
+            title = text[len("restaura ") :].strip()
+            return self._window_state_action(
+                title,
+                "desktop.restore_window",
+                "Ventana restaurada",
+                confirm,
+            )
+
+        if normalized.startswith("trae ") and normalized.endswith(
+            " al frente"
+        ):
+            title = text[len("trae ") : -len(" al frente")].strip()
+            return self._window_state_action(
+                title,
+                "desktop.bring_window_to_front",
+                "Ventana activada",
+                confirm,
+            )
+
+        if normalized.startswith("activa "):
+            title = text[len("activa ") :].strip()
+            return self._window_state_action(
+                title,
+                "desktop.bring_window_to_front",
+                "Ventana activada",
+                confirm,
+            )
+
+        if normalized.startswith("cierra "):
+            title = text[len("cierra ") :].strip()
+            return self._close_window(title, confirm)
+
+        if normalized in {
+            "maximiza",
+            "minimiza",
+            "restaura",
+            "cierra",
+            "activa",
+        }:
+            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        if normalized.startswith("mueve y cambia el tamano de "):
+            return self._move_resize_window(text, confirm)
+
+        if normalized.startswith("mueve ") and not self._is_move_cursor_command(
+            normalized
+        ):
+            return self._move_window(text, confirm)
+
+        if normalized.startswith("cambia el tamano de ") or normalized.startswith(
+            "redimensiona "
+        ):
+            return self._resize_window(text, confirm)
+
+        return None
+
+    def _window_state_action(
+        self,
+        title: str,
+        tool_name: str,
+        label: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Execute a state action against one resolved window."""
+        window = self._resolve_window(title, confirm)
+        self._executor.execute(
+            tool_name,
+            ToolContext(parameters={"handle": int(window["handle"])}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} {label}:\n{window['title']}"
+
+    def _move_window(
+        self,
+        text: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Move a resolved window."""
+        title, numbers = self._split_window_command(text, "mueve ", 2)
+        window = self._resolve_window(title, confirm)
+        x, y = numbers
+        self._executor.execute(
+            "desktop.move_window",
+            ToolContext(
+                parameters={
+                    "handle": int(window["handle"]),
+                    "x": x,
+                    "y": y,
+                }
+            ),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} Ventana movida a ({x}, {y})."
+
+    def _resize_window(
+        self,
+        text: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Resize a resolved window."""
+        normalized = self._normalize(text)
+        prefix = (
+            "cambia el tamaño de "
+            if normalized.startswith("cambia el tamano de ")
+            else "redimensiona "
+        )
+        title, numbers = self._split_window_command(text, prefix, 2)
+        window = self._resolve_window(title, confirm)
+        width, height = numbers
+        self._executor.execute(
+            "desktop.resize_window",
+            ToolContext(
+                parameters={
+                    "handle": int(window["handle"]),
+                    "width": width,
+                    "height": height,
+                }
+            ),
+        )
+
+        return (
+            f"{self._CONFIRMATION_PREFIX} "
+            f"Ventana redimensionada a {width} x {height}."
+        )
+
+    def _move_resize_window(
+        self,
+        text: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Move and resize a resolved window."""
+        title, numbers = self._split_window_command(
+            text,
+            "mueve y cambia el tamaño de ",
+            4,
+        )
+        window = self._resolve_window(title, confirm)
+        x, y, width, height = numbers
+        self._executor.execute(
+            "desktop.move_resize_window",
+            ToolContext(
+                parameters={
+                    "handle": int(window["handle"]),
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                }
+            ),
+        )
+
+        return (
+            f"{self._CONFIRMATION_PREFIX} Ventana movida a ({x}, {y}) "
+            f"y redimensionada a {width} x {height}."
+        )
+
+    def _close_window(
+        self,
+        title: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Request closing a resolved window after confirmation."""
+        window = self._resolve_window(title, confirm)
+
+        if not self._confirmed_close(confirm, str(window["title"])):
+            return "Acción cancelada."
+
+        self._executor.execute(
+            "desktop.close_window",
+            ToolContext(parameters={"handle": int(window["handle"])}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} Solicitud de cierre enviada."
+
+    def _resolve_window(
+        self,
+        title: str,
+        confirm: Callable[[str], str] | None,
+    ) -> dict[str, object]:
+        """Resolve a title into one explicit window match."""
+        if not title:
+            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        matches = self._list_windows(title)
+
+        if not matches:
+            raise ValueError(f"No se encontraron ventanas para '{title}'.")
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if confirm is None:
+            raise ValueError(
+                "Varias ventanas coinciden. Se requiere seleccion explicita."
+            )
+
+        selection = confirm(
+            self._format_window_matches(matches)
+            + f"\nSelecciona una ventana [1-{len(matches)}]: "
+        )
+
+        if not selection.strip().isdigit():
+            raise ValueError("Seleccion invalida.")
+
+        index = int(selection.strip())
+
+        if index < 1 or index > len(matches):
+            raise ValueError("Seleccion invalida.")
+
+        return matches[index - 1]
+
+    def _list_windows(
+        self,
+        title: str,
+    ) -> list[dict[str, object]]:
+        """Return visible windows matching title."""
+        if not title:
+            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        result = self._executor.execute(
+            "desktop.list_windows",
+            ToolContext(parameters={"title": title}),
+        )
+
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de ventanas invalida.")
+
+        return result
+
+    def _format_window_matches(
+        self,
+        matches: list[dict[str, object]],
+    ) -> str:
+        """Format window matches deterministically."""
+        if not matches:
+            return "No se encontraron ventanas."
+
+        lines = ["Se encontraron ventanas:"]
+
+        for index, window in enumerate(matches, start=1):
+            lines.append(f"{index}. {window['title']}")
+
+        return "\n".join(lines)
+
+    def _split_window_command(
+        self,
+        text: str,
+        prefix: str,
+        expected_numbers: int,
+    ) -> tuple[str, list[int]]:
+        """Split a window command into title and numeric arguments."""
+        if not self._normalize(text).startswith(self._normalize(prefix)):
+            raise ValueError("Orden incompleta.")
+
+        body = text[len(prefix) :].strip()
+        separator = re.search(r"\s+a\s+", body, flags=re.IGNORECASE)
+
+        if separator is None:
+            raise ValueError("Orden incompleta: faltan parametros.")
+
+        title = body[: separator.start()].strip()
+        parameters = body[separator.end() :].strip()
+        numbers = self._extract_number_list(parameters, expected_numbers)
+
+        if not title:
+            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        return title, numbers
+
+    def _extract_number_list(
+        self,
+        text: str,
+        expected: int,
+    ) -> list[int]:
+        """Extract an exact number of integer parameters."""
+        if re.search(r"[A-Za-z]+", text):
+            raise ValueError("Los parametros deben ser numericos.")
+
+        numbers = [int(value) for value in re.findall(r"-?\d+", text)]
+
+        if len(numbers) != expected:
+            raise ValueError("Numero de parametros invalido.")
+
+        return numbers
+
+    def _confirmed_close(
+        self,
+        confirm: Callable[[str], str] | None,
+        title: str,
+    ) -> bool:
+        """Return whether the user explicitly confirmed closing a window."""
+        if confirm is None:
+            return False
+
+        response = confirm(
+            f"¿Confirmas cerrar la ventana \"{title}\"? [s/N]: "
+        )
+
+        return self._normalize(response) in {
+            "s",
+            "si",
+            "y",
+            "yes",
+        }
 
     def _validate_coordinates(
         self,
