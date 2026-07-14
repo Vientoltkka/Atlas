@@ -68,6 +68,9 @@ class DesktopController(Protocol):
     def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
         """Return a window rectangle."""
 
+    def get_foreground_window(self) -> dict[str, object]:
+        """Return the current foreground window."""
+
     def bring_window_to_front(self, handle: int) -> None:
         """Bring a window to the foreground."""
 
@@ -134,6 +137,21 @@ class WindowsDesktopController:
     _USER32.ShowWindow.restype = wintypes.BOOL
     _USER32.SetForegroundWindow.argtypes = (wintypes.HWND,)
     _USER32.SetForegroundWindow.restype = wintypes.BOOL
+    _USER32.BringWindowToTop.argtypes = (wintypes.HWND,)
+    _USER32.BringWindowToTop.restype = wintypes.BOOL
+    _USER32.GetForegroundWindow.restype = wintypes.HWND
+    _USER32.GetWindowThreadProcessId.argtypes = (
+        wintypes.HWND,
+        ctypes.c_void_p,
+    )
+    _USER32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _USER32.AttachThreadInput.argtypes = (
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.BOOL,
+    )
+    _USER32.AttachThreadInput.restype = wintypes.BOOL
+    _KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
     _USER32.MoveWindow.argtypes = (
         wintypes.HWND,
         ctypes.c_int,
@@ -441,6 +459,7 @@ class WindowsDesktopController:
                     "handle": int(handle),
                     "title": window_title,
                     "rect": self.get_window_rect(int(handle)),
+                    "order": len(windows),
                 }
             )
 
@@ -468,12 +487,31 @@ class WindowsDesktopController:
             int(rect.bottom),
         )
 
+    def get_foreground_window(self) -> dict[str, object]:
+        """Return the current foreground window."""
+        handle = int(self._USER32.GetForegroundWindow())
+
+        if handle <= 0:
+            raise RuntimeError("No se pudo obtener la ventana activa.")
+
+        length = self._USER32.GetWindowTextLengthW(handle)
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        self._USER32.GetWindowTextW(handle, buffer, length + 1)
+
+        return {
+            "handle": handle,
+            "title": buffer.value,
+            "rect": self.get_window_rect(handle),
+        }
+
     def bring_window_to_front(self, handle: int) -> None:
         """Bring a window to the foreground."""
         self._ensure_window(handle)
         self._USER32.ShowWindow(handle, self._SW_RESTORE)
 
-        if not self._USER32.SetForegroundWindow(handle):
+        if not self._USER32.SetForegroundWindow(handle) and not (
+            self._attach_and_set_foreground(handle)
+        ):
             raise RuntimeError("No se pudo activar la ventana.")
 
     def maximize_window(self, handle: int) -> None:
@@ -625,6 +663,59 @@ class WindowsDesktopController:
         """Run ShowWindow on a valid handle."""
         self._ensure_window(handle)
         self._USER32.ShowWindow(handle, command)
+
+    def _attach_and_set_foreground(
+        self,
+        handle: int,
+    ) -> bool:
+        """Try foreground activation by temporarily joining input queues."""
+        foreground = self._USER32.GetForegroundWindow()
+        current_thread = self._KERNEL32.GetCurrentThreadId()
+        target_thread = self._USER32.GetWindowThreadProcessId(handle, None)
+        foreground_thread = (
+            self._USER32.GetWindowThreadProcessId(foreground, None)
+            if foreground
+            else 0
+        )
+
+        attached_target = False
+        attached_foreground = False
+
+        try:
+            if target_thread and target_thread != current_thread:
+                attached_target = bool(
+                    self._USER32.AttachThreadInput(
+                        current_thread,
+                        target_thread,
+                        True,
+                    )
+                )
+
+            if foreground_thread and foreground_thread != current_thread:
+                attached_foreground = bool(
+                    self._USER32.AttachThreadInput(
+                        current_thread,
+                        foreground_thread,
+                        True,
+                    )
+                )
+
+            self._USER32.BringWindowToTop(handle)
+            return bool(self._USER32.SetForegroundWindow(handle))
+        finally:
+            if attached_foreground:
+                self._USER32.AttachThreadInput(
+                    current_thread,
+                    foreground_thread,
+                    False,
+                )
+
+            if attached_target:
+                self._USER32.AttachThreadInput(
+                    current_thread,
+                    target_thread,
+                    False,
+                )
 
     def _save_bitmap_as_png(
         self,

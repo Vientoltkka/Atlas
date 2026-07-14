@@ -7,6 +7,10 @@ import re
 from typing import Callable
 import unicodedata
 
+from use_cases.action_engine import (
+    AutomationResult,
+    PrepareAtlasWorkspaceUseCase,
+)
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
 
@@ -23,6 +27,7 @@ class DesktopInteractionUseCase:
         executor: ToolExecutor,
         project_root: Path | None = None,
         screenshots_dir: Path | None = None,
+        prepare_atlas_workspace: PrepareAtlasWorkspaceUseCase | None = None,
     ) -> None:
         self._executor = executor
         self._project_root = project_root or Path(".")
@@ -31,6 +36,7 @@ class DesktopInteractionUseCase:
             if screenshots_dir is not None
             else self._project_root / "artifacts" / "screenshots"
         )
+        self._prepare_atlas_workspace = prepare_atlas_workspace
 
     def execute(
         self,
@@ -42,6 +48,19 @@ class DesktopInteractionUseCase:
         normalized = self._normalize(text)
 
         try:
+            if self._is_free_sequence_command(normalized):
+                raise ValueError("No se admiten secuencias libres.")
+
+            if self._is_prepare_atlas_workspace_command(normalized):
+                if self._prepare_atlas_workspace is None:
+                    raise RuntimeError("Workflow no disponible.")
+
+                result = self._prepare_atlas_workspace.execute(
+                    self._project_root,
+                )
+
+                return self._format_automation_result(result)
+
             window_response = self._execute_window_command(
                 text,
                 normalized,
@@ -174,6 +193,62 @@ class DesktopInteractionUseCase:
             return f"Error: {exc}"
 
         return None
+
+    def _is_prepare_atlas_workspace_command(
+        self,
+        text: str,
+    ) -> bool:
+        """Return whether the command asks for the Atlas workspace workflow."""
+        return text in {
+            "prepara atlas para trabajar",
+            "prepara el proyecto atlas",
+            "abre el entorno de atlas",
+            "prepare atlas workspace",
+        }
+
+    def _is_free_sequence_command(
+        self,
+        text: str,
+    ) -> bool:
+        """Return whether the command asks for an unsupported free sequence."""
+        return (
+            " y luego " in text
+            or text.startswith("ejecuta estas ")
+            or text.startswith("repite ")
+            or text.startswith("si falla ")
+        )
+
+    def _format_automation_result(
+        self,
+        result: AutomationResult,
+    ) -> str:
+        """Format an automation result for the interactive flow."""
+        lines = [
+            "Automatización iniciada: preparar Atlas para trabajar",
+            "",
+        ]
+
+        for step_result in result.step_results:
+            if step_result.success:
+                lines.append(
+                    f"{self._CONFIRMATION_PREFIX} {step_result.step_name}"
+                )
+                continue
+
+            lines.append(f"Error en {step_result.step_name}:")
+            lines.append(step_result.error or step_result.message)
+
+        lines.append("")
+
+        if result.completed:
+            lines.append("Automatización completada correctamente.")
+        else:
+            lines.append("Automatización incompleta.")
+
+        lines.append(f"Pasos ejecutados: {result.executed_steps}")
+        lines.append(f"Pasos fallidos: {result.failed_steps}")
+
+        return "\n".join(lines)
 
     def _open(
         self,

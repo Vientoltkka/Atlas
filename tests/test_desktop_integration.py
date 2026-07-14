@@ -50,6 +50,7 @@ def test_bootstrap_registers_desktop_tools() -> None:
     assert executor._registry.exists("desktop.capture_screenshot")
     assert executor._registry.exists("desktop.list_windows")
     assert executor._registry.exists("desktop.get_window_rect")
+    assert executor._registry.exists("desktop.get_foreground_window")
     assert executor._registry.exists("desktop.bring_window_to_front")
     assert executor._registry.exists("desktop.maximize_window")
     assert executor._registry.exists("desktop.minimize_window")

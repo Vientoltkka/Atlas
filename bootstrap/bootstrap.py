@@ -1,5 +1,7 @@
 """Bootstrap module for Atlas."""
 
+from pathlib import Path
+
 from agents.chat_agent import ChatAgent
 from agents.coding_agent import CodingAgent
 from agents.project_agent import ProjectAgent
@@ -28,6 +30,7 @@ from tools.desktop.desktop_tools import (
     CloseWindowTool,
     DoubleClickTool,
     GetCursorPositionTool,
+    GetForegroundWindowTool,
     GetScreenSizeTool,
     GetWindowRectTool,
     LeftClickTool,
@@ -63,6 +66,10 @@ from use_cases.plan_refactoring import PlanRefactoringUseCase
 from use_cases.rename_symbol import RenameSymbolUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
+from use_cases.action_engine import (
+    ActionEngineUseCase,
+    PrepareAtlasWorkspaceUseCase,
+)
 
 
 class Bootstrap:
@@ -109,6 +116,7 @@ class Bootstrap:
         tool_registry.register(CaptureScreenshotTool())
         tool_registry.register(ListWindowsTool())
         tool_registry.register(GetWindowRectTool())
+        tool_registry.register(GetForegroundWindowTool())
         tool_registry.register(BringWindowToFrontTool())
         tool_registry.register(MaximizeWindowTool())
         tool_registry.register(MinimizeWindowTool())
@@ -171,8 +179,15 @@ class Bootstrap:
             query_architecture_graph,
             prompt_client,
         )
+        action_engine = ActionEngineUseCase()
+        prepare_atlas_workspace = PrepareAtlasWorkspaceUseCase(
+            tool_executor,
+            action_engine,
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
+            project_root=Path(".").resolve(),
+            prepare_atlas_workspace=prepare_atlas_workspace,
         )
 
         # -----------------------

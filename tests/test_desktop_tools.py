@@ -9,6 +9,7 @@ from tools.desktop.desktop_tools import (
     CloseWindowTool,
     DoubleClickTool,
     GetCursorPositionTool,
+    GetForegroundWindowTool,
     GetScreenSizeTool,
     GetWindowRectTool,
     LeftClickTool,
@@ -135,6 +136,14 @@ class FakeDesktopController:
                 return window["rect"]
 
         raise RuntimeError("missing")
+
+    def get_foreground_window(self) -> dict[str, object]:
+        self.calls.append(("get_foreground_window", None))
+        return {
+            "handle": 10,
+            "title": "Visual Studio Code - Atlas",
+            "rect": (20, 30, 820, 630),
+        }
 
     def bring_window_to_front(self, handle: int) -> None:
         self.calls.append(("bring_window_to_front", handle))
@@ -521,6 +530,19 @@ def test_get_window_rect_tool() -> None:
     result = tool.execute(ToolContext(parameters={"handle": 10}))
 
     assert result == (20, 30, 820, 630)
+
+
+def test_get_foreground_window_tool() -> None:
+    controller = FakeDesktopController()
+    tool = GetForegroundWindowTool(controller)
+
+    result = tool.execute(ToolContext())
+
+    assert result == {
+        "handle": 10,
+        "title": "Visual Studio Code - Atlas",
+        "rect": (20, 30, 820, 630),
+    }
 
 
 def test_bring_window_to_front_tool() -> None:

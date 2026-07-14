@@ -1,0 +1,385 @@
+"""Sequential desktop action execution."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from tools.executor import ToolExecutor
+from tools.tool_context import ToolContext
+
+
+@dataclass(frozen=True)
+class ActionStep:
+    """Explicit action step."""
+
+    name: str
+    operation: Callable[[], str]
+
+
+@dataclass(frozen=True)
+class ActionStepResult:
+    """Result of one action step."""
+
+    step_name: str
+    success: bool
+    message: str
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class AutomationResult:
+    """Result of a sequential automation."""
+
+    workflow_name: str
+    total_steps: int
+    executed_steps: int
+    successful_steps: int
+    failed_steps: int
+    completed: bool
+    stopped_early: bool
+    step_results: tuple[ActionStepResult, ...] = field(default_factory=tuple)
+    summary: str = ""
+
+
+class ActionEngineUseCase:
+    """Execute explicit action steps in order."""
+
+    def execute(
+        self,
+        workflow_name: str,
+        steps: list[ActionStep],
+    ) -> AutomationResult:
+        """Execute a workflow until success or first blocking failure."""
+        results: list[ActionStepResult] = []
+
+        for step in steps:
+            try:
+                message = step.operation()
+            except Exception as exc:
+                results.append(
+                    ActionStepResult(
+                        step_name=step.name,
+                        success=False,
+                        message="",
+                        error=str(exc),
+                    )
+                )
+                break
+
+            results.append(
+                ActionStepResult(
+                    step_name=step.name,
+                    success=True,
+                    message=message,
+                )
+            )
+
+        successful_steps = sum(1 for result in results if result.success)
+        failed_steps = sum(1 for result in results if not result.success)
+        completed = len(results) == len(steps) and failed_steps == 0
+        stopped_early = len(results) < len(steps)
+
+        return AutomationResult(
+            workflow_name=workflow_name,
+            total_steps=len(steps),
+            executed_steps=len(results),
+            successful_steps=successful_steps,
+            failed_steps=failed_steps,
+            completed=completed,
+            stopped_early=stopped_early,
+            step_results=tuple(results),
+            summary=self._summary(
+                workflow_name,
+                completed,
+                len(results),
+                failed_steps,
+            ),
+        )
+
+    def _summary(
+        self,
+        workflow_name: str,
+        completed: bool,
+        executed_steps: int,
+        failed_steps: int,
+    ) -> str:
+        """Return a deterministic automation summary."""
+        state = "completada" if completed else "incompleta"
+
+        return (
+            f"Automatizacion {state}: {workflow_name}. "
+            f"Pasos ejecutados: {executed_steps}. "
+            f"Pasos fallidos: {failed_steps}."
+        )
+
+
+class PrepareAtlasWorkspaceUseCase:
+    """Prepare Atlas workspace using existing desktop tools."""
+
+    def __init__(
+        self,
+        executor: ToolExecutor,
+        action_engine: ActionEngineUseCase,
+    ) -> None:
+        self._executor = executor
+        self._action_engine = action_engine
+
+    def execute(
+        self,
+        project_root: Path,
+        editor_file: str | Path = Path("core") / "orchestrator.py",
+    ) -> AutomationResult:
+        """Prepare Atlas workspace."""
+        root = project_root.resolve()
+        file_path = self._validate_input(root, Path(editor_file))
+        relative_file = file_path.relative_to(root)
+
+        steps = [
+            ActionStep(
+                name="Abrir Visual Studio Code",
+                operation=lambda: self._run_tool(
+                    "desktop.open_application",
+                    {"application": "Visual Studio Code"},
+                ),
+            ),
+            ActionStep(
+                name="Abrir carpeta Atlas",
+                operation=lambda: self._run_tool(
+                    "desktop.open_folder",
+                    {"path": str(root)},
+                ),
+            ),
+            ActionStep(
+                name=f"Abrir archivo {relative_file.as_posix()}",
+                operation=lambda: self._run_tool(
+                    "desktop.open_file",
+                    {
+                        "path": str(file_path),
+                        "application": "Visual Studio Code",
+                    },
+                ),
+            ),
+            ActionStep(
+                name="Activar Visual Studio Code",
+                operation=lambda: self._activate_editor_window(
+                    root,
+                    relative_file,
+                    file_path.name,
+                ),
+            ),
+        ]
+
+        return self._action_engine.execute(
+            "prepare_atlas_workspace",
+            steps,
+        )
+
+    def _run_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, object],
+    ) -> str:
+        """Run a registered tool."""
+        result = self._executor.execute(
+            tool_name,
+            ToolContext(parameters=parameters),
+        )
+
+        return str(result)
+
+    def _activate_editor_window(
+        self,
+        project_root: Path,
+        relative_file: Path,
+        expected_file_name: str,
+    ) -> str:
+        """Resolve and activate the intended Visual Studio Code window."""
+        window = self._resolve_editor_window(
+            project_root,
+            relative_file,
+            expected_file_name,
+        )
+        handle = int(window["handle"])
+
+        self._run_tool(
+            "desktop.bring_window_to_front",
+            {"handle": handle},
+        )
+
+        return f"Ventana activada: {window['title']}"
+
+    def _resolve_editor_window(
+        self,
+        project_root: Path,
+        relative_file: Path,
+        expected_file_name: str,
+    ) -> dict[str, object]:
+        """Resolve one compatible Visual Studio Code window."""
+        windows = self._list_editor_windows()
+
+        if not windows:
+            raise RuntimeError("No se encontraron ventanas de Visual Studio Code.")
+
+        scored = [
+            (
+                self._editor_window_score(
+                    window,
+                    project_root,
+                    relative_file,
+                    expected_file_name,
+                ),
+                self._window_order(window),
+                window,
+            )
+            for window in windows
+        ]
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                item[1],
+                str(item[2].get("title", "")).lower(),
+                int(item[2].get("handle", 0)),
+            )
+        )
+        best_score = scored[0][0]
+        best_order = scored[0][1]
+        best_matches = [
+            window
+            for score, order, window in scored
+            if score == best_score and order == best_order
+        ]
+
+        if len(best_matches) != 1:
+            titles = ", ".join(str(window.get("title", "")) for window in best_matches)
+            raise RuntimeError(
+                f"Varias ventanas de Visual Studio Code siguen siendo ambiguas: {titles}"
+            )
+
+        return best_matches[0]
+
+    def _list_editor_windows(self) -> list[dict[str, object]]:
+        """List visible windows compatible with Visual Studio Code."""
+        windows_by_handle: dict[int, dict[str, object]] = {}
+
+        for query in ("Visual Studio Code", "Code"):
+            result = self._executor.execute(
+                "desktop.list_windows",
+                ToolContext(parameters={"title": query}),
+            )
+
+            if not isinstance(result, list):
+                raise RuntimeError("Respuesta de ventanas invalida.")
+
+            for window in result:
+                if not isinstance(window, dict):
+                    continue
+
+                title = str(window.get("title", ""))
+
+                if not self._is_visual_studio_code_title(title):
+                    continue
+
+                handle = window.get("handle")
+
+                if isinstance(handle, int):
+                    windows_by_handle[handle] = window
+
+        return sorted(
+            windows_by_handle.values(),
+            key=lambda window: (
+                str(window.get("title", "")).lower(),
+                int(window.get("handle", 0)),
+            ),
+        )
+
+    def _is_visual_studio_code_title(
+        self,
+        title: str,
+    ) -> bool:
+        """Return whether a title is compatible with Visual Studio Code."""
+        normalized = title.lower()
+
+        return (
+            "visual studio code" in normalized
+            or normalized.endswith(" - code")
+            or " - visual studio code" in normalized
+        )
+
+    def _editor_window_score(
+        self,
+        window: dict[str, object],
+        project_root: Path,
+        relative_file: Path,
+        expected_file_name: str,
+    ) -> int:
+        """Score a VS Code window for deterministic workflow activation."""
+        title = str(window.get("title", "")).lower()
+        root_name = project_root.name.lower()
+        relative_posix = relative_file.as_posix().lower()
+        relative_windows = str(relative_file).lower()
+        file_name = expected_file_name.lower()
+        score = 0
+
+        if root_name and root_name in title:
+            score += 8
+
+        if relative_posix in title or relative_windows in title:
+            score += 6
+
+        if file_name in title:
+            score += 4
+
+        if "visual studio code" in title:
+            score += 2
+
+        return score
+
+    def _window_order(
+        self,
+        window: dict[str, object],
+    ) -> int:
+        """Return the preserved Windows Z-order for deterministic tie breaks."""
+        order = window.get("order")
+
+        if isinstance(order, int) and order >= 0:
+            return order
+
+        return 999999
+
+    def _validate_input(
+        self,
+        project_root: Path,
+        editor_file: Path,
+    ) -> Path:
+        """Validate workflow input before executing actions."""
+        if not project_root.exists():
+            raise ValueError(f"project_root no existe: {project_root}")
+
+        if not project_root.is_dir():
+            raise ValueError(f"project_root no es una carpeta: {project_root}")
+
+        candidate = (
+            editor_file
+            if editor_file.is_absolute()
+            else project_root / editor_file
+        ).resolve()
+
+        if not candidate.exists():
+            raise ValueError(f"editor_file no existe: {candidate}")
+
+        if not candidate.is_file():
+            raise ValueError(f"editor_file no es un archivo: {candidate}")
+
+        if candidate.suffix != ".py":
+            raise ValueError("editor_file debe tener extension .py.")
+
+        try:
+            candidate.relative_to(project_root)
+        except ValueError as exc:
+            raise ValueError(
+                "editor_file debe estar dentro de project_root."
+            ) from exc
+
+        return candidate

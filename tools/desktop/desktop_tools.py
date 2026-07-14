@@ -564,6 +564,24 @@ class GetWindowRectTool(DesktopTool):
         )
 
 
+class GetForegroundWindowTool(DesktopTool):
+    """Return the current foreground window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.get_foreground_window"
+
+    @property
+    def description(self) -> str:
+        return "Return the current foreground window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> dict[str, object]:
+        return self._controller.get_foreground_window()
+
+
 class BringWindowToFrontTool(DesktopTool):
     """Bring a window to the foreground."""
 
