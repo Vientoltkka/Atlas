@@ -89,6 +89,7 @@ from use_cases.speech_engine import (
     SpeechEngineUseCase,
     SpeechInteractionUseCase,
 )
+from use_cases.wake_word_engine import WakeWordEngine, WakeWordInteractionUseCase
 
 
 class Bootstrap:
@@ -230,6 +231,13 @@ class Bootstrap:
             FasterWhisperSpeechToTextProvider(),
         )
         speech_interaction = SpeechInteractionUseCase(speech_engine)
+        wake_word_interaction = WakeWordInteractionUseCase(
+            WakeWordEngine(
+                speech_engine,
+                wake_word="Atlas",
+                timeout_seconds=30.0,
+            )
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
@@ -285,4 +293,5 @@ class Bootstrap:
             correction_interaction=correction_interaction,
             desktop_interaction=desktop_interaction,
             speech_interaction=speech_interaction,
+            wake_word_interaction=wake_word_interaction,
         )

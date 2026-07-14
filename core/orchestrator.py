@@ -15,6 +15,7 @@ from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.speech_engine import SpeechInteractionUseCase
+from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 
 
@@ -33,6 +34,7 @@ class AtlasOrchestrator:
         correction_interaction: CorrectionInteractionUseCase | None = None,
         desktop_interaction: DesktopInteractionUseCase | None = None,
         speech_interaction: SpeechInteractionUseCase | None = None,
+        wake_word_interaction: WakeWordInteractionUseCase | None = None,
         project_root: Path | None = None,
     ) -> None:
 
@@ -46,6 +48,7 @@ class AtlasOrchestrator:
         self._correction_interaction = correction_interaction
         self._desktop_interaction = desktop_interaction
         self._speech_interaction = speech_interaction
+        self._wake_word_interaction = wake_word_interaction
         self._project_root = project_root or Path(".")
 
     def start(self) -> None:
@@ -81,6 +84,17 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._wake_word_interaction is not None:
+                wake_word_response = self._wake_word_interaction.execute(prompt)
+
+                if wake_word_response is not None:
+                    print()
+                    print("Atlas:")
+                    print(wake_word_response)
+                    print()
+
+                    continue
 
             if self._speech_interaction is not None:
                 speech_response = self._speech_interaction.execute(prompt)
