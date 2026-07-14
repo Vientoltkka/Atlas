@@ -89,6 +89,7 @@ from use_cases.speech_engine import (
     SpeechEngineUseCase,
     SpeechInteractionUseCase,
 )
+from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordEngine, WakeWordInteractionUseCase
 
 
@@ -238,6 +239,19 @@ class Bootstrap:
                 timeout_seconds=30.0,
             )
         )
+        voice_conversation = VoiceConversationUseCase(
+            speech_engine=speech_engine,
+            wake_word_engine=WakeWordEngine(
+                speech_engine,
+                wake_word="Atlas",
+                timeout_seconds=30.0,
+                capture_phrase_after_detection=False,
+            ),
+            conversation_idle_timeout=25.0,
+            max_session_duration=600.0,
+            max_turns=20,
+            max_consecutive_no_speech=2,
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
@@ -294,4 +308,5 @@ class Bootstrap:
             desktop_interaction=desktop_interaction,
             speech_interaction=speech_interaction,
             wake_word_interaction=wake_word_interaction,
+            voice_conversation=voice_conversation,
         )

@@ -38,6 +38,18 @@ class AudioCaptureResult:
 
 
 @dataclass(frozen=True)
+class SpeechCaptureSettings:
+    """Temporary audio capture settings."""
+
+    max_duration: float | None = None
+    initial_silence_timeout: float | None = None
+    trailing_silence: float | None = None
+    chunk_duration: float | None = None
+    speech_threshold: float | None = None
+    minimum_audio_duration: float | None = None
+
+
+@dataclass(frozen=True)
 class ProviderTranscriptionResult:
     """Provider-level transcription result."""
 
@@ -179,6 +191,7 @@ class SoundDeviceAudioCapture:
         trailing_silence: float = 1.0,
         chunk_duration: float = 0.1,
         speech_threshold: float = 0.015,
+        minimum_audio_duration: float = 0.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.max_duration = max_duration
@@ -186,6 +199,7 @@ class SoundDeviceAudioCapture:
         self.trailing_silence = trailing_silence
         self.chunk_duration = chunk_duration
         self.speech_threshold = speech_threshold
+        self.minimum_audio_duration = minimum_audio_duration
         self._selected_index: int | None = None
 
     def list_microphones(self) -> list[MicrophoneInfo]:
@@ -237,6 +251,10 @@ class SoundDeviceAudioCapture:
 
         raise ValueError(f"Microfono inexistente: {index}")
 
+    def active_microphone(self) -> MicrophoneInfo:
+        """Return selected microphone or the default input device."""
+        return self.selected_or_default_microphone()
+
     def selected_or_default_microphone(self) -> MicrophoneInfo:
         """Return the selected microphone or the default input."""
         if self._selected_index is not None:
@@ -244,33 +262,67 @@ class SoundDeviceAudioCapture:
 
         return self.default_microphone()
 
-    def capture_phrase(self) -> AudioCaptureResult:
-        """Capture one phrase from the selected microphone."""
-        microphone = self.selected_or_default_microphone()
-        sd = self._sounddevice()
-        frames = int(self.sample_rate * self.chunk_duration)
+    def prepare_stream(
+        self,
+        settings: SpeechCaptureSettings | None = None,
+    ) -> MicrophoneInfo:
+        """Open and close the active input stream without retaining audio."""
+        original = self._snapshot_settings()
+        self._apply_settings(settings)
 
         try:
+            microphone = self.selected_or_default_microphone()
+            sd = self._sounddevice()
+            frames = max(1, int(self.sample_rate * self.chunk_duration))
+
             with sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype="float32",
                 device=microphone.index,
             ) as stream:
-                chunks = self._read_stream_chunks(stream, frames)
-                return self.capture_from_chunks(chunks, microphone.name)
-        except KeyboardInterrupt:
-            return AudioCaptureResult(
-                samples=np.array([], dtype=np.float32),
-                sample_rate=self.sample_rate,
-                duration_seconds=0.0,
-                microphone_name=microphone.name,
-                completed=False,
-                cancelled=True,
-                warnings=("captura cancelada por el usuario",),
-            )
-        except Exception as error:
-            raise RuntimeError(f"No se pudo capturar audio: {error}") from error
+                stream.read(frames)
+
+            return microphone
+        finally:
+            self._restore_settings(original)
+
+    def capture_phrase(
+        self,
+        settings: SpeechCaptureSettings | None = None,
+    ) -> AudioCaptureResult:
+        """Capture one phrase from the selected microphone."""
+        original = self._snapshot_settings()
+        self._apply_settings(settings)
+
+        try:
+            microphone = self.selected_or_default_microphone()
+            sd = self._sounddevice()
+            frames = int(self.sample_rate * self.chunk_duration)
+
+            try:
+                with sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=1,
+                    dtype="float32",
+                    device=microphone.index,
+                ) as stream:
+                    chunks = self._read_stream_chunks(stream, frames)
+                    return self.capture_from_chunks(chunks, microphone.name)
+            except KeyboardInterrupt:
+                return AudioCaptureResult(
+                    samples=np.array([], dtype=np.float32),
+                    sample_rate=self.sample_rate,
+                    duration_seconds=0.0,
+                    microphone_name=microphone.name,
+                    completed=False,
+                    cancelled=True,
+                    warnings=("captura cancelada por el usuario",),
+                )
+            except Exception as error:
+                raise RuntimeError(f"No se pudo capturar audio: {error}") from error
+        finally:
+            self._restore_settings(original)
 
     def capture_from_chunks(
         self,
@@ -307,7 +359,12 @@ class SoundDeviceAudioCapture:
                     silence_after_voice + len(mono) / self.sample_rate
                 )
 
-                if silence_after_voice >= self.trailing_silence:
+                captured_duration = sum(len(item) for item in captured) / self.sample_rate
+
+                if (
+                    silence_after_voice >= self.trailing_silence
+                    and captured_duration >= self.minimum_audio_duration
+                ):
                     break
 
             if elapsed >= self.max_duration:
@@ -390,6 +447,36 @@ class SoundDeviceAudioCapture:
 
         return sd
 
+    def _snapshot_settings(self) -> dict[str, float]:
+        return {
+            "max_duration": self.max_duration,
+            "initial_silence_timeout": self.initial_silence_timeout,
+            "trailing_silence": self.trailing_silence,
+            "chunk_duration": self.chunk_duration,
+            "speech_threshold": self.speech_threshold,
+            "minimum_audio_duration": self.minimum_audio_duration,
+        }
+
+    def _apply_settings(
+        self,
+        settings: SpeechCaptureSettings | None,
+    ) -> None:
+        if settings is None:
+            return
+
+        for name in self._snapshot_settings():
+            value = getattr(settings, name)
+
+            if value is not None:
+                setattr(self, name, value)
+
+    def _restore_settings(
+        self,
+        settings: dict[str, float],
+    ) -> None:
+        for name, value in settings.items():
+            setattr(self, name, value)
+
     def _default_input_index(
         self,
         sd,
@@ -423,6 +510,15 @@ class SpeechEngineUseCase:
         """Return default microphone."""
         return self._capture.default_microphone()
 
+    def active_microphone(self) -> MicrophoneInfo:
+        """Return selected microphone or default microphone."""
+        active_microphone = getattr(self._capture, "active_microphone", None)
+
+        if callable(active_microphone):
+            return active_microphone()
+
+        return self.default_microphone()
+
     def select_microphone(
         self,
         index: int,
@@ -430,12 +526,38 @@ class SpeechEngineUseCase:
         """Select a microphone."""
         return self._capture.select_microphone(index)
 
-    def transcribe_once(self) -> SpeechTranscriptionResult:
+    def warm_up(self) -> None:
+        """Prepare microphone lookup and the local provider."""
+        self.active_microphone()
+        load_model = getattr(self._provider, "_load_model", None)
+
+        if callable(load_model):
+            load_model()
+
+    def prepare_stream(
+        self,
+        capture_settings: SpeechCaptureSettings | None = None,
+    ) -> MicrophoneInfo:
+        """Prepare the active microphone stream before capture."""
+        prepare_stream = getattr(self._capture, "prepare_stream", None)
+
+        if callable(prepare_stream):
+            return prepare_stream(capture_settings)
+
+        return self.active_microphone()
+
+    def transcribe_once(
+        self,
+        capture_settings: SpeechCaptureSettings | None = None,
+    ) -> SpeechTranscriptionResult:
         """Capture one phrase and transcribe it."""
         started = time.monotonic()
 
         try:
-            capture = self._capture.capture_phrase()
+            try:
+                capture = self._capture.capture_phrase(capture_settings)
+            except TypeError:
+                capture = self._capture.capture_phrase()
         except Exception as error:
             return self._failed_result(str(error))
 
