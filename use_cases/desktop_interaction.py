@@ -51,6 +51,15 @@ class DesktopInteractionUseCase:
             if self._is_free_sequence_command(normalized):
                 raise ValueError("No se admiten secuencias libres.")
 
+            clipboard_response = self._execute_clipboard_command(
+                text,
+                normalized,
+                confirm,
+            )
+
+            if clipboard_response is not None:
+                return clipboard_response
+
             if self._is_prepare_atlas_workspace_command(normalized):
                 if self._prepare_atlas_workspace is None:
                     raise RuntimeError("Workflow no disponible.")
@@ -287,6 +296,195 @@ class DesktopInteractionUseCase:
             {"application": target},
             f"{target} abierto.",
         )
+
+    def _execute_clipboard_command(
+        self,
+        text: str,
+        normalized: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Execute supported clipboard commands."""
+        copy_text = self._extract_clipboard_copy_text(text)
+
+        if copy_text is not None:
+            length = self._executor.execute(
+                "desktop.copy_clipboard_text",
+                ToolContext(parameters={"text": copy_text}),
+            )
+
+            return (
+                f"{self._CONFIRMATION_PREFIX} "
+                f"Texto copiado al portapapeles.\nCaracteres: {length}"
+            )
+
+        if normalized in {
+            "copia al portapapeles",
+            "copia este texto al portapapeles",
+            "copiar al portapapeles",
+            "copiar",
+        }:
+            raise ValueError("Orden incompleta: falta el texto a copiar.")
+
+        if normalized in {
+            "copia una imagen",
+            "lee imagen del portapapeles",
+        }:
+            raise ValueError("Formato de portapapeles no soportado.")
+
+        if normalized in {
+            "lee el portapapeles",
+            "leer portapapeles",
+            "que hay en el portapapeles",
+            "read clipboard",
+        }:
+            content = self._executor.execute(
+                "desktop.read_clipboard_text",
+                ToolContext(),
+            )
+
+            if content is None:
+                return "El portapapeles no contiene texto."
+
+            return f"Contenido del portapapeles:\n\n{content}"
+
+        if normalized in {
+            "hay texto en el portapapeles",
+            "el portapapeles contiene texto",
+            "clipboard has text",
+        }:
+            has_text = self._executor.execute(
+                "desktop.clipboard_has_text",
+                ToolContext(),
+            )
+
+            if has_text is True:
+                return "El portapapeles contiene texto."
+
+            return "El portapapeles no contiene texto."
+
+        if normalized in {
+            "limpia el portapapeles",
+            "vacia el portapapeles",
+            "clear clipboard",
+        }:
+            if not self._confirmed_clear_clipboard(confirm):
+                return "Limpieza cancelada."
+
+            return self._run(
+                "desktop.clear_clipboard",
+                {},
+                "Portapapeles vaciado.",
+            )
+
+        if normalized in {"limpia", "vacia"}:
+            raise ValueError("Orden incompleta: falta el portapapeles.")
+
+        if normalized in {
+            "pega el portapapeles",
+            "pega el contenido del portapapeles",
+            "paste clipboard",
+        }:
+            return self._paste_clipboard(confirm)
+
+        if normalized == "pega":
+            raise ValueError("Orden incompleta: falta el portapapeles.")
+
+        return None
+
+    def _extract_clipboard_copy_text(
+        self,
+        text: str,
+    ) -> str | None:
+        """Extract copy text from supported clipboard commands."""
+        patterns = (
+            r"^\s*copia\s+al\s+portapapeles\s*:\s*(.*)$",
+            r"^\s*copia\s+este\s+texto\s+al\s+portapapeles\s*:\s*(.*)$",
+            r"^\s*copiar\s+al\s+portapapeles\s+(.+)$",
+        )
+
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+
+            if match is None:
+                continue
+
+            content = match.group(1)
+
+            if content == "":
+                raise ValueError("Orden incompleta: falta el texto a copiar.")
+
+            return content
+
+        return None
+
+    def _paste_clipboard(
+        self,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Paste clipboard text into the active window after confirmation."""
+        has_text = self._executor.execute(
+            "desktop.clipboard_has_text",
+            ToolContext(),
+        )
+
+        if has_text is not True:
+            raise RuntimeError("El portapapeles no contiene texto.")
+
+        window = self._executor.execute(
+            "desktop.get_foreground_window",
+            ToolContext(),
+        )
+
+        if not isinstance(window, dict) or not window.get("title"):
+            raise RuntimeError("No existe una ventana destino valida.")
+
+        title = str(window["title"])
+
+        if not self._confirmed_paste_clipboard(confirm, title):
+            return "Pegado cancelado."
+
+        return self._run(
+            "desktop.paste_clipboard",
+            {"window_title": title},
+            "Contenido pegado.",
+        )
+
+    def _confirmed_clear_clipboard(
+        self,
+        confirm: Callable[[str], str] | None,
+    ) -> bool:
+        """Return whether the user explicitly confirmed clearing clipboard."""
+        if confirm is None:
+            return False
+
+        response = confirm("Â¿Confirmas vaciar el portapapeles? [s/N]: ")
+
+        return self._normalize(response) in {
+            "s",
+            "si",
+            "y",
+            "yes",
+        }
+
+    def _confirmed_paste_clipboard(
+        self,
+        confirm: Callable[[str], str] | None,
+        title: str,
+    ) -> bool:
+        """Return whether the user explicitly confirmed pasting clipboard."""
+        if confirm is None:
+            return False
+
+        response = confirm(
+            f"Â¿Confirmas pegar el contenido en \"{title}\"? [s/N]: "
+        )
+
+        return self._normalize(response) in {
+            "s",
+            "si",
+            "y",
+            "yes",
+        }
 
     def _clean_open_target(
         self,

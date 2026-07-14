@@ -8,6 +8,7 @@ class FakeToolExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ToolContext]] = []
         self.fail_on_execute = False
+        self.clipboard_text: str | None = "Hola Atlas"
         self.windows: list[dict[str, object]] = [
             {
                 "handle": 10,
@@ -34,6 +35,28 @@ class FakeToolExecutor:
 
         if tool_name == "desktop.capture_screenshot":
             return str(Path(context.parameters["output_dir"]) / "shot.png")
+
+        if tool_name == "desktop.copy_clipboard_text":
+            text = context.parameters["text"]
+            assert isinstance(text, str)
+            self.clipboard_text = text
+            return len(text)
+
+        if tool_name == "desktop.read_clipboard_text":
+            return self.clipboard_text
+
+        if tool_name == "desktop.clear_clipboard":
+            self.clipboard_text = None
+            return "Portapapeles vaciado."
+
+        if tool_name == "desktop.clipboard_has_text":
+            return self.clipboard_text is not None
+
+        if tool_name == "desktop.get_foreground_window":
+            if not self.windows:
+                raise RuntimeError("missing")
+
+            return self.windows[0]
 
         if tool_name == "desktop.list_windows":
             title = str(context.parameters["title"]).lower()
@@ -154,6 +177,202 @@ def test_desktop_interaction_types_text() -> None:
     assert executor.calls[0][1].parameters == {
         "window_title": "Visual Studio Code",
         "text": 'print("Hola")',
+    }
+
+
+def test_desktop_interaction_copies_clipboard_text() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("copia al portapapeles: Hola Atlas")
+
+    assert result == "\u2713 Texto copiado al portapapeles.\nCaracteres: 10"
+    assert executor.clipboard_text == "Hola Atlas"
+    assert executor.calls[0][0] == "desktop.copy_clipboard_text"
+    assert executor.calls[0][1].parameters == {"text": "Hola Atlas"}
+
+
+def test_desktop_interaction_preserves_clipboard_copy_text_exactly() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    text = "LÃ­nea 1\n  LÃ­nea 2: Ã±"
+    result = use_case.execute(f"copia este texto al portapapeles: {text}")
+
+    assert result.endswith(f"Caracteres: {len(text)}")
+    assert executor.calls[0][1].parameters == {"text": text}
+
+
+def test_desktop_interaction_copies_clipboard_text_without_colon() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("copiar al portapapeles Hola Atlas")
+
+    assert result.endswith("Caracteres: 10")
+    assert executor.clipboard_text == "Hola Atlas"
+
+
+def test_desktop_interaction_rejects_incomplete_clipboard_copy() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("copia al portapapeles")
+
+    assert result == "Error: Orden incompleta: falta el texto a copiar."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_rejects_unsupported_clipboard_format() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("lee imagen del portapapeles")
+
+    assert result == "Error: Formato de portapapeles no soportado."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_reads_clipboard_text() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("que hay en el portapapeles")
+
+    assert result == "Contenido del portapapeles:\n\nHola Atlas"
+    assert executor.calls[0][0] == "desktop.read_clipboard_text"
+
+
+def test_desktop_interaction_reports_clipboard_without_text() -> None:
+    executor = FakeToolExecutor()
+    executor.clipboard_text = None
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("read clipboard")
+
+    assert result == "El portapapeles no contiene texto."
+
+
+def test_desktop_interaction_checks_whether_clipboard_has_text() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("clipboard has text")
+
+    assert result == "El portapapeles contiene texto."
+    assert executor.calls[0][0] == "desktop.clipboard_has_text"
+
+
+def test_desktop_interaction_reports_clipboard_has_no_text() -> None:
+    executor = FakeToolExecutor()
+    executor.clipboard_text = None
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("hay texto en el portapapeles")
+
+    assert result == "El portapapeles no contiene texto."
+
+
+def test_desktop_interaction_clear_clipboard_requires_confirmation() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("limpia el portapapeles")
+
+    assert result == "Limpieza cancelada."
+    assert executor.clipboard_text == "Hola Atlas"
+    assert executor.calls == []
+
+
+def test_desktop_interaction_clear_clipboard_cancels_with_empty_or_no() -> None:
+    for response in ("", "n"):
+        executor = FakeToolExecutor()
+        use_case = DesktopInteractionUseCase(executor)
+
+        result = use_case.execute(
+            "vacia el portapapeles",
+            confirm=lambda _: response,
+        )
+
+        assert result == "Limpieza cancelada."
+        assert executor.clipboard_text == "Hola Atlas"
+        assert executor.calls == []
+
+
+def test_desktop_interaction_clear_clipboard_after_yes() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("clear clipboard", confirm=lambda _: "s")
+
+    assert result == "\u2713 Portapapeles vaciado."
+    assert executor.clipboard_text is None
+    assert executor.calls[0][0] == "desktop.clear_clipboard"
+
+
+def test_desktop_interaction_paste_requires_confirmation() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pega el portapapeles")
+
+    assert result == "Pegado cancelado."
+    assert [call[0] for call in executor.calls] == [
+        "desktop.clipboard_has_text",
+        "desktop.get_foreground_window",
+    ]
+
+
+def test_desktop_interaction_paste_cancels_with_empty_or_no() -> None:
+    for response in ("", "n"):
+        executor = FakeToolExecutor()
+        use_case = DesktopInteractionUseCase(executor)
+
+        result = use_case.execute(
+            "paste clipboard",
+            confirm=lambda _: response,
+        )
+
+        assert result == "Pegado cancelado."
+        assert all(call[0] != "desktop.paste_clipboard" for call in executor.calls)
+
+
+def test_desktop_interaction_does_not_paste_without_text() -> None:
+    executor = FakeToolExecutor()
+    executor.clipboard_text = None
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pega el contenido del portapapeles", confirm=lambda _: "s")
+
+    assert result == "Error: El portapapeles no contiene texto."
+    assert [call[0] for call in executor.calls] == ["desktop.clipboard_has_text"]
+
+
+def test_desktop_interaction_does_not_paste_without_valid_window() -> None:
+    executor = FakeToolExecutor()
+    executor.windows = []
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pega el portapapeles", confirm=lambda _: "s")
+
+    assert result == "Error: missing"
+    assert all(call[0] != "desktop.paste_clipboard" for call in executor.calls)
+
+
+def test_desktop_interaction_pastes_with_ctrl_v_tool_after_yes() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pega el portapapeles", confirm=lambda _: "yes")
+
+    assert result == "\u2713 Contenido pegado."
+    assert [call[0] for call in executor.calls] == [
+        "desktop.clipboard_has_text",
+        "desktop.get_foreground_window",
+        "desktop.paste_clipboard",
+    ]
+    assert executor.calls[2][1].parameters == {
+        "window_title": "Visual Studio Code - Atlas"
     }
 
 

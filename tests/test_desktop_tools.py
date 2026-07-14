@@ -6,7 +6,10 @@ from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
     CaptureScreenshotTool,
+    ClearClipboardTool,
+    ClipboardHasTextTool,
     CloseWindowTool,
+    CopyClipboardTextTool,
     DoubleClickTool,
     GetCursorPositionTool,
     GetForegroundWindowTool,
@@ -22,7 +25,9 @@ from tools.desktop.desktop_tools import (
     OpenApplicationTool,
     OpenFileTool,
     OpenFolderTool,
+    PasteClipboardTool,
     PressHotkeyTool,
+    ReadClipboardTextTool,
     ResizeWindowTool,
     RestoreWindowTool,
     RightClickTool,
@@ -30,6 +35,7 @@ from tools.desktop.desktop_tools import (
     ScrollVerticalTool,
     TypeTextTool,
 )
+from tools.desktop.windows_controller import WindowsDesktopController
 from tools.tool_context import ToolContext
 
 
@@ -41,6 +47,7 @@ class FakeDesktopController:
         self.cursor_position = (12, 34)
         self.fail_capture = False
         self.virtual_desktop = (0, 0, 1920, 1080)
+        self.clipboard_text: str | None = "Hola Atlas"
         self.window_matches = [
             {
                 "handle": 10,
@@ -77,6 +84,23 @@ class FakeDesktopController:
 
     def type_text(self, text: str) -> None:
         self.calls.append(("type_text", text))
+
+    def copy_clipboard_text(self, text: str) -> int:
+        self.calls.append(("copy_clipboard_text", text))
+        self.clipboard_text = text
+        return len(text)
+
+    def read_clipboard_text(self) -> str | None:
+        self.calls.append(("read_clipboard_text", None))
+        return self.clipboard_text
+
+    def clear_clipboard(self) -> None:
+        self.calls.append(("clear_clipboard", None))
+        self.clipboard_text = None
+
+    def clipboard_has_text(self) -> bool:
+        self.calls.append(("clipboard_has_text", None))
+        return self.clipboard_text is not None
 
     def press_hotkey(self, keys: list[str]) -> None:
         self.calls.append(("press_hotkey", keys))
@@ -265,6 +289,81 @@ def test_type_text_activates_window_before_writing() -> None:
         ("activate_window", "Visual Studio Code"),
         ("type_text", "print('Hola')"),
     ]
+
+
+def test_copy_clipboard_text_tool_writes_unicode_text() -> None:
+    controller = FakeDesktopController()
+    tool = CopyClipboardTextTool(controller)
+
+    result = tool.execute(ToolContext(parameters={"text": "Hola Ã¡Ã±\nAtlas"}))
+
+    assert result == 15
+    assert controller.clipboard_text == "Hola Ã¡Ã±\nAtlas"
+    assert controller.calls == [("copy_clipboard_text", "Hola Ã¡Ã±\nAtlas")]
+
+
+def test_copy_clipboard_text_tool_rejects_non_str() -> None:
+    tool = CopyClipboardTextTool(FakeDesktopController())
+
+    with pytest.raises(TypeError):
+        tool.execute(ToolContext(parameters={"text": 123}))
+
+
+def test_read_clipboard_text_tool_returns_text_or_none() -> None:
+    controller = FakeDesktopController()
+    tool = ReadClipboardTextTool(controller)
+
+    assert tool.execute(ToolContext()) == "Hola Atlas"
+    controller.clipboard_text = None
+    assert tool.execute(ToolContext()) is None
+
+
+def test_clear_clipboard_tool_clears_text() -> None:
+    controller = FakeDesktopController()
+    tool = ClearClipboardTool(controller)
+
+    result = tool.execute(ToolContext())
+
+    assert result == "Portapapeles vaciado."
+    assert controller.clipboard_text is None
+    assert controller.calls == [("clear_clipboard", None)]
+
+
+def test_clipboard_has_text_tool() -> None:
+    controller = FakeDesktopController()
+    tool = ClipboardHasTextTool(controller)
+
+    assert tool.execute(ToolContext()) is True
+    controller.clipboard_text = None
+    assert tool.execute(ToolContext()) is False
+
+
+def test_paste_clipboard_tool_uses_ctrl_v_not_type_text() -> None:
+    controller = FakeDesktopController()
+    tool = PasteClipboardTool(controller)
+
+    result = tool.execute(
+        ToolContext(parameters={"window_title": "Visual Studio Code"})
+    )
+
+    assert result == "Contenido pegado."
+    assert controller.calls == [
+        ("clipboard_has_text", None),
+        ("activate_window", "Visual Studio Code"),
+        ("press_hotkey", ["ctrl", "v"]),
+    ]
+    assert all(call[0] != "type_text" for call in controller.calls)
+
+
+def test_paste_clipboard_tool_rejects_clipboard_without_text() -> None:
+    controller = FakeDesktopController()
+    controller.clipboard_text = None
+    tool = PasteClipboardTool(controller)
+
+    with pytest.raises(RuntimeError):
+        tool.execute(ToolContext(parameters={"window_title": "Visual Studio Code"}))
+
+    assert controller.calls == [("clipboard_has_text", None)]
 
 
 def test_save_file_sends_ctrl_s_to_existing_window() -> None:
@@ -687,3 +786,233 @@ def test_close_window_tool_requests_close_without_killing_process() -> None:
 
     assert result == "Solicitud de cierre enviada."
     assert controller.calls == [("close_window", 10)]
+
+
+class FakeUser32Clipboard:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self.open_ok = True
+        self.close_ok = True
+        self.empty_ok = True
+        self.set_ok = True
+        self.has_text = True
+        self.read_handle = 700
+
+    def OpenClipboard(self, handle):
+        self.calls.append(("OpenClipboard", handle))
+        return self.open_ok
+
+    def CloseClipboard(self):
+        self.calls.append(("CloseClipboard", None))
+        return self.close_ok
+
+    def EmptyClipboard(self):
+        self.calls.append(("EmptyClipboard", None))
+        return self.empty_ok
+
+    def SetClipboardData(self, clipboard_format, handle):
+        self.calls.append(("SetClipboardData", (clipboard_format, handle)))
+        return handle if self.set_ok else 0
+
+    def IsClipboardFormatAvailable(self, clipboard_format):
+        self.calls.append(("IsClipboardFormatAvailable", clipboard_format))
+        return self.has_text
+
+    def GetClipboardData(self, clipboard_format):
+        self.calls.append(("GetClipboardData", clipboard_format))
+        return self.read_handle
+
+
+class FakeKernel32Clipboard:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self.alloc_ok = True
+        self.lock_ok = True
+        self.handle = 900
+        self.pointer = 1200
+
+    def GlobalAlloc(self, flags, size):
+        self.calls.append(("GlobalAlloc", (flags, size)))
+        return self.handle if self.alloc_ok else 0
+
+    def GlobalLock(self, handle):
+        self.calls.append(("GlobalLock", handle))
+        return self.pointer if self.lock_ok else 0
+
+    def GlobalUnlock(self, handle):
+        self.calls.append(("GlobalUnlock", handle))
+        return 1
+
+    def GlobalFree(self, handle):
+        self.calls.append(("GlobalFree", handle))
+        return 0
+
+
+def _fake_native_clipboard_controller() -> tuple[
+    WindowsDesktopController,
+    FakeUser32Clipboard,
+    FakeKernel32Clipboard,
+]:
+    controller = WindowsDesktopController(max_clipboard_text_chars=20)
+    user32 = FakeUser32Clipboard()
+    kernel32 = FakeKernel32Clipboard()
+    controller._USER32 = user32
+    controller._KERNEL32 = kernel32
+
+    return controller, user32, kernel32
+
+
+def test_windows_controller_copy_writes_unicode_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, user32, kernel32 = _fake_native_clipboard_controller()
+    copied: list[tuple[int, bytes, int]] = []
+
+    def fake_memmove(pointer, data, size):
+        copied.append((pointer, bytes(data), size))
+        return pointer
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.ctypes.memmove",
+        fake_memmove,
+    )
+
+    result = controller.copy_clipboard_text("Hola\nAtlas")
+
+    assert result == 10
+    assert copied == [
+        (1200, "Hola\nAtlas".encode("utf-16-le") + b"\x00\x00", 22)
+    ]
+    assert user32.calls == [
+        ("OpenClipboard", None),
+        ("EmptyClipboard", None),
+        ("SetClipboardData", (13, 900)),
+        ("CloseClipboard", None),
+    ]
+    assert ("GlobalFree", 900) not in kernel32.calls
+
+
+def test_windows_controller_rejects_empty_clipboard_copy() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+
+    with pytest.raises(ValueError):
+        controller.copy_clipboard_text("")
+
+    assert user32.calls == []
+
+
+def test_windows_controller_rejects_too_large_clipboard_copy() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+
+    with pytest.raises(ValueError):
+        controller.copy_clipboard_text("x" * 21)
+
+    assert user32.calls == []
+
+
+def test_windows_controller_closes_clipboard_after_copy_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, user32, kernel32 = _fake_native_clipboard_controller()
+    user32.set_ok = False
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.ctypes.memmove",
+        lambda pointer, data, size: pointer,
+    )
+
+    with pytest.raises(RuntimeError, match="No se pudo escribir"):
+        controller.copy_clipboard_text("Hola")
+
+    assert ("CloseClipboard", None) in user32.calls
+    assert ("GlobalFree", 900) in kernel32.calls
+
+
+def test_windows_controller_handles_open_clipboard_failure() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+    user32.open_ok = False
+
+    with pytest.raises(RuntimeError, match="No se pudo abrir"):
+        controller.copy_clipboard_text("Hola")
+
+    assert user32.calls == [("OpenClipboard", None)]
+
+
+def test_windows_controller_handles_global_alloc_failure() -> None:
+    controller, user32, kernel32 = _fake_native_clipboard_controller()
+    kernel32.alloc_ok = False
+
+    with pytest.raises(RuntimeError, match="reservar memoria"):
+        controller.copy_clipboard_text("Hola")
+
+    assert ("EmptyClipboard", None) not in user32.calls
+    assert ("CloseClipboard", None) in user32.calls
+
+
+def test_windows_controller_handles_global_lock_failure() -> None:
+    controller, user32, kernel32 = _fake_native_clipboard_controller()
+    kernel32.lock_ok = False
+
+    with pytest.raises(RuntimeError, match="bloquear memoria"):
+        controller.copy_clipboard_text("Hola")
+
+    assert ("EmptyClipboard", None) not in user32.calls
+    assert ("GlobalFree", 900) in kernel32.calls
+    assert ("CloseClipboard", None) in user32.calls
+
+
+def test_windows_controller_read_returns_none_without_unicode_text() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+    user32.has_text = False
+
+    result = controller.read_clipboard_text()
+
+    assert result is None
+    assert user32.calls == [
+        ("OpenClipboard", None),
+        ("IsClipboardFormatAvailable", 13),
+        ("CloseClipboard", None),
+    ]
+
+
+def test_windows_controller_read_unicode_text_and_unlocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, user32, kernel32 = _fake_native_clipboard_controller()
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.ctypes.wstring_at",
+        lambda pointer: "Hola\nAtlas",
+    )
+
+    result = controller.read_clipboard_text()
+
+    assert result == "Hola\nAtlas"
+    assert user32.calls == [
+        ("OpenClipboard", None),
+        ("IsClipboardFormatAvailable", 13),
+        ("GetClipboardData", 13),
+        ("CloseClipboard", None),
+    ]
+    assert kernel32.calls == [
+        ("GlobalLock", 700),
+        ("GlobalUnlock", 700),
+    ]
+
+
+def test_windows_controller_clear_clipboard_closes() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+
+    controller.clear_clipboard()
+
+    assert user32.calls == [
+        ("OpenClipboard", None),
+        ("EmptyClipboard", None),
+        ("CloseClipboard", None),
+    ]
+
+
+def test_windows_controller_clipboard_has_text_uses_unicode_format() -> None:
+    controller, user32, _ = _fake_native_clipboard_controller()
+
+    assert controller.clipboard_has_text() is True
+
+    assert user32.calls == [("IsClipboardFormatAvailable", 13)]

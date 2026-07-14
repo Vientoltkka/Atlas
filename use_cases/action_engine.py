@@ -383,3 +383,80 @@ class PrepareAtlasWorkspaceUseCase:
             ) from exc
 
         return candidate
+
+
+class CopyAndPasteTextUseCase:
+    """Copy text to the clipboard and paste it into one target window."""
+
+    def __init__(
+        self,
+        executor: ToolExecutor,
+        action_engine: ActionEngineUseCase,
+    ) -> None:
+        self._executor = executor
+        self._action_engine = action_engine
+
+    def execute(
+        self,
+        text: str,
+        target_window_title: str,
+    ) -> AutomationResult:
+        """Execute the explicit copy-and-paste workflow."""
+        self._validate_input(text, target_window_title)
+
+        steps = [
+            ActionStep(
+                name="Copiar texto al portapapeles",
+                operation=lambda: self._run_tool(
+                    "desktop.copy_clipboard_text",
+                    {"text": text},
+                ),
+            ),
+            ActionStep(
+                name="Activar ventana destino",
+                operation=lambda: self._run_tool(
+                    "desktop.activate_window",
+                    {"window_title": target_window_title},
+                ),
+            ),
+            ActionStep(
+                name="Pegar contenido del portapapeles",
+                operation=lambda: self._run_tool(
+                    "desktop.press_hotkey",
+                    {
+                        "window_title": target_window_title,
+                        "keys": ["ctrl", "v"],
+                    },
+                ),
+            ),
+        ]
+
+        return self._action_engine.execute("copy_and_paste_text", steps)
+
+    def _run_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, object],
+    ) -> str:
+        """Run a registered tool and return its message."""
+        result = self._executor.execute(
+            tool_name,
+            ToolContext(parameters=parameters),
+        )
+
+        return str(result)
+
+    def _validate_input(
+        self,
+        text: str,
+        target_window_title: str,
+    ) -> None:
+        """Validate workflow inputs."""
+        if not isinstance(text, str):
+            raise TypeError("El contenido del portapapeles debe ser texto.")
+
+        if text == "":
+            raise ValueError("No se puede copiar texto vacio.")
+
+        if not target_window_title.strip():
+            raise ValueError("Falta la ventana destino.")

@@ -27,7 +27,10 @@ from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
     CaptureScreenshotTool,
+    ClearClipboardTool,
+    ClipboardHasTextTool,
     CloseWindowTool,
+    CopyClipboardTextTool,
     DoubleClickTool,
     GetCursorPositionTool,
     GetForegroundWindowTool,
@@ -43,7 +46,9 @@ from tools.desktop.desktop_tools import (
     OpenApplicationTool,
     OpenFileTool,
     OpenFolderTool,
+    PasteClipboardTool,
     PressHotkeyTool,
+    ReadClipboardTextTool,
     ResizeWindowTool,
     RestoreWindowTool,
     RightClickTool,
@@ -103,6 +108,11 @@ class Bootstrap:
         tool_registry.register(OpenFolderTool())
         tool_registry.register(OpenFileTool())
         tool_registry.register(TypeTextTool())
+        tool_registry.register(CopyClipboardTextTool())
+        tool_registry.register(ReadClipboardTextTool())
+        tool_registry.register(ClearClipboardTool())
+        tool_registry.register(ClipboardHasTextTool())
+        tool_registry.register(PasteClipboardTool())
         tool_registry.register(PressHotkeyTool())
         tool_registry.register(SaveFileTool())
         tool_registry.register(ActivateWindowTool())

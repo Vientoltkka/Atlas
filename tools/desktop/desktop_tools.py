@@ -249,6 +249,111 @@ class TypeTextTool(DesktopTool):
         return "Texto escrito."
 
 
+class CopyClipboardTextTool(DesktopTool):
+    """Copy Unicode text into the clipboard."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.copy_clipboard_text"
+
+    @property
+    def description(self) -> str:
+        return "Copy Unicode text into the clipboard."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> int:
+        text = context.parameters.get("text")
+
+        if not isinstance(text, str):
+            raise TypeError("El contenido del portapapeles debe ser texto.")
+
+        return self._controller.copy_clipboard_text(text)
+
+
+class ReadClipboardTextTool(DesktopTool):
+    """Read Unicode text from the clipboard."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.read_clipboard_text"
+
+    @property
+    def description(self) -> str:
+        return "Read Unicode text from the clipboard."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str | None:
+        return self._controller.read_clipboard_text()
+
+
+class ClearClipboardTool(DesktopTool):
+    """Clear the clipboard."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.clear_clipboard"
+
+    @property
+    def description(self) -> str:
+        return "Clear the clipboard."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        self._controller.clear_clipboard()
+
+        return "Portapapeles vaciado."
+
+
+class ClipboardHasTextTool(DesktopTool):
+    """Return whether the clipboard contains Unicode text."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.clipboard_has_text"
+
+    @property
+    def description(self) -> str:
+        return "Return whether the clipboard contains Unicode text."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> bool:
+        return self._controller.clipboard_has_text()
+
+
+class PasteClipboardTool(DesktopTool):
+    """Paste clipboard content into an existing target window."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.paste_clipboard"
+
+    @property
+    def description(self) -> str:
+        return "Paste clipboard content into an existing target window."
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+        title = self._window_title(context)
+
+        if not self._controller.clipboard_has_text():
+            raise RuntimeError("El portapapeles no contiene texto.")
+
+        self._controller.activate_window(title)
+        self._controller.press_hotkey(["ctrl", "v"])
+
+        return "Contenido pegado."
+
+
 class PressHotkeyTool(DesktopTool):
     """Send a keyboard shortcut to an existing target window."""
 

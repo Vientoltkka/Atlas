@@ -32,6 +32,18 @@ class DesktopController(Protocol):
     def type_text(self, text: str) -> None:
         """Type text into the active window."""
 
+    def copy_clipboard_text(self, text: str) -> int:
+        """Copy Unicode text into the clipboard."""
+
+    def read_clipboard_text(self) -> str | None:
+        """Read Unicode text from the clipboard."""
+
+    def clear_clipboard(self) -> None:
+        """Clear the clipboard."""
+
+    def clipboard_has_text(self) -> bool:
+        """Return whether the clipboard contains Unicode text."""
+
     def press_hotkey(self, keys: list[str]) -> None:
         """Press a keyboard shortcut."""
 
@@ -117,8 +129,18 @@ class WindowsDesktopController:
     _KERNEL32.GlobalLock.restype = ctypes.c_void_p
     _KERNEL32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
     _KERNEL32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    _KERNEL32.GlobalFree.restype = wintypes.HGLOBAL
+    _KERNEL32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
     _USER32.SetClipboardData.restype = wintypes.HANDLE
     _USER32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    _USER32.OpenClipboard.argtypes = (wintypes.HWND,)
+    _USER32.OpenClipboard.restype = wintypes.BOOL
+    _USER32.CloseClipboard.restype = wintypes.BOOL
+    _USER32.EmptyClipboard.restype = wintypes.BOOL
+    _USER32.GetClipboardData.restype = wintypes.HANDLE
+    _USER32.GetClipboardData.argtypes = (wintypes.UINT,)
+    _USER32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    _USER32.IsClipboardFormatAvailable.argtypes = (wintypes.UINT,)
     _USER32.IsWindow.argtypes = (wintypes.HWND,)
     _USER32.IsWindow.restype = wintypes.BOOL
     _USER32.IsWindowVisible.argtypes = (wintypes.HWND,)
@@ -278,6 +300,16 @@ class WindowsDesktopController:
     _SW_MAXIMIZE = 3
     _SW_MINIMIZE = 6
     _WM_CLOSE = 0x0010
+    _CF_UNICODETEXT = 13
+    _GMEM_MOVEABLE = 0x0002
+    _GMEM_ZEROINIT = 0x0040
+    _MAX_CLIPBOARD_TEXT_CHARS = 100_000
+
+    def __init__(
+        self,
+        max_clipboard_text_chars: int = _MAX_CLIPBOARD_TEXT_CHARS,
+    ) -> None:
+        self._max_clipboard_text_chars = max_clipboard_text_chars
 
     def open_application(self, application: str) -> None:
         """Open an installed application."""
@@ -316,8 +348,101 @@ class WindowsDesktopController:
 
     def type_text(self, text: str) -> None:
         """Type text into the active window."""
-        self._set_clipboard_text(text)
+        self.copy_clipboard_text(text)
         self.press_hotkey(["ctrl", "v"])
+
+    def copy_clipboard_text(self, text: str) -> int:
+        """Copy Unicode text into the Windows clipboard."""
+        self._validate_clipboard_text(text)
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        handle = None
+        transferred = False
+
+        if not self._USER32.OpenClipboard(None):
+            raise RuntimeError("No se pudo abrir el portapapeles.")
+
+        try:
+            handle = self._KERNEL32.GlobalAlloc(
+                self._GMEM_MOVEABLE | self._GMEM_ZEROINIT,
+                len(data),
+            )
+
+            if not handle:
+                raise RuntimeError("No se pudo reservar memoria.")
+
+            pointer = self._KERNEL32.GlobalLock(handle)
+
+            if not pointer:
+                raise RuntimeError("No se pudo bloquear memoria.")
+
+            try:
+                ctypes.memmove(pointer, data, len(data))
+            finally:
+                self._KERNEL32.GlobalUnlock(handle)
+
+            if not self._USER32.EmptyClipboard():
+                raise RuntimeError("No se pudo vaciar el portapapeles.")
+
+            if not self._USER32.SetClipboardData(self._CF_UNICODETEXT, handle):
+                raise RuntimeError("No se pudo escribir en el portapapeles.")
+
+            transferred = True
+            return len(text)
+        except Exception:
+            if handle and not transferred:
+                self._KERNEL32.GlobalFree(handle)
+
+            raise
+        finally:
+            if not self._USER32.CloseClipboard():
+                raise RuntimeError("Error al cerrar el portapapeles.")
+
+    def read_clipboard_text(self) -> str | None:
+        """Read Unicode text from the Windows clipboard."""
+        if not self._USER32.OpenClipboard(None):
+            raise RuntimeError("No se pudo abrir el portapapeles.")
+
+        try:
+            if not self._USER32.IsClipboardFormatAvailable(
+                self._CF_UNICODETEXT,
+            ):
+                return None
+
+            handle = self._USER32.GetClipboardData(self._CF_UNICODETEXT)
+
+            if not handle:
+                raise RuntimeError("No se pudo leer el portapapeles.")
+
+            pointer = self._KERNEL32.GlobalLock(handle)
+
+            if not pointer:
+                raise RuntimeError("No se pudo bloquear memoria.")
+
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                self._KERNEL32.GlobalUnlock(handle)
+        finally:
+            if not self._USER32.CloseClipboard():
+                raise RuntimeError("Error al cerrar el portapapeles.")
+
+    def clear_clipboard(self) -> None:
+        """Clear the Windows clipboard."""
+        if not self._USER32.OpenClipboard(None):
+            raise RuntimeError("No se pudo abrir el portapapeles.")
+
+        try:
+            if not self._USER32.EmptyClipboard():
+                raise RuntimeError("No se pudo vaciar el portapapeles.")
+        finally:
+            if not self._USER32.CloseClipboard():
+                raise RuntimeError("Error al cerrar el portapapeles.")
+
+    def clipboard_has_text(self) -> bool:
+        """Return whether the Windows clipboard contains Unicode text."""
+        return bool(
+            self._USER32.IsClipboardFormatAvailable(self._CF_UNICODETEXT)
+        )
 
     def press_hotkey(self, keys: list[str]) -> None:
         """Press a keyboard shortcut."""
@@ -601,31 +726,16 @@ class WindowsDesktopController:
 
         return int(windows[0]["handle"])
 
-    def _set_clipboard_text(self, text: str) -> None:
-        """Put text into the Windows clipboard."""
-        if not self._USER32.OpenClipboard(None):
-            raise RuntimeError("No se pudo abrir el portapapeles.")
+    def _validate_clipboard_text(self, text: str) -> None:
+        """Validate text before writing it to the clipboard."""
+        if not isinstance(text, str):
+            raise TypeError("El contenido del portapapeles debe ser texto.")
 
-        try:
-            self._USER32.EmptyClipboard()
-            data = text.encode("utf-16-le") + b"\x00\x00"
-            handle = self._KERNEL32.GlobalAlloc(0x0042, len(data))
+        if text == "":
+            raise ValueError("No se puede copiar texto vacio.")
 
-            if not handle:
-                raise RuntimeError("No se pudo reservar memoria.")
-
-            pointer = self._KERNEL32.GlobalLock(handle)
-
-            if pointer is None:
-                raise RuntimeError("No se pudo bloquear memoria.")
-
-            ctypes.memmove(pointer, data, len(data))
-            self._KERNEL32.GlobalUnlock(handle)
-
-            if not self._USER32.SetClipboardData(13, handle):
-                raise RuntimeError("No se pudo escribir en el portapapeles.")
-        finally:
-            self._USER32.CloseClipboard()
+        if len(text) > self._max_clipboard_text_chars:
+            raise ValueError("Texto demasiado grande para el portapapeles.")
 
     def _key_code(self, key: str) -> int:
         """Return the Windows virtual-key code for a key."""

@@ -6,6 +6,7 @@ from tools.tool_context import ToolContext
 from use_cases.action_engine import (
     ActionEngineUseCase,
     ActionStep,
+    CopyAndPasteTextUseCase,
     PrepareAtlasWorkspaceUseCase,
 )
 from use_cases.desktop_interaction import DesktopInteractionUseCase
@@ -389,6 +390,76 @@ def test_prepare_atlas_workspace_uses_z_order_to_break_identical_vscode_titles(
 
     assert result.completed is True
     assert executor.calls[-1][1].parameters == {"handle": 10}
+
+
+def test_copy_and_paste_text_executes_steps_in_order() -> None:
+    executor = FakeToolExecutor()
+    use_case = CopyAndPasteTextUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("Hola Atlas", "Visual Studio Code")
+
+    assert result.completed is True
+    assert result.workflow_name == "copy_and_paste_text"
+    assert [call[0] for call in executor.calls] == [
+        "desktop.copy_clipboard_text",
+        "desktop.activate_window",
+        "desktop.press_hotkey",
+    ]
+    assert executor.calls[0][1].parameters == {"text": "Hola Atlas"}
+    assert executor.calls[1][1].parameters == {
+        "window_title": "Visual Studio Code"
+    }
+    assert executor.calls[2][1].parameters == {
+        "window_title": "Visual Studio Code",
+        "keys": ["ctrl", "v"],
+    }
+
+
+def test_copy_and_paste_text_stops_when_copy_fails() -> None:
+    executor = FakeToolExecutor()
+    executor.fail_tool = "desktop.copy_clipboard_text"
+    use_case = CopyAndPasteTextUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("Hola Atlas", "Visual Studio Code")
+
+    assert result.completed is False
+    assert result.stopped_early is True
+    assert [call[0] for call in executor.calls] == [
+        "desktop.copy_clipboard_text"
+    ]
+
+
+def test_copy_and_paste_text_stops_when_activation_fails() -> None:
+    executor = FakeToolExecutor()
+    executor.fail_tool = "desktop.activate_window"
+    use_case = CopyAndPasteTextUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("Hola Atlas", "Visual Studio Code")
+
+    assert result.completed is False
+    assert result.stopped_early is True
+    assert [call[0] for call in executor.calls] == [
+        "desktop.copy_clipboard_text",
+        "desktop.activate_window",
+    ]
+    assert result.step_results[-1].success is False
+
+
+def test_copy_and_paste_text_returns_structured_result() -> None:
+    executor = FakeToolExecutor()
+    use_case = CopyAndPasteTextUseCase(executor, ActionEngineUseCase())
+
+    result = use_case.execute("Hola Atlas", "Visual Studio Code")
+
+    assert result.total_steps == 3
+    assert result.executed_steps == 3
+    assert result.successful_steps == 3
+    assert result.failed_steps == 0
+    assert [step.step_name for step in result.step_results] == [
+        "Copiar texto al portapapeles",
+        "Activar ventana destino",
+        "Pegar contenido del portapapeles",
+    ]
 
 
 def test_desktop_interaction_interprets_prepare_commands(
