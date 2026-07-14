@@ -81,6 +81,7 @@ from use_cases.action_engine import (
     PrepareAtlasWorkspaceUseCase,
     RestartApplicationUseCase,
 )
+from use_cases.verified_text_file import CreateVerifiedTextFileUseCase
 from use_cases.wait_engine import WaitEngine
 
 
@@ -213,11 +214,17 @@ class Bootstrap:
             action_engine,
             wait_engine,
         )
+        create_verified_text_file = CreateVerifiedTextFileUseCase(
+            tool_executor,
+            action_engine,
+            wait_engine,
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
             prepare_atlas_workspace=prepare_atlas_workspace,
             restart_application=restart_application,
+            create_verified_text_file=create_verified_text_file,
         )
 
         # -----------------------

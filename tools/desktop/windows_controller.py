@@ -937,6 +937,7 @@ class WindowsDesktopController:
             ["tasklist", "/FO", "CSV", "/V"],
             capture_output=True,
             text=True,
+            errors="replace",
             shell=False,
         )
 
@@ -945,6 +946,7 @@ class WindowsDesktopController:
                 ["tasklist", "/FO", "CSV"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 shell=False,
             )
 

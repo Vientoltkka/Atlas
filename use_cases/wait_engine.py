@@ -128,6 +128,29 @@ class WaitEngine:
             cancelled,
         )
 
+    def wait_file_updated(
+        self,
+        path: str | Path,
+        *,
+        previous_mtime_ns: int | None,
+        timeout: float,
+        poll_interval: float,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> WaitResult:
+        """Wait until a file exists and has a newer modification timestamp."""
+        target = Path(self._require_text(str(path), "ruta de archivo"))
+        condition = "file_updated"
+        description = self._description(condition, str(target))
+
+        return self._wait(
+            condition,
+            description,
+            timeout,
+            poll_interval,
+            lambda: self._file_is_updated(target, previous_mtime_ns),
+            cancelled,
+        )
+
     def wait_application(
         self,
         application: str,
@@ -254,6 +277,20 @@ class WaitEngine:
         active_title = str(result.get("title", "")).lower()
         return title.lower() in active_title
 
+    def _file_is_updated(
+        self,
+        path: Path,
+        previous_mtime_ns: int | None,
+    ) -> bool:
+        """Return whether a file exists and is newer than the recorded state."""
+        if not path.exists() or not path.is_file():
+            return False
+
+        if previous_mtime_ns is None:
+            return True
+
+        return path.stat().st_mtime_ns > previous_mtime_ns
+
     def _require_text(
         self,
         value: str,
@@ -289,6 +326,7 @@ class WaitEngine:
             "active_window": "Esperando ventana activa",
             "file_exists": "Esperando archivo",
             "file_absent": "Esperando desaparicion de archivo",
+            "file_updated": "Esperando actualizacion de archivo",
         }
 
         return f"{labels[condition]}: {target}"

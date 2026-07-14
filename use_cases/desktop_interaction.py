@@ -12,6 +12,10 @@ from use_cases.action_engine import (
     PrepareAtlasWorkspaceUseCase,
     RestartApplicationUseCase,
 )
+from use_cases.verified_text_file import (
+    CreateVerifiedTextFileUseCase,
+    VerifiedTextFileAutomationResult,
+)
 from use_cases.wait_engine import WaitEngine, WaitResult
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
@@ -31,6 +35,7 @@ class DesktopInteractionUseCase:
         screenshots_dir: Path | None = None,
         prepare_atlas_workspace: PrepareAtlasWorkspaceUseCase | None = None,
         restart_application: RestartApplicationUseCase | None = None,
+        create_verified_text_file: CreateVerifiedTextFileUseCase | None = None,
         wait_engine: WaitEngine | None = None,
     ) -> None:
         self._executor = executor
@@ -42,6 +47,7 @@ class DesktopInteractionUseCase:
         )
         self._prepare_atlas_workspace = prepare_atlas_workspace
         self._restart_application = restart_application
+        self._create_verified_text_file = create_verified_text_file
         self._wait_engine = wait_engine or WaitEngine(executor)
 
     def execute(
@@ -59,6 +65,14 @@ class DesktopInteractionUseCase:
 
             if normalized.startswith("ejecuta "):
                 raise ValueError("No se aceptan comandos arbitrarios.")
+
+            verified_file_response = self._execute_verified_text_file_command(
+                normalized,
+                confirm,
+            )
+
+            if verified_file_response is not None:
+                return verified_file_response
 
             wait_response = self._execute_wait_command(text, normalized)
 
@@ -285,6 +299,71 @@ class DesktopInteractionUseCase:
 
         lines.append(f"Pasos ejecutados: {result.executed_steps}")
         lines.append(f"Pasos fallidos: {result.failed_steps}")
+
+        return "\n".join(lines)
+
+    def _execute_verified_text_file_command(
+        self,
+        normalized: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Execute the controlled verified text-file workflow."""
+        if normalized not in {
+            "crea un archivo de trabajo verificado",
+            "crea archivo verificado",
+            "create verified work file",
+        }:
+            return None
+
+        if self._create_verified_text_file is None:
+            raise RuntimeError("Workflow no disponible.")
+
+        if confirm is None:
+            raise RuntimeError("Confirmacion no disponible.")
+
+        relative_path = confirm("Ruta relativa del archivo: ").strip()
+        content = confirm("Contenido: ")
+        result = self._create_verified_text_file.execute(
+            workspace_root=self._project_root,
+            target_file=relative_path,
+            content=content,
+            confirm=confirm,
+        )
+
+        return self._format_verified_text_file_result(result)
+
+    def _format_verified_text_file_result(
+        self,
+        result: VerifiedTextFileAutomationResult,
+    ) -> str:
+        """Format a verified text-file result for the console flow."""
+        lines = [
+            "Automatizacion iniciada: create_verified_text_file",
+            f"Archivo: {result.target_file}",
+            f"Confirmado: {result.confirmed}",
+            f"Completada: {result.completed}",
+            f"Verificacion: {result.verification_passed}",
+            f"Rollback: {result.rolled_back}",
+            f"Rollback fallido: {result.rollback_failed}",
+            f"Reintentos utilizados: {result.retries_used}",
+            "",
+        ]
+
+        for step_result in result.step_results:
+            if step_result.success:
+                lines.append(f"{self._CONFIRMATION_PREFIX} {step_result.step_name}")
+                continue
+
+            lines.append(f"Error en {step_result.step_name}:")
+            lines.append(step_result.error or step_result.message)
+
+        if result.warnings:
+            lines.append("")
+            lines.append("Advertencias:")
+            lines.extend(f"- {warning}" for warning in result.warnings)
+
+        lines.append("")
+        lines.append(result.summary)
 
         return "\n".join(lines)
 

@@ -1264,12 +1264,13 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, shell=False):
+    def fake_run(args, capture_output, text, errors=None, shell=False):
         calls.append(
             {
                 "args": args,
                 "capture_output": capture_output,
                 "text": text,
+                "errors": errors,
                 "shell": shell,
             }
         )
@@ -1307,7 +1308,7 @@ def test_windows_controller_list_processes_falls_back_when_verbose_denied(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, shell=False):
+    def fake_run(args, capture_output, text, errors=None, shell=False):
         calls.append(args)
         return Denied() if len(calls) == 1 else Completed()
 
