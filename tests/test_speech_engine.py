@@ -120,9 +120,15 @@ def test_sounddevice_device_listing_uses_input_devices(monkeypatch: pytest.Monke
     capture = SoundDeviceAudioCapture()
     fake_sd = SimpleNamespace(
         default=SimpleNamespace(device=(1, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
         query_devices=lambda: [
             {"name": "Output", "max_input_channels": 0},
-            {"name": "Input", "max_input_channels": 2},
+            {
+                "name": "Input",
+                "max_input_channels": 2,
+                "hostapi": 0,
+                "default_samplerate": 44100,
+            },
         ],
     )
     monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
@@ -132,6 +138,156 @@ def test_sounddevice_device_listing_uses_input_devices(monkeypatch: pytest.Monke
     assert len(microphones) == 1
     assert microphones[0].index == 1
     assert microphones[0].is_default is True
+    assert microphones[0].host_api == "MME"
+    assert microphones[0].default_samplerate == 44100
+
+
+def test_prefers_physical_microphone_over_microsoft_mapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Asignador de sonido Microsoft - Input",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+            {
+                "name": "Microphone Array (Realtek(R) Audio)",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+        ],
+    )
+    monkeypatch.delenv("ATLAS_MICROPHONE_INDEX", raising=False)
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    microphone = capture.active_microphone()
+
+    assert microphone.index == 1
+    assert microphone.name == "Microphone Array (Realtek(R) Audio)"
+
+
+def test_manual_microphone_index_overrides_physical_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(1, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Asignador de sonido Microsoft - Input",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+            {
+                "name": "Microphone Array (Realtek(R) Audio)",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+        ],
+    )
+    monkeypatch.setenv("ATLAS_MICROPHONE_INDEX", "0")
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    microphone = capture.active_microphone()
+
+    assert microphone.index == 0
+
+
+def test_wdm_ks_microphone_is_rejected_before_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(11, None)),
+        query_hostapis=lambda: [{"name": "WDM-KS"}, {"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Varios micrófonos",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+            {
+                "name": "Microphone Array (Realtek(R) Audio)",
+                "max_input_channels": 2,
+                "hostapi": 1,
+            },
+        ],
+    )
+    monkeypatch.setenv("ATLAS_MICROPHONE_INDEX", "0")
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    with pytest.raises(RuntimeError) as error:
+        capture.validate_active_microphone()
+
+    message = str(error.value)
+    assert "WDM-KS" in message
+    assert "Prueba con 1 - Microphone Array" in message
+
+
+def test_microphone_index_1_compatible_opens_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    open_calls: list[int] = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            return np.zeros((1, 1), dtype=np.float32), False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(1, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {"name": "Asignador", "max_input_channels": 2, "hostapi": 0},
+            {
+                "name": "Microphone Array (Realtek(R) Audio)",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+        ],
+        InputStream=lambda **kwargs: (
+            open_calls.append(kwargs["device"]) or Stream()
+        ),
+    )
+    monkeypatch.setenv("ATLAS_MICROPHONE_INDEX", "1")
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    microphone = capture.validate_active_microphone()
+
+    assert microphone.index == 1
+    assert open_calls == [1]
+
+
+def test_list_microphones_marks_wdm_ks_as_not_openable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "WDM-KS"}],
+        query_devices=lambda: [
+            {"name": "Varios micrófonos", "max_input_channels": 2, "hostapi": 0},
+        ],
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    microphones = capture.list_microphones(include_open_status=True)
+
+    assert microphones[0].host_api == "WDM-KS"
+    assert microphones[0].can_open is False
+    assert "WDM-KS" in microphones[0].open_error
 
 
 def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
@@ -145,7 +301,7 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     silence = np.zeros((1, 1), dtype=np.float32)
     voice = np.ones((1, 1), dtype=np.float32) * 0.2
     result = capture.capture_from_chunks(
-        [silence, silence, voice, voice, silence, silence],
+        [silence, silence, voice, voice, voice, silence, silence],
         "Fake Mic",
     )
 
@@ -153,7 +309,7 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     assert result.sample_rate == 10
     assert result.microphone_name == "Fake Mic"
     assert result.samples.ndim == 1
-    assert result.duration_seconds == pytest.approx(0.4)
+    assert result.duration_seconds == pytest.approx(0.5)
 
 
 def test_capture_limits_max_duration() -> None:
@@ -170,6 +326,48 @@ def test_capture_limits_max_duration() -> None:
     assert "Duracion maxima alcanzada." in result.warnings
 
 
+def test_voice_above_dynamic_threshold_is_detected() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.2,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.3,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.01
+
+    result = capture.capture_from_chunks(
+        [silence, voice, voice, voice, silence, silence],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.no_speech_detected is False
+
+
+def test_long_phrase_is_detected_with_manual_voice_settings() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=5.0,
+        trailing_silence=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.3,
+    )
+    voice = np.ones(1, dtype=np.float32) * 0.012
+    silence = np.zeros(1, dtype=np.float32)
+
+    result = capture.capture_from_chunks(
+        [voice for _ in range(12)] + [silence for _ in range(10)],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.duration_seconds >= 0.3
+
+
 def test_detects_initial_silence_and_no_speech() -> None:
     capture = SoundDeviceAudioCapture(
         sample_rate=10,
@@ -182,6 +380,158 @@ def test_detects_initial_silence_and_no_speech() -> None:
 
     assert result.completed is False
     assert result.no_speech_detected is True
+
+
+def test_constant_silence_is_not_detected_as_voice() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=0.3,
+        chunk_duration=0.1,
+    )
+
+    result = capture.capture_from_chunks(
+        [np.ones(1, dtype=np.float32) * 0.002 for _ in range(5)],
+        "Fake Mic",
+    )
+
+    assert result.completed is False
+    assert result.no_speech_detected is True
+
+
+def test_calibrates_noise_threshold_from_ambient_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(sample_rate=10, chunk_duration=0.1)
+    chunks = [np.ones((1, 1), dtype=np.float32) * 0.002 for _ in range(5)]
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            return chunks.pop(0), False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_devices=lambda: [{"name": "Physical Mic", "max_input_channels": 1}],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.delenv("ATLAS_VOICE_RMS_THRESHOLD", raising=False)
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    threshold = capture.calibrate_noise_threshold(duration_seconds=0.5)
+
+    assert threshold == pytest.approx(0.006)
+    assert capture.speech_threshold == pytest.approx(0.006)
+
+
+def test_configured_rms_threshold_overrides_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture()
+    monkeypatch.setenv("ATLAS_VOICE_RMS_THRESHOLD", "0.012")
+
+    threshold = capture.calibrate_noise_threshold(duration_seconds=0.5)
+
+    assert threshold == pytest.approx(0.012)
+
+
+def test_microphone_probe_reports_rms_without_stt_or_tts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+    )
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            return np.ones((1, 1), dtype=np.float32) * 0.01, False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(1, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Microphone Array (Realtek(R) Audio)",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+        ],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    result = capture.test_microphone(0, duration_seconds=0.3)
+
+    assert result.error == ""
+    assert result.rms == pytest.approx(0.01)
+    assert result.voice_detected is True
+
+
+def test_capture_drains_buffer_before_reading_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.2,
+        minimum_audio_duration=0.25,
+    )
+    reads: list[float] = []
+    chunks = [
+        np.ones((1, 1), dtype=np.float32) * 0.5,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.zeros((1, 1), dtype=np.float32),
+        np.zeros((1, 1), dtype=np.float32),
+    ] + [np.zeros((1, 1), dtype=np.float32) for _ in range(200)]
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            chunk = chunks.pop(0)
+            reads.append(float(chunk[0][0]))
+            return chunk, False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(1, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Microphone Array",
+                "max_input_channels": 1,
+                "hostapi": 0,
+            }
+        ],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    result = capture.capture_phrase()
+
+    assert reads[0] == pytest.approx(0.5)
+    assert result.completed is True
+    assert result.samples[0] == pytest.approx(0.01)
 
 
 def test_cancels_with_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,6 +650,44 @@ def test_faster_whisper_temp_file_removed_on_success_and_error(tmp_path: Path) -
         provider.transcribe(np.zeros(10, dtype=np.float32), 16_000)
 
     assert not path.exists()
+
+
+def test_faster_whisper_is_configured_for_short_spanish_phrases(tmp_path: Path) -> None:
+    class Segment:
+        text = " hola "
+        avg_logprob = -0.2
+        no_speech_prob = 0.1
+
+    class Info:
+        language = "es"
+
+    class Model:
+        def __init__(self) -> None:
+            self.kwargs = {}
+
+        def transcribe(self, *_args, **kwargs):
+            self.kwargs = kwargs
+            return ([Segment()], Info())
+
+    model = Model()
+    provider = FasterWhisperSpeechToTextProvider()
+    path = tmp_path / "audio.wav"
+    provider._model = model
+    provider._write_temp_wav = lambda _samples, _rate: path
+    path.write_bytes(b"temp")
+
+    result = provider.transcribe(np.zeros(10, dtype=np.float32), 16_000)
+
+    assert result.text == "hola"
+    assert result.language == "es"
+    assert model.kwargs["language"] == "es"
+    assert model.kwargs["task"] == "transcribe"
+    assert model.kwargs["vad_filter"] is True
+    assert model.kwargs["condition_on_previous_text"] is False
+    assert model.kwargs["beam_size"] == 5
+    assert model.kwargs["temperature"] == 0
+    assert result.average_log_probability == -0.2
+    assert result.no_speech_probability == 0.1
 
 
 def test_interprets_spanish_and_english_listen_commands() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,6 +19,8 @@ def speech_result(
     cancelled: bool = False,
     no_speech: bool = False,
     warnings: tuple[str, ...] = (),
+    average_log_probability: float | None = None,
+    no_speech_probability: float | None = None,
 ) -> SpeechTranscriptionResult:
     return SpeechTranscriptionResult(
         text=text,
@@ -31,6 +34,8 @@ def speech_result(
         no_speech_detected=no_speech,
         warnings=warnings,
         summary="fake",
+        average_log_probability=average_log_probability,
+        no_speech_probability=no_speech_probability,
     )
 
 
@@ -50,6 +55,7 @@ class FakeSpeechEngine:
         self.sound_played = False
         self.cloud_calls = 0
         self.stream_closed = True
+        self.capture_settings_seen = []
 
     def warm_up(self) -> None:
         self.warm_up_calls += 1
@@ -70,8 +76,9 @@ class FakeSpeechEngine:
         self.prepared_before_wake = True
         return self.active_microphone()
 
-    def transcribe_once(self) -> SpeechTranscriptionResult:
+    def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
         self.transcribe_calls += 1
+        self.capture_settings_seen.append(capture_settings)
 
         if not self._results:
             return speech_result(
@@ -111,6 +118,40 @@ class FakeWakeWordEngine:
         )
 
 
+class FakeSpeechOutputEngine:
+    def __init__(
+        self,
+        fail: bool = False,
+        fail_once: bool = False,
+        events: list[str] | None = None,
+    ) -> None:
+        self.calls: list[str] = []
+        self.closed = False
+        self.fail = fail
+        self.fail_once = fail_once
+        self.warm_up_calls = 0
+        self.events = events
+
+    def speak(self, text: str) -> None:
+        if self.events is not None:
+            self.events.append(f"tts start:{text}")
+
+        self.calls.append(text)
+
+        if self.fail or self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("motor TTS roto")
+
+        if self.events is not None:
+            self.events.append(f"tts end:{text}")
+
+    def close(self) -> None:
+        self.closed = True
+
+    def warm_up(self) -> None:
+        self.warm_up_calls += 1
+
+
 class FakeClock:
     def __init__(self, values: list[float]) -> None:
         self._values = list(values)
@@ -126,20 +167,26 @@ class FakeClock:
 def make_use_case(
     speech: FakeSpeechEngine,
     wake: FakeWakeWordEngine | None = None,
+    output: FakeSpeechOutputEngine | None = None,
     clock=None,
     max_turns: int = 5,
     max_consecutive_no_speech: int = 2,
     max_session_duration: float = 600.0,
     conversation_idle_timeout: float = 25.0,
+    diagnostics_enabled: bool = True,
+    now_provider=None,
 ) -> VoiceConversationUseCase:
     return VoiceConversationUseCase(
         speech_engine=speech,
         wake_word_engine=wake or FakeWakeWordEngine(),
+        speech_output_engine=output,
         conversation_idle_timeout=conversation_idle_timeout,
         max_session_duration=max_session_duration,
         max_turns=max_turns,
         max_consecutive_no_speech=max_consecutive_no_speech,
+        diagnostics_enabled=diagnostics_enabled,
         clock=clock or (lambda: 0.0),
+        now_provider=now_provider,
         session_id_factory=lambda: "session-1",
     )
 
@@ -527,6 +574,663 @@ def test_privacy_no_audio_tts_sound_or_cloud() -> None:
     assert speech.tts_calls == 0
     assert speech.sound_played is False
     assert speech.cloud_calls == 0
+
+
+def test_manual_voice_speaks_after_valid_transcription_without_wake_word() -> None:
+    speech = FakeSpeechEngine([speech_result("hola atlas"), speech_result("salir")])
+    wake = FakeWakeWordEngine()
+    output = FakeSpeechOutputEngine()
+    processed: list[str] = []
+
+    result = make_use_case(speech, wake=wake, output=output).execute_manual(
+        process_text=lambda text: processed.append(text) or "respuesta hablada",
+    )
+
+    assert result.session.successful_turns == 1
+    assert wake.calls == 0
+    assert processed == [
+        "hola atlas\n\nResponde en español, de forma natural y concisa."
+    ]
+    assert output.calls == ["respuesta hablada"]
+    assert output.closed is True
+    assert output.warm_up_calls == 1
+    assert "respuesta hablada" in "\n".join(result.messages)
+
+
+def test_manual_voice_uses_shorter_turn_capture_settings() -> None:
+    speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("salir")])
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda _text: "respuesta",
+    )
+
+    assert result.session.successful_turns == 1
+    assert speech.capture_settings_seen
+    settings = speech.capture_settings_seen[0]
+    assert settings.max_duration == 10.0
+    assert settings.initial_silence_timeout == 5.0
+    assert settings.trailing_silence == 1.0
+    assert settings.minimum_audio_duration == 0.3
+
+
+def test_manual_voice_applies_calibrated_noise_threshold() -> None:
+    class CalibratingSpeech(FakeSpeechEngine):
+        def calibrate_noise_threshold(self, capture_settings=None, duration_seconds=0.5):
+            assert duration_seconds == 0.5
+            assert capture_settings.initial_silence_timeout == 5.0
+            return 0.011
+
+    speech = CalibratingSpeech([speech_result("pregunta"), speech_result("salir")])
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda _text: "respuesta",
+    )
+
+    assert result.session.successful_turns == 1
+    assert speech.capture_settings_seen[0].speech_threshold == 0.011
+
+
+def test_manual_voice_rejects_incompatible_wdm_ks_before_session_loop() -> None:
+    class WdmKsSpeech(FakeSpeechEngine):
+        def validate_active_microphone(self, capture_settings=None):
+            raise RuntimeError(
+                "Dispositivo incompatible para captura bloqueante: "
+                "11 - Varios micrófonos (WDM-KS). Prueba con 1 - Microphone Array (MME)."
+            )
+
+    speech = WdmKsSpeech([speech_result("no debe escucharse")])
+    output: list[str] = []
+
+    result = make_use_case(
+        speech,
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda _text: "unexpected",
+        status_sink=output.append,
+    )
+
+    assert result.session.ended_reason == "critical_error"
+    assert speech.transcribe_calls == 0
+    assert "Esperando voz..." not in output
+    assert len([message for message in result.messages if "WDM-KS" in message]) == 1
+
+
+def test_open_error_9999_is_reported_once_and_does_not_loop() -> None:
+    class BrokenSpeech(FakeSpeechEngine):
+        def validate_active_microphone(self, capture_settings=None):
+            raise RuntimeError(
+                "Fallo al abrir stream del microfono 11 - Varios micrófonos "
+                "(WDM-KS): Error opening InputStream: PaErrorCode -9999 "
+                "Blocking API not supported yet."
+            )
+
+    speech = BrokenSpeech([speech_result("no debe escucharse")])
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda _text: "unexpected",
+    )
+
+    messages = "\n".join(result.messages)
+    assert result.session.ended_reason == "critical_error"
+    assert result.session.consecutive_no_speech == 0
+    assert speech.transcribe_calls == 0
+    assert messages.count("PaErrorCode -9999") == 1
+
+
+def test_device_failure_does_not_count_as_timeout() -> None:
+    class BrokenSpeech(FakeSpeechEngine):
+        def validate_active_microphone(self, capture_settings=None):
+            raise RuntimeError("Fallo al abrir stream del microfono")
+
+    speech = BrokenSpeech([speech_result("", completed=False, no_speech=True)])
+
+    result = make_use_case(
+        speech,
+        max_consecutive_no_speech=1,
+    ).execute_manual(process_text=lambda _text: "unexpected")
+
+    assert result.session.ended_reason == "critical_error"
+    assert result.session.failed_turns == 0
+    assert result.session.consecutive_no_speech == 0
+
+
+def test_calibration_runs_once_and_second_phrase_reuses_same_threshold() -> None:
+    class CalibratingSpeech(FakeSpeechEngine):
+        def __init__(self, results):
+            super().__init__(results)
+            self.calibration_calls = 0
+
+        def calibrate_noise_threshold(self, capture_settings=None, duration_seconds=0.5):
+            self.calibration_calls += 1
+            return 0.011
+
+    speech = CalibratingSpeech(
+        [speech_result("primera"), speech_result("segunda"), speech_result("salir")]
+    )
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 2
+    assert speech.calibration_calls == 1
+    assert speech.capture_settings_seen[0].speech_threshold == 0.011
+    assert speech.capture_settings_seen[1].speech_threshold == 0.011
+
+
+def test_rejects_high_no_speech_probability_transcription() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result(
+                "nice",
+                average_log_probability=-1.5,
+                no_speech_probability=0.9,
+            ),
+            speech_result("salir"),
+        ]
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, max_consecutive_no_speech=2).execute_manual(
+        process_text=lambda text: processed.append(text) or "unexpected",
+    )
+
+    assert result.session.failed_turns == 1
+    assert processed == []
+    assert "No entendí la frase. Inténtalo de nuevo." in result.messages
+
+
+def test_trims_residual_punctuation_before_processing() -> None:
+    speech = FakeSpeechEngine([speech_result("  ¿pregunta valida?  "), speech_result("salir")])
+    prompts: list[str] = []
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta",
+    )
+
+    assert result.session.successful_turns == 1
+    assert result.session.transcript_history == ["pregunta valida"]
+    assert prompts == [
+        "pregunta valida\n\nResponde en español, de forma natural y concisa."
+    ]
+
+
+def test_rejects_low_value_noise_transcription() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result(
+                "thank you",
+                average_log_probability=-0.9,
+                no_speech_probability=0.4,
+            ),
+            speech_result("cancelar"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "unexpected",
+    )
+
+    assert result.session.successful_turns == 0
+    assert result.session.failed_turns == 1
+    assert output.calls == []
+
+
+def test_spanish_voice_question_adds_spanish_instruction() -> None:
+    speech = FakeSpeechEngine([speech_result("cuentame algo"), speech_result("salir")])
+    prompts: list[str] = []
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta en espanol",
+    )
+
+    assert result.session.successful_turns == 1
+    assert "Responde en español, de forma natural y concisa." in prompts[0]
+
+
+def test_explicit_english_voice_question_does_not_force_spanish() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("answer in English, say hello"), speech_result("salir")]
+    )
+    prompts: list[str] = []
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "Hello.",
+    )
+
+    assert result.session.response_history == ["Hello."]
+    assert prompts == ["answer in English, say hello"]
+
+
+def test_current_time_uses_mocked_clock_and_does_not_call_model() -> None:
+    speech = FakeSpeechEngine([speech_result("que hora es"), speech_result("salir")])
+    output = FakeSpeechOutputEngine()
+    model_calls = 0
+
+    def process(_text: str) -> str:
+        nonlocal model_calls
+        model_calls += 1
+        return "modelo no debe responder"
+
+    result = make_use_case(
+        speech,
+        output=output,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(process_text=process)
+
+    assert model_calls == 0
+    assert result.session.response_history == ["Son las seis y doce de la tarde."]
+    assert output.calls == ["Son las seis y doce de la tarde."]
+
+
+def test_mistranscribed_short_time_question_uses_mocked_clock_and_does_not_call_model() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("que ahora es ahora mismo atras"), speech_result("salir")]
+    )
+    model_calls = 0
+
+    def process(_text: str) -> str:
+        nonlocal model_calls
+        model_calls += 1
+        return "modelo no debe responder"
+
+    result = make_use_case(
+        speech,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(process_text=process)
+
+    assert model_calls == 0
+    assert result.session.response_history == ["Son las seis y doce de la tarde."]
+
+
+def test_current_date_uses_mocked_clock_and_does_not_call_model() -> None:
+    speech = FakeSpeechEngine([speech_result("cual es la fecha"), speech_result("salir")])
+    model_calls = 0
+
+    def process(_text: str) -> str:
+        nonlocal model_calls
+        model_calls += 1
+        return "modelo no debe responder"
+
+    result = make_use_case(
+        speech,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(process_text=process)
+
+    assert model_calls == 0
+    assert result.session.response_history == [
+        "Hoy es miércoles, 15 de julio de 2026."
+    ]
+
+
+def test_current_date_and_time_uses_mocked_clock_and_does_not_call_model() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("fecha y hora actual"), speech_result("salir")]
+    )
+    model_calls = 0
+
+    def process(_text: str) -> str:
+        nonlocal model_calls
+        model_calls += 1
+        return "modelo no debe responder"
+
+    result = make_use_case(
+        speech,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(process_text=process)
+
+    assert model_calls == 0
+    assert result.session.response_history == [
+        "Son las seis y doce de la tarde del miércoles, 15 de julio de 2026."
+    ]
+
+
+def test_three_consecutive_timeouts_end_manual_session() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("", completed=False, no_speech=True),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("", completed=False, no_speech=True),
+        ]
+    )
+
+    result = make_use_case(
+        speech,
+        max_consecutive_no_speech=3,
+    ).execute_manual(process_text=lambda _text: "unexpected")
+
+    assert result.session.ended_reason == "idle_timeout"
+    assert speech.transcribe_calls == 3
+
+
+def test_single_timeout_does_not_end_manual_session() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("", completed=False, no_speech=True),
+            speech_result("pregunta valida"),
+            speech_result("salir"),
+        ]
+    )
+
+    result = make_use_case(
+        speech,
+        max_consecutive_no_speech=3,
+    ).execute_manual(process_text=lambda _text: "respuesta")
+
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.successful_turns == 1
+
+
+def test_slow_isolated_timeouts_do_not_trigger_absolute_idle_before_counter() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("", completed=False, no_speech=True),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("salir"),
+        ]
+    )
+
+    result = make_use_case(
+        speech,
+        clock=FakeClock([0.0, 0.0, 0.0, 30.0, 31.0, 61.0, 62.0]),
+        conversation_idle_timeout=25.0,
+        max_consecutive_no_speech=3,
+    ).execute_manual(process_text=lambda _text: "unexpected")
+
+    assert result.session.ended_reason == "explicit_close"
+    assert speech.transcribe_calls == 3
+
+
+def test_valid_question_resets_timeout_counter() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("", completed=False, no_speech=True),
+            speech_result("pregunta valida"),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("salir"),
+        ]
+    )
+
+    result = make_use_case(
+        speech,
+        max_consecutive_no_speech=3,
+    ).execute_manual(process_text=lambda _text: "respuesta")
+
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.successful_turns == 1
+    assert result.session.failed_turns == 3
+
+
+def test_clean_console_when_diagnostics_disabled() -> None:
+    speech = FakeSpeechEngine([speech_result("que hora es"), speech_result("salir")])
+    output: list[str] = []
+
+    make_use_case(
+        speech,
+        diagnostics_enabled=False,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(
+        process_text=lambda _text: "modelo no debe responder",
+        status_sink=output.append,
+    )
+
+    assert output[:3] == [
+        "Esperando voz...",
+        "Tú: que hora es",
+        "Atlas: Son las seis y doce de la tarde.",
+    ]
+    assert "Transcripcion:" not in output
+    assert "Respuesta:" not in output
+    assert "Estado: inicializando." not in output
+
+
+def test_voice_resources_are_loaded_once_for_session() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("primera"), speech_result("segunda"), speech_result("salir")]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text}",
+    )
+
+    assert result.session.successful_turns == 2
+    assert speech.warm_up_calls == 1
+    assert output.warm_up_calls == 1
+
+
+def test_two_consecutive_responses_are_both_spoken_once() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("primera"), speech_result("segunda"), speech_result("salir")]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 2
+    assert output.calls == ["respuesta primera", "respuesta segunda"]
+
+
+def test_next_turn_starts_after_tts_finishes() -> None:
+    events: list[str] = []
+
+    class EventSpeech(FakeSpeechEngine):
+        def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+            events.append("listen")
+            return super().transcribe_once(capture_settings)
+
+    speech = EventSpeech(
+        [speech_result("primera"), speech_result("segunda"), speech_result("salir")]
+    )
+    output = FakeSpeechOutputEngine(events=events)
+
+    make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert events == [
+        "listen",
+        "tts start:respuesta primera",
+        "tts end:respuesta primera",
+        "listen",
+        "tts start:respuesta segunda",
+        "tts end:respuesta segunda",
+        "listen",
+    ]
+
+
+def test_tts_failure_allows_next_turn_to_speak() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("primera"), speech_result("segunda"), speech_result("salir")]
+    )
+    output = FakeSpeechOutputEngine(fail_once=True)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 2
+    assert output.calls == ["respuesta primera", "respuesta segunda"]
+    assert "TTS falló:" in "\n".join(result.messages)
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_tts_diagnostics_are_hidden_when_diagnostics_disabled() -> None:
+    speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("salir")])
+    output = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    make_use_case(
+        speech,
+        output=output,
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda _text: "respuesta",
+        status_sink=console.append,
+    )
+
+    assert "TTS iniciado" not in console
+    assert "TTS finalizado" not in console
+    assert output.calls == ["respuesta"]
+
+
+def test_tts_is_called_once_per_non_empty_response() -> None:
+    speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("terminar")])
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "respuesta unica",
+    )
+
+    assert result.session.successful_turns == 1
+    assert output.calls == ["respuesta unica"]
+
+
+def test_tts_is_not_called_for_empty_response() -> None:
+    speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("cancelar")])
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "",
+    )
+
+    assert result.session.successful_turns == 1
+    assert result.session.response_history == ["Respuesta vacia."]
+    assert output.calls == []
+
+
+@pytest.mark.parametrize("command", ["salir", "terminar", "cancelar"])
+def test_manual_voice_exits_by_spoken_commands(command: str) -> None:
+    speech = FakeSpeechEngine([speech_result(command)])
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "unexpected",
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.total_turns == 0
+    assert output.calls == []
+
+
+@pytest.mark.parametrize("command", ["salir", "terminar", "cancelar"])
+def test_manual_voice_exits_by_typed_commands(command: str) -> None:
+    speech = FakeSpeechEngine([speech_result("no debe escucharse")])
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "unexpected",
+        typed_input=lambda: command,
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert speech.transcribe_calls == 0
+    assert output.calls == []
+
+
+def test_manual_voice_timeout_does_not_call_tts() -> None:
+    speech = FakeSpeechEngine(
+        [speech_result("", completed=False, no_speech=True, warnings=("silencio",))]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(
+        speech,
+        output=output,
+        max_consecutive_no_speech=1,
+    ).execute_manual(process_text=lambda _text: "unexpected")
+
+    assert result.session.ended_reason == "idle_timeout"
+    assert output.calls == []
+
+
+def test_tts_error_keeps_textual_flow_alive() -> None:
+    speech = FakeSpeechEngine([speech_result("primera"), speech_result("terminar")])
+    output = FakeSpeechOutputEngine(fail=True)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text}",
+    )
+
+    messages = "\n".join(result.messages)
+    assert result.session.successful_turns == 1
+    assert "respuesta primera" in messages
+    assert "TTS falló:" in messages
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_timeout_counter_starts_after_tts_finishes() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("primera"),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(
+        speech,
+        output=output,
+        clock=FakeClock([0.0, 0.0, 0.0, 100.0, 101.0, 102.0, 103.0]),
+        conversation_idle_timeout=25.0,
+        max_consecutive_no_speech=3,
+    ).execute_manual(process_text=lambda _text: "respuesta")
+
+    assert result.session.ended_reason == "explicit_close"
+    assert output.calls == ["respuesta"]
+
+
+def test_voice_response_removes_internal_json_block_before_print_and_tts() -> None:
+    speech = FakeSpeechEngine([speech_result("muestra formato"), speech_result("salir")])
+    output = FakeSpeechOutputEngine()
+    raw_response = "\n".join(
+        [
+            "Es hora de la respuesta del sistema; aqui tienes el formato actual:",
+            "",
+            "```json",
+            '{ "time": "14:59" }',
+            "```",
+        ]
+    )
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: raw_response,
+    )
+
+    messages = "\n".join(result.messages)
+    assert "respuesta del sistema" not in messages
+    assert "```json" not in messages
+    assert result.session.response_history == ["Hora: 14:59."]
+    assert output.calls == ["Hora: 14:59."]
+
+
+def test_manual_voice_processes_second_question_in_same_session() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("primera pregunta"),
+            speech_result("segunda pregunta"),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.transcript_history == [
+        "primera pregunta",
+        "segunda pregunta",
+    ]
+    assert output.calls == [
+        "respuesta primera pregunta",
+        "respuesta segunda pregunta",
+    ]
 
 
 def test_real_wake_word_engine_can_detect_without_capturing_phrase() -> None:

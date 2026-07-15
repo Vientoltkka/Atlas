@@ -1,5 +1,6 @@
 """Bootstrap module for Atlas."""
 
+import os
 from pathlib import Path
 
 from agents.chat_agent import ChatAgent
@@ -89,6 +90,7 @@ from use_cases.speech_engine import (
     SpeechEngineUseCase,
     SpeechInteractionUseCase,
 )
+from use_cases.speech_output_engine import Pyttsx3SpeechOutputEngine
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import (
     OpenWakeWordProvider,
@@ -235,6 +237,7 @@ class Bootstrap:
             SoundDeviceAudioCapture(),
             FasterWhisperSpeechToTextProvider(),
         )
+        speech_output_engine = Pyttsx3SpeechOutputEngine.from_environment()
         speech_interaction = SpeechInteractionUseCase(speech_engine)
         wake_word_interaction = WakeWordInteractionUseCase(
             WakeWordEngine(
@@ -253,10 +256,17 @@ class Bootstrap:
                 timeout_seconds=30.0,
                 capture_phrase_after_detection=False,
             ),
+            speech_output_engine=speech_output_engine,
             conversation_idle_timeout=25.0,
             max_session_duration=600.0,
             max_turns=20,
-            max_consecutive_no_speech=2,
+            max_consecutive_no_speech=_read_int(
+                "ATLAS_VOICE_MAX_CONSECUTIVE_TIMEOUTS",
+                3,
+                minimum=1,
+                maximum=10,
+            ),
+            diagnostics_enabled=_read_bool("ATLAS_VOICE_DIAGNOSTICS", False),
         )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
@@ -316,3 +326,34 @@ class Bootstrap:
             wake_word_interaction=wake_word_interaction,
             voice_conversation=voice_conversation,
         )
+
+
+def _read_int(
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+
+    return min(max(value, minimum), maximum)
+
+
+def _read_bool(
+    name: str,
+    default: bool,
+) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+
+    if not raw:
+        return default
+
+    return raw in {"1", "true", "yes", "s", "si", "sí"}

@@ -130,6 +130,33 @@ class AtlasOrchestrator:
 
             self._print_atlas(response)
 
+    def start_voice(self) -> None:
+        """Start manual voice conversation mode without wake word."""
+        print("Atlas iniciado en modo voz.")
+        print()
+
+        if self._voice_conversation is None:
+            print("Atlas:")
+            print("Modo de voz no disponible.")
+            print()
+            return
+
+        self._voice_conversation.execute_manual(
+            process_text=lambda text: self.process_prompt(
+                text,
+                confirm=input,
+            ),
+            status_sink=print,
+            typed_input=self._read_typed_exit_command,
+        )
+
+    def list_microphones(self) -> str:
+        """Return available input microphones."""
+        if self._speech_interaction is None:
+            return "Modo de voz no disponible."
+
+        return self._speech_interaction.list_microphones_text()
+
     def process_prompt(
         self,
         prompt: str,
@@ -210,3 +237,26 @@ class AtlasOrchestrator:
         print("Atlas:")
         print(response)
         print()
+
+    def _read_typed_exit_command(self) -> str | None:
+        """Read a typed exit command when a console line is already available."""
+        try:
+            import msvcrt
+        except ImportError:
+            return None
+
+        if not msvcrt.kbhit():
+            return None
+
+        characters: list[str] = []
+
+        while msvcrt.kbhit():
+            character = msvcrt.getwch()
+
+            if character in ("\r", "\n"):
+                break
+
+            characters.append(character)
+
+        text = "".join(characters).strip()
+        return text or None

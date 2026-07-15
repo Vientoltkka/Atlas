@@ -15,3 +15,13 @@ class Atlas:
         """Start Atlas."""
 
         self._orchestrator.start()
+
+    def start_voice(self) -> None:
+        """Start Atlas in manual voice mode."""
+
+        self._orchestrator.start_voice()
+
+    def list_microphones(self) -> str:
+        """Return available input microphones."""
+
+        return self._orchestrator.list_microphones()
