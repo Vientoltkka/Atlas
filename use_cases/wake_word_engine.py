@@ -72,6 +72,8 @@ class OpenWakeWordProvider:
         self._sensitivity = sensitivity
         self._model_factory = model_factory
         self._model = None
+        self._model_name: str | None = None
+        self._last_scores: dict[str, float] = {}
 
     @classmethod
     def from_environment(cls) -> "OpenWakeWordProvider":
@@ -102,26 +104,47 @@ class OpenWakeWordProvider:
             wakeword_models=[str(model_path)],
             inference_framework="onnx",
         )
+        self._model_name = model_path.stem
 
     def process_frame(
         self,
         pcm_frame: np.ndarray,
     ) -> bool:
         """Process one mono PCM frame using acoustic score only."""
-        self._ensure_initialized()
-        frame = np.asarray(pcm_frame, dtype=np.int16).reshape(-1)
         _model_path, sensitivity = self._validated_configuration()
+        return self.score_frame(pcm_frame) >= sensitivity
 
-        if len(frame) == 0:
-            raise RuntimeError("Frame PCM invalido para openWakeWord.")
-
+    def score_frame(
+        self,
+        pcm_frame: np.ndarray,
+    ) -> float:
+        """Return the configured custom model score for one PCM frame."""
+        self._ensure_initialized()
+        frame = self._validated_pcm_frame(pcm_frame)
         predictions = self._model.predict(frame)
 
         if not isinstance(predictions, dict):
             raise RuntimeError("Prediccion invalida de openWakeWord.")
 
-        scores = [float(score) for score in predictions.values()]
-        return bool(scores) and max(scores) >= sensitivity
+        self._last_scores = {
+            str(name): float(score)
+            for name, score in predictions.items()
+        }
+
+        if self._model_name in self._last_scores:
+            return self._last_scores[self._model_name]
+
+        if len(self._last_scores) == 1:
+            return next(iter(self._last_scores.values()))
+
+        raise RuntimeError(
+            "openWakeWord no devolvio una puntuacion para el modelo configurado."
+        )
+
+    @property
+    def last_scores(self) -> dict[str, float]:
+        """Latest raw openWakeWord scores by model name."""
+        return dict(self._last_scores)
 
     def close(self) -> None:
         """Reset provider state without unloading the model."""
@@ -172,6 +195,23 @@ class OpenWakeWordProvider:
             ) from error
 
         return Model
+
+    def _validated_pcm_frame(
+        self,
+        pcm_frame: np.ndarray,
+    ) -> np.ndarray:
+        if not isinstance(pcm_frame, np.ndarray):
+            raise RuntimeError("Frame PCM invalido para openWakeWord.")
+
+        if pcm_frame.dtype != np.int16:
+            raise RuntimeError("Frame PCM invalido para openWakeWord.")
+
+        frame = pcm_frame.reshape(-1)
+
+        if len(frame) == 0:
+            raise RuntimeError("Frame PCM invalido para openWakeWord.")
+
+        return frame
 
     def _ensure_initialized(self) -> None:
         if self._model is None:

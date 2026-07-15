@@ -225,8 +225,8 @@ def test_openwakeword_initializes_once_and_detects_above_threshold(tmp_path: Pat
     )
 
     assert provider._model is None
-    assert provider.process_frame(np.array([[1], [2], [3]], dtype=np.float32)) is True
     assert provider.process_frame(np.array([1, 2, 3], dtype=np.int16)) is True
+    assert provider.last_scores == {"Atlas": 0.56}
     assert provider._model is fake
     assert created == 1
     assert fake.frames[0].dtype == np.int16
@@ -270,6 +270,45 @@ def test_openwakeword_rejects_empty_or_invalid_prediction(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="Prediccion invalida"):
         provider.process_frame(np.ones(1280, dtype=np.int16))
+
+
+def test_openwakeword_rejects_invalid_pcm_format(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    class FakeModel:
+        def predict(self, _frame):  # pragma: no cover - must not be reached
+            raise AssertionError("invalid PCM should be rejected before predict")
+
+    provider = OpenWakeWordProvider(
+        model,
+        model_factory=lambda **_kwargs: FakeModel(),
+    )
+
+    with pytest.raises(RuntimeError, match="Frame PCM invalido"):
+        provider.process_frame(np.ones(1280, dtype=np.float32))
+
+    with pytest.raises(RuntimeError, match="Frame PCM invalido"):
+        provider.process_frame([0] * 1280)
+
+
+def test_openwakeword_requires_score_for_configured_custom_model(tmp_path: Path) -> None:
+    model = tmp_path / "Atlas.onnx"
+    model.write_bytes(b"model")
+
+    class FakeModel:
+        def predict(self, _frame):
+            return {"Other": 0.99, "Noise": 0.01}
+
+    provider = OpenWakeWordProvider(
+        model,
+        model_factory=lambda **_kwargs: FakeModel(),
+    )
+
+    with pytest.raises(RuntimeError, match="modelo configurado"):
+        provider.process_frame(np.ones(1280, dtype=np.int16))
+
+    assert provider.last_scores == {"Other": 0.99, "Noise": 0.01}
 
 
 def test_detects_wake_word_from_provider_and_closes_stream_and_provider() -> None:
