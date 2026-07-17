@@ -7,8 +7,8 @@ import sys
 from typing import Any
 
 from bootstrap.bootstrap import Bootstrap
-from tools.argument_schema import ArgumentValidationError
 from tools.intent_selector import ToolIntent
+from tools.single_tool_runner import ToolRunResult
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,30 +29,11 @@ def main(argv: list[str] | None = None) -> int:
 
     runner = Bootstrap.build_single_tool_runner()
     intent = ToolIntent(action=action, arguments=arguments)
+    outcome = runner.run(intent)
 
-    try:
-        result = runner.run(intent)
-    except ArgumentValidationError as error:
-        print("Validation error")
-        print(f"Intent: {error.intent_action}")
-        print(f"Field: {error.field}")
-        print(f"Reason: {error.reason}")
-        print("Executed: false")
-        return 1
+    _print_outcome(outcome)
 
-    request = runner.last_request
-    if request is None:
-        raise RuntimeError("Single tool runner finished without a validated request.")
-
-    print(f"Intent: {request.intent.action}")
-    print(f"Selected tool: {request.tool_name}")
-    print(f"Validated: {str(request.validated).lower()}")
-    print("Executed: true")
-    print(f"Execution count: {runner.execution_count}")
-    print("Result:")
-    print(_console_text(result))
-
-    return 0
+    return 0 if outcome.success else 1
 
 
 def _parse_arguments(raw_arguments: str) -> Any:
@@ -75,6 +56,25 @@ def _console_text(value: Any) -> str:
     text = str(value)
     encoding = sys.stdout.encoding or "utf-8"
     return text.encode(encoding, errors="backslashreplace").decode(encoding)
+
+
+def _print_outcome(outcome: ToolRunResult) -> None:
+    print(f"Intent: {outcome.intent.action}")
+    print(f"Tool: {outcome.tool_name or ''}")
+    print(f"Success: {str(outcome.success).lower()}")
+    print(f"Status: {outcome.status}")
+    print(f"Executed: {str(outcome.executed).lower()}")
+    print(f"Execution count: {outcome.execution_count}")
+
+    if outcome.success:
+        print("Result:")
+        print(_console_text(outcome.result))
+        return
+
+    if outcome.error_field:
+        print(f"Field: {outcome.error_field}")
+
+    print(f"Error: {outcome.error_message or ''}")
 
 
 if __name__ == "__main__":
