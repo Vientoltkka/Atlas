@@ -18,6 +18,7 @@ from memory.conversation import ConversationMemory
 from models.prompt_client import PromptClient
 
 from tools.executor import ToolExecutor
+from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 
 from tools.filesystem.read_file_tool import ReadFileTool
@@ -152,6 +153,30 @@ class Bootstrap:
         tool_registry.register(CloseWindowTool())
 
         return tool_registry
+
+    @staticmethod
+    def build_tool_selector(
+        tool_registry: ToolRegistry | None = None,
+    ) -> ToolSelector:
+        """Build the deterministic selector for supported tool intents."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        intent_registry = ToolIntentRegistry()
+
+        for action, tool_name in (
+            ("file.read", "read_file"),
+            ("file.write", "write_file"),
+            ("directory.list", "list_directory"),
+            ("project.tree", "project_tree"),
+            ("desktop.application.open", "desktop.open_application"),
+            ("desktop.file.open", "desktop.open_file"),
+            ("desktop.text.type", "desktop.type_text"),
+            ("desktop.hotkey.press", "desktop.press_hotkey"),
+            ("desktop.windows.list", "desktop.list_windows"),
+        ):
+            if registry.exists(tool_name):
+                intent_registry.register(action, tool_name)
+
+        return ToolSelector(registry, intent_registry)
 
     @staticmethod
     def build() -> AtlasOrchestrator:
