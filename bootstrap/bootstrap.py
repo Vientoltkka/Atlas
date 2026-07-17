@@ -27,6 +27,7 @@ from tools.argument_schema import (
 )
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
+from tools.single_tool_runner import SingleToolRunner
 
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
@@ -316,6 +317,22 @@ class Bootstrap:
         """Build the validator for selected tool intent arguments."""
         return ArgumentValidator(
             schema_registry or Bootstrap.build_argument_schema_registry()
+        )
+
+    @staticmethod
+    def build_single_tool_runner(
+        tool_registry: ToolRegistry | None = None,
+        selector: ToolSelector | None = None,
+        validator: ArgumentValidator | None = None,
+        executor: ToolExecutor | None = None,
+    ) -> SingleToolRunner:
+        """Build the coordinator for one selected, validated tool execution."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+
+        return SingleToolRunner(
+            selector or Bootstrap.build_tool_selector(registry),
+            validator or Bootstrap.build_argument_validator(),
+            executor or ToolExecutor(registry),
         )
 
     @staticmethod
