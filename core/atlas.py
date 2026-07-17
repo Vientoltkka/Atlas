@@ -21,6 +21,11 @@ class Atlas:
 
         self._orchestrator.start_voice()
 
+    def start_assistant(self) -> None:
+        """Start Atlas in permanent assistant mode."""
+
+        self._orchestrator.start_assistant()
+
     def list_microphones(self) -> str:
         """Return available input microphones."""
 

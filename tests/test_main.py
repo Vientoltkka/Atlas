@@ -15,6 +15,9 @@ def test_main_starts_text_mode_by_default(monkeypatch) -> None:
         def start_voice(self) -> None:
             calls.append("voice")
 
+        def start_assistant(self) -> None:
+            calls.append("assistant")
+
     monkeypatch.setattr(main, "Atlas", FakeAtlas)
     monkeypatch.setattr(sys, "argv", ["main.py"])
 
@@ -33,12 +36,36 @@ def test_main_starts_voice_mode_with_flag(monkeypatch) -> None:
         def start_voice(self) -> None:
             calls.append("voice")
 
+        def start_assistant(self) -> None:
+            calls.append("assistant")
+
     monkeypatch.setattr(main, "Atlas", FakeAtlas)
     monkeypatch.setattr(sys, "argv", ["main.py", "--voice"])
 
     main.main()
 
     assert calls == ["voice"]
+
+
+def test_main_starts_assistant_mode_with_flag(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeAtlas:
+        def start(self) -> None:
+            calls.append("text")
+
+        def start_voice(self) -> None:
+            calls.append("voice")
+
+        def start_assistant(self) -> None:
+            calls.append("assistant")
+
+    monkeypatch.setattr(main, "Atlas", FakeAtlas)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--assistant"])
+
+    main.main()
+
+    assert calls == ["assistant"]
 
 
 def test_main_lists_microphones(monkeypatch, capsys) -> None:
@@ -53,6 +80,9 @@ def test_main_lists_microphones(monkeypatch, capsys) -> None:
 
         def start_voice(self) -> None:
             calls.append("voice")
+
+        def start_assistant(self) -> None:
+            calls.append("assistant")
 
         def list_microphones(self) -> str:
             calls.append("list")

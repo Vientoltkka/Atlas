@@ -278,6 +278,7 @@ class SoundDeviceAudioCapture:
         "microsoft sound mapper",
     )
     _BLOCKING_UNSUPPORTED_HOST_APIS = {"wdm-ks"}
+    _DEFAULT_INPUT_SIGNAL_RMS = 0.0005
 
     def __init__(
         self,
@@ -527,10 +528,11 @@ class SoundDeviceAudioCapture:
         """Capture one phrase from the selected microphone."""
         original = self._snapshot_settings()
         self._apply_settings(settings)
+        self._apply_debug_timeouts()
 
         try:
-            microphone = self.selected_or_default_microphone()
             sd = self._sounddevice()
+            microphone = self._select_microphone_with_audio(sd)
             frames = int(self.sample_rate * self.chunk_duration)
 
             try:
@@ -557,8 +559,123 @@ class SoundDeviceAudioCapture:
                 raise RuntimeError(
                     f"Fallo al abrir o leer el stream del microfono: {error}"
                 ) from error
+        except KeyboardInterrupt:
+            return AudioCaptureResult(
+                samples=np.array([], dtype=np.float32),
+                sample_rate=self.sample_rate,
+                duration_seconds=0.0,
+                microphone_name="desconocido",
+                completed=False,
+                cancelled=True,
+                warnings=("captura cancelada por el usuario",),
+            )
         finally:
             self._restore_settings(original)
+
+    def _apply_debug_timeouts(self) -> None:
+        if self.initial_silence_timeout < 5.0:
+            self.initial_silence_timeout = 6.0
+
+        if self.max_duration < self.initial_silence_timeout:
+            self.max_duration = max(8.0, self.initial_silence_timeout + 1.0)
+
+    def _select_microphone_with_audio(
+        self,
+        sd,
+    ) -> MicrophoneInfo:
+        microphone = self.selected_or_default_microphone()
+        diagnostic = self._probe_microphone_audio(sd, microphone)
+        self._print_capture_diagnostic(microphone, diagnostic)
+
+        if diagnostic["has_audio"]:
+            return microphone
+
+        alternative = self._first_microphone_with_audio(sd, exclude_index=microphone.index)
+
+        if alternative is None:
+            print("Audio de micrófono: no se encontró otro dispositivo con señal.")
+            return microphone
+
+        alternative_microphone, alternative_diagnostic = alternative
+        self._selected_index = alternative_microphone.index
+        print(
+            "Cambiando automáticamente al dispositivo de entrada: "
+            f"{alternative_microphone.index} - {alternative_microphone.name}"
+        )
+        self._print_capture_diagnostic(alternative_microphone, alternative_diagnostic)
+        return alternative_microphone
+
+    def _first_microphone_with_audio(
+        self,
+        sd,
+        exclude_index: int,
+    ) -> tuple[MicrophoneInfo, dict[str, float | bool]] | None:
+        for microphone in self.list_microphones():
+            if microphone.index == exclude_index or self._is_blocking_unsupported(microphone):
+                continue
+
+            diagnostic = self._probe_microphone_audio(sd, microphone)
+
+            if diagnostic["has_audio"]:
+                return microphone, diagnostic
+
+        return None
+
+    def _probe_microphone_audio(
+        self,
+        sd,
+        microphone: MicrophoneInfo,
+    ) -> dict[str, float | bool]:
+        if self._is_blocking_unsupported(microphone):
+            return {"rms": 0.0, "has_audio": False}
+
+        frames = max(1, int(self.sample_rate * self.chunk_duration))
+        probe_chunks = max(1, math.ceil(0.5 / self.chunk_duration))
+        rms_values: list[float] = []
+
+        try:
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="float32",
+                device=microphone.index,
+            ) as stream:
+                for _ in range(probe_chunks):
+                    data, _overflowed = stream.read(frames)
+                    rms_values.append(self._rms(self._mono_float32(data)))
+        except Exception:
+            return {"rms": 0.0, "has_audio": False}
+
+        rms = max(rms_values) if rms_values else 0.0
+        return {
+            "rms": rms,
+            "has_audio": rms >= self._input_signal_threshold(),
+        }
+
+    def _print_capture_diagnostic(
+        self,
+        microphone: MicrophoneInfo,
+        diagnostic: dict[str, float | bool],
+    ) -> None:
+        host_api = f" ({microphone.host_api})" if microphone.host_api else ""
+        print(
+            "Dispositivo de entrada utilizado: "
+            f"{microphone.index} - {microphone.name}{host_api}"
+        )
+        print(f"Frecuencia de muestreo: {self.sample_rate} Hz")
+        print(f"Nivel RMS del audio recibido: {float(diagnostic['rms']):.6f}")
+        print(
+            "Audio entrando por el micrófono: "
+            f"{'sí' if diagnostic['has_audio'] else 'no'}"
+        )
+
+    def _input_signal_threshold(self) -> float:
+        return _read_float(
+            "ATLAS_AUDIO_INPUT_MIN_RMS",
+            self._DEFAULT_INPUT_SIGNAL_RMS,
+            0.0,
+            0.05,
+        )
 
     def capture_from_chunks(
         self,

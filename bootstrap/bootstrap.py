@@ -77,6 +77,7 @@ from use_cases.plan_refactoring import PlanRefactoringUseCase
 from use_cases.rename_symbol import RenameSymbolUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
+from use_cases.permanent_assistant import PermanentAssistantUseCase
 from use_cases.action_engine import (
     ActionEngineUseCase,
     PrepareAtlasWorkspaceUseCase,
@@ -87,10 +88,12 @@ from use_cases.wait_engine import WaitEngine
 from use_cases.speech_engine import (
     FasterWhisperSpeechToTextProvider,
     SoundDeviceAudioCapture,
+    SpeechCaptureSettings,
     SpeechEngineUseCase,
     SpeechInteractionUseCase,
 )
 from use_cases.speech_output_engine import Pyttsx3SpeechOutputEngine
+from use_cases.stt_wake_word_engine import SttWakeWordEngine
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import (
     OpenWakeWordProvider,
@@ -268,6 +271,16 @@ class Bootstrap:
             ),
             diagnostics_enabled=_read_bool("ATLAS_VOICE_DIAGNOSTICS", False),
         )
+        permanent_assistant = PermanentAssistantUseCase(
+            wake_word_engine=_assistant_wake_word_engine(speech_engine),
+            voice_conversation=voice_conversation,
+            max_consecutive_errors=_read_int(
+                "ATLAS_ASSISTANT_MAX_CONSECUTIVE_ERRORS",
+                5,
+                minimum=1,
+                maximum=20,
+            ),
+        )
         desktop_interaction = DesktopInteractionUseCase(
             tool_executor,
             project_root=Path(".").resolve(),
@@ -325,6 +338,7 @@ class Bootstrap:
             speech_interaction=speech_interaction,
             wake_word_interaction=wake_word_interaction,
             voice_conversation=voice_conversation,
+            permanent_assistant=permanent_assistant,
         )
 
 
@@ -357,3 +371,73 @@ def _read_bool(
         return default
 
     return raw in {"1", "true", "yes", "s", "si", "sí"}
+
+
+def _assistant_wake_word_engine(
+    speech_engine: SpeechEngineUseCase,
+):
+    model_path = os.getenv("ATLAS_WAKE_WORD_MODEL_PATH", "").strip()
+
+    if model_path:
+        resolved_model_path = Path(model_path).expanduser()
+
+        if resolved_model_path.suffix.lower() == ".onnx" and resolved_model_path.is_file():
+            return WakeWordEngine(
+                speech_engine,
+                provider=OpenWakeWordProvider.from_environment(),
+                wake_word="Atlas",
+                timeout_seconds=30.0,
+                capture_phrase_after_detection=False,
+            )
+
+    return SttWakeWordEngine(
+        speech_engine,
+        wake_word="Atlas",
+        capture_settings=SpeechCaptureSettings(
+            max_duration=_read_float(
+                "ATLAS_ASSISTANT_WAKE_STT_MAX_DURATION",
+                2.2,
+                minimum=0.8,
+                maximum=6.0,
+            ),
+            initial_silence_timeout=_read_float(
+                "ATLAS_ASSISTANT_WAKE_STT_INITIAL_SILENCE",
+                1.4,
+                minimum=0.3,
+                maximum=4.0,
+            ),
+            trailing_silence=_read_float(
+                "ATLAS_ASSISTANT_WAKE_STT_TRAILING_SILENCE",
+                0.45,
+                minimum=0.2,
+                maximum=2.0,
+            ),
+            chunk_duration=0.1,
+            speech_threshold=_read_float(
+                "ATLAS_ASSISTANT_WAKE_STT_RMS_THRESHOLD",
+                0.004,
+                minimum=0.001,
+                maximum=0.05,
+            ),
+            minimum_audio_duration=0.25,
+        ),
+    )
+
+
+def _read_float(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        return default
+
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+
+    return min(max(value, minimum), maximum)

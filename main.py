@@ -17,6 +17,11 @@ def main() -> None:
         help="Inicia Atlas en modo conversacion por voz sin wake word.",
     )
     parser.add_argument(
+        "--assistant",
+        action="store_true",
+        help="Inicia Atlas en modo asistente permanente con wake word.",
+    )
+    parser.add_argument(
         "--list-microphones",
         action="store_true",
         help="Lista los dispositivos de entrada de audio disponibles.",
@@ -40,6 +45,10 @@ def main() -> None:
 
     if args.voice:
         atlas.start_voice()
+        return
+
+    if args.assistant:
+        atlas.start_assistant()
         return
 
     atlas.start()

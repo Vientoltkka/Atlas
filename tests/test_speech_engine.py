@@ -497,6 +497,13 @@ def test_capture_drains_buffer_before_reading_phrase(
         np.ones((1, 1), dtype=np.float32) * 0.01,
         np.ones((1, 1), dtype=np.float32) * 0.01,
         np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
+        np.ones((1, 1), dtype=np.float32) * 0.01,
         np.zeros((1, 1), dtype=np.float32),
         np.zeros((1, 1), dtype=np.float32),
     ] + [np.zeros((1, 1), dtype=np.float32) for _ in range(200)]
@@ -532,6 +539,110 @@ def test_capture_drains_buffer_before_reading_phrase(
     assert reads[0] == pytest.approx(0.5)
     assert result.completed is True
     assert result.samples[0] == pytest.approx(0.01)
+
+
+def test_capture_prints_audio_diagnostics_and_switches_to_device_with_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.2,
+        minimum_audio_duration=0.25,
+    )
+    stream_reads: dict[int, int] = {0: 0, 1: 0}
+    opened_devices: list[int] = []
+
+    class Stream:
+        def __init__(self, device: int) -> None:
+            self._device = device
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            stream_reads[self._device] += 1
+
+            if self._device == 0:
+                return np.zeros((1, 1), dtype=np.float32), False
+
+            return np.ones((1, 1), dtype=np.float32) * 0.02, False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Silent Mic",
+                "max_input_channels": 1,
+                "hostapi": 0,
+            },
+            {
+                "name": "Live Mic",
+                "max_input_channels": 1,
+                "hostapi": 0,
+            },
+        ],
+        InputStream=lambda **kwargs: (
+            opened_devices.append(kwargs["device"]) or Stream(kwargs["device"])
+        ),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    result = capture.capture_phrase()
+
+    output = capsys.readouterr().out
+    assert result.completed is True
+    assert "Dispositivo de entrada utilizado: 0 - Silent Mic" in output
+    assert "Audio entrando por el micrófono: no" in output
+    assert "Cambiando automáticamente al dispositivo de entrada: 1 - Live Mic" in output
+    assert "Dispositivo de entrada utilizado: 1 - Live Mic" in output
+    assert "Frecuencia de muestreo: 10 Hz" in output
+    assert "Nivel RMS del audio recibido:" in output
+    assert opened_devices[0] == 0
+    assert 1 in opened_devices
+
+
+def test_capture_debug_timeout_is_raised_for_short_initial_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=2.0,
+        initial_silence_timeout=0.5,
+        chunk_duration=0.1,
+    )
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            return np.zeros((1, 1), dtype=np.float32), False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {"name": "Silent Mic", "max_input_channels": 1, "hostapi": 0}
+        ],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    result = capture.capture_phrase()
+
+    assert result.no_speech_detected is True
+    assert result.duration_seconds == pytest.approx(6.0, abs=0.11)
 
 
 def test_cancels_with_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

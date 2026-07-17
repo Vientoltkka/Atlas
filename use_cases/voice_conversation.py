@@ -310,6 +310,160 @@ class VoiceConversationUseCase:
 
         return VoiceConversationResult(session=session, messages=messages)
 
+    def warm_up_resources(self) -> None:
+        """Load speech and TTS resources for a long-running assistant session."""
+        self._active_microphone()
+        self._validate_active_microphone()
+        self._calibrate_turn_capture_settings()
+        self._warm_up()
+
+    def close_resources(self) -> None:
+        """Release speech and TTS resources owned by the voice flow."""
+        self._close_resources()
+
+    def discard_residual_audio(self) -> None:
+        """Open and drain the input stream before returning to wake-word mode."""
+        self._prepare_turn_stream()
+
+    def is_close_command(
+        self,
+        text: str,
+    ) -> bool:
+        """Return True when text asks Atlas to stop listening."""
+        return self._is_close_command(text)
+
+    def execute_assistant_turn(
+        self,
+        process_text: Callable[[str], str],
+        status_sink: Callable[[str], None] | None = None,
+        initial_text: str | None = None,
+    ) -> VoiceConversationResult:
+        """Process one assistant turn after an external wake-word detection."""
+        messages: list[str] = []
+
+        def emit(message: str, diagnostic: bool = True) -> None:
+            messages.append(message)
+
+            if status_sink is not None and (self._diagnostics_enabled or not diagnostic):
+                status_sink(message)
+
+        session = VoiceConversationSession(
+            session_id=self._session_id_factory(),
+            started_at=self._clock(),
+        )
+
+        if initial_text is not None and initial_text.strip():
+            return self._execute_assistant_text_turn(
+                session,
+                initial_text,
+                process_text,
+                emit,
+            )
+
+        transcription = self._transcribe_turn()
+
+        if transcription.cancelled:
+            self._end_session(session, "cancelled", "Conversacion cancelada.")
+            emit("Conversacion cancelada.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
+        if transcription.no_speech_detected:
+            session.failed_turns += 1
+            session.consecutive_no_speech += 1
+            self._end_session(session, "no_speech", "No se detecto ninguna frase.")
+            emit("No se detecto ninguna frase.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
+        if not transcription.completed:
+            session.failed_turns += 1
+            error = "; ".join(transcription.warnings) or transcription.summary
+            reason = "critical_error" if self._is_critical_error(error) else "recoverable_error"
+            self._end_session(
+                session,
+                reason,
+                f"No se pudo procesar el turno: {error}",
+            )
+            emit(session.summary, diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
+        text = self._accepted_transcription_text(
+            transcription,
+            trim_edge_punctuation=True,
+        )
+
+        if text is None:
+            session.failed_turns += 1
+            session.consecutive_no_speech += 1
+            self._end_session(session, "no_speech", "No entendi la frase.")
+            emit("No entendi la frase.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
+        if self._is_close_command(text):
+            self._end_session(session, "explicit_close", "Conversacion finalizada.")
+            emit("Conversacion finalizada.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
+        self._process_successful_turn(
+            session,
+            transcription,
+            text,
+            process_text,
+            emit,
+            enforce_spanish_response=True,
+        )
+
+        if session.active:
+            self._end_session(session, "turn_completed", "Turno completado.")
+
+        return VoiceConversationResult(session=session, messages=messages)
+
+    def _execute_assistant_text_turn(
+        self,
+        session: VoiceConversationSession,
+        text: str,
+        process_text: Callable[[str], str],
+        emit: Callable[[str, bool], None],
+    ) -> VoiceConversationResult:
+        cleaned_text = self._clean_transcription_text(
+            text,
+            trim_edge_punctuation=True,
+        )
+
+        if not cleaned_text:
+            self._end_session(session, "no_speech", "No entendi la frase.")
+            emit("No entendi la frase.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=[])
+
+        if self._is_close_command(cleaned_text):
+            self._end_session(session, "explicit_close", "Conversacion finalizada.")
+            emit("Conversacion finalizada.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=[])
+
+        transcription = SpeechTranscriptionResult(
+            text=cleaned_text,
+            language="es",
+            audio_duration_seconds=0.0,
+            processing_duration_seconds=0.0,
+            provider="stt-wake-word",
+            microphone_name="wake-word",
+            completed=True,
+            cancelled=False,
+            no_speech_detected=False,
+        )
+        self._process_successful_turn(
+            session,
+            transcription,
+            cleaned_text,
+            process_text,
+            emit,
+            enforce_spanish_response=True,
+        )
+
+        if session.active:
+            self._end_session(session, "turn_completed", "Turno completado.")
+
+        return VoiceConversationResult(session=session, messages=[])
+
     def _warm_up(self) -> None:
         warm_up = getattr(self._speech_engine, "warm_up", None)
 
@@ -337,6 +491,12 @@ class VoiceConversationUseCase:
 
         if callable(prepare_stream):
             prepare_stream(self._wake_capture_settings)
+
+    def _prepare_turn_stream(self) -> None:
+        prepare_stream = getattr(self._speech_engine, "prepare_stream", None)
+
+        if callable(prepare_stream):
+            prepare_stream(self._turn_capture_settings)
 
     def _run_turns(
         self,

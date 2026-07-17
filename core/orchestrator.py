@@ -14,6 +14,7 @@ from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
+from use_cases.permanent_assistant import PermanentAssistantUseCase
 from use_cases.speech_engine import SpeechInteractionUseCase
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
@@ -37,6 +38,7 @@ class AtlasOrchestrator:
         speech_interaction: SpeechInteractionUseCase | None = None,
         wake_word_interaction: WakeWordInteractionUseCase | None = None,
         voice_conversation: VoiceConversationUseCase | None = None,
+        permanent_assistant: PermanentAssistantUseCase | None = None,
         project_root: Path | None = None,
     ) -> None:
 
@@ -52,6 +54,7 @@ class AtlasOrchestrator:
         self._speech_interaction = speech_interaction
         self._wake_word_interaction = wake_word_interaction
         self._voice_conversation = voice_conversation
+        self._permanent_assistant = permanent_assistant
         self._project_root = project_root or Path(".")
 
     def start(self) -> None:
@@ -142,6 +145,23 @@ class AtlasOrchestrator:
             return
 
         self._voice_conversation.execute_manual(
+            process_text=lambda text: self.process_prompt(
+                text,
+                confirm=input,
+            ),
+            status_sink=print,
+            typed_input=self._read_typed_exit_command,
+        )
+
+    def start_assistant(self) -> None:
+        """Start permanent assistant mode with wake word."""
+        if self._permanent_assistant is None:
+            print("Atlas:")
+            print("Modo asistente permanente no disponible.")
+            print()
+            return
+
+        self._permanent_assistant.run(
             process_text=lambda text: self.process_prompt(
                 text,
                 confirm=input,
