@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from agents.registry import AgentRegistry
@@ -40,6 +41,7 @@ class AtlasOrchestrator:
         voice_conversation: VoiceConversationUseCase | None = None,
         permanent_assistant: PermanentAssistantUseCase | None = None,
         project_root: Path | None = None,
+        now_provider=None,
     ) -> None:
 
         self._planner = planner
@@ -56,6 +58,7 @@ class AtlasOrchestrator:
         self._voice_conversation = voice_conversation
         self._permanent_assistant = permanent_assistant
         self._project_root = project_root or Path(".")
+        self._now_provider = now_provider or (lambda: datetime.now().astimezone())
 
     def start(self) -> None:
 
@@ -94,7 +97,7 @@ class AtlasOrchestrator:
             if self._voice_conversation is not None:
                 voice_result = self._voice_conversation.execute(
                     prompt=prompt,
-                    process_text=lambda text: self.process_prompt(
+                    process_text=lambda text: self.process_voice_prompt(
                         text,
                         confirm=input,
                     ),
@@ -145,7 +148,7 @@ class AtlasOrchestrator:
             return
 
         self._voice_conversation.execute_manual(
-            process_text=lambda text: self.process_prompt(
+            process_text=lambda text: self.process_voice_prompt(
                 text,
                 confirm=input,
             ),
@@ -162,7 +165,7 @@ class AtlasOrchestrator:
             return
 
         self._permanent_assistant.run(
-            process_text=lambda text: self.process_prompt(
+            process_text=lambda text: self.process_voice_prompt(
                 text,
                 confirm=input,
             ),
@@ -249,6 +252,73 @@ class AtlasOrchestrator:
 
         return response
 
+    def process_voice_prompt(
+        self,
+        prompt: str,
+        confirm,
+    ) -> str:
+        """Route transcribed voice text before falling back to the model."""
+        routing_text = self._voice_routing_text(prompt)
+        route_voice_command = getattr(self._router, "route_voice_command", None)
+        voice_route = (
+            route_voice_command(routing_text)
+            if callable(route_voice_command)
+            else None
+        )
+
+        if voice_route == "voice_time":
+            return f"Son las {self._time_words(self._now_provider())}."
+
+        if voice_route == "voice_date":
+            return f"Hoy es {self._date_words(self._now_provider())}."
+
+        if voice_route == "voice_datetime":
+            now = self._now_provider()
+            return (
+                f"Son las {self._time_words(now)} del "
+                f"{self._date_words(now)}."
+            )
+
+        if voice_route == "voice_open_notepad":
+            return self._execute_voice_desktop_command("Abre Bloc de notas", confirm)
+
+        if voice_route == "voice_open_vscode":
+            return self._execute_voice_desktop_command(
+                "Abre Visual Studio Code",
+                confirm,
+            )
+
+        return self.process_prompt(prompt, confirm=confirm)
+
+    def _execute_voice_desktop_command(
+        self,
+        prompt: str,
+        confirm,
+    ) -> str:
+        """Execute a router-approved voice command through existing tools."""
+        if self._desktop_interaction is None:
+            return "Herramienta de escritorio no disponible."
+
+        response = self._desktop_interaction.execute(prompt, confirm=confirm)
+
+        if response is None:
+            return "Herramienta no disponible para esta frase."
+
+        return response
+
+    def _voice_routing_text(
+        self,
+        prompt: str,
+    ) -> str:
+        """Remove voice-only response instructions before router matching."""
+        normalized_newlines = prompt.replace("\r\n", "\n")
+        marker = "\n\nResponde en "
+
+        if marker in normalized_newlines:
+            return normalized_newlines.split(marker, 1)[0].strip()
+
+        return prompt.strip()
+
     def _print_atlas(
         self,
         response: str,
@@ -280,3 +350,117 @@ class AtlasOrchestrator:
 
         text = "".join(characters).strip()
         return text or None
+
+    def _time_words(
+        self,
+        now: datetime,
+    ) -> str:
+        """Return natural Spanish time words for voice responses."""
+        hour = now.hour
+        minute = now.minute
+        period = "de la madrugada"
+
+        if 6 <= hour < 12:
+            period = "de la mañana"
+        elif 12 <= hour < 20:
+            period = "de la tarde"
+        elif hour >= 20:
+            period = "de la noche"
+
+        spoken_hour = hour % 12
+
+        if spoken_hour == 0:
+            spoken_hour = 12
+
+        return (
+            f"{self._number_words(spoken_hour)} y "
+            f"{self._number_words(minute)} {period}"
+        )
+
+    def _date_words(
+        self,
+        now: datetime,
+    ) -> str:
+        """Return natural Spanish date words for voice responses."""
+        weekdays = (
+            "lunes",
+            "martes",
+            "miércoles",
+            "jueves",
+            "viernes",
+            "sábado",
+            "domingo",
+        )
+        months = (
+            "enero",
+            "febrero",
+            "marzo",
+            "abril",
+            "mayo",
+            "junio",
+            "julio",
+            "agosto",
+            "septiembre",
+            "octubre",
+            "noviembre",
+            "diciembre",
+        )
+
+        return (
+            f"{weekdays[now.weekday()]}, {now.day} de "
+            f"{months[now.month - 1]} de {now.year}"
+        )
+
+    def _number_words(
+        self,
+        value: int,
+    ) -> str:
+        """Return Spanish words for the limited clock range."""
+        units = (
+            "cero",
+            "una",
+            "dos",
+            "tres",
+            "cuatro",
+            "cinco",
+            "seis",
+            "siete",
+            "ocho",
+            "nueve",
+            "diez",
+            "once",
+            "doce",
+            "trece",
+            "catorce",
+            "quince",
+            "dieciséis",
+            "diecisiete",
+            "dieciocho",
+            "diecinueve",
+            "veinte",
+            "veintiuna",
+            "veintidós",
+            "veintitrés",
+            "veinticuatro",
+            "veinticinco",
+            "veintiséis",
+            "veintisiete",
+            "veintiocho",
+            "veintinueve",
+        )
+
+        if 0 <= value < len(units):
+            return units[value]
+
+        tens = {
+            30: "treinta",
+            40: "cuarenta",
+            50: "cincuenta",
+        }
+        ten = value - (value % 10)
+        unit = value % 10
+
+        if unit == 0:
+            return tens[ten]
+
+        return f"{tens[ten]} y {units[unit]}"

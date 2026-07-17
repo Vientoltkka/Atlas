@@ -65,6 +65,26 @@ def test_pyttsx3_runs_once_per_response(monkeypatch: pytest.MonkeyPatch) -> None
     assert engine.run_and_wait_calls == 1
 
 
+def test_pyttsx3_rebuilds_engine_for_each_successful_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = FakePyttsx3Engine()
+    second = FakePyttsx3Engine()
+    third = FakePyttsx3Engine()
+    fake_module = FakePyttsx3Module([first, second, third])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+    output.speak("primera")
+    output.speak("segunda")
+    output.speak("tercera")
+
+    assert first.say_calls == ["primera"]
+    assert second.say_calls == ["segunda"]
+    assert third.say_calls == ["tercera"]
+    assert fake_module.init_calls == 3
+
+
 def test_pyttsx3_stops_busy_engine_before_speaking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -75,7 +95,7 @@ def test_pyttsx3_stops_busy_engine_before_speaking(
     output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
     output.speak("respuesta")
 
-    assert engine.stop_calls == 1
+    assert engine.stop_calls == 2
     assert engine.run_and_wait_calls == 1
 
 

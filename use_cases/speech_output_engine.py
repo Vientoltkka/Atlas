@@ -77,6 +77,10 @@ class Pyttsx3SpeechOutputEngine:
         except Exception as error:
             self._discard_failed_engine(engine)
             raise RuntimeError(str(error)) from error
+        finally:
+            if self._engine is engine:
+                self._release_engine(engine)
+                self._engine = None
 
     def warm_up(self) -> None:
         """Initialize pyttsx3 and select voice before the first spoken response."""
@@ -91,6 +95,8 @@ class Pyttsx3SpeechOutputEngine:
 
         if callable(stop):
             stop()
+
+        self._engine = None
 
     def _load_engine(self):
         if self._engine is not None:
@@ -128,6 +134,13 @@ class Pyttsx3SpeechOutputEngine:
         self,
         engine,
     ) -> None:
+        self._release_engine(engine)
+        self._engine = None
+
+    def _release_engine(
+        self,
+        engine,
+    ) -> None:
         stop = getattr(engine, "stop", None)
 
         if callable(stop):
@@ -135,8 +148,6 @@ class Pyttsx3SpeechOutputEngine:
                 stop()
             except Exception:
                 pass
-
-        self._engine = None
 
     def _select_voice(
         self,

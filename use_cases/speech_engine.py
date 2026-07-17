@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import traceback
 from typing import Callable, Protocol
 import wave
 
@@ -51,6 +52,25 @@ class AudioCaptureResult:
     cancelled: bool = False
     no_speech_detected: bool = False
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    phrase_start_ms: float = 0.0
+    accumulated_voice_ms: float = 0.0
+    end_reason: str = ""
+    voice_threshold: float = 0.0
+    noise_floor: float = 0.0
+
+
+@dataclass(frozen=True)
+class StreamReadDiagnostics:
+    """Raw stream read diagnostics for one phrase capture."""
+
+    callbacks_received: int
+    read_blocks: int
+    block_lengths: tuple[int, ...]
+    total_buffer_length: int
+    ndarray_size_before_vad: int
+    dtype: str
+    overflow_count: int
+    drained_block_length: int
 
 
 @dataclass(frozen=True)
@@ -94,6 +114,9 @@ class SpeechTranscriptionResult:
     summary: str = ""
     average_log_probability: float | None = None
     no_speech_probability: float | None = None
+    samples_count: int = 0
+    rms: float = 0.0
+    exception_traceback: str = ""
 
 
 class SpeechToTextProvider(Protocol):
@@ -120,13 +143,18 @@ class FasterWhisperSpeechToTextProvider:
         device: str = "cpu",
         compute_type: str = "int8",
         language: str | None = None,
+        initial_prompt: str | None = None,
         min_confidence: float | None = None,
         max_no_speech_probability: float | None = None,
     ) -> None:
         self._model_size = model_size
         self._device = device
         self._compute_type = compute_type
-        self._language = language or os.getenv("ATLAS_STT_LANGUAGE", "es")
+        self._language = language or "es"
+        self._initial_prompt = initial_prompt or os.getenv(
+            "ATLAS_STT_INITIAL_PROMPT",
+            "Atlas, hora, fecha, capital de Francia, abrir Bloc de notas, abrir VS Code",
+        )
         self._min_confidence = (
             min_confidence
             if min_confidence is not None
@@ -153,6 +181,7 @@ class FasterWhisperSpeechToTextProvider:
             segments, info = model.transcribe(
                 str(path),
                 language=self._language,
+                initial_prompt=self._initial_prompt,
                 task="transcribe",
                 vad_filter=True,
                 condition_on_previous_text=False,
@@ -180,6 +209,11 @@ class FasterWhisperSpeechToTextProvider:
     def language(self) -> str:
         """Forced transcription language."""
         return self._language
+
+    @property
+    def initial_prompt(self) -> str:
+        """Initial transcription prompt for short Atlas voice commands."""
+        return self._initial_prompt
 
     @property
     def min_confidence(self) -> float:
@@ -279,6 +313,14 @@ class SoundDeviceAudioCapture:
     )
     _BLOCKING_UNSUPPORTED_HOST_APIS = {"wdm-ks"}
     _DEFAULT_INPUT_SIGNAL_RMS = 0.0005
+    _INITIAL_VOICE_SECONDS = 0.20
+    _INITIAL_SILENCE_TOLERANCE_SECONDS = 0.15
+    _TRAILING_SILENCE_SECONDS = 0.75
+    _ADAPTIVE_NOISE_SECONDS = 0.4
+    _FLOAT32_MIN_VOICE_RMS = 0.0015
+    _NOISE_MULTIPLIER = 3.0
+    _RECOVERY_CONTRAST_MULTIPLIER = 2.2
+    _PRE_ROLL_SECONDS = 0.25
 
     def __init__(
         self,
@@ -302,6 +344,7 @@ class SoundDeviceAudioCapture:
         )
         self.minimum_audio_duration = minimum_audio_duration
         self._selected_index: int | None = None
+        self._empty_capture_diagnostics = 0
 
     def list_microphones(
         self,
@@ -542,9 +585,22 @@ class SoundDeviceAudioCapture:
                     dtype="float32",
                     device=microphone.index,
                 ) as stream:
-                    self._drain_input_buffer(stream, frames)
-                    chunks = self._read_stream_chunks(stream, frames)
-                    return self.capture_from_chunks(chunks, microphone.name)
+                    drained = self._drain_input_buffer(stream, frames)
+                    chunks, diagnostics = self._read_stream_chunks(
+                        stream,
+                        frames,
+                        drained,
+                    )
+                    capture = self.capture_from_chunks(
+                        chunks,
+                        microphone.name,
+                    )
+                    self._print_stream_read_diagnostic(
+                        diagnostics,
+                        capture,
+                        chunks,
+                    )
+                    return capture
             except KeyboardInterrupt:
                 return AudioCaptureResult(
                     samples=np.array([], dtype=np.float32),
@@ -573,17 +629,29 @@ class SoundDeviceAudioCapture:
             self._restore_settings(original)
 
     def _apply_debug_timeouts(self) -> None:
-        if self.initial_silence_timeout < 5.0:
-            self.initial_silence_timeout = 6.0
-
         if self.max_duration < self.initial_silence_timeout:
-            self.max_duration = max(8.0, self.initial_silence_timeout + 1.0)
+            self.max_duration = self.initial_silence_timeout + 1.0
 
     def _select_microphone_with_audio(
         self,
         sd,
     ) -> MicrophoneInfo:
         microphone = self.selected_or_default_microphone()
+        try:
+            self._open_probe_stream(microphone, None)
+        except Exception:
+            alternative = self._first_open_microphone(exclude_index=microphone.index)
+
+            if alternative is None:
+                raise
+
+            self._selected_index = alternative.index
+            microphone = alternative
+
+        diagnostic = self._probe_microphone_audio(sd, microphone)
+        self._print_capture_diagnostic(microphone, diagnostic)
+        return microphone
+
         diagnostic = self._probe_microphone_audio(sd, microphone)
         self._print_capture_diagnostic(microphone, diagnostic)
 
@@ -618,6 +686,23 @@ class SoundDeviceAudioCapture:
 
             if diagnostic["has_audio"]:
                 return microphone, diagnostic
+
+        return None
+
+    def _first_open_microphone(
+        self,
+        exclude_index: int,
+    ) -> MicrophoneInfo | None:
+        for microphone in self.list_microphones():
+            if microphone.index == exclude_index or self._is_blocking_unsupported(microphone):
+                continue
+
+            try:
+                self._open_probe_stream(microphone, None)
+            except Exception:
+                continue
+
+            return microphone
 
         return None
 
@@ -657,6 +742,9 @@ class SoundDeviceAudioCapture:
         microphone: MicrophoneInfo,
         diagnostic: dict[str, float | bool],
     ) -> None:
+        if not self._voice_debug_enabled():
+            return
+
         host_api = f" ({microphone.host_api})" if microphone.host_api else ""
         print(
             "Dispositivo de entrada utilizado: "
@@ -685,62 +773,123 @@ class SoundDeviceAudioCapture:
         """Capture a phrase from controlled audio chunks."""
         captured: list[np.ndarray] = []
         pending_voice: list[np.ndarray] = []
+        pre_voice_buffer: list[np.ndarray] = []
+        mono_chunks = [self._mono_float32(chunk) for chunk in chunks]
+        block_rms_values = [self._rms(chunk) for chunk in mono_chunks]
+        noise_floor = self._noise_floor(block_rms_values)
+        voice_threshold = self._adaptive_voice_threshold(noise_floor)
         voice_started = False
+        voice_started_at = 0.0
+        accumulated_voice = 0.0
+        pending_silence = 0.0
+        pending_voice_blocks = 0
         elapsed = 0.0
         silence_after_voice = 0.0
         warnings: list[str] = []
-        required_voice_duration = max(0.25, self.minimum_audio_duration)
+        end_reason = "fin de bloques"
+        required_voice_duration = self._initial_voice_duration()
+        tolerated_initial_silence = self._initial_silence_tolerance()
+        trailing_silence = self._trailing_silence_duration()
 
-        for chunk in chunks:
-            mono = self._mono_float32(chunk)
-            elapsed += len(mono) / self.sample_rate
-            rms = self._rms(mono)
-            is_voice = rms >= self.speech_threshold
+        for mono, rms in zip(mono_chunks, block_rms_values):
+            chunk_duration = len(mono) / self.sample_rate
+            chunk_started_at = elapsed
+            elapsed += chunk_duration
+            is_voice = rms >= voice_threshold
 
             if not voice_started:
                 if is_voice:
                     pending_voice.append(mono)
-                    pending_duration = (
-                        sum(len(item) for item in pending_voice) / self.sample_rate
-                    )
+                    pending_voice_blocks += 1
+                    accumulated_voice += chunk_duration
+                    pending_silence = 0.0
 
-                    if pending_duration >= required_voice_duration:
+                    if (
+                        pending_voice_blocks >= 2
+                        and accumulated_voice >= required_voice_duration
+                    ):
                         voice_started = True
+                        voice_started_at = chunk_started_at
+                        captured.extend(pre_voice_buffer)
                         captured.extend(pending_voice)
                         pending_voice = []
+                        pre_voice_buffer = []
                         silence_after_voice = 0.0
                 else:
-                    pending_voice = []
+                    if pending_voice and pending_silence < tolerated_initial_silence:
+                        pending_voice.append(mono)
+                        pending_silence += chunk_duration
+                    else:
+                        pre_voice_buffer.append(mono)
+                        self._trim_pre_roll(pre_voice_buffer)
+                        pending_voice = []
+                        pending_silence = 0.0
+                        pending_voice_blocks = 0
+                        accumulated_voice = 0.0
 
                 if not voice_started and elapsed >= self.initial_silence_timeout:
                     return self._no_speech_result(
                         microphone_name,
                         elapsed,
                         "No se detecto voz antes del tiempo limite.",
+                        voice_threshold=voice_threshold,
+                        noise_floor=noise_floor,
                     )
             else:
                 captured.append(mono)
-                silence_after_voice = 0.0 if is_voice else (
-                    silence_after_voice + len(mono) / self.sample_rate
-                )
+                if is_voice:
+                    accumulated_voice += chunk_duration
+                    silence_after_voice = 0.0
+                else:
+                    silence_after_voice += chunk_duration
 
                 captured_duration = sum(len(item) for item in captured) / self.sample_rate
 
                 if (
-                    silence_after_voice >= self.trailing_silence
+                    silence_after_voice >= trailing_silence
                     and captured_duration >= self.minimum_audio_duration
                 ):
+                    end_reason = "silencio posterior detectado"
                     break
 
             if elapsed >= self.max_duration:
                 warnings.append("Duracion maxima alcanzada.")
+                end_reason = "duracion maxima alcanzada"
                 break
 
         if not voice_started:
+            recovered = self._recover_contrasting_phrase(
+                mono_chunks,
+                block_rms_values,
+                voice_threshold,
+                noise_floor,
+            )
+
+            if recovered is not None:
+                samples, start_ms, voice_ms = recovered
+                warnings.append(
+                    "recuperacion conservadora: contraste de energia suficiente"
+                )
+                return AudioCaptureResult(
+                    samples=samples,
+                    sample_rate=self.sample_rate,
+                    duration_seconds=len(samples) / self.sample_rate,
+                    microphone_name=microphone_name,
+                    completed=True,
+                    warnings=tuple(warnings),
+                    phrase_start_ms=start_ms,
+                    accumulated_voice_ms=voice_ms,
+                    end_reason="recuperacion conservadora por contraste",
+                    voice_threshold=voice_threshold,
+                    noise_floor=noise_floor,
+                )
+
             return self._no_speech_result(
                 microphone_name,
                 elapsed,
                 "No se detecto ninguna frase.",
+                voice_threshold=voice_threshold,
+                noise_floor=noise_floor,
             )
 
         samples = np.concatenate(captured).astype(np.float32)
@@ -752,31 +901,320 @@ class SoundDeviceAudioCapture:
             microphone_name=microphone_name,
             completed=True,
             warnings=tuple(warnings),
+            phrase_start_ms=voice_started_at * 1000.0,
+            accumulated_voice_ms=accumulated_voice * 1000.0,
+            end_reason=end_reason,
+            voice_threshold=voice_threshold,
+            noise_floor=noise_floor,
         )
 
     def _read_stream_chunks(
         self,
         stream,
         frames: int,
-    ) -> list[np.ndarray]:
+        drained_block_length: int = 0,
+    ) -> tuple[list[np.ndarray], StreamReadDiagnostics]:
         chunks: list[np.ndarray] = []
+        block_lengths: list[int] = []
+        overflow_count = 0
         max_chunks = math.ceil(self.max_duration / self.chunk_duration)
 
         for _ in range(max_chunks):
-            data, _overflowed = stream.read(frames)
+            data, overflowed = stream.read(frames)
             chunks.append(data)
+            mono = self._mono_float32(data)
+            block_lengths.append(len(mono))
+            if overflowed:
+                overflow_count += 1
 
-        return chunks
+            partial = self.capture_from_chunks(chunks)
+            if partial.completed and partial.end_reason == "silencio posterior detectado":
+                break
+
+        total_buffer_length = sum(block_lengths)
+        raw_buffer = self._concatenate_chunks(chunks)
+
+        return chunks, StreamReadDiagnostics(
+            callbacks_received=0,
+            read_blocks=len(chunks),
+            block_lengths=tuple(block_lengths),
+            total_buffer_length=total_buffer_length,
+            ndarray_size_before_vad=int(raw_buffer.size),
+            dtype=str(raw_buffer.dtype),
+            overflow_count=overflow_count,
+            drained_block_length=drained_block_length,
+        )
 
     def _drain_input_buffer(
         self,
         stream,
         frames: int,
-    ) -> None:
+    ) -> int:
         try:
-            stream.read(frames)
+            data, _overflowed = stream.read(frames)
         except Exception:
             raise
+
+        return len(self._mono_float32(data))
+
+    def _concatenate_chunks(
+        self,
+        chunks: list[np.ndarray],
+    ) -> np.ndarray:
+        if not chunks:
+            return np.array([], dtype=np.float32)
+
+        mono_chunks = [self._mono_float32(chunk) for chunk in chunks]
+        non_empty = [chunk for chunk in mono_chunks if len(chunk) > 0]
+
+        if not non_empty:
+            return np.array([], dtype=np.float32)
+
+        return np.concatenate(non_empty).astype(np.float32)
+
+    def _print_stream_read_diagnostic(
+        self,
+        diagnostics: StreamReadDiagnostics,
+        capture: AudioCaptureResult,
+        chunks: list[np.ndarray],
+    ) -> None:
+        if not self._voice_debug_enabled():
+            return
+
+        if capture.samples.size == 0:
+            self._empty_capture_diagnostics += 1
+        else:
+            self._empty_capture_diagnostics = 0
+
+        if self._empty_capture_diagnostics > 3:
+            print(
+                "[speech-debug] captura sin voz util repetida; "
+                "se omite diagnostico extenso temporalmente"
+            )
+            time.sleep(0.2)
+            return
+
+        block_lengths_text = ", ".join(
+            str(length) for length in diagnostics.block_lengths
+        )
+        if len(block_lengths_text) > 240:
+            block_lengths_text = f"{block_lengths_text[:240]}..."
+
+        block_rms_values = [
+            self._rms(self._mono_float32(chunk))
+            for chunk in chunks
+        ]
+        noise_floor = capture.noise_floor or self._noise_floor(block_rms_values)
+        voice_threshold = (
+            capture.voice_threshold
+            or self._adaptive_voice_threshold(noise_floor)
+        )
+        voice_block_rms = [
+            rms for rms in block_rms_values if rms >= voice_threshold
+        ]
+        voice_blocks = len(voice_block_rms)
+        rms_stats = self._block_rms_stats(block_rms_values)
+        reason = "captura valida enviada a STT"
+
+        if capture.samples.size == 0:
+            if diagnostics.total_buffer_length == 0:
+                reason = "stream.read devolvio bloques vacios"
+            elif voice_blocks == 0:
+                reason = "el buffer tenia muestras pero ninguna supero el umbral de voz"
+            else:
+                reason = (
+                    "hubo bloques con voz, pero no alcanzaron la duracion minima "
+                    "para iniciar la frase"
+                )
+
+        print("[speech-debug] callbacks recibidos: 0 (InputStream usa stream.read)")
+        print(f"[speech-debug] bloques leidos por stream.read: {diagnostics.read_blocks}")
+        print(
+            "[speech-debug] longitud de cada bloque: "
+            f"[{block_lengths_text}]"
+        )
+        print(
+            "[speech-debug] longitud total del buffer leido: "
+            f"{diagnostics.total_buffer_length}"
+        )
+        print(
+            "[speech-debug] tamano ndarray antes de VAD/STT: "
+            f"{diagnostics.ndarray_size_before_vad}"
+        )
+        print(f"[speech-debug] dtype ndarray antes de VAD/STT: {diagnostics.dtype}")
+        print(
+            "[speech-debug] bloque descartado al limpiar buffer inicial: "
+            f"{diagnostics.drained_block_length}"
+        )
+        print(f"[speech-debug] overflows detectados: {diagnostics.overflow_count}")
+        print(f"[speech-debug] RMS minimo bloques: {rms_stats['min']:.6f}")
+        print(f"[speech-debug] RMS maximo bloques: {rms_stats['max']:.6f}")
+        print(f"[speech-debug] RMS medio bloques: {rms_stats['mean']:.6f}")
+        print(f"[speech-debug] RMS p50 bloques: {rms_stats['p50']:.6f}")
+        print(f"[speech-debug] RMS p75 bloques: {rms_stats['p75']:.6f}")
+        print(f"[speech-debug] RMS p90 bloques: {rms_stats['p90']:.6f}")
+        print(f"[speech-debug] RMS p95 bloques: {rms_stats['p95']:.6f}")
+        print(f"[speech-debug] noise floor adaptativo: {noise_floor:.6f}")
+        print(f"[speech-debug] umbral de voz aplicado: {voice_threshold:.6f}")
+        print(
+            "[speech-debug] RMS bloques clasificados como voz: "
+            f"{self._format_rms_values(voice_block_rms)}"
+        )
+        print(f"[speech-debug] bloques con voz segun umbral: {voice_blocks}")
+        print(
+            "[speech-debug] ms hasta detectar inicio de frase: "
+            f"{capture.phrase_start_ms:.1f}"
+        )
+        print(
+            "[speech-debug] duracion de voz acumulada: "
+            f"{capture.accumulated_voice_ms:.1f} ms"
+        )
+        print(f"[speech-debug] motivo de finalizacion: {capture.end_reason or 'n/a'}")
+        print(
+            "[speech-debug] tamano ndarray final antes del STT: "
+            f"{int(capture.samples.size)}"
+        )
+        print(f"[speech-debug] motivo si termina en cero muestras: {reason}")
+
+    def _initial_voice_duration(self) -> float:
+        configured = self.minimum_audio_duration or self._INITIAL_VOICE_SECONDS
+        return min(max(configured, self._INITIAL_VOICE_SECONDS), 0.35)
+
+    def _initial_silence_tolerance(self) -> float:
+        return max(self.chunk_duration, self._INITIAL_SILENCE_TOLERANCE_SECONDS)
+
+    def _trailing_silence_duration(self) -> float:
+        return min(max(self._TRAILING_SILENCE_SECONDS, 0.6), 0.9)
+
+    def _trim_pre_roll(
+        self,
+        chunks: list[np.ndarray],
+    ) -> None:
+        max_samples = max(1, int(self.sample_rate * self._PRE_ROLL_SECONDS))
+
+        while sum(len(chunk) for chunk in chunks) > max_samples and len(chunks) > 1:
+            chunks.pop(0)
+
+    def _noise_floor(
+        self,
+        block_rms_values: list[float],
+    ) -> float:
+        if not block_rms_values:
+            return 0.0
+
+        values = np.asarray(block_rms_values, dtype=np.float32)
+        ambient_blocks = max(
+            1,
+            math.ceil(self._ADAPTIVE_NOISE_SECONDS / self.chunk_duration),
+        )
+        ambient = values[:ambient_blocks]
+        ambient_median = float(np.median(ambient))
+        global_p25 = float(np.percentile(values, 25))
+
+        return min(ambient_median, global_p25)
+
+    def _adaptive_voice_threshold(
+        self,
+        noise_floor: float,
+    ) -> float:
+        adaptive = max(
+            self._FLOAT32_MIN_VOICE_RMS,
+            noise_floor * self._NOISE_MULTIPLIER,
+        )
+        configured_cap = max(
+            self._FLOAT32_MIN_VOICE_RMS,
+            min(max(self.speech_threshold, 0.0), 1.0),
+        )
+
+        return min(adaptive, configured_cap)
+
+    def _recover_contrasting_phrase(
+        self,
+        mono_chunks: list[np.ndarray],
+        block_rms_values: list[float],
+        voice_threshold: float,
+        noise_floor: float,
+    ) -> tuple[np.ndarray, float, float] | None:
+        if not mono_chunks or not block_rms_values:
+            return None
+
+        peak = max(block_rms_values)
+        contrast_threshold = max(
+            self._FLOAT32_MIN_VOICE_RMS,
+            noise_floor * self._RECOVERY_CONTRAST_MULTIPLIER,
+        )
+
+        if peak < contrast_threshold:
+            return None
+
+        candidate_indexes = [
+            index
+            for index, rms in enumerate(block_rms_values)
+            if rms >= contrast_threshold
+        ]
+
+        if len(candidate_indexes) < 2:
+            return None
+
+        start = max(0, candidate_indexes[0] - 1)
+        end = min(
+            len(mono_chunks),
+            candidate_indexes[-1]
+            + 1
+            + math.ceil(self._trailing_silence_duration() / self.chunk_duration),
+        )
+        samples = np.concatenate(mono_chunks[start:end]).astype(np.float32)
+        voice_ms = sum(
+            len(mono_chunks[index]) / self.sample_rate
+            for index in candidate_indexes
+        ) * 1000.0
+
+        if voice_ms < self._INITIAL_VOICE_SECONDS * 1000.0:
+            return None
+
+        return samples, start * self.chunk_duration * 1000.0, voice_ms
+
+    def _block_rms_stats(
+        self,
+        block_rms_values: list[float],
+    ) -> dict[str, float]:
+        if not block_rms_values:
+            return {
+                "min": 0.0,
+                "max": 0.0,
+                "mean": 0.0,
+                "p50": 0.0,
+                "p75": 0.0,
+                "p90": 0.0,
+                "p95": 0.0,
+            }
+
+        values = np.asarray(block_rms_values, dtype=np.float32)
+        return {
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+            "mean": float(np.mean(values)),
+            "p50": float(np.percentile(values, 50)),
+            "p75": float(np.percentile(values, 75)),
+            "p90": float(np.percentile(values, 90)),
+            "p95": float(np.percentile(values, 95)),
+        }
+
+    def _format_rms_values(
+        self,
+        values: list[float],
+    ) -> str:
+        if not values:
+            return "[]"
+
+        text = ", ".join(f"{value:.6f}" for value in values)
+        if len(text) > 240:
+            text = f"{text[:240]}..."
+
+        return f"[{text}]"
+
+    def _voice_debug_enabled(self) -> bool:
+        return _read_bool("ATLAS_VOICE_DEBUG", False)
 
     def _capture_fixed_duration(
         self,
@@ -862,6 +1300,8 @@ class SoundDeviceAudioCapture:
         microphone_name: str,
         duration: float,
         warning: str,
+        voice_threshold: float = 0.0,
+        noise_floor: float = 0.0,
     ) -> AudioCaptureResult:
         return AudioCaptureResult(
             samples=np.array([], dtype=np.float32),
@@ -871,6 +1311,8 @@ class SoundDeviceAudioCapture:
             completed=False,
             no_speech_detected=True,
             warnings=(warning,),
+            voice_threshold=voice_threshold,
+            noise_floor=noise_floor,
         )
 
     def _mono_float32(
@@ -1195,7 +1637,10 @@ class SpeechEngineUseCase:
             except TypeError:
                 capture = self._capture.capture_phrase()
         except Exception as error:
-            return self._failed_result(str(error))
+            return self._failed_result(
+                str(error),
+                exception_traceback=traceback.format_exc(),
+            )
 
         if capture.cancelled:
             return self._capture_failure(capture, cancelled=True)
@@ -1213,6 +1658,9 @@ class SpeechEngineUseCase:
                 str(error),
                 microphone_name=capture.microphone_name,
                 audio_duration=capture.duration_seconds,
+                samples_count=self._sample_count(capture.samples),
+                rms=self._samples_rms(capture.samples),
+                exception_traceback=traceback.format_exc(),
             )
 
         text = provider_result.text.strip()
@@ -1232,6 +1680,8 @@ class SpeechEngineUseCase:
                 summary="La transcripcion esta vacia.",
                 average_log_probability=provider_result.average_log_probability,
                 no_speech_probability=provider_result.no_speech_probability,
+                samples_count=self._sample_count(capture.samples),
+                rms=self._samples_rms(capture.samples),
             )
 
         warnings = list(capture.warnings)
@@ -1264,6 +1714,8 @@ class SpeechEngineUseCase:
             summary="Transcripcion completada.",
             average_log_probability=provider_result.average_log_probability,
             no_speech_probability=provider_result.no_speech_probability,
+            samples_count=self._sample_count(capture.samples),
+            rms=self._samples_rms(capture.samples),
         )
 
     def _confidence(
@@ -1309,6 +1761,8 @@ class SpeechEngineUseCase:
             else "Captura cancelada.",
             average_log_probability=None,
             no_speech_probability=None,
+            samples_count=self._sample_count(capture.samples),
+            rms=self._samples_rms(capture.samples),
         )
 
     def _failed_result(
@@ -1316,6 +1770,9 @@ class SpeechEngineUseCase:
         warning: str,
         microphone_name: str = "",
         audio_duration: float = 0.0,
+        samples_count: int = 0,
+        rms: float = 0.0,
+        exception_traceback: str = "",
     ) -> SpeechTranscriptionResult:
         return SpeechTranscriptionResult(
             text="",
@@ -1331,7 +1788,27 @@ class SpeechEngineUseCase:
             summary=f"No se pudo transcribir la frase: {warning}",
             average_log_probability=None,
             no_speech_probability=None,
+            samples_count=samples_count,
+            rms=rms,
+            exception_traceback=exception_traceback,
         )
+
+    def _sample_count(
+        self,
+        samples: np.ndarray,
+    ) -> int:
+        return int(np.asarray(samples).size)
+
+    def _samples_rms(
+        self,
+        samples: np.ndarray,
+    ) -> float:
+        array = np.asarray(samples, dtype=np.float32)
+
+        if array.size == 0:
+            return 0.0
+
+        return float(np.sqrt(np.mean(np.square(array))))
 
 
 class SpeechInteractionUseCase:
@@ -1520,6 +1997,18 @@ def _read_float(
         return default
 
     return min(max(value, minimum), maximum)
+
+
+def _read_bool(
+    name: str,
+    default: bool,
+) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+
+    if not raw:
+        return default
+
+    return raw in {"1", "true", "yes", "on", "si", "sí"}
 
 
 def _normalize_text(

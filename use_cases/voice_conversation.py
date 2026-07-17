@@ -6,7 +6,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 import json
 import os
+import queue
 import re
+import threading
 import time
 import unicodedata
 from typing import Callable
@@ -149,17 +151,28 @@ class VoiceConversationUseCase:
             minimum_audio_duration=0.8,
         )
         self._turn_capture_settings = turn_capture_settings or SpeechCaptureSettings(
-            max_duration=10.0,
-            initial_silence_timeout=5.0,
-            trailing_silence=1.0,
+            max_duration=8.0,
+            initial_silence_timeout=3.0,
+            trailing_silence=0.75,
             chunk_duration=0.1,
             speech_threshold=_read_float("ATLAS_VOICE_RMS_THRESHOLD", 0.004, 0.001, 0.05),
-            minimum_audio_duration=0.3,
+            minimum_audio_duration=0.2,
         )
         self._diagnostics_enabled = (
             diagnostics_enabled
             if diagnostics_enabled is not None
-            else _read_bool("ATLAS_VOICE_DIAGNOSTICS", False)
+            else (
+                _read_bool("ATLAS_VOICE_DIAGNOSTICS", False)
+                or _read_bool("ATLAS_VOICE_DEBUG", False)
+            )
+        )
+        self._voice_debug_enabled = _read_bool("ATLAS_VOICE_DEBUG", False)
+        self._tts_speaking = False
+        self._model_timeout_seconds = _read_float(
+            "ATLAS_VOICE_MODEL_TIMEOUT",
+            25.0,
+            0.1,
+            300.0,
         )
         self._clock = clock
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
@@ -294,6 +307,8 @@ class VoiceConversationUseCase:
                 typed_input,
                 enforce_spanish_response=True,
                 retry_initial_no_speech=False,
+                keep_listening_on_recoverable=True,
+                voice_debug=self._voice_debug_enabled,
             )
         except KeyboardInterrupt:
             self._end_session(session, "cancelled", "Conversacion cancelada.")
@@ -506,6 +521,8 @@ class VoiceConversationUseCase:
         typed_input: Callable[[], str | None] | None = None,
         enforce_spanish_response: bool = False,
         retry_initial_no_speech: bool = False,
+        keep_listening_on_recoverable: bool = False,
+        voice_debug: bool = False,
     ) -> None:
         first_listen = True
         last_activity = self._clock()
@@ -554,6 +571,8 @@ class VoiceConversationUseCase:
 
             emit("Esperando voz...", diagnostic=False)
             transcription = self._transcribe_turn()
+            if transcription.no_speech_detected or not transcription.completed:
+                self._emit_voice_debug_transcription(transcription, emit, voice_debug)
 
             if (
                 retry_initial_no_speech
@@ -562,6 +581,8 @@ class VoiceConversationUseCase:
             ):
                 emit("No se detecto voz. Vuelvo a escuchar...", diagnostic=True)
                 transcription = self._transcribe_turn()
+                if transcription.no_speech_detected or not transcription.completed:
+                    self._emit_voice_debug_transcription(transcription, emit, voice_debug)
 
             first_listen = False
 
@@ -577,6 +598,8 @@ class VoiceConversationUseCase:
                 last_activity = self._clock()
 
                 if (
+                    not keep_listening_on_recoverable
+                    and
                     session.consecutive_no_speech
                     >= self._max_consecutive_no_speech
                 ):
@@ -589,6 +612,11 @@ class VoiceConversationUseCase:
                     emit(session.summary, diagnostic=True)
                     break
 
+                self._emit_voice_debug_discard(
+                    "timeout recuperable de captura",
+                    emit,
+                    voice_debug,
+                )
                 emit("No se detecto ninguna frase.", diagnostic=True)
                 continue
 
@@ -607,6 +635,12 @@ class VoiceConversationUseCase:
                     emit(session.summary, diagnostic=True)
                     break
 
+                self._emit_voice_debug_discard(
+                    error or "error recuperable del STT",
+                    emit,
+                    voice_debug,
+                    transcription.exception_traceback,
+                )
                 emit(f"No se pudo procesar el turno: {error}", diagnostic=True)
                 continue
 
@@ -616,11 +650,23 @@ class VoiceConversationUseCase:
             )
 
             if accepted_text is None:
+                self._emit_voice_debug_transcription(transcription, emit, voice_debug)
+                self._emit_voice_debug_discard(
+                    self._transcription_discard_reason(
+                        transcription,
+                        trim_edge_punctuation=enforce_spanish_response,
+                    ),
+                    emit,
+                    voice_debug,
+                )
                 session.consecutive_no_speech += 1
                 session.failed_turns += 1
                 last_activity = self._clock()
 
-                if session.consecutive_no_speech >= self._max_consecutive_no_speech:
+                if (
+                    not keep_listening_on_recoverable
+                    and session.consecutive_no_speech >= self._max_consecutive_no_speech
+                ):
                     self._end_session(
                         session,
                         "idle_timeout",
@@ -654,6 +700,7 @@ class VoiceConversationUseCase:
                 process_text,
                 emit,
                 enforce_spanish_response,
+                voice_debug,
             )
             last_activity = self._clock()
 
@@ -665,46 +712,41 @@ class VoiceConversationUseCase:
         process_text: Callable[[str], str],
         emit: Callable[[str, bool], None],
         enforce_spanish_response: bool = False,
+        voice_debug: bool = False,
     ) -> None:
         turn_number = session.total_turns + 1
+        prompt_for_voice = self._prompt_for_voice(text, enforce_spanish_response)
+        route_label = self._voice_flow_route(text)
+        success = True
+        error_text = ""
 
         try:
-            deterministic_response = (
-                self._deterministic_datetime_response(text)
-                if enforce_spanish_response
-                else None
+            self._emit_voice_flow(f"STT recibido: {text!r}", emit, voice_debug)
+            self._emit_voice_flow(
+                f"ruta seleccionada: {route_label}",
+                emit,
+                voice_debug,
             )
-            response = deterministic_response or process_text(
-                self._prompt_for_voice(text, enforce_spanish_response)
+            response = self._process_text_for_voice(
+                prompt_for_voice,
+                process_text,
+                route_label,
+            )
+            self._emit_voice_flow(
+                f"respuesta obtenida: {response!r}",
+                emit,
+                voice_debug,
             )
         except Exception as error:
-            response = ""
-            session.failed_turns += 1
-            session.total_turns += 1
-            session.transcript_history.append(text)
-            turn = VoiceConversationTurn(
-                number=turn_number,
-                transcription=text,
-                response="",
-                audio_duration_seconds=transcription.audio_duration_seconds,
-                processing_duration_seconds=transcription.processing_duration_seconds,
-                success=False,
-                timestamp=self._clock(),
-                error=str(error),
+            error_text = f"{type(error).__name__}: {error}"
+            response = f"Error en flujo post-STT: {error_text}"
+            self._emit_voice_flow(
+                f"respuesta obtenida: {response!r}",
+                emit,
+                voice_debug,
             )
-            session.turns.append(turn)
-
-            if self._is_critical_error(str(error)):
-                self._end_session(
-                    session,
-                    "critical_error",
-                    f"Conversacion finalizada por error critico: {error}",
-                )
-                emit(session.summary, diagnostic=True)
-            else:
-                emit(f"No se pudo procesar el turno: {error}", diagnostic=True)
-
-            return
+            success = False
+            session.failed_turns += 1
 
         response = self._format_response_for_voice(response or "")
         should_speak_response = bool(response.strip())
@@ -713,7 +755,8 @@ class VoiceConversationUseCase:
             response = "Respuesta vacia."
 
         session.total_turns += 1
-        session.successful_turns += 1
+        if success:
+            session.successful_turns += 1
         session.transcript_history.append(text)
         session.response_history.append(response)
         session.turns.append(
@@ -723,11 +766,37 @@ class VoiceConversationUseCase:
                 response=response,
                 audio_duration_seconds=transcription.audio_duration_seconds,
                 processing_duration_seconds=transcription.processing_duration_seconds,
-                success=True,
+                success=success,
                 timestamp=self._clock(),
+                error=error_text,
             )
         )
-        if self._diagnostics_enabled:
+        self._deliver_voice_response(
+            text,
+            response,
+            should_speak_response,
+            transcription,
+            prompt_for_voice,
+            emit,
+            voice_debug,
+        )
+        return
+
+    def _deliver_voice_response(
+        self,
+        text: str,
+        response: str,
+        should_speak_response: bool,
+        transcription: SpeechTranscriptionResult,
+        prompt_for_voice: str,
+        emit: Callable[[str, bool], None],
+        voice_debug: bool = False,
+    ) -> None:
+        """Print and speak exactly one final Atlas response for a voice turn."""
+        if voice_debug:
+            emit(f"Tú: {text}", diagnostic=False)
+            emit(f"Atlas: {response}", diagnostic=False)
+        elif self._diagnostics_enabled:
             emit("Transcripcion:", diagnostic=True)
             emit(text, diagnostic=True)
             emit("Respuesta:", diagnostic=True)
@@ -737,8 +806,86 @@ class VoiceConversationUseCase:
             emit(f"Atlas: {response}", diagnostic=False)
 
         if should_speak_response:
+            self._emit_voice_flow("inicio TTS", emit, voice_debug)
             self._speak_response(response, emit)
+            self._emit_voice_flow("fin TTS", emit, voice_debug)
             time.sleep(0.2)
+            self._emit_voice_flow("vuelta a escucha", emit, voice_debug)
+
+    def _process_text_for_voice(
+        self,
+        prompt: str,
+        process_text: Callable[[str], str],
+        route_label: str,
+    ) -> str:
+        if route_label != "modelo":
+            return process_text(prompt)
+
+        return self._process_text_with_timeout(prompt, process_text)
+
+    def _process_text_with_timeout(
+        self,
+        prompt: str,
+        process_text: Callable[[str], str],
+    ) -> str:
+        result_queue: queue.Queue[tuple[bool, str | BaseException]] = queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                result_queue.put((True, process_text(prompt)))
+            except BaseException as error:
+                result_queue.put((False, error))
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+
+        try:
+            ok, value = result_queue.get(timeout=self._model_timeout_seconds)
+        except queue.Empty:
+            return "La respuesta está tardando demasiado. Inténtalo de nuevo."
+
+        if ok:
+            return str(value)
+
+        raise value
+
+    def _voice_flow_route(
+        self,
+        text: str,
+    ) -> str:
+        normalized = re.sub(r"[^\w\s]", " ", self._normalize(text))
+        normalized = " ".join(normalized.split())
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+
+        if self._asks_current_time(normalized) or self._asks_current_date(normalized):
+            return "local"
+
+        if any(
+            marker in normalized
+            for marker in (
+                "notepad",
+                "visual studio code",
+            )
+        ) or any(
+            marker in compact
+            for marker in (
+                "blocdenotas",
+                "vscode",
+                "visualstudiocode",
+            )
+        ):
+            return "herramienta"
+
+        return "modelo"
+
+    def _emit_voice_flow(
+        self,
+        message: str,
+        emit: Callable[[str, bool], None],
+        enabled: bool,
+    ) -> None:
+        if enabled:
+            emit(f"[voice-flow] {message}", diagnostic=False)
 
     def _speak_response(
         self,
@@ -748,12 +895,15 @@ class VoiceConversationUseCase:
         if self._speech_output_engine is None or not response.strip():
             return
 
+        self._tts_speaking = True
         try:
             emit("TTS iniciado", diagnostic=True)
             self._speech_output_engine.speak(response)
             emit("TTS finalizado", diagnostic=True)
         except Exception as error:
-            emit(f"TTS falló: {error}", diagnostic=True)
+            emit(f"Error TTS: {error}", diagnostic=False)
+        finally:
+            self._tts_speaking = False
 
     def _calibrate_turn_capture_settings(self) -> None:
         calibrate = getattr(self._speech_engine, "calibrate_noise_threshold", None)
@@ -762,7 +912,7 @@ class VoiceConversationUseCase:
             return
 
         try:
-            threshold = calibrate(self._turn_capture_settings, 0.5)
+            threshold = calibrate(self._turn_capture_settings, 0.4)
         except Exception:
             return
 
@@ -797,6 +947,75 @@ class VoiceConversationUseCase:
             return self._speech_engine.transcribe_once(self._turn_capture_settings)
         except TypeError:
             return self._speech_engine.transcribe_once()
+
+    def _emit_voice_debug_transcription(
+        self,
+        transcription: SpeechTranscriptionResult,
+        emit: Callable[[str, bool], None],
+        enabled: bool,
+    ) -> None:
+        if not enabled:
+            return
+
+        self._emit_voice_debug(
+            f"duracion audio capturado: {transcription.audio_duration_seconds:.3f}s",
+            emit,
+            enabled,
+        )
+        self._emit_voice_debug(
+            f"numero de muestras: {transcription.samples_count}",
+            emit,
+            enabled,
+        )
+        self._emit_voice_debug(
+            f"RMS final: {transcription.rms:.6f}",
+            emit,
+            enabled,
+        )
+        self._emit_voice_debug(
+            f"texto exacto STT repr: {transcription.text!r}",
+            emit,
+            enabled,
+        )
+
+        if transcription.exception_traceback:
+            self._emit_voice_debug(
+                "excepcion completa:\n" + transcription.exception_traceback,
+                emit,
+                enabled,
+            )
+
+    def _emit_voice_debug_discard(
+        self,
+        reason: str,
+        emit: Callable[[str, bool], None],
+        enabled: bool,
+        exception_traceback: str = "",
+    ) -> None:
+        if not enabled:
+            return
+
+        self._emit_voice_debug(
+            f"texto descartado: si | motivo: {reason}",
+            emit,
+            enabled,
+        )
+
+        if exception_traceback:
+            self._emit_voice_debug(
+                "excepcion completa:\n" + exception_traceback,
+                emit,
+                enabled,
+            )
+
+    def _emit_voice_debug(
+        self,
+        message: str,
+        emit: Callable[[str, bool], None],
+        enabled: bool,
+    ) -> None:
+        if enabled:
+            emit(f"[voice-debug] {message}", diagnostic=False)
 
     def _accepted_transcription_text(
         self,
@@ -846,6 +1065,58 @@ class VoiceConversationUseCase:
             return None
 
         return text
+
+    def _transcription_discard_reason(
+        self,
+        transcription: SpeechTranscriptionResult,
+        trim_edge_punctuation: bool = False,
+    ) -> str:
+        text = self._clean_transcription_text(
+            transcription.text,
+            trim_edge_punctuation=trim_edge_punctuation,
+        )
+
+        if not text:
+            return "STT devolvio texto vacio"
+
+        useful = self._useful_text(text)
+        confidence = self._confidence(transcription.average_log_probability)
+        no_speech_probability = transcription.no_speech_probability
+
+        if (
+            no_speech_probability is not None
+            and no_speech_probability
+            > self._stt_threshold("ATLAS_STT_MAX_NO_SPEECH_PROBABILITY", 0.65)
+        ):
+            return (
+                "probabilidad de silencio alta: "
+                f"{no_speech_probability:.3f}"
+            )
+
+        if (
+            confidence is not None
+            and confidence < self._stt_threshold("ATLAS_STT_MIN_CONFIDENCE", 0.35)
+            and len(useful) < 8
+        ):
+            return f"confianza baja en texto corto: {confidence:.3f}"
+
+        if (
+            self._normalize(text) in self._LOW_VALUE_NOISE_PHRASES
+            and (
+                confidence is None
+                or confidence < 0.75
+                or (
+                    no_speech_probability is not None
+                    and no_speech_probability > 0.35
+                )
+            )
+        ):
+            return "frase corta de bajo valor filtrada"
+
+        if len(useful) < 2 and not self._is_close_command(text):
+            return "texto util demasiado corto"
+
+        return "motivo de descarte no identificado"
 
     def _clean_transcription_text(
         self,
@@ -945,6 +1216,19 @@ class VoiceConversationUseCase:
         self,
         normalized: str,
     ) -> bool:
+        words = normalized.split()
+
+        if words == ["hora"] or words == ["hora", "es"]:
+            return True
+
+        if words in (
+            ["que", "hora"],
+            ["que", "hora", "es"],
+            ["que", "hora", "es", "hoy"],
+            ["dime", "la", "hora"],
+        ):
+            return True
+
         if any(
             phrase in normalized
             for phrase in (
@@ -955,12 +1239,12 @@ class VoiceConversationUseCase:
         ):
             return True
 
-        words = normalized.split()
         return (
-            "ahora" in words
-            and "es" in words
+            "hora" in words
+            and any(marker in words for marker in ("actual", "ahora"))
             and (
                 normalized.startswith("que ")
+                or "dime" in words
                 or "actual" in words
                 or "mismo" in words
             )
@@ -970,6 +1254,18 @@ class VoiceConversationUseCase:
         self,
         normalized: str,
     ) -> bool:
+        words = normalized.split()
+
+        if words == ["fecha"] or words == ["fecha", "hoy"]:
+            return True
+
+        if words in (
+            ["que", "fecha", "es", "hoy"],
+            ["que", "dia", "es", "hoy"],
+            ["dime", "la", "fecha"],
+        ):
+            return True
+
         return any(
             phrase in normalized
             for phrase in (

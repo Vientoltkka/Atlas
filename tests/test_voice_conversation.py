@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 
 from agents.registry import AgentRegistry
 from core.orchestrator import AtlasOrchestrator
+from core.router import Router
 from use_cases.speech_engine import SpeechTranscriptionResult
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordDetectionResult, WakeWordEngine
@@ -21,6 +23,9 @@ def speech_result(
     warnings: tuple[str, ...] = (),
     average_log_probability: float | None = None,
     no_speech_probability: float | None = None,
+    samples_count: int = 16000,
+    rms: float = 0.01,
+    exception_traceback: str = "",
 ) -> SpeechTranscriptionResult:
     return SpeechTranscriptionResult(
         text=text,
@@ -36,6 +41,9 @@ def speech_result(
         summary="fake",
         average_log_probability=average_log_probability,
         no_speech_probability=no_speech_probability,
+        samples_count=samples_count,
+        rms=rms,
+        exception_traceback=exception_traceback,
     )
 
 
@@ -123,12 +131,14 @@ class FakeSpeechOutputEngine:
         self,
         fail: bool = False,
         fail_once: bool = False,
+        fail_on_calls: tuple[int, ...] = (),
         events: list[str] | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.closed = False
         self.fail = fail
         self.fail_once = fail_once
+        self.fail_on_calls = set(fail_on_calls)
         self.warm_up_calls = 0
         self.events = events
 
@@ -138,7 +148,7 @@ class FakeSpeechOutputEngine:
 
         self.calls.append(text)
 
-        if self.fail or self.fail_once:
+        if self.fail or self.fail_once or len(self.calls) in self.fail_on_calls:
             self.fail_once = False
             raise RuntimeError("motor TTS roto")
 
@@ -547,18 +557,28 @@ def test_non_critical_turn_failure_allows_continuation() -> None:
     assert result.session.ended_reason == "explicit_close"
 
 
-def test_critical_turn_failure_ends_session() -> None:
-    speech = FakeSpeechEngine([speech_result("primer turno")])
+def test_post_stt_processor_failure_is_reported_and_listening_continues() -> None:
+    speech = FakeSpeechEngine([speech_result("primer turno"), speech_result("salir")])
+    output = FakeSpeechOutputEngine()
+    console: list[str] = []
 
-    result = make_use_case(speech).execute(
+    result = make_use_case(speech, output=output).execute(
         "activa conversacion por voz",
         process_text=lambda _text: (_ for _ in ()).throw(
             RuntimeError("permisos denegados")
         ),
+        status_sink=console.append,
     )
 
     assert result is not None
-    assert result.session.ended_reason == "critical_error"
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.failed_turns == 1
+    assert result.session.response_history == [
+        "Error en flujo post-STT: RuntimeError: permisos denegados"
+    ]
+    assert output.calls == [
+        "Error en flujo post-STT: RuntimeError: permisos denegados"
+    ]
 
 
 def test_privacy_no_audio_tts_sound_or_cloud() -> None:
@@ -607,17 +627,17 @@ def test_manual_voice_uses_shorter_turn_capture_settings() -> None:
     assert result.session.successful_turns == 1
     assert speech.capture_settings_seen
     settings = speech.capture_settings_seen[0]
-    assert settings.max_duration == 10.0
-    assert settings.initial_silence_timeout == 5.0
-    assert settings.trailing_silence == 1.0
-    assert settings.minimum_audio_duration == 0.3
+    assert settings.max_duration == 8.0
+    assert settings.initial_silence_timeout == 3.0
+    assert settings.trailing_silence == 0.75
+    assert settings.minimum_audio_duration == 0.2
 
 
 def test_manual_voice_applies_calibrated_noise_threshold() -> None:
     class CalibratingSpeech(FakeSpeechEngine):
-        def calibrate_noise_threshold(self, capture_settings=None, duration_seconds=0.5):
-            assert duration_seconds == 0.5
-            assert capture_settings.initial_silence_timeout == 5.0
+        def calibrate_noise_threshold(self, capture_settings=None, duration_seconds=0.4):
+            assert duration_seconds == 0.4
+            assert capture_settings.initial_silence_timeout == 3.0
             return 0.011
 
     speech = CalibratingSpeech([speech_result("pregunta"), speech_result("salir")])
@@ -803,95 +823,76 @@ def test_explicit_english_voice_question_does_not_force_spanish() -> None:
     assert prompts == ["answer in English, say hello"]
 
 
-def test_current_time_uses_mocked_clock_and_does_not_call_model() -> None:
+def test_current_time_reaches_voice_processor_for_router_resolution() -> None:
     speech = FakeSpeechEngine([speech_result("que hora es"), speech_result("salir")])
     output = FakeSpeechOutputEngine()
-    model_calls = 0
+    prompts: list[str] = []
 
-    def process(_text: str) -> str:
-        nonlocal model_calls
-        model_calls += 1
-        return "modelo no debe responder"
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta del router",
+    )
 
-    result = make_use_case(
-        speech,
-        output=output,
-        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
-    ).execute_manual(process_text=process)
-
-    assert model_calls == 0
-    assert result.session.response_history == ["Son las seis y doce de la tarde."]
-    assert output.calls == ["Son las seis y doce de la tarde."]
+    assert prompts == [
+        "que hora es\n\nResponde en español, de forma natural y concisa."
+    ]
+    assert result.session.response_history == ["respuesta del router"]
+    assert output.calls == ["respuesta del router"]
 
 
-def test_mistranscribed_short_time_question_uses_mocked_clock_and_does_not_call_model() -> None:
+def test_mistranscribed_short_time_question_reaches_voice_processor() -> None:
     speech = FakeSpeechEngine(
         [speech_result("que ahora es ahora mismo atras"), speech_result("salir")]
     )
-    model_calls = 0
+    prompts: list[str] = []
 
-    def process(_text: str) -> str:
-        nonlocal model_calls
-        model_calls += 1
-        return "modelo no debe responder"
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta del router",
+    )
 
-    result = make_use_case(
-        speech,
-        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
-    ).execute_manual(process_text=process)
-
-    assert model_calls == 0
-    assert result.session.response_history == ["Son las seis y doce de la tarde."]
-
-
-def test_current_date_uses_mocked_clock_and_does_not_call_model() -> None:
-    speech = FakeSpeechEngine([speech_result("cual es la fecha"), speech_result("salir")])
-    model_calls = 0
-
-    def process(_text: str) -> str:
-        nonlocal model_calls
-        model_calls += 1
-        return "modelo no debe responder"
-
-    result = make_use_case(
-        speech,
-        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
-    ).execute_manual(process_text=process)
-
-    assert model_calls == 0
-    assert result.session.response_history == [
-        "Hoy es miércoles, 15 de julio de 2026."
+    assert prompts == [
+        "que ahora es ahora mismo atras\n\n"
+        "Responde en español, de forma natural y concisa."
     ]
+    assert result.session.response_history == ["respuesta del router"]
 
 
-def test_current_date_and_time_uses_mocked_clock_and_does_not_call_model() -> None:
+def test_current_date_reaches_voice_processor_for_router_resolution() -> None:
+    speech = FakeSpeechEngine([speech_result("cual es la fecha"), speech_result("salir")])
+    prompts: list[str] = []
+
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta del router",
+    )
+
+    assert prompts == [
+        "cual es la fecha\n\nResponde en español, de forma natural y concisa."
+    ]
+    assert result.session.response_history == ["respuesta del router"]
+
+
+def test_current_date_and_time_reaches_voice_processor_for_router_resolution() -> None:
     speech = FakeSpeechEngine(
         [speech_result("fecha y hora actual"), speech_result("salir")]
     )
-    model_calls = 0
+    prompts: list[str] = []
 
-    def process(_text: str) -> str:
-        nonlocal model_calls
-        model_calls += 1
-        return "modelo no debe responder"
+    result = make_use_case(speech).execute_manual(
+        process_text=lambda text: prompts.append(text) or "respuesta del router",
+    )
 
-    result = make_use_case(
-        speech,
-        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
-    ).execute_manual(process_text=process)
-
-    assert model_calls == 0
-    assert result.session.response_history == [
-        "Son las seis y doce de la tarde del miércoles, 15 de julio de 2026."
+    assert prompts == [
+        "fecha y hora actual\n\nResponde en español, de forma natural y concisa."
     ]
+    assert result.session.response_history == ["respuesta del router"]
 
 
-def test_three_consecutive_timeouts_end_manual_session() -> None:
+def test_three_consecutive_timeouts_do_not_end_manual_session() -> None:
     speech = FakeSpeechEngine(
         [
             speech_result("", completed=False, no_speech=True),
             speech_result("", completed=False, no_speech=True),
             speech_result("", completed=False, no_speech=True),
+            speech_result("salir"),
         ]
     )
 
@@ -900,8 +901,8 @@ def test_three_consecutive_timeouts_end_manual_session() -> None:
         max_consecutive_no_speech=3,
     ).execute_manual(process_text=lambda _text: "unexpected")
 
-    assert result.session.ended_reason == "idle_timeout"
-    assert speech.transcribe_calls == 3
+    assert result.session.ended_reason == "explicit_close"
+    assert speech.transcribe_calls == 4
 
 
 def test_single_timeout_does_not_end_manual_session() -> None:
@@ -970,20 +971,391 @@ def test_clean_console_when_diagnostics_disabled() -> None:
     make_use_case(
         speech,
         diagnostics_enabled=False,
-        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
     ).execute_manual(
-        process_text=lambda _text: "modelo no debe responder",
+        process_text=lambda _text: "respuesta del router",
         status_sink=output.append,
     )
 
     assert output[:3] == [
         "Esperando voz...",
         "Tú: que hora es",
-        "Atlas: Son las seis y doce de la tarde.",
+        "Atlas: respuesta del router",
     ]
     assert "Transcripcion:" not in output
     assert "Respuesta:" not in output
     assert "Estado: inicializando." not in output
+
+
+def test_manual_voice_empty_transcription_continues_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    speech = FakeSpeechEngine(
+        [
+            speech_result(
+                "",
+                completed=False,
+                no_speech=False,
+                warnings=("transcripcion vacia",),
+                samples_count=8000,
+                rms=0.012,
+            ),
+            speech_result("salir"),
+        ]
+    )
+    output: list[str] = []
+    processed: list[str] = []
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: processed.append(text) or "unexpected",
+        status_sink=output.append,
+    )
+
+    joined = "\n".join(output)
+    assert result.session.ended_reason == "explicit_close"
+    assert speech.transcribe_calls == 2
+    assert processed == []
+    assert "[voice-debug] duracion audio capturado:" in joined
+    assert "[voice-debug] numero de muestras: 8000" in output
+    assert "[voice-debug] RMS final: 0.012000" in output
+    assert "[voice-debug] texto exacto STT repr: ''" in output
+    assert "[voice-debug] texto descartado: si | motivo: transcripcion vacia" in output
+
+
+def test_manual_voice_valid_transcription_calls_process_once() -> None:
+    speech = FakeSpeechEngine([speech_result("pregunta valida"), speech_result("salir")])
+    processed: list[str] = []
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: processed.append(text) or "respuesta valida",
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert processed == [
+        "pregunta valida\n\nResponde en español, de forma natural y concisa."
+    ]
+
+
+def test_manual_voice_valid_response_is_printed_and_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    speech = FakeSpeechEngine([speech_result("pregunta valida"), speech_result("salir")])
+    output: list[str] = []
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda _text: "respuesta valida",
+        status_sink=output.append,
+    )
+
+    assert result.session.response_history == ["respuesta valida"]
+    assert any(item.startswith("T") and item.endswith("pregunta valida") for item in output)
+    assert "Atlas: respuesta valida" in output
+    assert "[voice-flow] STT recibido: 'pregunta valida'" in output
+    assert "[voice-flow] ruta seleccionada: modelo" in output
+    assert "[voice-flow] respuesta obtenida: 'respuesta valida'" in output
+
+
+def test_manual_voice_waits_for_tts_before_next_capture() -> None:
+    events: list[str] = []
+
+    class EventSpeech(FakeSpeechEngine):
+        def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+            events.append(f"capture {self.transcribe_calls + 1}")
+            return super().transcribe_once(capture_settings)
+
+    speech = EventSpeech([speech_result("pregunta valida"), speech_result("salir")])
+    output = FakeSpeechOutputEngine(events=events)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "respuesta valida",
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert events == [
+        "capture 1",
+        "tts start:respuesta valida",
+        "tts end:respuesta valida",
+        "capture 2",
+    ]
+
+
+def test_manual_voice_recoverable_stt_error_does_not_close_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    speech = FakeSpeechEngine(
+        [
+            speech_result(
+                "",
+                completed=False,
+                no_speech=False,
+                warnings=("fallo temporal STT",),
+                exception_traceback="Traceback (most recent call last):\nRuntimeError: fallo temporal STT",
+            ),
+            speech_result("salir"),
+        ]
+    )
+    output: list[str] = []
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda _text: "unexpected",
+        status_sink=output.append,
+    )
+
+    joined = "\n".join(output)
+    assert result.session.ended_reason == "explicit_close"
+    assert speech.transcribe_calls == 2
+    assert "texto descartado: si | motivo: fallo temporal STT" in joined
+    assert "excepcion completa:" in joined
+    assert "RuntimeError: fallo temporal STT" in joined
+
+
+def test_manual_voice_router_time_receives_transcribed_text() -> None:
+    speech = FakeSpeechEngine([speech_result("que hora es"), speech_result("salir")])
+    output: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(
+            text,
+            confirm=lambda _prompt: "",
+        ),
+        status_sink=output.append,
+    )
+
+    assert result.session.response_history == ["Son las seis y doce de la tarde."]
+    assert any(item.startswith("T") and item.endswith("que hora es") for item in output)
+    assert "Atlas: Son las seis y doce de la tarde." in output
+
+
+def test_manual_voice_time_prints_and_speaks_once() -> None:
+    speech = FakeSpeechEngine([speech_result("Qué hora es"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(text, confirm=lambda _prompt: ""),
+        status_sink=console.append,
+    )
+
+    assert console.count("Atlas: Son las seis y doce de la tarde.") == 1
+    assert tts.calls == ["Son las seis y doce de la tarde."]
+
+
+def test_manual_voice_date_prints_and_speaks_once() -> None:
+    speech = FakeSpeechEngine([speech_result("Qué fecha es hoy"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(text, confirm=lambda _prompt: ""),
+        status_sink=console.append,
+    )
+
+    expected = "Hoy es miércoles, 15 de julio de 2026."
+    assert console.count(f"Atlas: {expected}") == 1
+    assert tts.calls == [expected]
+
+
+def test_manual_voice_tool_confirmation_prints_and_speaks_once() -> None:
+    class FakeDesktopInteraction:
+        def execute(self, prompt, confirm=None):
+            assert prompt == "Abre Bloc de notas"
+            return "Bloc de notas abierto."
+
+    speech = FakeSpeechEngine([speech_result("abre bloc de notas"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=FakeDesktopInteraction(),
+    )
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(text, confirm=lambda _prompt: ""),
+        status_sink=console.append,
+    )
+
+    assert console.count("Atlas: Bloc de notas abierto.") == 1
+    assert tts.calls == ["Bloc de notas abierto."]
+
+
+def test_manual_voice_model_response_prints_and_speaks_once() -> None:
+    class FakeMemory:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str]] = []
+
+        def add_user(self, prompt: str) -> None:
+            self.events.append(("user", prompt))
+
+        def add_assistant(self, response: str) -> None:
+            self.events.append(("assistant", response))
+
+        def history(self):
+            return [
+                {"role": role, "content": content}
+                for role, content in self.events
+            ]
+
+    class FakeChatAgent:
+        name = "chat"
+        description = "fake chat"
+
+        def run(self, model, messages):
+            return "Paris es la capital de Francia."
+
+    registry = AgentRegistry()
+    registry.register(FakeChatAgent())
+    speech = FakeSpeechEngine([speech_result("cual es la capital de francia"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(create_plan=lambda text: SimpleNamespace(task="chat", objective=text)),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "fake-model"),
+        memory=FakeMemory(),
+        registry=registry,
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+    )
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(text, confirm=lambda _prompt: ""),
+        status_sink=console.append,
+    )
+
+    assert console.count("Atlas: Paris es la capital de Francia.") == 1
+    assert tts.calls == ["Paris es la capital de Francia."]
+
+
+def test_manual_voice_accented_model_question_uses_model_and_speaks_once() -> None:
+    speech = FakeSpeechEngine([speech_result("Cuál es la capital de Francia"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    processed: list[str] = []
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: processed.append(text) or "París es la capital de Francia.",
+        status_sink=console.append,
+    )
+
+    assert processed == [
+        "Cuál es la capital de Francia\n\nResponde en español, de forma natural y concisa."
+    ]
+    assert console.count("Atlas: París es la capital de Francia.") == 1
+    assert tts.calls == ["París es la capital de Francia."]
+
+
+def test_voice_flow_debug_marks_successful_post_stt_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    speech = FakeSpeechEngine([speech_result("Qué hora es"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    make_use_case(
+        speech,
+        output=tts,
+        diagnostics_enabled=False,
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    ).execute_manual(
+        process_text=lambda _text: "Son las seis y doce de la tarde.",
+        status_sink=console.append,
+    )
+
+    joined = "\n".join(console)
+    assert "[voice-flow] STT recibido: 'Qué hora es'" in joined
+    assert "[voice-flow] ruta seleccionada: local" in joined
+    assert "[voice-flow] respuesta obtenida: 'Son las seis y doce de la tarde.'" in joined
+    assert "[voice-flow] inicio TTS" in joined
+    assert "[voice-flow] fin TTS" in joined
+    assert "[voice-flow] vuelta a escucha" in joined
+    assert "[voice-debug] entrada enviada a process_voice_prompt repr:" not in joined
+    assert tts.calls == ["Son las seis y doce de la tarde."]
+
+
+def test_model_timeout_prints_speaks_and_returns_to_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MODEL_TIMEOUT", "0.01")
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Cuál es la capital de Francia"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    def slow_model(_text: str) -> str:
+        time.sleep(0.2)
+        return "respuesta tardia"
+
+    use_case = make_use_case(speech, output=tts, diagnostics_enabled=False)
+    result = use_case.execute_manual(
+        process_text=lambda text: (
+            slow_model(text)
+            if "capital de francia" in text.lower()
+            else "Son las seis y doce de la tarde."
+        ),
+        status_sink=console.append,
+    )
+
+    timeout_response = "La respuesta está tardando demasiado. Inténtalo de nuevo."
+    assert result.session.ended_reason == "explicit_close"
+    assert console.count(f"Atlas: {timeout_response}") == 1
+    assert "Atlas: Son las seis y doce de la tarde." in console
+    assert tts.calls == [timeout_response, "Son las seis y doce de la tarde."]
+    assert use_case._tts_speaking is False
 
 
 def test_voice_resources_are_loaded_once_for_session() -> None:
@@ -1007,12 +1379,64 @@ def test_two_consecutive_responses_are_both_spoken_once() -> None:
     )
     output = FakeSpeechOutputEngine()
 
-    result = make_use_case(speech, output=output).execute_manual(
+    use_case = make_use_case(speech, output=output)
+    result = use_case.execute_manual(
         process_text=lambda text: f"respuesta {text.splitlines()[0]}",
     )
 
     assert result.session.successful_turns == 2
     assert output.calls == ["respuesta primera", "respuesta segunda"]
+
+
+def test_three_consecutive_responses_complete_tts_three_times() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("primera"),
+            speech_result("segunda"),
+            speech_result("tercera"),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    use_case = make_use_case(speech, output=output)
+    result = use_case.execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 3
+    assert output.calls == [
+        "respuesta primera",
+        "respuesta segunda",
+        "respuesta tercera",
+    ]
+    assert use_case._tts_speaking is False
+
+
+def test_tts_error_on_second_turn_does_not_block_third_turn() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("primera"),
+            speech_result("segunda"),
+            speech_result("tercera"),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine(fail_on_calls=(2,))
+
+    use_case = make_use_case(speech, output=output)
+    result = use_case.execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 3
+    assert output.calls == [
+        "respuesta primera",
+        "respuesta segunda",
+        "respuesta tercera",
+    ]
+    assert "Error TTS: motor TTS roto" in result.messages
+    assert use_case._tts_speaking is False
 
 
 def test_next_turn_starts_after_tts_finishes() -> None:
@@ -1055,7 +1479,7 @@ def test_tts_failure_allows_next_turn_to_speak() -> None:
 
     assert result.session.successful_turns == 2
     assert output.calls == ["respuesta primera", "respuesta segunda"]
-    assert "TTS falló:" in "\n".join(result.messages)
+    assert "Error TTS: motor TTS roto" in "\n".join(result.messages)
     assert result.session.ended_reason == "explicit_close"
 
 
@@ -1134,7 +1558,10 @@ def test_manual_voice_exits_by_typed_commands(command: str) -> None:
 
 def test_manual_voice_timeout_does_not_call_tts() -> None:
     speech = FakeSpeechEngine(
-        [speech_result("", completed=False, no_speech=True, warnings=("silencio",))]
+        [
+            speech_result("", completed=False, no_speech=True, warnings=("silencio",)),
+            speech_result("salir"),
+        ]
     )
     output = FakeSpeechOutputEngine()
 
@@ -1144,7 +1571,7 @@ def test_manual_voice_timeout_does_not_call_tts() -> None:
         max_consecutive_no_speech=1,
     ).execute_manual(process_text=lambda _text: "unexpected")
 
-    assert result.session.ended_reason == "idle_timeout"
+    assert result.session.ended_reason == "explicit_close"
     assert output.calls == []
 
 
@@ -1159,7 +1586,7 @@ def test_tts_error_keeps_textual_flow_alive() -> None:
     messages = "\n".join(result.messages)
     assert result.session.successful_turns == 1
     assert "respuesta primera" in messages
-    assert "TTS falló:" in messages
+    assert "Error TTS: motor TTS roto" in messages
     assert result.session.ended_reason == "explicit_close"
 
 
@@ -1277,6 +1704,243 @@ def test_real_wake_word_engine_can_detect_without_capturing_phrase() -> None:
     assert result.detected is True
     assert result.phrase is None
     assert speech.transcribe_calls == 0
+
+
+def test_router_classifies_only_supported_voice_tool_commands() -> None:
+    router = Router()
+
+    assert router.route_voice_command("que hora es") == "voice_time"
+    assert router.route_voice_command("cual es la fecha") == "voice_date"
+    assert router.route_voice_command("fecha y hora actual") == "voice_datetime"
+    assert router.route_voice_command("abre bloc de notas") == "voice_open_notepad"
+    assert router.route_voice_command("abre VS Code") == "voice_open_vscode"
+    assert router.route_voice_command("cuentame algo") is None
+    assert router.route_voice_command("abre Chrome") is None
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "qué hora es",
+        "que hora es",
+        "qué hora es hoy",
+        "dime la hora",
+        "hora",
+        "hora es",
+        "qué hora",
+        "¿Qué hora?",
+    ],
+)
+def test_router_accepts_time_transcription_variants(phrase: str) -> None:
+    assert Router().route_voice_command(phrase) == "voice_time"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "qué fecha es hoy",
+        "que fecha es hoy",
+        "qué día es hoy",
+        "que dia es hoy",
+        "dime la fecha",
+        "fecha hoy",
+        "fecha",
+        "¿Fecha hoy?",
+    ],
+)
+def test_router_accepts_date_transcription_variants(phrase: str) -> None:
+    assert Router().route_voice_command(phrase) == "voice_date"
+
+
+@pytest.mark.parametrize(
+    ("phrase", "route"),
+    [
+        ("abre el bloc de notas", "voice_open_notepad"),
+        ("abrir bloc de notas", "voice_open_notepad"),
+        ("abre bloc de notas", "voice_open_notepad"),
+        ("abre notepad", "voice_open_notepad"),
+        ("abre visual studio code", "voice_open_vscode"),
+        ("abre vs code", "voice_open_vscode"),
+        ("abre vscode", "voice_open_vscode"),
+    ],
+)
+def test_router_accepts_tool_transcription_variants(
+    phrase: str,
+    route: str,
+) -> None:
+    assert Router().route_voice_command(phrase) == route
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "a que hora abre el gimnasio",
+        "la fecha limite del proyecto",
+        "mejora esta frase",
+        "abre chrome",
+        "abre el calendario",
+        "cuentame algo sobre visual studio code",
+        "la hora de comer es importante",
+    ],
+)
+def test_router_rejects_voice_command_false_positives(phrase: str) -> None:
+    assert Router().route_voice_command(phrase) is None
+
+
+def test_orchestrator_routes_voice_time_before_model() -> None:
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(
+            add_user=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("memory must not be touched for voice tools")
+            ),
+            add_assistant=lambda _response: None,
+            history=list,
+        ),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    response = orchestrator.process_voice_prompt(
+        "que hora es\n\nResponde en español, de forma natural y concisa.",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "Son las seis y doce de la tarde."
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        (
+            "Hora es\n\nResponde en español, de forma natural y concisa.",
+            "Son las seis y doce de la tarde.",
+        ),
+        (
+            "Fecha hoy\n\nResponde en español, de forma natural y concisa.",
+            "Hoy es miércoles, 15 de julio de 2026.",
+        ),
+    ],
+)
+def test_orchestrator_routes_imperfect_time_date_transcriptions_before_model(
+    prompt: str,
+    expected: str,
+) -> None:
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(
+            add_user=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("memory must not be touched for voice tools")
+            ),
+            add_assistant=lambda _response: None,
+            history=list,
+        ),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    assert orchestrator.process_voice_prompt(prompt, confirm=lambda _prompt: "") == expected
+
+
+def test_orchestrator_routes_voice_desktop_apps_through_existing_tool() -> None:
+    class FakeDesktopInteraction:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(self, prompt, confirm=None):
+            self.calls.append(prompt)
+            return f"tool:{prompt}"
+
+    desktop = FakeDesktopInteraction()
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop,
+    )
+
+    vscode = orchestrator.process_voice_prompt(
+        "abre VS Code\n\nResponde en español, de forma natural y concisa.",
+        confirm=lambda _prompt: "",
+    )
+    notepad = orchestrator.process_voice_prompt(
+        "abre bloc de notas\n\nResponde en español, de forma natural y concisa.",
+        confirm=lambda _prompt: "",
+    )
+
+    assert vscode == "tool:Abre Visual Studio Code"
+    assert notepad == "tool:Abre Bloc de notas"
+    assert desktop.calls == ["Abre Visual Studio Code", "Abre Bloc de notas"]
+
+
+def test_orchestrator_voice_fallback_uses_model_flow_exactly_as_now() -> None:
+    memory_events: list[tuple[str, str]] = []
+    agent_messages: list[list[dict[str, str]]] = []
+
+    class FakeMemory:
+        def add_user(self, prompt: str) -> None:
+            memory_events.append(("user", prompt))
+
+        def add_assistant(self, response: str) -> None:
+            memory_events.append(("assistant", response))
+
+        def history(self):
+            return [
+                {"role": role, "content": content}
+                for role, content in memory_events
+            ]
+
+    class FakeChatAgent:
+        name = "chat"
+        description = "fake chat"
+
+        def run(self, model, messages):
+            agent_messages.append(messages)
+            return f"modelo:{model}"
+
+    registry = AgentRegistry()
+    registry.register(FakeChatAgent())
+    prompt = "cuentame algo\n\nResponde en español, de forma natural y concisa."
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda text: SimpleNamespace(task="chat", objective=text)
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda agent: f"model:{agent}"),
+        memory=FakeMemory(),
+        registry=registry,
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+    )
+
+    response = orchestrator.process_voice_prompt(prompt, confirm=lambda _prompt: "")
+
+    assert response == "modelo:model:chat"
+    assert memory_events == [
+        ("user", prompt),
+        ("assistant", "modelo:model:chat"),
+    ]
+    assert agent_messages == [[{"role": "user", "content": prompt}]]
 
 
 def test_orchestrator_integrates_voice_mode_before_router(monkeypatch, capsys) -> None:
