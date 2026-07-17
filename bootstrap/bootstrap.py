@@ -27,6 +27,7 @@ from tools.argument_schema import (
 )
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
+from tools.tool_chain_runner import ToolChainRunner
 from tools.single_tool_runner import SingleToolRunner
 
 from tools.filesystem.read_file_tool import ReadFileTool
@@ -333,6 +334,15 @@ class Bootstrap:
             selector or Bootstrap.build_tool_selector(registry),
             validator or Bootstrap.build_argument_validator(),
             executor or ToolExecutor(registry),
+        )
+
+    @staticmethod
+    def build_tool_chain_runner(
+        single_tool_runner: SingleToolRunner | None = None,
+    ) -> ToolChainRunner:
+        """Build the coordinator for deterministic linear tool chains."""
+        return ToolChainRunner(
+            single_tool_runner or Bootstrap.build_single_tool_runner()
         )
 
     @staticmethod
