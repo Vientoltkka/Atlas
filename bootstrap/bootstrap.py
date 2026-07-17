@@ -106,23 +106,8 @@ class Bootstrap:
     """Build the Atlas application."""
 
     @staticmethod
-    def build() -> AtlasOrchestrator:
-
-        # -----------------------
-        # Core
-        # -----------------------
-
-        planner = Planner()
-        router = Router()
-        model_manager = ModelManager()
-        memory = ConversationMemory()
-
-        prompt_client = PromptClient()
-
-        # -----------------------
-        # Tools
-        # -----------------------
-
+    def build_tool_registry() -> ToolRegistry:
+        """Build the central registry with the tools available in Atlas."""
         tool_registry = ToolRegistry()
 
         tool_registry.register(ReadFileTool())
@@ -165,6 +150,28 @@ class Bootstrap:
         tool_registry.register(ResizeWindowTool())
         tool_registry.register(MoveResizeWindowTool())
         tool_registry.register(CloseWindowTool())
+
+        return tool_registry
+
+    @staticmethod
+    def build() -> AtlasOrchestrator:
+
+        # -----------------------
+        # Core
+        # -----------------------
+
+        planner = Planner()
+        router = Router()
+        model_manager = ModelManager()
+        memory = ConversationMemory()
+
+        prompt_client = PromptClient()
+
+        # -----------------------
+        # Tools
+        # -----------------------
+
+        tool_registry = Bootstrap.build_tool_registry()
 
         tool_executor = ToolExecutor(tool_registry)
 

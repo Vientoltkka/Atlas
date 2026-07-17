@@ -25,9 +25,4 @@ class ToolExecutor:
 
         tool = self._registry.get(tool_name)
 
-        if tool is None:
-            raise RuntimeError(
-                f"Tool '{tool_name}' is not registered."
-            )
-
         return tool.execute(context)
