@@ -493,7 +493,7 @@ def test_ends_by_inactivity_max_duration_and_max_turns() -> None:
         conversation_idle_timeout=700.0,
     ).execute("activa conversacion por voz", process_text=lambda text: "respuesta")
     max_turns = make_use_case(
-        FakeSpeechEngine([speech_result("uno"), speech_result("dos")]),
+        FakeSpeechEngine([speech_result("pregunta uno"), speech_result("pregunta dos")]),
         max_turns=1,
     ).execute("activa conversacion por voz", process_text=lambda text: "respuesta")
 
@@ -1022,6 +1022,21 @@ def test_manual_voice_empty_transcription_continues_loop(
     assert "[voice-debug] texto descartado: si | motivo: transcripcion vacia" in output
 
 
+def test_manual_voice_rejects_too_short_non_intent_transcription() -> None:
+    speech = FakeSpeechEngine([speech_result("si"), speech_result("salir")])
+    processed: list[str] = []
+    console: list[str] = []
+
+    result = make_use_case(speech, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: processed.append(text) or "unexpected",
+        status_sink=console.append,
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert processed == []
+    assert any(item.startswith("No entend") for item in console)
+
+
 def test_manual_voice_valid_transcription_calls_process_once() -> None:
     speech = FakeSpeechEngine([speech_result("pregunta valida"), speech_result("salir")])
     processed: list[str] = []
@@ -1228,6 +1243,71 @@ def test_manual_voice_tool_confirmation_prints_and_speaks_once() -> None:
     assert tts.calls == ["Bloc de notas abierto."]
 
 
+@pytest.mark.parametrize(
+    ("spoken", "expected_prompt", "expected_response"),
+    [
+        ("VS Code", "Abre Visual Studio Code", "VS Code abierto."),
+        ("Bloc de notas", "Abre Bloc de notas", "Bloc de notas abierto."),
+    ],
+)
+def test_manual_voice_short_tool_orders_are_routed_and_spoken_once(
+    spoken: str,
+    expected_prompt: str,
+    expected_response: str,
+) -> None:
+    class FakeDesktopInteraction:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(self, prompt, confirm=None):
+            self.calls.append(prompt)
+            return expected_response
+
+    desktop = FakeDesktopInteraction()
+    speech = FakeSpeechEngine([speech_result(spoken), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop,
+    )
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(text, confirm=lambda _prompt: ""),
+        status_sink=console.append,
+    )
+
+    assert desktop.calls == [expected_prompt]
+    assert console.count(f"Atlas: {expected_response}") == 1
+    assert tts.calls == [expected_response]
+
+
+def test_manual_voice_ambiguous_hoy_asks_clarification_without_model() -> None:
+    speech = FakeSpeechEngine([speech_result("Hoy"), speech_result("salir")])
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+    processed: list[str] = []
+
+    make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: processed.append(text) or "modelo no debe responder",
+        status_sink=console.append,
+    )
+
+    expected = "¿Quieres saber la hora o la fecha?"
+    assert processed == []
+    assert console.count(f"Atlas: {expected}") == 1
+    assert tts.calls == [expected]
+
+
 def test_manual_voice_model_response_prints_and_speaks_once() -> None:
     class FakeMemory:
         def __init__(self) -> None:
@@ -1322,6 +1402,40 @@ def test_voice_flow_debug_marks_successful_post_stt_route(
     assert tts.calls == ["Son las seis y doce de la tarde."]
 
 
+def test_voice_latency_metrics_are_only_visible_with_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    debug_speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("salir")])
+    debug_console: list[str] = []
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+
+    make_use_case(
+        debug_speech,
+        output=FakeSpeechOutputEngine(),
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda _text: "respuesta",
+        status_sink=debug_console.append,
+    )
+
+    assert any("[voice-flow] latencia espera_voz=" in item for item in debug_console)
+
+    monkeypatch.delenv("ATLAS_VOICE_DEBUG", raising=False)
+    normal_speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("salir")])
+    normal_console: list[str] = []
+
+    make_use_case(
+        normal_speech,
+        output=FakeSpeechOutputEngine(),
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda _text: "respuesta",
+        status_sink=normal_console.append,
+    )
+
+    assert not any("latencia espera_voz=" in item for item in normal_console)
+
+
 def test_model_timeout_prints_speaks_and_returns_to_next_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1356,6 +1470,142 @@ def test_model_timeout_prints_speaks_and_returns_to_next_turn(
     assert "Atlas: Son las seis y doce de la tarde." in console
     assert tts.calls == [timeout_response, "Son las seis y doce de la tarde."]
     assert use_case._tts_speaking is False
+
+
+def test_model_route_valid_response_keeps_voice_loop_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Ya es hoy"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: (
+            "respuesta del modelo"
+            if "Ya es hoy" in text
+            else "Son las seis y doce de la tarde."
+        ),
+        status_sink=console.append,
+    )
+
+    joined = "\n".join(console)
+    assert result.session.ended_reason == "explicit_close"
+    assert "[voice-flow] STT recibido: 'Ya es hoy'" in joined
+    assert "[voice-flow] ruta seleccionada: modelo" in joined
+    assert "[voice-flow] antes de llamar al modelo" in joined
+    assert "[voice-flow] despues de llamar al modelo" in joined
+    assert "[voice-flow] turno terminado" in joined
+    assert console.count("Esperando voz...") == 3
+    assert tts.calls == ["respuesta del modelo", "Son las seis y doce de la tarde."]
+
+
+def test_model_route_exception_is_recoverable_and_next_turn_continues() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Ya es hoy"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    def process(text: str) -> str:
+        if "Ya es hoy" in text:
+            raise RuntimeError("modelo roto")
+        return "Son las seis y doce de la tarde."
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=process,
+        status_sink=console.append,
+    )
+
+    expected = "Error en flujo post-STT: RuntimeError: modelo roto"
+    assert result.session.ended_reason == "explicit_close"
+    assert console.count(f"Atlas: {expected}") == 1
+    assert "Atlas: Son las seis y doce de la tarde." in console
+    assert tts.calls == [expected, "Son las seis y doce de la tarde."]
+
+
+def test_model_route_system_exit_is_recoverable_and_not_silent() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Ya es hoy"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    def process(text: str) -> str:
+        if "Ya es hoy" in text:
+            raise SystemExit("salida del modelo")
+        return "Son las seis y doce de la tarde."
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=process,
+        status_sink=console.append,
+    )
+
+    expected = "Error en flujo post-STT: RuntimeError: SystemExit: salida del modelo"
+    assert result.session.ended_reason == "explicit_close"
+    assert console.count(f"Atlas: {expected}") == 1
+    assert "Atlas: Son las seis y doce de la tarde." in console
+    assert tts.calls == [expected, "Son las seis y doce de la tarde."]
+
+
+def test_model_route_empty_response_is_recoverable_and_next_turn_continues() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Ya es hoy"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: "" if "Ya es hoy" in text else "Son las seis y doce de la tarde.",
+        status_sink=console.append,
+    )
+
+    expected = "No pude generar una respuesta. Inténtalo de nuevo."
+    assert result.session.ended_reason == "explicit_close"
+    assert console.count(f"Atlas: {expected}") == 1
+    assert "Atlas: Son las seis y doce de la tarde." in console
+    assert tts.calls == [expected, "Son las seis y doce de la tarde."]
+
+
+def test_model_route_none_response_is_recoverable_and_next_turn_continues() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("Ya es hoy"),
+            speech_result("que hora es"),
+            speech_result("salir"),
+        ]
+    )
+    tts = FakeSpeechOutputEngine()
+    console: list[str] = []
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: None if "Ya es hoy" in text else "Son las seis y doce de la tarde.",
+        status_sink=console.append,
+    )
+
+    expected = "No pude generar una respuesta. Inténtalo de nuevo."
+    assert result.session.ended_reason == "explicit_close"
+    assert console.count(f"Atlas: {expected}") == 1
+    assert "Atlas: Son las seis y doce de la tarde." in console
+    assert tts.calls == [expected, "Son las seis y doce de la tarde."]
 
 
 def test_voice_resources_are_loaded_once_for_session() -> None:
@@ -1514,7 +1764,7 @@ def test_tts_is_called_once_per_non_empty_response() -> None:
     assert output.calls == ["respuesta unica"]
 
 
-def test_tts_is_not_called_for_empty_response() -> None:
+def test_empty_response_is_reported_and_spoken_once() -> None:
     speech = FakeSpeechEngine([speech_result("pregunta"), speech_result("cancelar")])
     output = FakeSpeechOutputEngine()
 
@@ -1522,9 +1772,10 @@ def test_tts_is_not_called_for_empty_response() -> None:
         process_text=lambda _text: "",
     )
 
+    expected = "No pude generar una respuesta. Inténtalo de nuevo."
     assert result.session.successful_turns == 1
-    assert result.session.response_history == ["Respuesta vacia."]
-    assert output.calls == []
+    assert result.session.response_history == [expected]
+    assert output.calls == [expected]
 
 
 @pytest.mark.parametrize("command", ["salir", "terminar", "cancelar"])
@@ -1714,6 +1965,8 @@ def test_router_classifies_only_supported_voice_tool_commands() -> None:
     assert router.route_voice_command("fecha y hora actual") == "voice_datetime"
     assert router.route_voice_command("abre bloc de notas") == "voice_open_notepad"
     assert router.route_voice_command("abre VS Code") == "voice_open_vscode"
+    assert router.route_voice_command("VS Code") == "voice_open_vscode"
+    assert router.route_voice_command("Bloc de notas") == "voice_open_notepad"
     assert router.route_voice_command("cuentame algo") is None
     assert router.route_voice_command("abre Chrome") is None
 
@@ -1762,6 +2015,9 @@ def test_router_accepts_date_transcription_variants(phrase: str) -> None:
         ("abre visual studio code", "voice_open_vscode"),
         ("abre vs code", "voice_open_vscode"),
         ("abre vscode", "voice_open_vscode"),
+        ("visual studio code", "voice_open_vscode"),
+        ("vs code", "voice_open_vscode"),
+        ("bloc de notas", "voice_open_notepad"),
     ],
 )
 def test_router_accepts_tool_transcription_variants(

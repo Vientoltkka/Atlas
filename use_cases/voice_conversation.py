@@ -569,6 +569,7 @@ class VoiceConversationUseCase:
                 emit(session.summary)
                 break
 
+            self._emit_voice_flow("comenzar siguiente turno", emit, voice_debug)
             emit("Esperando voz...", diagnostic=False)
             transcription = self._transcribe_turn()
             if transcription.no_speech_detected or not transcription.completed:
@@ -719,6 +720,7 @@ class VoiceConversationUseCase:
         route_label = self._voice_flow_route(text)
         success = True
         error_text = ""
+        processing_started = time.monotonic()
 
         try:
             self._emit_voice_flow(f"STT recibido: {text!r}", emit, voice_debug)
@@ -727,17 +729,38 @@ class VoiceConversationUseCase:
                 emit,
                 voice_debug,
             )
-            response = self._process_text_for_voice(
-                prompt_for_voice,
-                process_text,
-                route_label,
-            )
+            if self._normalize(text) == "hoy":
+                response = "¿Quieres saber la hora o la fecha?"
+            elif route_label == "modelo":
+                self._emit_voice_flow("antes de llamar al modelo", emit, voice_debug)
+                try:
+                    response = self._process_text_for_voice(
+                        prompt_for_voice,
+                        process_text,
+                        route_label,
+                    )
+                finally:
+                    self._emit_voice_flow(
+                        "despues de llamar al modelo",
+                        emit,
+                        voice_debug,
+                    )
+            else:
+                response = self._process_text_for_voice(
+                    prompt_for_voice,
+                    process_text,
+                    route_label,
+                )
+            processing_duration = time.monotonic() - processing_started
             self._emit_voice_flow(
                 f"respuesta obtenida: {response!r}",
                 emit,
                 voice_debug,
             )
-        except Exception as error:
+        except KeyboardInterrupt:
+            raise
+        except BaseException as error:
+            processing_duration = time.monotonic() - processing_started
             error_text = f"{type(error).__name__}: {error}"
             response = f"Error en flujo post-STT: {error_text}"
             self._emit_voice_flow(
@@ -748,11 +771,14 @@ class VoiceConversationUseCase:
             success = False
             session.failed_turns += 1
 
-        response = self._format_response_for_voice(response or "")
+        response = self._format_response_for_voice(
+            response if response is not None else ""
+        )
         should_speak_response = bool(response.strip())
 
         if not response:
-            response = "Respuesta vacia."
+            response = "No pude generar una respuesta. Inténtalo de nuevo."
+            should_speak_response = True
 
         session.total_turns += 1
         if success:
@@ -777,9 +803,11 @@ class VoiceConversationUseCase:
             should_speak_response,
             transcription,
             prompt_for_voice,
+            processing_duration,
             emit,
             voice_debug,
         )
+        self._emit_voice_flow("turno terminado", emit, voice_debug)
         return
 
     def _deliver_voice_response(
@@ -789,6 +817,7 @@ class VoiceConversationUseCase:
         should_speak_response: bool,
         transcription: SpeechTranscriptionResult,
         prompt_for_voice: str,
+        processing_duration: float,
         emit: Callable[[str, bool], None],
         voice_debug: bool = False,
     ) -> None:
@@ -807,10 +836,34 @@ class VoiceConversationUseCase:
 
         if should_speak_response:
             self._emit_voice_flow("inicio TTS", emit, voice_debug)
+            tts_started = time.monotonic()
             self._speak_response(response, emit)
+            tts_duration = time.monotonic() - tts_started
             self._emit_voice_flow("fin TTS", emit, voice_debug)
             time.sleep(0.2)
             self._emit_voice_flow("vuelta a escucha", emit, voice_debug)
+        else:
+            tts_duration = 0.0
+
+        if voice_debug:
+            total_duration = (
+                (transcription.phrase_start_ms / 1000.0)
+                + transcription.audio_duration_seconds
+                + transcription.processing_duration_seconds
+                + processing_duration
+                + tts_duration
+            )
+            self._emit_voice_flow(
+                "latencia espera_voz="
+                f"{transcription.phrase_start_ms / 1000.0:.3f}s "
+                f"captura={transcription.audio_duration_seconds:.3f}s "
+                f"stt={transcription.processing_duration_seconds:.3f}s "
+                f"procesamiento={processing_duration:.3f}s "
+                f"tts={tts_duration:.3f}s "
+                f"total={total_duration:.3f}s",
+                emit,
+                voice_debug,
+            )
 
     def _process_text_for_voice(
         self,
@@ -845,9 +898,21 @@ class VoiceConversationUseCase:
             return "La respuesta está tardando demasiado. Inténtalo de nuevo."
 
         if ok:
+            if value is None:
+                return ""
+
             return str(value)
 
-        raise value
+        if isinstance(value, KeyboardInterrupt):
+            raise value
+
+        if isinstance(value, Exception):
+            raise value
+
+        if isinstance(value, BaseException):
+            raise RuntimeError(f"{type(value).__name__}: {value}") from value
+
+        raise RuntimeError(str(value))
 
     def _voice_flow_route(
         self,
@@ -857,7 +922,11 @@ class VoiceConversationUseCase:
         normalized = " ".join(normalized.split())
         compact = re.sub(r"[^a-z0-9]+", "", normalized)
 
-        if self._asks_current_time(normalized) or self._asks_current_date(normalized):
+        if (
+            normalized == "hoy"
+            or self._asks_current_time(normalized)
+            or self._asks_current_date(normalized)
+        ):
             return "local"
 
         if any(
@@ -1064,6 +1133,25 @@ class VoiceConversationUseCase:
         if len(useful) < 2 and not self._is_close_command(text):
             return None
 
+        normalized = self._normalize(text)
+        allowed_short_intents = {
+            "hora",
+            "fecha",
+            "hoy",
+            "salir",
+            "atras",
+            "vs code",
+            "vscode",
+            "bloc de notas",
+        }
+
+        if (
+            len(useful) <= 3
+            and normalized not in allowed_short_intents
+            and not self._is_close_command(text)
+        ):
+            return None
+
         return text
 
     def _transcription_discard_reason(
@@ -1115,6 +1203,25 @@ class VoiceConversationUseCase:
 
         if len(useful) < 2 and not self._is_close_command(text):
             return "texto util demasiado corto"
+
+        normalized = self._normalize(text)
+        allowed_short_intents = {
+            "hora",
+            "fecha",
+            "hoy",
+            "salir",
+            "atras",
+            "vs code",
+            "vscode",
+            "bloc de notas",
+        }
+
+        if (
+            len(useful) <= 3
+            and normalized not in allowed_short_intents
+            and not self._is_close_command(text)
+        ):
+            return "texto corto sin intencion local util"
 
         return "motivo de descarte no identificado"
 

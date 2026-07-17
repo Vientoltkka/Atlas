@@ -301,7 +301,7 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     silence = np.zeros((1, 1), dtype=np.float32)
     voice = np.ones((1, 1), dtype=np.float32) * 0.2
     result = capture.capture_from_chunks(
-        [silence, silence, voice, voice, voice, silence, silence],
+        [silence, silence] + [voice for _ in range(6)] + [silence for _ in range(8)],
         "Fake Mic",
     )
 
@@ -309,7 +309,7 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     assert result.sample_rate == 10
     assert result.microphone_name == "Fake Mic"
     assert result.samples.ndim == 1
-    assert result.duration_seconds == pytest.approx(0.7)
+    assert result.duration_seconds == pytest.approx(1.6)
 
 
 def test_capture_limits_max_duration() -> None:
@@ -339,7 +339,7 @@ def test_voice_above_dynamic_threshold_is_detected() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.01
 
     result = capture.capture_from_chunks(
-        [silence, voice, voice, voice, silence, silence],
+        [silence] + [voice for _ in range(6)] + [silence for _ in range(8)],
         "Fake Mic",
     )
 
@@ -358,13 +358,89 @@ def test_short_valid_phrase_starts_quickly() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.02
 
     result = capture.capture_from_chunks(
-        [silence, voice, voice] + [silence for _ in range(8)],
+        [silence] + [voice for _ in range(6)] + [silence for _ in range(8)],
         "Fake Mic",
     )
 
     assert result.completed is True
     assert result.samples.size > 0
-    assert result.accumulated_voice_ms == pytest.approx(200.0)
+    assert result.accumulated_voice_ms == pytest.approx(600.0)
+
+
+@pytest.mark.parametrize(
+    ("spoken_case", "voice_blocks"),
+    [
+        ("que hora es", 6),
+        ("cual es la capital de francia", 10),
+        ("abre el bloc de notas", 8),
+    ],
+)
+def test_voice_commands_are_not_cut_before_phrase_is_complete(
+    spoken_case: str,
+    voice_blocks: int,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    result = capture.capture_from_chunks(
+        [silence, silence]
+        + [voice for _ in range(voice_blocks)]
+        + [silence for _ in range(8)],
+        f"Fake Mic: {spoken_case}",
+    )
+
+    assert result.completed is True
+    assert result.end_reason == "silencio posterior detectado"
+    assert result.accumulated_voice_ms >= 600.0
+
+
+def test_three_hundred_ms_voice_does_not_close_as_complete_phrase() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    result = capture.capture_from_chunks(
+        [voice, voice, voice] + [silence for _ in range(8)],
+        "Fake Mic",
+    )
+
+    assert result.completed is False
+    assert result.no_speech_detected is True
+    assert "demasiado breve" in result.warnings[0]
+
+
+def test_capture_keeps_preroll_before_detected_voice() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    result = capture.capture_from_chunks(
+        [silence, silence, silence] + [voice for _ in range(6)] + [silence for _ in range(8)],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.samples.size >= 5
+    assert result.phrase_start_ms == pytest.approx(400.0)
 
 
 def test_normalized_float32_voice_uses_adaptive_threshold() -> None:
@@ -379,7 +455,7 @@ def test_normalized_float32_voice_uses_adaptive_threshold() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.002
 
     result = capture.capture_from_chunks(
-        [room, room, room, voice, voice] + [room for _ in range(8)],
+        [room, room, room] + [voice for _ in range(6)] + [room for _ in range(8)],
         "Fake Mic",
     )
 
@@ -400,7 +476,8 @@ def test_short_voice_above_ambient_noise_is_detected() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.004
 
     result = capture.capture_from_chunks(
-        [room, room, room, room, voice, voice, room, voice]
+        [room, room, room, room, voice, voice, room]
+        + [voice for _ in range(4)]
         + [room for _ in range(8)],
         "Fake Mic",
     )
@@ -421,12 +498,12 @@ def test_short_natural_pause_does_not_reset_phrase_start() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.02
 
     result = capture.capture_from_chunks(
-        [voice, silence, voice] + [silence for _ in range(8)],
+        [voice, voice, silence] + [voice for _ in range(4)] + [silence for _ in range(8)],
         "Fake Mic",
     )
 
     assert result.completed is True
-    assert result.accumulated_voice_ms == pytest.approx(200.0)
+    assert result.accumulated_voice_ms == pytest.approx(600.0)
 
 
 def test_constant_ambient_noise_does_not_activate_adaptive_vad() -> None:
@@ -474,7 +551,7 @@ def test_conservative_recovery_uses_high_energy_contrast() -> None:
     capture = SoundDeviceAudioCapture(
         sample_rate=10,
         speech_threshold=0.006,
-        initial_silence_timeout=1.0,
+        initial_silence_timeout=3.0,
         chunk_duration=0.1,
         minimum_audio_duration=0.35,
     )
@@ -482,7 +559,13 @@ def test_conservative_recovery_uses_high_energy_contrast() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.004
 
     result = capture.capture_from_chunks(
-        [room, room, voice, room, voice, room, room, room],
+        [room, room]
+        + [voice, room, room, room]
+        + [voice, room, room, room]
+        + [voice, room, room, room]
+        + [voice, room, room, room]
+        + [voice, room, room, room]
+        + [voice, room, room],
         "Fake Mic",
     )
 
@@ -504,13 +587,13 @@ def test_phrase_finishes_after_post_speech_silence() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.02
 
     result = capture.capture_from_chunks(
-        [voice, voice, voice] + [silence for _ in range(20)],
+        [voice for _ in range(6)] + [silence for _ in range(20)],
         "Fake Mic",
     )
 
     assert result.completed is True
     assert result.end_reason == "silencio posterior detectado"
-    assert result.duration_seconds == pytest.approx(1.1)
+    assert result.duration_seconds == pytest.approx(1.4)
 
 
 def test_timeout_without_voice_still_returns_no_speech() -> None:
@@ -679,16 +762,7 @@ def test_capture_drains_buffer_before_reading_phrase(
     reads: list[float] = []
     chunks = [
         np.ones((1, 1), dtype=np.float32) * 0.5,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
-        np.ones((1, 1), dtype=np.float32) * 0.01,
+            *[np.ones((1, 1), dtype=np.float32) * 0.01 for _ in range(20)],
         np.zeros((1, 1), dtype=np.float32),
         np.zeros((1, 1), dtype=np.float32),
     ] + [np.zeros((1, 1), dtype=np.float32) for _ in range(200)]
@@ -860,6 +934,8 @@ def test_transcribes_valid_audio_and_returns_structured_result() -> None:
     assert result.processing_duration_seconds == 0.25
     assert result.provider == "fake-local"
     assert result.microphone_name == "Fake Mic"
+    assert result.phrase_start_ms == pytest.approx(0.0)
+    assert result.capture_end_reason == ""
 
 
 def test_empty_transcription_no_speech_and_capture_errors_are_controlled() -> None:

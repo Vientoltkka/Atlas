@@ -117,6 +117,9 @@ class SpeechTranscriptionResult:
     samples_count: int = 0
     rms: float = 0.0
     exception_traceback: str = ""
+    phrase_start_ms: float = 0.0
+    accumulated_voice_ms: float = 0.0
+    capture_end_reason: str = ""
 
 
 class SpeechToTextProvider(Protocol):
@@ -314,13 +317,15 @@ class SoundDeviceAudioCapture:
     _BLOCKING_UNSUPPORTED_HOST_APIS = {"wdm-ks"}
     _DEFAULT_INPUT_SIGNAL_RMS = 0.0005
     _INITIAL_VOICE_SECONDS = 0.20
-    _INITIAL_SILENCE_TOLERANCE_SECONDS = 0.15
-    _TRAILING_SILENCE_SECONDS = 0.75
+    _INITIAL_SILENCE_TOLERANCE_SECONDS = 0.20
+    _TRAILING_SILENCE_SECONDS = 0.80
+    _MIN_FINAL_VOICE_SECONDS = 0.60
+    _MIN_FINAL_VOICE_BLOCKS = 4
     _ADAPTIVE_NOISE_SECONDS = 0.4
     _FLOAT32_MIN_VOICE_RMS = 0.0015
     _NOISE_MULTIPLIER = 3.0
     _RECOVERY_CONTRAST_MULTIPLIER = 2.2
-    _PRE_ROLL_SECONDS = 0.25
+    _PRE_ROLL_SECONDS = 0.45
 
     def __init__(
         self,
@@ -783,6 +788,7 @@ class SoundDeviceAudioCapture:
         accumulated_voice = 0.0
         pending_silence = 0.0
         pending_voice_blocks = 0
+        voice_blocks = 0
         elapsed = 0.0
         silence_after_voice = 0.0
         warnings: list[str] = []
@@ -801,6 +807,7 @@ class SoundDeviceAudioCapture:
                 if is_voice:
                     pending_voice.append(mono)
                     pending_voice_blocks += 1
+                    voice_blocks += 1
                     accumulated_voice += chunk_duration
                     pending_silence = 0.0
 
@@ -838,6 +845,7 @@ class SoundDeviceAudioCapture:
             else:
                 captured.append(mono)
                 if is_voice:
+                    voice_blocks += 1
                     accumulated_voice += chunk_duration
                     silence_after_voice = 0.0
                 else:
@@ -846,8 +854,9 @@ class SoundDeviceAudioCapture:
                 captured_duration = sum(len(item) for item in captured) / self.sample_rate
 
                 if (
-                    silence_after_voice >= trailing_silence
+                    silence_after_voice + 1e-9 >= trailing_silence
                     and captured_duration >= self.minimum_audio_duration
+                    and self._has_complete_voice(accumulated_voice, voice_blocks)
                 ):
                     end_reason = "silencio posterior detectado"
                     break
@@ -888,6 +897,20 @@ class SoundDeviceAudioCapture:
                 microphone_name,
                 elapsed,
                 "No se detecto ninguna frase.",
+                voice_threshold=voice_threshold,
+                noise_floor=noise_floor,
+            )
+
+        if not self._has_complete_voice(accumulated_voice, voice_blocks):
+            warnings.append("Voz demasiado breve para formar una frase completa.")
+            return AudioCaptureResult(
+                samples=np.array([], dtype=np.float32),
+                sample_rate=self.sample_rate,
+                duration_seconds=elapsed,
+                microphone_name=microphone_name,
+                completed=False,
+                no_speech_detected=True,
+                warnings=tuple(warnings),
                 voice_threshold=voice_threshold,
                 noise_floor=noise_floor,
             )
@@ -1084,7 +1107,17 @@ class SoundDeviceAudioCapture:
         return max(self.chunk_duration, self._INITIAL_SILENCE_TOLERANCE_SECONDS)
 
     def _trailing_silence_duration(self) -> float:
-        return min(max(self._TRAILING_SILENCE_SECONDS, 0.6), 0.9)
+        return min(max(self._TRAILING_SILENCE_SECONDS, 0.7), 0.9)
+
+    def _has_complete_voice(
+        self,
+        accumulated_voice: float,
+        voice_blocks: int,
+    ) -> bool:
+        return (
+            accumulated_voice >= self._MIN_FINAL_VOICE_SECONDS
+            and voice_blocks >= self._MIN_FINAL_VOICE_BLOCKS
+        )
 
     def _trim_pre_roll(
         self,
@@ -1169,7 +1202,7 @@ class SoundDeviceAudioCapture:
             for index in candidate_indexes
         ) * 1000.0
 
-        if voice_ms < self._INITIAL_VOICE_SECONDS * 1000.0:
+        if voice_ms < self._MIN_FINAL_VOICE_SECONDS * 1000.0:
             return None
 
         return samples, start * self.chunk_duration * 1000.0, voice_ms
@@ -1682,6 +1715,9 @@ class SpeechEngineUseCase:
                 no_speech_probability=provider_result.no_speech_probability,
                 samples_count=self._sample_count(capture.samples),
                 rms=self._samples_rms(capture.samples),
+                phrase_start_ms=capture.phrase_start_ms,
+                accumulated_voice_ms=capture.accumulated_voice_ms,
+                capture_end_reason=capture.end_reason,
             )
 
         warnings = list(capture.warnings)
@@ -1716,6 +1752,9 @@ class SpeechEngineUseCase:
             no_speech_probability=provider_result.no_speech_probability,
             samples_count=self._sample_count(capture.samples),
             rms=self._samples_rms(capture.samples),
+            phrase_start_ms=capture.phrase_start_ms,
+            accumulated_voice_ms=capture.accumulated_voice_ms,
+            capture_end_reason=capture.end_reason,
         )
 
     def _confidence(
@@ -1763,6 +1802,9 @@ class SpeechEngineUseCase:
             no_speech_probability=None,
             samples_count=self._sample_count(capture.samples),
             rms=self._samples_rms(capture.samples),
+            phrase_start_ms=capture.phrase_start_ms,
+            accumulated_voice_ms=capture.accumulated_voice_ms,
+            capture_end_reason=capture.end_reason,
         )
 
     def _failed_result(

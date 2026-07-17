@@ -47,6 +47,7 @@ class Router:
 
         asks_time = self._asks_current_time(text)
         asks_date = self._asks_current_date(text)
+        tokens = self._tokens(text)
 
         if asks_time and asks_date:
             return "voice_datetime"
@@ -56,6 +57,12 @@ class Router:
 
         if asks_date:
             return "voice_date"
+
+        if tokens in (["bloc", "de", "notas"], ["notepad"]):
+            return "voice_open_notepad"
+
+        if tokens in (["vs", "code"], ["vscode"], ["visual", "studio", "code"]):
+            return "voice_open_vscode"
 
         if self._asks_open(text) and self._mentions_notepad(text):
             return "voice_open_notepad"
