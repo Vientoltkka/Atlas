@@ -6,6 +6,7 @@ import json
 import sys
 
 from bootstrap.bootstrap import Bootstrap
+from tools.argument_schema import ArgumentValidationError
 from tools.intent_selector import ToolIntent
 
 
@@ -39,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     selector = Bootstrap.build_tool_selector()
+    validator = Bootstrap.build_argument_validator()
     selection = selector.select(
         ToolIntent(
             action=action,
@@ -46,13 +48,28 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
+    try:
+        validation = validator.validate(selection)
+    except ArgumentValidationError as error:
+        print("Validation error")
+        print(f"Intent: {error.intent_action}")
+        print(f"Field: {error.field}")
+        print(f"Reason: {error.reason}")
+        print("Executed: false")
+        return 1
+
     print(f"Intent: {selection.intent.action}")
     print(f"Selected tool: {selection.tool_name}")
     print(
-        "Arguments: "
-        + json.dumps(dict(selection.arguments), ensure_ascii=False, sort_keys=True)
+        "Original arguments: "
+        + json.dumps(dict(validation.original_arguments), ensure_ascii=False, sort_keys=True)
     )
-    print(f"Executed: {str(selection.executed).lower()}")
+    print(
+        "Validated arguments: "
+        + json.dumps(dict(validation.validated_arguments), ensure_ascii=False, sort_keys=True)
+    )
+    print(f"Valid: {str(validation.valid).lower()}")
+    print(f"Executed: {str(validation.executed).lower()}")
 
     return 0
 

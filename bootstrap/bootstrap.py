@@ -18,6 +18,13 @@ from memory.conversation import ConversationMemory
 from models.prompt_client import PromptClient
 
 from tools.executor import ToolExecutor
+from tools.argument_schema import (
+    ArgumentField,
+    ArgumentSchema,
+    ArgumentSchemaRegistry,
+    ArgumentValidator,
+    require_non_empty,
+)
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 
@@ -177,6 +184,139 @@ class Bootstrap:
                 intent_registry.register(action, tool_name)
 
         return ToolSelector(registry, intent_registry)
+
+    @staticmethod
+    def build_argument_schema_registry() -> ArgumentSchemaRegistry:
+        """Build argument schemas for supported tool intents."""
+        schema_registry = ArgumentSchemaRegistry()
+
+        schema_registry.register(
+            ArgumentSchema(
+                "file.read",
+                (
+                    ArgumentField("path", str, required=True, description="File path."),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "file.write",
+                (
+                    ArgumentField("path", str, required=True, description="File path."),
+                    ArgumentField("content", str, required=True, description="File content."),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "directory.list",
+                (
+                    ArgumentField(
+                        "path",
+                        str,
+                        default=".",
+                        description="Directory path.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "project.tree",
+                (
+                    ArgumentField(
+                        "path",
+                        str,
+                        default=".",
+                        description="Project root path.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.application.open",
+                (
+                    ArgumentField(
+                        "application",
+                        str,
+                        required=True,
+                        description="Application name.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.file.open",
+                (
+                    ArgumentField("path", str, required=True, description="File path."),
+                    ArgumentField(
+                        "application",
+                        str,
+                        description="Optional application name.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.text.type",
+                (
+                    ArgumentField("text", str, required=True, description="Text to type."),
+                    ArgumentField(
+                        "window_title",
+                        str,
+                        required=True,
+                        description="Target window title.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.hotkey.press",
+                (
+                    ArgumentField(
+                        "keys",
+                        list,
+                        required=True,
+                        description="Keyboard shortcut keys.",
+                        validator=require_non_empty,
+                    ),
+                    ArgumentField(
+                        "window_title",
+                        str,
+                        required=True,
+                        description="Target window title.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.windows.list",
+                (
+                    ArgumentField(
+                        "title",
+                        str,
+                        required=True,
+                        description="Window title query.",
+                    ),
+                ),
+            )
+        )
+
+        return schema_registry
+
+    @staticmethod
+    def build_argument_validator(
+        schema_registry: ArgumentSchemaRegistry | None = None,
+    ) -> ArgumentValidator:
+        """Build the validator for selected tool intent arguments."""
+        return ArgumentValidator(
+            schema_registry or Bootstrap.build_argument_schema_registry()
+        )
 
     @staticmethod
     def build() -> AtlasOrchestrator:
