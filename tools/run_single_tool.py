@@ -33,6 +33,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_outcome(outcome)
 
+    if outcome.status == "confirmation_required" and outcome.confirmation_id:
+        outcome = _handle_confirmation(runner, outcome)
+
     return 0 if outcome.success else 1
 
 
@@ -75,6 +78,25 @@ def _print_outcome(outcome: ToolRunResult) -> None:
         print(f"Field: {outcome.error_field}")
 
     print(f"Error: {outcome.error_message or ''}")
+
+
+def _handle_confirmation(
+    runner,
+    outcome: ToolRunResult,
+) -> ToolRunResult:
+    confirmation_id = outcome.confirmation_id
+    prompt = ""
+
+    if outcome.metadata is not None:
+        prompt = str(outcome.metadata.get("prompt", ""))
+
+    while True:
+        response = input(prompt or "Confirm? [s/N]: ")
+        confirmed_outcome = runner.confirm(confirmation_id, response)
+        _print_outcome(confirmed_outcome)
+
+        if confirmed_outcome.status != "invalid_confirmation":
+            return confirmed_outcome
 
 
 if __name__ == "__main__":

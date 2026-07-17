@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
+from uuid import uuid4
 
 from tools.argument_schema import (
     ArgumentSchemaNotRegisteredError,
@@ -65,6 +66,7 @@ class ToolRunResult:
     error_message: str | None = None
     error_field: str | None = None
     exception_type: str | None = None
+    confirmation_id: str | None = None
     metadata: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -90,6 +92,15 @@ class ToolRunResult:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class PendingToolConfirmation:
+    """A selected and validated tool request waiting for explicit confirmation."""
+
+    confirmation_id: str
+    request: ValidatedToolRequest
+    prompt: str
+
+
 class SingleToolRunner:
     """Coordinate selection, validation, and one execution of one tool."""
 
@@ -104,6 +115,7 @@ class SingleToolRunner:
         self._executor = executor
         self._last_request: ValidatedToolRequest | None = None
         self._execution_count = 0
+        self._pending_confirmations: dict[str, PendingToolConfirmation] = {}
 
     @property
     def last_request(self) -> ValidatedToolRequest | None:
@@ -114,6 +126,11 @@ class SingleToolRunner:
     def execution_count(self) -> int:
         """Return executions completed by this runner instance."""
         return self._execution_count
+
+    @property
+    def pending_confirmations(self) -> tuple[PendingToolConfirmation, ...]:
+        """Return pending confirmations without exposing internal storage."""
+        return tuple(self._pending_confirmations.values())
 
     def build_request(
         self,
@@ -185,6 +202,76 @@ class SingleToolRunner:
                 validated_arguments=request.validated_arguments,
             )
 
+        if request.descriptor.requires_confirmation:
+            return self._confirmation_required_result(request)
+
+        return self._execute_request(request)
+
+    def confirm(
+        self,
+        confirmation_id: str,
+        response: str,
+    ) -> ToolRunResult:
+        """Apply a user response to one pending confirmation."""
+        pending = self._pending_confirmations.get(confirmation_id)
+
+        if pending is None:
+            return ToolRunResult(
+                success=False,
+                status="confirmation_not_found",
+                intent=ToolIntent("confirmation.unknown"),
+                executed=False,
+                execution_count=0,
+                result=None,
+                error_code="confirmation_not_found",
+                error_message="confirmation id is not pending",
+                confirmation_id=confirmation_id,
+            )
+
+        decision = _confirmation_decision(response)
+
+        if decision is None:
+            return ToolRunResult(
+                success=False,
+                status="invalid_confirmation",
+                intent=pending.request.intent,
+                tool_name=pending.request.tool_name,
+                original_arguments=pending.request.original_arguments,
+                validated_arguments=pending.request.validated_arguments,
+                executed=False,
+                execution_count=0,
+                result=None,
+                error_code="invalid_confirmation",
+                error_message="confirmation response must be yes or no",
+                confirmation_id=confirmation_id,
+                metadata={"prompt": pending.prompt},
+            )
+
+        del self._pending_confirmations[confirmation_id]
+
+        if decision is False:
+            return ToolRunResult(
+                success=False,
+                status="cancelled",
+                intent=pending.request.intent,
+                tool_name=pending.request.tool_name,
+                original_arguments=pending.request.original_arguments,
+                validated_arguments=pending.request.validated_arguments,
+                executed=False,
+                execution_count=0,
+                result=None,
+                error_code="cancelled",
+                error_message="operation cancelled by user",
+                confirmation_id=confirmation_id,
+            )
+
+        return self._execute_request(pending.request, confirmation_id=confirmation_id)
+
+    def _execute_request(
+        self,
+        request: ValidatedToolRequest,
+        confirmation_id: str | None = None,
+    ) -> ToolRunResult:
         try:
             result = self._executor.execute(
                 request.tool_name,
@@ -193,7 +280,7 @@ class SingleToolRunner:
         except Exception as error:
             self._execution_count += 1
             return self._error_result(
-                intent,
+                request.intent,
                 "tool_execution_error",
                 error,
                 tool_name=request.tool_name,
@@ -201,6 +288,7 @@ class SingleToolRunner:
                 validated_arguments=request.validated_arguments,
                 executed=True,
                 execution_count=1,
+                confirmation_id=confirmation_id,
             )
 
         self._execution_count += 1
@@ -208,13 +296,14 @@ class SingleToolRunner:
         return ToolRunResult(
             success=True,
             status="success",
-            intent=intent,
+            intent=request.intent,
             tool_name=request.tool_name,
             original_arguments=request.original_arguments,
             validated_arguments=request.validated_arguments,
             executed=True,
             execution_count=1,
             result=result,
+            confirmation_id=confirmation_id,
         )
 
     def _to_request(
@@ -230,6 +319,37 @@ class SingleToolRunner:
             validated_arguments=validation.validated_arguments,
             validated=validation.valid,
             executed=False,
+        )
+
+    def _confirmation_required_result(
+        self,
+        request: ValidatedToolRequest,
+    ) -> ToolRunResult:
+        confirmation_id = uuid4().hex
+        prompt = (
+            f"Confirmar ejecucion de {request.tool_name} "
+            f"con id {confirmation_id}? [s/N]: "
+        )
+        self._pending_confirmations[confirmation_id] = PendingToolConfirmation(
+            confirmation_id=confirmation_id,
+            request=request,
+            prompt=prompt,
+        )
+
+        return ToolRunResult(
+            success=False,
+            status="confirmation_required",
+            intent=request.intent,
+            tool_name=request.tool_name,
+            original_arguments=request.original_arguments,
+            validated_arguments=request.validated_arguments,
+            executed=False,
+            execution_count=0,
+            result=None,
+            error_code="confirmation_required",
+            error_message="explicit confirmation is required",
+            confirmation_id=confirmation_id,
+            metadata={"prompt": prompt},
         )
 
     def _validation_error_result(
@@ -263,6 +383,7 @@ class SingleToolRunner:
         execution_count: int = 0,
         error_field: str | None = None,
         error_message: str | None = None,
+        confirmation_id: str | None = None,
     ) -> ToolRunResult:
         return ToolRunResult(
             success=False,
@@ -278,6 +399,7 @@ class SingleToolRunner:
             error_message=error_message or str(error),
             error_field=error_field,
             exception_type=type(error).__name__,
+            confirmation_id=confirmation_id,
         )
 
 
@@ -292,3 +414,15 @@ def _validation_status(reason: str) -> str:
         return "none_not_allowed"
 
     return "invalid_argument"
+
+
+def _confirmation_decision(response: str) -> bool | None:
+    normalized = response.strip().lower()
+
+    if normalized in {"s", "si", "sí", "yes", "y"}:
+        return True
+
+    if normalized in {"n", "no"}:
+        return False
+
+    return None

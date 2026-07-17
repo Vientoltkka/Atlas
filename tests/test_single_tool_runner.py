@@ -61,6 +61,12 @@ class FailingTool(CountingTool):
         raise RuntimeError("tool failed")
 
 
+class DangerousCountingTool(CountingTool):
+    @property
+    def requires_confirmation(self) -> bool:
+        return True
+
+
 class CountingExecutor:
     def __init__(
         self,
@@ -178,6 +184,137 @@ def test_runner_returns_uniform_success_and_preserves_raw_result() -> None:
     assert selector.calls == 1
     assert validator.calls == 1
     assert runner.execution_count == 1
+
+
+def test_safe_tool_executes_without_confirmation() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner()
+
+    outcome = runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    assert outcome.status == "success"
+    assert outcome.executed is True
+    assert outcome.execution_count == 1
+    assert outcome.confirmation_id is None
+    assert runner.pending_confirmations == ()
+    assert isinstance(tool, CountingTool)
+    assert tool.calls == 1
+
+
+def test_dangerous_tool_initially_requires_confirmation_without_execution() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+
+    outcome = runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    assert outcome.success is False
+    assert outcome.status == "confirmation_required"
+    assert outcome.error_code == "confirmation_required"
+    assert outcome.executed is False
+    assert outcome.execution_count == 0
+    assert outcome.result is None
+    assert outcome.tool_name == "demo.tool"
+    assert outcome.confirmation_id
+    assert outcome.metadata is not None
+    assert outcome.metadata["prompt"]
+    assert len(runner.pending_confirmations) == 1
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 0
+
+
+def test_affirmative_confirmation_executes_dangerous_tool_once() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+    pending = runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    outcome = runner.confirm(str(pending.confirmation_id), "sí")
+
+    assert outcome.success is True
+    assert outcome.status == "success"
+    assert outcome.executed is True
+    assert outcome.execution_count == 1
+    assert outcome.confirmation_id == pending.confirmation_id
+    assert runner.pending_confirmations == ()
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 1
+    assert runner.execution_count == 1
+
+
+def test_negative_confirmation_cancels_without_execution() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+    pending = runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    outcome = runner.confirm(str(pending.confirmation_id), "no")
+
+    assert outcome.success is False
+    assert outcome.status == "cancelled"
+    assert outcome.executed is False
+    assert outcome.execution_count == 0
+    assert outcome.result is None
+    assert runner.pending_confirmations == ()
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 0
+
+
+def test_ambiguous_confirmation_does_not_execute_and_keeps_pending_action() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+    pending = runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    ambiguous = runner.confirm(str(pending.confirmation_id), "quizas")
+
+    assert ambiguous.success is False
+    assert ambiguous.status == "invalid_confirmation"
+    assert ambiguous.executed is False
+    assert ambiguous.execution_count == 0
+    assert len(runner.pending_confirmations) == 1
+
+    confirmed = runner.confirm(str(pending.confirmation_id), "s")
+
+    assert runner.pending_confirmations == ()
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 1
+    assert confirmed.status == "success"
+
+
+def test_wrong_confirmation_id_does_not_execute_pending_action() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+    runner.run(ToolIntent("demo.run", {"path": "README.md"}))
+
+    outcome = runner.confirm("wrong-id", "s")
+
+    assert outcome.success is False
+    assert outcome.status == "confirmation_not_found"
+    assert outcome.executed is False
+    assert outcome.execution_count == 0
+    assert len(runner.pending_confirmations) == 1
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 0
+
+
+def test_old_confirmation_id_cannot_execute_another_action() -> None:
+    runner, tool, _executor, _selector, _validator = _build_runner(
+        tool=DangerousCountingTool()
+    )
+    first_pending = runner.run(ToolIntent("demo.run", {"path": "first.txt"}))
+    cancelled = runner.confirm(str(first_pending.confirmation_id), "n")
+    second_pending = runner.run(ToolIntent("demo.run", {"path": "second.txt"}))
+
+    old = runner.confirm(str(first_pending.confirmation_id), "s")
+
+    assert cancelled.status == "cancelled"
+    assert second_pending.status == "confirmation_required"
+    assert old.status == "confirmation_not_found"
+    assert len(runner.pending_confirmations) == 1
+    assert runner.pending_confirmations[0].confirmation_id == second_pending.confirmation_id
+    assert isinstance(tool, DangerousCountingTool)
+    assert tool.calls == 0
 
 
 def test_runner_build_request_still_returns_validated_request_without_execution() -> None:

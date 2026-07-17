@@ -18,6 +18,10 @@ class WriteFileTool(BaseTool):
     def description(self) -> str:
         return "Write a UTF-8 text file."
 
+    @property
+    def requires_confirmation(self) -> bool:
+        return True
+
     def execute(
         self,
         context: ToolContext,

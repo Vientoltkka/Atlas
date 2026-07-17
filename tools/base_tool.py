@@ -23,6 +23,11 @@ class BaseTool(ABC):
         """Human readable description."""
         ...
 
+    @property
+    def requires_confirmation(self) -> bool:
+        """Return whether this tool must be explicitly confirmed before execution."""
+        return False
+
     @abstractmethod
     def execute(
         self,

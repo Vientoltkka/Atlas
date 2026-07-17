@@ -16,6 +16,7 @@ class ToolDescriptor:
     name: str
     description: str
     tool: BaseTool
+    requires_confirmation: bool = False
 
 
 class ToolAlreadyRegisteredError(ValueError):
@@ -63,6 +64,7 @@ class ToolRegistry:
             name=tool.name,
             description=tool.description,
             tool=tool,
+            requires_confirmation=tool.requires_confirmation,
         )
 
     def exists(self, name: str) -> bool:

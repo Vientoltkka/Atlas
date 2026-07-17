@@ -416,6 +416,10 @@ class TypeTextTool(DesktopTool):
     def description(self) -> str:
         return "Type text into an existing target window."
 
+    @property
+    def requires_confirmation(self) -> bool:
+        return True
+
     def execute(
         self,
         context: ToolContext,
@@ -547,6 +551,10 @@ class PressHotkeyTool(DesktopTool):
     @property
     def description(self) -> str:
         return "Send a keyboard shortcut to an existing target window."
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return True
 
     def execute(
         self,
