@@ -25,6 +25,7 @@ from tools.argument_schema import (
     ArgumentValidator,
     require_non_empty,
 )
+from tools.execution_decision import ExecutionDecisionEngine
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 from tools.tool_chain_runner import ToolChainRunner
@@ -343,6 +344,17 @@ class Bootstrap:
         """Build the coordinator for deterministic linear tool chains."""
         return ToolChainRunner(
             single_tool_runner or Bootstrap.build_single_tool_runner()
+        )
+
+    @staticmethod
+    def build_execution_decision_engine(
+        selector: ToolSelector | None = None,
+    ) -> ExecutionDecisionEngine:
+        """Build the deterministic execution-mode classifier."""
+        tool_selector = selector or Bootstrap.build_tool_selector()
+
+        return ExecutionDecisionEngine(
+            tool_selector.supported_intents()
         )
 
     @staticmethod
