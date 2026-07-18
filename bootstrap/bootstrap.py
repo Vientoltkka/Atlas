@@ -29,6 +29,7 @@ from tools.execution_decision import ExecutionDecisionEngine
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 from tools.tool_chain_runner import ToolChainRunner
+from tools.tool_proposal_builder import ToolProposalBuilder
 from tools.single_tool_runner import SingleToolRunner
 
 from tools.filesystem.read_file_tool import ReadFileTool
@@ -319,6 +320,25 @@ class Bootstrap:
         """Build the validator for selected tool intent arguments."""
         return ArgumentValidator(
             schema_registry or Bootstrap.build_argument_schema_registry()
+        )
+
+    @staticmethod
+    def build_tool_proposal_builder(
+        tool_registry: ToolRegistry | None = None,
+        selector: ToolSelector | None = None,
+        schema_registry: ArgumentSchemaRegistry | None = None,
+        validator: ArgumentValidator | None = None,
+    ) -> ToolProposalBuilder:
+        """Build the natural-language to structured-tool proposal mapper."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        active_selector = selector or Bootstrap.build_tool_selector(registry)
+        active_schema_registry = schema_registry or Bootstrap.build_argument_schema_registry()
+
+        return ToolProposalBuilder(
+            registry,
+            active_selector,
+            active_schema_registry,
+            validator or Bootstrap.build_argument_validator(active_schema_registry),
         )
 
     @staticmethod
