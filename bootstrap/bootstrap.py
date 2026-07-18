@@ -18,6 +18,7 @@ from memory.conversation import ConversationMemory
 from models.prompt_client import PromptClient
 
 from tools.executor import ToolExecutor
+from tools.execution_coordinator import ExecutionCoordinator
 from tools.argument_schema import (
     ArgumentField,
     ArgumentSchema,
@@ -404,6 +405,47 @@ class Bootstrap:
 
         return ExecutionDecisionEngine(
             tool_selector.supported_intents()
+        )
+
+    @staticmethod
+    def build_execution_coordinator(
+        tool_registry: ToolRegistry | None = None,
+        selector: ToolSelector | None = None,
+        schema_registry: ArgumentSchemaRegistry | None = None,
+        validator: ArgumentValidator | None = None,
+        executor: ToolExecutor | None = None,
+    ) -> ExecutionCoordinator:
+        """Build the coordinator for decision, proposal and runner execution."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        active_selector = selector or Bootstrap.build_tool_selector(registry)
+        active_schema_registry = schema_registry or Bootstrap.build_argument_schema_registry()
+        active_validator = validator or Bootstrap.build_argument_validator(
+            active_schema_registry
+        )
+        active_executor = executor or ToolExecutor(registry)
+        single_runner = Bootstrap.build_single_tool_runner(
+            registry,
+            active_selector,
+            active_validator,
+            active_executor,
+        )
+
+        return ExecutionCoordinator(
+            Bootstrap.build_execution_decision_engine(active_selector),
+            Bootstrap.build_tool_proposal_builder(
+                registry,
+                active_selector,
+                active_schema_registry,
+                active_validator,
+            ),
+            Bootstrap.build_tool_chain_proposal_builder(
+                registry,
+                active_selector,
+                active_schema_registry,
+                active_validator,
+            ),
+            single_runner,
+            Bootstrap.build_tool_chain_runner(single_runner),
         )
 
     @staticmethod

@@ -78,3 +78,37 @@ This phase validates candidate tools, step ids, raw arguments, schemas and
 reference direction/existence. `ToolChainRunner` remains the only component that
 resolves references against real tool results, asks confirmations through the
 single-tool runner, and executes tools.
+
+## Execution Coordination
+
+`ExecutionCoordinator` integrates the previous pieces without replacing them:
+
+1. `ExecutionDecisionEngine` classifies the original request.
+2. `ToolProposalBuilder` or `ToolChainProposalBuilder` builds a structured
+   proposal.
+3. Complete proposals are converted through their safe conversion methods.
+4. `SingleToolRunner` or `ToolChainRunner` executes.
+5. Confirmation responses are delegated back to the runner that owns the
+   pending `confirmation_id`.
+
+The coordinator returns `ExecutionCoordinationResult` with a uniform status,
+mode, decision, optional proposal, optional runner result, message, missing or
+ambiguous information, validation errors, confirmation id and executed flag.
+
+Coordinator statuses are:
+
+- `DIRECT_RESPONSE_REQUIRED`
+- `INFORMATION_REQUIRED`
+- `AMBIGUOUS_REQUEST`
+- `UNSUPPORTED`
+- `VALIDATION_FAILED`
+- `CONFIRMATION_REQUIRED`
+- `EXECUTED`
+- `CANCELLED`
+- `FAILED`
+
+The coordinator does not generate LLM answers, parse new arguments, call
+`ToolExecutor`, bypass selectors or validators, add artificial confirmations,
+retry, rollback, run a planner, or modify the conversational orchestrator. The
+CLI `python -B -m tools.run_execution_request "<prompt>"` is an isolated manual
+entry point for this phase.
