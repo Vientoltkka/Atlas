@@ -29,6 +29,7 @@ from tools.execution_decision import ExecutionDecisionEngine
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 from tools.tool_chain_runner import ToolChainRunner
+from tools.tool_chain_proposal_builder import ToolChainProposalBuilder
 from tools.tool_proposal_builder import ToolProposalBuilder
 from tools.single_tool_runner import SingleToolRunner
 
@@ -339,6 +340,34 @@ class Bootstrap:
             active_selector,
             active_schema_registry,
             validator or Bootstrap.build_argument_validator(active_schema_registry),
+        )
+
+    @staticmethod
+    def build_tool_chain_proposal_builder(
+        tool_registry: ToolRegistry | None = None,
+        selector: ToolSelector | None = None,
+        schema_registry: ArgumentSchemaRegistry | None = None,
+        validator: ArgumentValidator | None = None,
+        proposal_builder: ToolProposalBuilder | None = None,
+    ) -> ToolChainProposalBuilder:
+        """Build the natural-language to structured-chain proposal mapper."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        active_selector = selector or Bootstrap.build_tool_selector(registry)
+        active_schema_registry = schema_registry or Bootstrap.build_argument_schema_registry()
+        active_validator = validator or Bootstrap.build_argument_validator(
+            active_schema_registry
+        )
+
+        return ToolChainProposalBuilder(
+            proposal_builder
+            or Bootstrap.build_tool_proposal_builder(
+                registry,
+                active_selector,
+                active_schema_registry,
+                active_validator,
+            ),
+            active_selector,
+            active_validator,
         )
 
     @staticmethod

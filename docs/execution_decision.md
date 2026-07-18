@@ -49,3 +49,32 @@ callers.
 LLM, or write files. The initial extraction is deterministic and schema-aware;
 the interface is kept separate so a later LLM-backed mapper can preserve the
 same proposal contract.
+
+## Chain Proposals
+
+`ToolChainProposalBuilder` handles only `ExecutionDecision(mode=TOOL_CHAIN)`.
+It decomposes the original request into ordered, linear
+`StructuredToolChainStepProposal` entries and reuses `ToolProposalBuilder` for
+each single-tool step where possible.
+
+A chain proposal is different from an individual proposal:
+
+- An individual proposal describes one future `ToolIntent`.
+- A chain proposal describes ordered future `ToolChainStep` definitions,
+  dependencies between steps, and reference strings in arguments.
+
+Chain proposal states are `COMPLETE`, `INCOMPLETE`, `AMBIGUOUS`, and
+`UNSUPPORTED`. Any incomplete, ambiguous, unsupported, duplicated, future, or
+unknown step reference prevents conversion to a `ToolChainStep` tuple.
+
+Dependencies are represented with `depends_on` step ids and references use only
+the syntax already understood by `ToolChainRunner`:
+
+- `${steps.<id>.output}`
+- `${steps.<id>.output.<field>}`
+- `${steps.<id>.output.0}`
+
+This phase validates candidate tools, step ids, raw arguments, schemas and
+reference direction/existence. `ToolChainRunner` remains the only component that
+resolves references against real tool results, asks confirmations through the
+single-tool runner, and executes tools.
