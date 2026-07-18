@@ -91,6 +91,7 @@ from use_cases.plan_refactoring import PlanRefactoringUseCase
 from use_cases.rename_symbol import RenameSymbolUseCase
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
+from use_cases.execution_conversation import ExecutionConversationController
 from use_cases.permanent_assistant import PermanentAssistantUseCase
 from use_cases.action_engine import (
     ActionEngineUseCase,
@@ -590,6 +591,12 @@ class Bootstrap:
             restart_application=restart_application,
             create_verified_text_file=create_verified_text_file,
         )
+        execution_conversation = ExecutionConversationController(
+            Bootstrap.build_execution_coordinator(
+                tool_registry=tool_registry,
+                executor=tool_executor,
+            )
+        )
 
         # -----------------------
         # Agents
@@ -637,6 +644,7 @@ class Bootstrap:
             refactoring_interaction=refactoring_interaction,
             correction_interaction=correction_interaction,
             desktop_interaction=desktop_interaction,
+            execution_conversation=execution_conversation,
             speech_interaction=speech_interaction,
             wake_word_interaction=wake_word_interaction,
             voice_conversation=voice_conversation,

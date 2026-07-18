@@ -14,6 +14,7 @@ from core.router import Router
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
 from use_cases.desktop_interaction import DesktopInteractionUseCase
+from use_cases.execution_conversation import ExecutionConversationController
 from use_cases.refactoring_interaction import RefactoringInteractionUseCase
 from use_cases.permanent_assistant import PermanentAssistantUseCase
 from use_cases.speech_engine import SpeechInteractionUseCase
@@ -36,6 +37,7 @@ class AtlasOrchestrator:
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
         correction_interaction: CorrectionInteractionUseCase | None = None,
         desktop_interaction: DesktopInteractionUseCase | None = None,
+        execution_conversation: ExecutionConversationController | None = None,
         speech_interaction: SpeechInteractionUseCase | None = None,
         wake_word_interaction: WakeWordInteractionUseCase | None = None,
         voice_conversation: VoiceConversationUseCase | None = None,
@@ -53,6 +55,7 @@ class AtlasOrchestrator:
         self._refactoring_interaction = refactoring_interaction
         self._correction_interaction = correction_interaction
         self._desktop_interaction = desktop_interaction
+        self._execution_conversation = execution_conversation
         self._speech_interaction = speech_interaction
         self._wake_word_interaction = wake_word_interaction
         self._voice_conversation = voice_conversation
@@ -69,30 +72,16 @@ class AtlasOrchestrator:
 
             prompt = input("Tú: ")
 
-            coding_agent = self._registry.get("coding")
-
-            if (
-                prompt.strip().lower() == "s"
-                and coding_agent is not None
-                and coding_agent.generated_path is not None
-            ):
-                result = self._write_file.execute(
-                    coding_agent.generated_path,
-                    coding_agent.generated_content,
-                )
-
-                coding_agent.clear_generated()
-
-                print()
-                print("Atlas:")
-                print(result)
-                print()
-
-                continue
-
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            if self._execution_conversation is not None:
+                outcome = self._execution_conversation.handle(prompt)
+
+                if not outcome.direct_response_required:
+                    self._print_atlas(outcome.text)
+                    continue
 
             if self._voice_conversation is not None:
                 voice_result = self._voice_conversation.execute(
@@ -129,7 +118,7 @@ class AtlasOrchestrator:
 
                     continue
 
-            response = self.process_prompt(
+            response = self._process_prompt_without_execution(
                 prompt,
                 confirm=input,
             )
@@ -186,6 +175,23 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        if self._execution_conversation is not None:
+            outcome = self._execution_conversation.handle(prompt)
+
+            if not outcome.direct_response_required:
+                return outcome.text
+
+        return self._process_prompt_without_execution(
+            prompt,
+            confirm,
+        )
+
+    def _process_prompt_without_execution(
+        self,
+        prompt: str,
+        confirm,
+    ) -> str:
+        """Process text through the pre-existing conversational flow."""
         coding_agent = self._registry.get("coding")
 
         if (

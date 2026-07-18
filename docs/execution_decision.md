@@ -112,3 +112,35 @@ The coordinator does not generate LLM answers, parse new arguments, call
 retry, rollback, run a planner, or modify the conversational orchestrator. The
 CLI `python -B -m tools.run_execution_request "<prompt>"` is an isolated manual
 entry point for this phase.
+
+## Text Conversation Integration
+
+`AtlasOrchestrator.process_prompt()` now sends text turns through
+`ExecutionConversationController` before the previous conversational flow. The
+controller calls `ExecutionCoordinator.execute(prompt)` when no confirmation is
+pending. If the result is `DIRECT_RESPONSE_REQUIRED`, control returns to the
+existing planner, router, memory and agent flow; Atlas does not invent a fixed
+direct response.
+
+The controller owns one session-level pending confirmation id. While it is
+present, the next text input is treated as the confirmation response and is sent
+to `ExecutionCoordinator.confirm(id, response)`. Ambiguous replies keep the id
+pending and ask again. Accepted or rejected replies clear the id, so a completed
+confirmation cannot be reused and a second pending confirmation is not created
+accidentally.
+
+`ExecutionResultPresenter` formats coordination statuses for the user:
+
+- `EXECUTED`: shows the real tool or chain output without dumping dataclasses.
+- `INFORMATION_REQUIRED`: asks for the missing fields.
+- `AMBIGUOUS_REQUEST`: asks the user to clarify ambiguous fields.
+- `UNSUPPORTED`: reports that Atlas does not have the required tool.
+- `VALIDATION_FAILED`: gives a readable validation failure.
+- `CONFIRMATION_REQUIRED`: describes the pending action and asks whether to
+  continue, without exposing the confirmation id.
+- `CANCELLED`: reports cancellation.
+- `FAILED`: reports a uniform failure.
+
+Text integration remains out of scope for voice, wake word, autonomous memory,
+multi-agent flows, ReAct, advanced planning, LLM-generated proposals, retries,
+parallelism and rollback.
