@@ -144,3 +144,40 @@ accidentally.
 Text integration remains out of scope for voice, wake word, autonomous memory,
 multi-agent flows, ReAct, advanced planning, LLM-generated proposals, retries,
 parallelism and rollback.
+
+## Multi-Turn Clarification
+
+When the coordinator returns `INFORMATION_REQUIRED` or `AMBIGUOUS_REQUEST`, the
+text controller stores a single `PendingClarification` instead of executing:
+
+- `original_text`
+- `mode`
+- `proposal`
+- `missing_information`
+- `ambiguous_information`
+- `requested_fields`
+
+The next text input is handled as a clarification answer before it can become a
+new request. The resolver fills only requested fields, rebuilds a complete text
+request, and sends it back through `ExecutionCoordinator.execute()`. This keeps
+schema validation, proposal conversion, confirmation and execution in the
+existing layers.
+
+Partial answers are kept as an updated pending clarification and Atlas asks only
+for the remaining fields. Empty or irrelevant answers do not execute tools and
+do not clear the pending operation. The supported clarification context is
+limited to simple answers such as paths, directory names, write content, target
+window names, or a full replacement command for the pending chain.
+
+Cancellation words for clarification are `cancelar`, `cancela`, `cancelalo`,
+`cancelala`, `olvidalo`, `olvídalo`, and `salir de esta operacion`. Cancelling
+clears the pending clarification and does not execute anything.
+
+If a clearly separate new order arrives while a clarification is pending, Atlas
+does not merge it with the previous operation. The current policy is to keep the
+pending clarification and ask the user to answer it or cancel it first.
+
+Clarification and confirmation are mutually exclusive. Once clarification
+produces a `CONFIRMATION_REQUIRED` result, the clarification state is cleared and
+only the confirmation id remains pending. Completion, cancellation and failures
+also clear the clarification state.

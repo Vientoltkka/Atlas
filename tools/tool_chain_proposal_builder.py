@@ -307,7 +307,16 @@ def _segment_matches_tool(tool_name: str, normalized: str) -> bool:
     patterns = {
         "file.read": (r"\blee", r"\bmuestra"),
         "directory.list": (r"\blista", r"\blistar"),
-        "file.write": (r"\bescribe", r"\bcopia", r"\bguarda", r"\bcrea"),
+        "file.write": (
+            r"\bescribe",
+            r"\bcopia",
+            r"\bguarda",
+            r"\bgu\s*rdalo",
+            r"\bgu\s*rdala",
+            r"\bgu.?rdalo",
+            r"\bgu.?rdala",
+            r"\bcrea",
+        ),
         "desktop.application.open": (r"\babre", r"\babrir"),
         "desktop.text.type": (r"\bescribe", r"\bteclea"),
         "desktop.hotkey.press": (r"\bpulsa", r"\batajo"),
@@ -352,7 +361,10 @@ def _reference_for_write(
         return None
 
     normalized = _normalize(segment)
-    if not re.search(r"\b(?:contenido|resultado|salida|ambos|dos veces|guardalo|guardala)\b", normalized):
+    if not re.search(
+        r"\b(?:contenido|resultado|salida|ambos|dos veces|guardalo|guardala)\b|\bgu\s*rdalo\b|\bgu\s*rdala\b|\bgu.?rdalo\b|\bgu.?rdala\b",
+        normalized,
+    ):
         return None
 
     if "ambos" in normalized and len(previous_steps) >= 2:

@@ -10,9 +10,17 @@ from tools.execution_coordinator import (
     ExecutionCoordinationStatus,
     ExecutionCoordinator,
 )
-from tools.execution_decision import ExecutionMode
+from tools.execution_decision import ExecutionDecision, ExecutionMode
 from tools.single_tool_runner import ToolRunResult
 from tools.tool_chain_runner import ToolChainResult, ToolChainStepResult
+from use_cases.execution_clarification import (
+    ClarificationQuestionPresenter,
+    ClarificationResolver,
+    PendingClarification,
+    is_cancel_clarification,
+    merge_fields,
+    synthetic_result,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +42,10 @@ class ExecutionConversationController:
     ) -> None:
         self._coordinator = coordinator
         self._presenter = presenter or ExecutionResultPresenter()
+        self._question_presenter = ClarificationQuestionPresenter()
+        self._clarification_resolver = ClarificationResolver()
         self._pending_confirmation_id: str | None = None
+        self._pending_clarification: PendingClarification | None = None
         self._last_result: ExecutionCoordinationResult | None = None
 
     @property
@@ -46,6 +57,11 @@ class ExecutionConversationController:
     def last_result(self) -> ExecutionCoordinationResult | None:
         """Return the latest structured result for debugging."""
         return self._last_result
+
+    @property
+    def pending_clarification(self) -> PendingClarification | None:
+        """Return the active clarification request for debugging."""
+        return self._pending_clarification
 
     def handle(
         self,
@@ -64,6 +80,9 @@ class ExecutionConversationController:
                 result=result,
             )
 
+        if self._pending_clarification is not None:
+            return self._handle_clarification_response(prompt)
+
         result = self._coordinator.execute(prompt)
         self._remember(result)
 
@@ -72,6 +91,117 @@ class ExecutionConversationController:
                 direct_response_required=True,
                 text="",
                 result=result,
+            )
+
+        if result.status in {
+            ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+            ExecutionCoordinationStatus.AMBIGUOUS_REQUEST,
+        }:
+            return ExecutionConversationOutcome(
+                direct_response_required=False,
+                text=self._question_presenter.present(self._pending_clarification),
+                result=result,
+            )
+
+        return ExecutionConversationOutcome(
+            direct_response_required=False,
+            text=self._presenter.present(result),
+            result=result,
+        )
+
+    def _handle_clarification_response(
+        self,
+        prompt: str,
+    ) -> ExecutionConversationOutcome:
+        pending = self._pending_clarification
+        if pending is None:
+            raise RuntimeError("No pending clarification is available.")
+
+        if is_cancel_clarification(prompt):
+            result = synthetic_result(
+                ExecutionCoordinationStatus.CANCELLED,
+                pending.mode,
+                "operation cancelled by user",
+                pending.proposal,
+                candidate_tools=pending.candidate_tools,
+            )
+            self._remember(result)
+            return ExecutionConversationOutcome(False, self._presenter.present(result), result)
+
+        if not prompt.strip():
+            result = synthetic_result(
+                ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+                pending.mode,
+                "clarification response is empty",
+                pending.proposal,
+                candidate_tools=pending.candidate_tools,
+                missing_information=pending.missing_information,
+                ambiguous_information=pending.ambiguous_information,
+            )
+            self._remember_clarification_result(result, pending.original_text)
+            return ExecutionConversationOutcome(
+                False,
+                self._question_presenter.present(self._pending_clarification),
+                result,
+            )
+
+        if self._clarification_resolver.looks_like_new_order(prompt, pending):
+            result = synthetic_result(
+                ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+                pending.mode,
+                "new order received while clarification is pending",
+                pending.proposal,
+                candidate_tools=pending.candidate_tools,
+                missing_information=pending.missing_information,
+                ambiguous_information=pending.ambiguous_information,
+            )
+            self._last_result = result
+            return ExecutionConversationOutcome(
+                False,
+                (
+                    "Hay una operacion pendiente de aclaracion. "
+                    "Responde a esa aclaracion o escribe cancelar para descartarla."
+                ),
+                result,
+            )
+
+        completed_text = self._clarification_resolver.resolve(pending, prompt)
+        if completed_text is None:
+            result = synthetic_result(
+                ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+                pending.mode,
+                "clarification response did not provide requested fields",
+                pending.proposal,
+                candidate_tools=pending.candidate_tools,
+                missing_information=pending.missing_information,
+                ambiguous_information=pending.ambiguous_information,
+            )
+            self._last_result = result
+            return ExecutionConversationOutcome(
+                False,
+                self._question_presenter.present(pending),
+                result,
+            )
+
+        result = self._coordinator.execute_with_decision(
+            completed_text,
+            ExecutionDecision(
+                mode=pending.mode,
+                reason="Clarified pending operation.",
+                confidence=1.0,
+                candidate_tools=pending.candidate_tools,
+            ),
+        )
+        self._remember(result, original_text=completed_text)
+
+        if result.status in {
+            ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+            ExecutionCoordinationStatus.AMBIGUOUS_REQUEST,
+        }:
+            return ExecutionConversationOutcome(
+                False,
+                self._question_presenter.present(self._pending_clarification),
+                result,
             )
 
         return ExecutionConversationOutcome(
@@ -83,14 +213,51 @@ class ExecutionConversationController:
     def _remember(
         self,
         result: ExecutionCoordinationResult,
+        original_text: str | None = None,
     ) -> None:
         self._last_result = result
 
         if result.status is ExecutionCoordinationStatus.CONFIRMATION_REQUIRED:
+            self._pending_clarification = None
             self._pending_confirmation_id = result.confirmation_id
             return
 
         self._pending_confirmation_id = None
+
+        if result.status in {
+            ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+            ExecutionCoordinationStatus.AMBIGUOUS_REQUEST,
+        } and result.proposal is not None:
+            self._remember_clarification_result(
+                result,
+                original_text or result.proposal.source_text,
+            )
+            return
+
+        self._pending_clarification = None
+
+    def _remember_clarification_result(
+        self,
+        result: ExecutionCoordinationResult,
+        original_text: str,
+    ) -> None:
+        self._last_result = result
+        if result.proposal is None:
+            return
+
+        requested = merge_fields(
+            result.missing_information,
+            result.ambiguous_information,
+        )
+        self._pending_clarification = PendingClarification(
+            original_text=original_text,
+            mode=result.mode,
+            proposal=result.proposal,
+            candidate_tools=result.decision.candidate_tools,
+            missing_information=result.missing_information,
+            ambiguous_information=result.ambiguous_information,
+            requested_fields=requested,
+        )
 
 
 class ExecutionResultPresenter:

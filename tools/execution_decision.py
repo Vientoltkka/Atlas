@@ -191,9 +191,14 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "write_file",
         "file.write",
         (
+            r"\bescribe\b.+",
             r"\bescribe\b.*\b(?:archivo|\.txt|\.md|\.py|\.json)\b",
             r"\bcopia\b.*\b(?:contenido|en)\b.*\b[\w.-]+\.(?:md|txt|py|json|csv)\b",
             r"\bguarda\b.*\b[\w.-]+\.(?:md|txt|py|json|csv)\b",
+            r"\bguardalo\b.*\b(?:en|archivo)\b",
+            r"\bguardala\b.*\b(?:en|archivo)\b",
+            r"\bgu\s*rdalo\b.*\b(?:en|archivo)\b",
+            r"\bgu\s*rdala\b.*\b(?:en|archivo)\b",
         ),
     ),
     (

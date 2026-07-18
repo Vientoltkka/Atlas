@@ -256,6 +256,8 @@ class ToolProposalBuilder:
             return _ExtractionResult(_filter_fields({"path": _extract_path(source_text, normalized)}, field_names))
 
         if intent_action == "directory.list":
+            if _has_ambiguous_directory_target(normalized):
+                return _ExtractionResult({}, ("path",))
             return _ExtractionResult(_filter_fields({"path": _extract_directory_path(source_text, normalized)}, field_names))
 
         if intent_action == "file.write":
@@ -279,7 +281,15 @@ class ToolProposalBuilder:
             return _ExtractionResult(_filter_fields({"path": _extract_path(source_text, normalized)}, field_names))
 
         if intent_action == "desktop.hotkey.press":
-            return _ExtractionResult(_filter_fields({"keys": _extract_hotkey(normalized)}, field_names))
+            return _ExtractionResult(
+                _filter_fields(
+                    {
+                        "keys": _extract_hotkey(normalized),
+                        "window_title": _extract_window_title(source_text),
+                    },
+                    field_names,
+                )
+            )
 
         if intent_action == "desktop.text.type":
             text = _extract_type_text(source_text, normalized)
@@ -439,6 +449,17 @@ def _extract_write_content(
         if content and not _is_ambiguous_placeholder(_normalize(content)):
             return content
 
+    if path is None:
+        match = re.search(
+            r"\b(?:escribe)\s+(?P<content>.+)$",
+            source_text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            content = match.group("content").strip()
+            if content and not _is_ambiguous_placeholder(_normalize(content)):
+                return content
+
     return None
 
 
@@ -481,6 +502,23 @@ def _extract_hotkey(normalized: str) -> list[str] | None:
     return normalized_keys or None
 
 
+def _extract_window_title(source_text: str) -> str | None:
+    quoted = _extract_quoted(source_text)
+    if quoted:
+        return quoted
+
+    match = re.search(
+        r"\b(?:en|ventana)\s+(?P<title>[\w .-]+)$",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    title = match.group("title").strip()
+    return title or None
+
+
 def _extract_type_text(source_text: str, normalized: str) -> str | None:
     quoted = _extract_quoted(source_text)
     if quoted:
@@ -515,6 +553,12 @@ def _looks_like_path(value: str) -> bool:
 def _has_ambiguous_file_target(normalized: str) -> bool:
     return bool(
         re.search(r"\b(?:un|una|este|esta|ese|esa)\s+(?:archivo|fichero)\b", normalized)
+    )
+
+
+def _has_ambiguous_directory_target(normalized: str) -> bool:
+    return bool(
+        re.search(r"\b(?:un|una|este|esta|ese|esa)\s+(?:carpeta|directorio)\b", normalized)
     )
 
 

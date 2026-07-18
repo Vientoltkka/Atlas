@@ -86,7 +86,14 @@ class ExecutionCoordinator:
     ) -> ExecutionCoordinationResult:
         """Coordinate one user request without inventing tools or arguments."""
         decision = self._decision_engine.decide(prompt)
+        return self.execute_with_decision(prompt, decision)
 
+    def execute_with_decision(
+        self,
+        prompt: str,
+        decision: ExecutionDecision,
+    ) -> ExecutionCoordinationResult:
+        """Coordinate one request using an already established decision."""
         if decision.mode is ExecutionMode.DIRECT_RESPONSE:
             if _is_missing_tool_capability(decision):
                 return ExecutionCoordinationResult(
