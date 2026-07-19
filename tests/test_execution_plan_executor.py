@@ -5,8 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from core.execution_plan_executor import (
+    ExecutionControl,
+    ExecutionErrorCode,
     ExecutionPlanExecutor,
+    PlanExecutionStatus,
     PlanExecutionResult,
+    StepExecutionStatus,
     StepExecutionResult,
 )
 from core.execution_plan_validator import (
@@ -136,26 +140,30 @@ def test_executes_valid_single_step_plan() -> None:
 
     result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
 
-    assert result == PlanExecutionResult(
-        plan_status="completed",
-        success=True,
-        completed_steps=["step_1"],
-        failed_step=None,
-        skipped_steps=[],
-        step_results=[
-            StepExecutionResult(
-                step_id="step_1",
-                status="completed",
-                success=True,
-                tool_name="safe_tool",
-                output="done",
-                error=None,
-            )
-        ],
-        error=None,
-        requires_confirmation=False,
-        interrupted=False,
-    )
+    assert isinstance(result, PlanExecutionResult)
+    assert result.plan_status == PlanExecutionStatus.COMPLETED.value
+    assert result.status == PlanExecutionStatus.COMPLETED.value
+    assert result.success is True
+    assert result.completed is True
+    assert result.completed_steps == ["step_1"]
+    assert result.failed_step is None
+    assert result.skipped_steps == []
+    assert result.pending_steps == []
+    assert result.error is None
+    assert result.requires_confirmation is False
+    assert result.interrupted is False
+    assert result.resumable is False
+    assert result.metadata["plan_signature"]
+    assert result.step_results == [
+        StepExecutionResult(
+            step_id="step_1",
+            status=StepExecutionStatus.COMPLETED.value,
+            success=True,
+            tool_name="safe_tool",
+            output="done",
+            error=None,
+        )
+    ]
     assert calls == ["safe_tool"]
 
 
@@ -285,6 +293,10 @@ def test_confirmation_required_blocks_without_explicit_grant() -> None:
     assert result.success is False
     assert result.plan_status == "blocked_confirmation"
     assert result.requires_confirmation is True
+    assert result.blocked is True
+    assert result.resumable is True
+    assert result.error_code == ExecutionErrorCode.CONFIRMATION_REQUIRED.value
+    assert result.pending_steps == ["step_1"]
     assert calls == []
 
 
@@ -334,8 +346,13 @@ def test_failed_result_returned_by_tool_stops_plan() -> None:
 
     assert result.success is False
     assert result.failed_step == "step_1"
+    assert result.failed_steps == ["step_1"]
     assert result.skipped_steps == ["step_2"]
     assert result.error == "bad result"
+    assert result.error_code == ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+    assert result.resumable is False
+    assert result.step_results[0].error_code == ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+    assert result.step_results[1].status == StepExecutionStatus.SKIPPED.value
     assert calls == ["first_tool"]
 
 
@@ -349,6 +366,8 @@ def test_tool_exception_is_captured_as_structured_failure() -> None:
     assert result.success is False
     assert result.failed_step == "step_1"
     assert result.error == "failing_tool exploded"
+    assert result.error_code == ExecutionErrorCode.TOOL_EXCEPTION.value
+    assert result.step_results[0].metadata["exception_type"] == "RuntimeError"
     assert calls == ["failing_tool"]
 
 
@@ -373,6 +392,7 @@ def test_fail_fast_stops_on_first_failure() -> None:
     assert result.success is False
     assert result.failed_step == "step_1"
     assert result.skipped_steps == ["step_2", "step_3"]
+    assert result.plan_status == PlanExecutionStatus.FAILED.value
     assert calls == ["first_tool"]
 
 
@@ -397,6 +417,7 @@ def test_later_steps_are_not_executed_after_failure() -> None:
     assert result.success is False
     assert result.failed_step == "step_2"
     assert result.skipped_steps == ["step_3"]
+    assert result.plan_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value
     assert calls == ["first_tool", "second_tool"]
 
 
@@ -445,6 +466,242 @@ def test_global_result_is_structured() -> None:
     assert isinstance(result, PlanExecutionResult)
     assert isinstance(result.step_results[0], StepExecutionResult)
     assert result.plan_status == "completed"
+
+
+def test_interruption_before_first_step_is_structured_and_resumable() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+    control = ExecutionControl(
+        should_stop=lambda: True,
+        interruption_reason="pause requested",
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        control=control,
+    )
+
+    assert result.plan_status == PlanExecutionStatus.INTERRUPTED.value
+    assert result.success is False
+    assert result.interrupted is True
+    assert result.cancelled is False
+    assert result.resumable is True
+    assert result.completed_steps == []
+    assert result.pending_steps == ["step_1"]
+    assert result.current_step == "step_1"
+    assert result.interruption_reason == "pause requested"
+    assert result.error_code == ExecutionErrorCode.EXECUTION_INTERRUPTED.value
+    assert result.step_results[0].status == StepExecutionStatus.INTERRUPTED.value
+    assert calls == []
+
+
+def test_interruption_after_one_step_preserves_completed_and_pending_steps() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls)
+    third = SpyTool("third_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+            _step("step_3", "third_tool", dependencies=("step_2",)),
+        )
+    )
+    control = ExecutionControl(
+        should_stop=lambda: len(calls) >= 1,
+        interruption_reason="time limit",
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second, third)).execute(
+        plan,
+        _validation(plan),
+        control=control,
+    )
+
+    assert result.plan_status == PlanExecutionStatus.INTERRUPTED.value
+    assert result.completed_steps == ["step_1"]
+    assert result.pending_steps == ["step_2", "step_3"]
+    assert result.current_step == "step_2"
+    assert result.resumable is True
+    assert [step.status for step in result.step_results] == [
+        StepExecutionStatus.COMPLETED.value,
+        StepExecutionStatus.INTERRUPTED.value,
+        StepExecutionStatus.NOT_STARTED.value,
+    ]
+    assert calls == ["first_tool"]
+
+
+def test_controlled_cancellation_is_not_a_technical_failure() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+    control = ExecutionControl(
+        should_cancel=lambda: True,
+        cancellation_reason="user cancelled",
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        control=control,
+    )
+
+    assert result.plan_status == PlanExecutionStatus.CANCELLED.value
+    assert result.success is False
+    assert result.cancelled is True
+    assert result.failed is False
+    assert result.completed is False
+    assert result.resumable is False
+    assert result.error is None
+    assert result.error_code == ExecutionErrorCode.EXECUTION_CANCELLED.value
+    assert result.interruption_reason == "user cancelled"
+    assert result.step_results[0].status == StepExecutionStatus.CANCELLED.value
+    assert calls == []
+
+
+def test_rejected_plan_has_stable_error_code_and_is_not_resumable() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = replace(_plan((_step("step_1", "safe_tool"),)), goal="")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.plan_status == PlanExecutionStatus.REJECTED.value
+    assert result.error_code == ExecutionErrorCode.INVALID_PLAN.value
+    assert result.resumable is False
+    assert result.pending_steps == ["step_1"]
+    assert calls == []
+
+
+def test_validation_mismatch_has_specific_error_code() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        replace(plan, goal="different"),
+        _validation(plan),
+    )
+
+    assert result.error_code == ExecutionErrorCode.VALIDATION_MISMATCH.value
+    assert calls == []
+
+
+def test_dependency_failure_uses_dependency_error_code() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool", dependencies=("missing",)),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _manual_valid_result(),
+    )
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value
+    assert result.failed_steps == ["step_1"]
+    assert result.pending_steps == []
+    assert calls == []
+
+
+def test_missing_tool_uses_tool_not_found_error_code() -> None:
+    plan = _plan((_step("step_1", "missing_tool"),))
+
+    result = ExecutionPlanExecutor(_registry()).execute(plan, _validation(plan))
+
+    assert result.error_code == ExecutionErrorCode.TOOL_NOT_FOUND.value
+    assert result.step_results[0].error_code == ExecutionErrorCode.TOOL_NOT_FOUND.value
+
+
+def test_control_callback_error_is_internal_executor_error() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    def broken_control() -> bool:
+        raise RuntimeError("control broke")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        control=ExecutionControl(should_stop=broken_control),
+    )
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.INTERNAL_EXECUTOR_ERROR.value
+    assert result.failed is True
+    assert result.resumable is False
+    assert result.error == "Internal executor control error: control broke"
+    assert calls == []
+
+
+def test_outcome_flags_are_not_contradictory() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    completed = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+    interrupted = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        control=ExecutionControl(should_stop=lambda: True),
+    )
+
+    assert completed.completed is True
+    assert completed.failed is False
+    assert completed.interrupted is False
+    assert completed.cancelled is False
+    assert completed.success is True
+    assert interrupted.completed is False
+    assert interrupted.failed is False
+    assert interrupted.interrupted is True
+    assert interrupted.success is False
+
+
+def test_traceability_includes_completed_failed_and_skipped_steps() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls, fail=True)
+    third = SpyTool("third_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+            _step("step_3", "third_tool", dependencies=("step_2",)),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second, third)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert [step.step_id for step in result.step_results] == [
+        "step_1",
+        "step_2",
+        "step_3",
+    ]
+    assert [step.tool_name for step in result.step_results] == [
+        "first_tool",
+        "second_tool",
+        "third_tool",
+    ]
+    assert result.completed_steps == ["step_1"]
+    assert result.failed_steps == ["step_2"]
+    assert result.skipped_steps == ["step_3"]
+
+
+def test_executor_does_not_retry_failed_tool() -> None:
+    calls: list[str] = []
+    tool = SpyTool("failing_tool", calls, fail=True)
+    plan = _plan((_step("step_1", "failing_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert calls == ["failing_tool"]
 
 
 def test_executor_does_not_call_planner_or_replan() -> None:
