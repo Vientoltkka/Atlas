@@ -549,7 +549,7 @@ def _clear_incompatibility(
     if "historia" in tokens and "write_file" in descriptor.capabilities and not _looks_like_disk_write(normalized_query):
         return True
     if "proceso" in tokens or "procesos" in tokens:
-        if "terminate_process" in descriptor.capabilities and not ({"termina", "terminar", "mata", "cerrar", "cierra"} & tokens):
+        if "terminate_process" in descriptor.capabilities and not ({"termina", "terminar", "terminalo", "terminala", "mata", "cerrar", "cierra"} & tokens):
             return True
     return False
 

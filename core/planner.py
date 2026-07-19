@@ -141,6 +141,7 @@ class Planner:
         argument_validator: ArgumentValidator | None = None,
         semantic_tool_catalog: SemanticToolCatalog | None = None,
         tool_selection_result: ToolSelectionResult | None = None,
+        multi_tool_planner: Any | None = None,
         plan_response_provider: Callable[[str, tuple[ToolDescriptor, ...]], str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -152,6 +153,7 @@ class Planner:
         )
         self._semantic_tool_catalog = semantic_tool_catalog
         self._tool_selection_result = tool_selection_result
+        self._multi_tool_planner = multi_tool_planner
         self._plan_response_provider = plan_response_provider
 
     def create_plan(self, prompt: str) -> Plan:
@@ -239,6 +241,10 @@ class Planner:
             raw_response = self._plan_response_provider(goal, catalog)
             return self._parse_plan_response(goal, raw_response, catalog)
 
+        multi_tool_result = self._try_multi_tool_plan(goal)
+        if multi_tool_result is not None:
+            return multi_tool_result
+
         decision = ExecutionDecisionEngine(self._supported_intents()).decide(goal)
         if decision.mode == ExecutionMode.DIRECT_RESPONSE:
             return PlanGenerationResult(
@@ -274,6 +280,34 @@ class Planner:
             warnings=warnings,
             generation_attempted=True,
             error_code=PlannerErrorCode.INSUFFICIENT_INFORMATION.value if errors else None,
+        )
+
+    def _try_multi_tool_plan(
+        self,
+        goal: str,
+    ) -> PlanGenerationResult | None:
+        if (
+            self._multi_tool_planner is None
+            or self._semantic_tool_catalog is None
+            or self._tool_selector is None
+        ):
+            return None
+
+        result = self._multi_tool_planner.plan(
+            goal,
+            self._semantic_tool_catalog,
+            self._tool_selector,
+        )
+        if not result.handled:
+            return None
+
+        return PlanGenerationResult(
+            success=result.success,
+            plan=result.plan,
+            errors=list(result.errors),
+            warnings=list(result.warnings),
+            generation_attempted=True,
+            error_code=result.error_code,
         )
 
     def tool_catalog(self) -> tuple[ToolDescriptor, ...]:
