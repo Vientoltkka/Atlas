@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping
 import unicodedata
 
 from tools.execution_decision import ExecutionDecisionEngine, ExecutionMode
@@ -23,6 +25,14 @@ class ExecutionStep:
     tool: str | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "arguments",
+            MappingProxyType(dict(self.arguments)),
+        )
 
 
 @dataclass(frozen=True, slots=True)

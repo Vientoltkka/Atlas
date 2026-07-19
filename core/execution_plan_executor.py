@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -156,7 +157,7 @@ class ExecutionPlanExecutor:
                 error_code=self._precondition_error_code(precondition_error),
                 pending_steps=self._pending_step_ids(plan),
                 failure_reason=precondition_error,
-                metadata={"plan_signature": plan_signature(plan)},
+                metadata={"plan_signature": self._safe_plan_signature(plan)},
             )
 
         assert validation_result is not None
@@ -173,7 +174,7 @@ class ExecutionPlanExecutor:
                 pending_steps=self._pending_step_ids(plan),
                 current_step=self._first_pending_step_id(plan),
                 error_code=ExecutionErrorCode.CONFIRMATION_REQUIRED.value,
-                metadata={"plan_signature": plan_signature(plan)},
+                metadata={"plan_signature": self._safe_plan_signature(plan)},
             )
 
         completed_steps = [
@@ -182,6 +183,7 @@ class ExecutionPlanExecutor:
             if step.status == self._COMPLETED_STEP_STATUS
         ]
         completed: set[str] = set(completed_steps)
+        previous_results: dict[str, object] = {}
         step_results: list[StepExecutionResult] = []
 
         for index, step in enumerate(plan.ordered_steps):
@@ -241,12 +243,17 @@ class ExecutionPlanExecutor:
                     metadata={"plan_signature": validation_result.plan_signature},
                 )
 
-            outcome = self._execute_step(step)
+            outcome = self._execute_step(
+                step,
+                plan_signature=validation_result.plan_signature,
+                previous_results=previous_results,
+            )
             step_results.append(outcome)
 
             if outcome.success:
                 completed.add(step.id)
                 completed_steps.append(step.id)
+                previous_results[step.id] = outcome.output
                 continue
 
             return PlanExecutionResult(
@@ -305,14 +312,27 @@ class ExecutionPlanExecutor:
 
         if (
             validation_result.plan_signature is not None
-            and validation_result.plan_signature != plan_signature(plan)
         ):
-            return "PlanValidationResult does not match the execution plan."
+            current_signature = self._safe_plan_signature(plan)
+            if current_signature is None:
+                return "Execution plan is not deterministically serializable."
+
+            if validation_result.plan_signature != current_signature:
+                return "PlanValidationResult does not match the execution plan."
 
         if plan.status not in self._EXECUTABLE_PLAN_STATUSES:
             return f"Plan status '{plan.status}' is not executable."
 
         return None
+
+    def _safe_plan_signature(
+        self,
+        plan: ExecutionPlan,
+    ) -> str | None:
+        try:
+            return plan_signature(plan)
+        except TypeError:
+            return None
 
     def _precondition_error_code(
         self,
@@ -320,6 +340,9 @@ class ExecutionPlanExecutor:
     ) -> str:
         if "does not match" in message:
             return ExecutionErrorCode.VALIDATION_MISMATCH.value
+
+        if "serializable" in message:
+            return ExecutionErrorCode.INVALID_PLAN.value
 
         if "status" in message:
             return ExecutionErrorCode.INVALID_PLAN.value
@@ -466,6 +489,9 @@ class ExecutionPlanExecutor:
     def _execute_step(
         self,
         step: ExecutionStep,
+        *,
+        plan_signature: str | None,
+        previous_results: dict[str, object],
     ) -> StepExecutionResult:
         if step.tool in self._LOGICAL_TOOLS:
             return StepExecutionResult(
@@ -494,7 +520,13 @@ class ExecutionPlanExecutor:
         try:
             output = self._tool_executor.execute(
                 step.tool,
-                ToolContext(),
+                ToolContext(
+                    parameters=deepcopy(dict(step.arguments)),
+                    step_id=step.id,
+                    plan_signature=plan_signature,
+                    previous_results=dict(previous_results),
+                    metadata={"executor": "ExecutionPlanExecutor"},
+                ),
             )
         except ToolNotRegisteredError as error:
             return StepExecutionResult(

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
+from typing import Any, Mapping
 
 from core.planner import ExecutionPlan
 
@@ -48,6 +49,7 @@ class ExecutionPlanValidator:
         self._validate_estimated_steps(plan, errors)
         self._validate_step_ids(plan, errors)
         self._validate_tools(plan, errors)
+        self._validate_arguments(plan, errors)
         self._validate_dependencies(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
@@ -60,7 +62,7 @@ class ExecutionPlanValidator:
             warnings=warnings,
             requires_confirmation=plan.requires_confirmation,
             status="valid" if is_valid else "invalid",
-            plan_signature=plan_signature(plan),
+            plan_signature=plan_signature(plan) if is_valid else None,
         )
 
     def _validate_goal(
@@ -146,6 +148,40 @@ class ExecutionPlanValidator:
             if step.tool != "direct_response" and step.tool not in declared_tools:
                 errors.append(
                     f"Step '{step.id}' uses undeclared tool '{step.tool}'."
+                )
+
+    def _validate_arguments(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        for step in plan.ordered_steps:
+            if not isinstance(step.arguments, Mapping):
+                errors.append(f"Step '{step.id}' arguments must be a mapping.")
+                continue
+
+            if step.tool is None and step.arguments:
+                errors.append(
+                    f"Logical step '{step.id}' cannot declare arguments."
+                )
+
+            for key in step.arguments:
+                if not isinstance(key, str):
+                    errors.append(
+                        f"Step '{step.id}' argument keys must be strings."
+                    )
+                    continue
+
+                if not key.strip():
+                    errors.append(
+                        f"Step '{step.id}' argument keys cannot be empty."
+                    )
+
+            try:
+                _signature_safe_value(dict(step.arguments))
+            except TypeError as error:
+                errors.append(
+                    f"Step '{step.id}' arguments are not deterministically serializable: {error}."
                 )
 
     def _validate_dependencies(
@@ -276,6 +312,7 @@ def plan_signature(
                 "tool": step.tool,
                 "dependencies": list(step.dependencies),
                 "status": step.status,
+                "arguments": _signature_safe_value(dict(step.arguments)),
             }
             for step in plan.ordered_steps
         ],
@@ -292,3 +329,32 @@ def plan_signature(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _signature_safe_value(
+    value: Any,
+) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, list):
+        return [_signature_safe_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_signature_safe_value(item) for item in value]
+
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("mapping keys must be strings")
+
+            if not key.strip():
+                raise TypeError("mapping keys cannot be empty")
+
+            normalized[key] = _signature_safe_value(item)
+
+        return normalized
+
+    raise TypeError(f"unsupported value type {type(value).__name__}")

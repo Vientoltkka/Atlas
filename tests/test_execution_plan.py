@@ -21,6 +21,7 @@ def test_simple_goal_generates_single_execution_plan_step() -> None:
             tool="read_file",
             dependencies=(),
             status="pending",
+            arguments={},
         ),
     )
 
@@ -69,3 +70,43 @@ def test_execution_plan_generation_does_not_execute_tools(tmp_path) -> None:
     assert plan.required_tools == ("write_file",)
     assert plan.requires_confirmation is True
     assert target.exists() is False
+
+
+def test_execution_step_accepts_structured_arguments() -> None:
+    step = ExecutionStep(
+        id="step_1",
+        description="Read file.",
+        tool="read_file",
+        arguments={"path": "README.md", "flag": True, "count": 2},
+    )
+
+    assert dict(step.arguments) == {
+        "path": "README.md",
+        "flag": True,
+        "count": 2,
+    }
+
+
+def test_execution_step_arguments_default_is_independent() -> None:
+    first = ExecutionStep("step_1", "First.", "read_file")
+    second = ExecutionStep("step_2", "Second.", "read_file")
+
+    assert first.arguments == {}
+    assert second.arguments == {}
+    assert first.arguments is not second.arguments
+
+
+def test_execution_step_arguments_are_top_level_read_only() -> None:
+    step = ExecutionStep(
+        id="step_1",
+        description="Read file.",
+        tool="read_file",
+        arguments={"path": "README.md"},
+    )
+
+    try:
+        step.arguments["other"] = "value"  # type: ignore[index]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("step arguments must be read-only")

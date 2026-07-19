@@ -64,6 +64,7 @@ def _step(
     tool: str | None,
     dependencies: tuple[str, ...] = (),
     status: str = "pending",
+    arguments: dict[str, Any] | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -71,6 +72,7 @@ def _step(
         tool=tool,
         dependencies=dependencies,
         status=status,
+        arguments={} if arguments is None else arguments,
     )
 
 
@@ -165,6 +167,7 @@ def test_executes_valid_single_step_plan() -> None:
         )
     ]
     assert calls == ["safe_tool"]
+    assert tool.contexts[0].parameters == {}
 
 
 def test_executes_multiple_steps_in_order() -> None:
@@ -316,6 +319,120 @@ def test_confirmation_grant_allows_execution() -> None:
 
     assert result.success is True
     assert calls == ["write_file"]
+
+
+def test_step_arguments_are_delivered_to_tool_context() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    arguments = {"path": "README.md", "mode": "safe"}
+    plan = _plan((_step("step_1", "safe_tool", arguments=arguments),))
+    validation = _validation(plan)
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, validation)
+
+    assert result.success is True
+    assert tool.contexts[0].parameters == arguments
+    assert tool.contexts[0].arguments == arguments
+    assert tool.contexts[0].step_id == "step_1"
+    assert tool.contexts[0].plan_signature == validation.plan_signature
+    assert tool.contexts[0].metadata == {"executor": "ExecutionPlanExecutor"}
+
+
+def test_previous_results_are_available_to_later_steps_without_resolution() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].previous_results == {
+        "step_1": {"content": "alpha"},
+    }
+
+
+def test_original_arguments_are_not_mutated_by_tool() -> None:
+    class MutatingTool(SpyTool):
+        def execute(
+            self,
+            context: ToolContext,
+        ) -> Any:
+            context.parameters["path"] = "changed.txt"
+            context.parameters["nested"]["value"] = "changed"
+            return super().execute(context)
+
+    calls: list[str] = []
+    tool = MutatingTool("safe_tool", calls)
+    nested = {"value": "original"}
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"path": "README.md", "nested": nested},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert dict(plan.ordered_steps[0].arguments) == {
+        "path": "README.md",
+        "nested": {"value": "original"},
+    }
+    assert nested == {"value": "original"}
+
+
+def test_argument_change_after_validation_is_rejected() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    original = _plan(
+        (_step("step_1", "safe_tool", arguments={"path": "README.md"}),)
+    )
+    validation = _validation(original)
+    changed = replace(
+        original,
+        ordered_steps=(
+            _step("step_1", "safe_tool", arguments={"path": "changed.md"}),
+        ),
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(changed, validation)
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.VALIDATION_MISMATCH.value
+    assert calls == []
+
+
+def test_dangerous_step_with_arguments_still_requires_confirmation() -> None:
+    calls: list[str] = []
+    tool = SpyTool("write_file", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "write_file",
+                arguments={"path": "out.txt", "content": "hello"},
+            ),
+        ),
+        requires_confirmation=True,
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+    assert result.error_code == ExecutionErrorCode.CONFIRMATION_REQUIRED.value
+    assert calls == []
 
 
 def test_missing_tool_fails_step_without_execution() -> None:
@@ -709,3 +826,18 @@ def test_executor_does_not_call_planner_or_replan() -> None:
 
     assert "Planner" not in source
     assert "create_execution_plan" not in source
+
+
+def test_executor_does_not_eval_or_interpret_argument_strings() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    payload = "__import__('os').system('echo no')"
+    plan = _plan((_step("step_1", "safe_tool", arguments={"payload": payload}),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert tool.contexts[0].parameters["payload"] == payload
+    source = Path("core/execution_plan_executor.py").read_text(encoding="utf-8")
+    assert "eval(" not in source
+    assert "exec(" not in source

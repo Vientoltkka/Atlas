@@ -17,9 +17,10 @@ def _valid_plan() -> ExecutionPlan:
 
 def _step(
     step_id: str,
-    tool: str = "read_file",
+    tool: str | None = "read_file",
     dependencies: tuple[str, ...] = (),
     status: str = "pending",
+    arguments: dict | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -27,6 +28,7 @@ def _step(
         tool=tool,
         dependencies=dependencies,
         status=status,
+        arguments={} if arguments is None else arguments,
     )
 
 
@@ -238,3 +240,140 @@ def test_validation_does_not_execute_or_modify_plan(tmp_path) -> None:
     assert result.is_valid is True
     assert repr(plan) == before
     assert target.exists() is False
+
+
+def test_step_arguments_with_supported_values_are_valid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                arguments={
+                    "path": "README.md",
+                    "count": 1,
+                    "enabled": True,
+                    "items": ["a", None],
+                    "nested": {"mode": "safe"},
+                },
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.plan_signature
+
+
+def test_logical_step_allows_empty_arguments() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(_step("step_1", tool=None),),
+        estimated_steps=1,
+        required_tools=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+
+
+def test_logical_step_rejects_arguments() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(_step("step_1", tool=None, arguments={"path": "README.md"}),),
+        estimated_steps=1,
+        required_tools=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Logical step 'step_1' cannot declare arguments." in result.errors
+
+
+def test_argument_keys_must_be_non_empty_strings() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1", arguments={"": "empty", 3: "number"}),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_1' argument keys cannot be empty." in result.errors
+    assert "Step 'step_1' argument keys must be strings." in result.errors
+
+
+def test_non_serializable_argument_value_is_rejected() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(_step("step_1", arguments={"value": object()}),),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any(
+        error.startswith(
+            "Step 'step_1' arguments are not deterministically serializable:"
+        )
+        for error in result.errors
+    )
+
+
+def test_argument_key_order_does_not_change_plan_signature() -> None:
+    base = _valid_plan()
+    first = replace(
+        base,
+        ordered_steps=(
+            _step("step_1", arguments={"a": 1, "b": 2}),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+    second = replace(
+        base,
+        ordered_steps=(
+            _step("step_1", arguments={"b": 2, "a": 1}),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    assert _validate(first).plan_signature == _validate(second).plan_signature
+
+
+def test_different_arguments_change_plan_signature() -> None:
+    base = _valid_plan()
+    first = replace(
+        base,
+        ordered_steps=(_step("step_1", arguments={"path": "a.txt"}),),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+    second = replace(
+        base,
+        ordered_steps=(_step("step_1", arguments={"path": "b.txt"}),),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    assert _validate(first).plan_signature != _validate(second).plan_signature
