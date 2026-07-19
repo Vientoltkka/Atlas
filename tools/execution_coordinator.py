@@ -170,6 +170,72 @@ class ExecutionCoordinator:
             pending_owner="chain",
         )
 
+    def pending_confirmation_owner(
+        self,
+        confirmation_id: str,
+    ) -> _ConfirmationOwner | None:
+        """Return the owner of one pending confirmation id."""
+        return self._pending_confirmations.get(confirmation_id)
+
+    def cancel_pending_confirmation(
+        self,
+        confirmation_id: str,
+    ) -> None:
+        """Cancel a pending confirmation id without executing any runner."""
+        owner = self._pending_confirmations.pop(confirmation_id, None)
+        if owner == "single":
+            self._single_tool_runner.cancel_pending_confirmation(confirmation_id)
+        elif owner == "chain":
+            self._chain_runner.cancel_pending_chain(confirmation_id)
+
+    def reissue_single_confirmation(
+        self,
+        confirmation_id: str,
+        arguments: dict[str, object],
+    ) -> ExecutionCoordinationResult:
+        """Revalidate a modified single-tool confirmation and issue a new id."""
+        owner = self._pending_confirmations.get(confirmation_id)
+        decision = _confirmation_decision()
+        if owner != "single":
+            return _confirmation_not_pending_result(confirmation_id, decision)
+
+        outcome = self._single_tool_runner.reissue_pending_confirmation(
+            confirmation_id,
+            arguments,
+        )
+        self._pending_confirmations.pop(confirmation_id, None)
+        return self._single_result(
+            decision,
+            proposal=None,
+            outcome=outcome,
+            pending_owner="single",
+        )
+
+    def reissue_chain_confirmation(
+        self,
+        confirmation_id: str,
+        step_arguments: dict[str, object],
+        resolved_arguments: dict[str, object],
+    ) -> ExecutionCoordinationResult:
+        """Revalidate a modified pending chain step and issue a new id."""
+        owner = self._pending_confirmations.get(confirmation_id)
+        decision = _confirmation_decision()
+        if owner != "chain":
+            return _confirmation_not_pending_result(confirmation_id, decision)
+
+        outcome = self._chain_runner.reissue_pending_step(
+            confirmation_id,
+            step_arguments,
+            resolved_arguments,
+        )
+        self._pending_confirmations.pop(confirmation_id, None)
+        return self._chain_result(
+            decision,
+            proposal=None,
+            outcome=outcome,
+            pending_owner="chain",
+        )
+
     def _execute_single(
         self,
         prompt: str,
@@ -420,4 +486,20 @@ def _confirmation_decision() -> ExecutionDecision:
         mode=ExecutionMode.DIRECT_RESPONSE,
         reason="Confirmation request.",
         confidence=1.0,
+    )
+
+
+def _confirmation_not_pending_result(
+    confirmation_id: str,
+    decision: ExecutionDecision,
+) -> ExecutionCoordinationResult:
+    return ExecutionCoordinationResult(
+        status=ExecutionCoordinationStatus.FAILED,
+        mode=ExecutionMode.DIRECT_RESPONSE,
+        decision=decision,
+        proposal=None,
+        execution_result=None,
+        message="confirmation id is not pending",
+        confirmation_id=confirmation_id,
+        executed=False,
     )

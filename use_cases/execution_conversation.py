@@ -21,6 +21,13 @@ from use_cases.execution_clarification import (
     merge_fields,
     synthetic_result,
 )
+from use_cases.pending_confirmation import (
+    PendingConfirmationContext,
+    PendingConfirmationInputType,
+    PendingConfirmationPresenter,
+    PendingConfirmationResolver,
+    context_with_new_result,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +51,10 @@ class ExecutionConversationController:
         self._presenter = presenter or ExecutionResultPresenter()
         self._question_presenter = ClarificationQuestionPresenter()
         self._clarification_resolver = ClarificationResolver()
+        self._pending_confirmation_resolver = PendingConfirmationResolver()
+        self._pending_confirmation_presenter = PendingConfirmationPresenter()
         self._pending_confirmation_id: str | None = None
+        self._pending_confirmation_context: PendingConfirmationContext | None = None
         self._pending_clarification: PendingClarification | None = None
         self._last_result: ExecutionCoordinationResult | None = None
 
@@ -63,28 +73,24 @@ class ExecutionConversationController:
         """Return the active clarification request for debugging."""
         return self._pending_clarification
 
+    @property
+    def pending_confirmation_context(self) -> PendingConfirmationContext | None:
+        """Return the active confirmation context for debugging."""
+        return self._pending_confirmation_context
+
     def handle(
         self,
         prompt: str,
     ) -> ExecutionConversationOutcome:
         """Handle one text turn before the normal conversational fallback."""
         if self._pending_confirmation_id is not None:
-            result = self._coordinator.confirm(
-                self._pending_confirmation_id,
-                prompt,
-            )
-            self._remember(result)
-            return ExecutionConversationOutcome(
-                direct_response_required=False,
-                text=self._presenter.present(result),
-                result=result,
-            )
+            return self._handle_confirmation_response(prompt)
 
         if self._pending_clarification is not None:
             return self._handle_clarification_response(prompt)
 
         result = self._coordinator.execute(prompt)
-        self._remember(result)
+        self._remember(result, original_text=prompt)
 
         if result.status is ExecutionCoordinationStatus.DIRECT_RESPONSE_REQUIRED:
             return ExecutionConversationOutcome(
@@ -108,6 +114,129 @@ class ExecutionConversationController:
             text=self._presenter.present(result),
             result=result,
         )
+
+    def _handle_confirmation_response(
+        self,
+        prompt: str,
+    ) -> ExecutionConversationOutcome:
+        context = self._pending_confirmation_context
+        if context is None:
+            raise RuntimeError("No pending confirmation context is available.")
+
+        resolution = self._pending_confirmation_resolver.resolve(prompt, context)
+
+        if resolution.input_type is PendingConfirmationInputType.CONFIRM:
+            result = self._coordinator.confirm(context.confirmation_id, prompt)
+            self._remember(result)
+            return ExecutionConversationOutcome(False, self._presenter.present(result), result)
+
+        if resolution.input_type in {
+            PendingConfirmationInputType.REJECT,
+            PendingConfirmationInputType.CANCEL,
+        }:
+            result = self._coordinator.confirm(context.confirmation_id, "no")
+            self._remember(result)
+            return ExecutionConversationOutcome(False, self._presenter.present(result), result)
+
+        if resolution.input_type is PendingConfirmationInputType.INSPECT:
+            result = _pending_confirmation_result(context, "pending operation inspected")
+            self._last_result = result
+            return ExecutionConversationOutcome(
+                False,
+                self._pending_confirmation_presenter.describe(context, inspect=True),
+                result,
+            )
+
+        if resolution.input_type is PendingConfirmationInputType.REPLACE:
+            self._coordinator.cancel_pending_confirmation(context.confirmation_id)
+            self._clear_pending_confirmation()
+            replacement = resolution.replacement_text or prompt
+            return self.handle(replacement)
+
+        if resolution.input_type is PendingConfirmationInputType.MODIFY:
+            if resolution.blocked_reason:
+                result = _pending_confirmation_result(context, resolution.blocked_reason)
+                self._last_result = result
+                return ExecutionConversationOutcome(False, resolution.blocked_reason, result)
+
+            if not resolution.arguments:
+                result = _pending_confirmation_result(context, "modification is incomplete")
+                self._last_result = result
+                return ExecutionConversationOutcome(
+                    False,
+                    (
+                        "La modificacion no es suficientemente clara. Indica que "
+                        "argumento quieres cambiar o confirma/cancela la operacion pendiente."
+                    ),
+                    result,
+                )
+
+            return self._apply_pending_modification(context, dict(resolution.arguments))
+
+        result = _pending_confirmation_result(context, "pending confirmation needs a clear response")
+        self._last_result = result
+        return ExecutionConversationOutcome(
+            False,
+            (
+                "Hay una confirmacion pendiente. Responde si/s para ejecutar, "
+                "no/n para cancelar, pregunta que voy a hacer o indica un cambio claro."
+            ),
+            result,
+        )
+
+    def _apply_pending_modification(
+        self,
+        context: PendingConfirmationContext,
+        arguments: dict[str, Any],
+    ) -> ExecutionConversationOutcome:
+        pending = _pending_tool_result(context.execution_result)
+        if pending is None:
+            result = _pending_confirmation_result(context, "pending operation cannot be modified")
+            self._last_result = result
+            return ExecutionConversationOutcome(False, "No puedo modificar esa operacion pendiente.", result)
+
+        current_arguments = dict(pending.validated_arguments or pending.original_arguments or {})
+        current_arguments.update(arguments)
+
+        if context.owner == "single":
+            result = self._coordinator.reissue_single_confirmation(
+                context.confirmation_id,
+                current_arguments,
+            )
+        else:
+            step = _pending_chain_step(context.execution_result)
+            step_arguments = dict(step.arguments) if step is not None else {}
+            step_arguments.update(arguments)
+            result = self._coordinator.reissue_chain_confirmation(
+                context.confirmation_id,
+                step_arguments,
+                current_arguments,
+            )
+
+        self._remember(result, original_text=context.original_text)
+
+        if result.status in {
+            ExecutionCoordinationStatus.INFORMATION_REQUIRED,
+            ExecutionCoordinationStatus.AMBIGUOUS_REQUEST,
+        }:
+            return ExecutionConversationOutcome(
+                False,
+                self._question_presenter.present(self._pending_clarification),
+                result,
+            )
+
+        if result.status is ExecutionCoordinationStatus.CONFIRMATION_REQUIRED:
+            active_context = self._pending_confirmation_context
+            if active_context is not None:
+                text = self._pending_confirmation_presenter.describe(
+                    active_context,
+                    prefix="De acuerdo. Ahora",
+                )
+            else:
+                text = self._presenter.present(result)
+            return ExecutionConversationOutcome(False, text, result)
+
+        return ExecutionConversationOutcome(False, self._presenter.present(result), result)
 
     def _handle_clarification_response(
         self,
@@ -220,9 +349,14 @@ class ExecutionConversationController:
         if result.status is ExecutionCoordinationStatus.CONFIRMATION_REQUIRED:
             self._pending_clarification = None
             self._pending_confirmation_id = result.confirmation_id
+            self._pending_confirmation_context = self._build_pending_confirmation_context(
+                result,
+                original_text,
+            )
             return
 
         self._pending_confirmation_id = None
+        self._pending_confirmation_context = None
 
         if result.status in {
             ExecutionCoordinationStatus.INFORMATION_REQUIRED,
@@ -234,6 +368,45 @@ class ExecutionConversationController:
             )
             return
 
+        self._pending_clarification = None
+
+    def _build_pending_confirmation_context(
+        self,
+        result: ExecutionCoordinationResult,
+        original_text: str | None,
+    ) -> PendingConfirmationContext | None:
+        if result.confirmation_id is None:
+            return None
+
+        owner = self._coordinator.pending_confirmation_owner(result.confirmation_id)
+        if owner is None:
+            previous = self._pending_confirmation_context
+            if previous is not None and previous.confirmation_id == result.confirmation_id:
+                return previous
+            return None
+
+        previous = self._pending_confirmation_context
+        if previous is not None and previous.confirmation_id == result.confirmation_id:
+            return context_with_new_result(
+                previous,
+                result.execution_result or previous.execution_result,
+                result.confirmation_id,
+            )
+
+        context = PendingConfirmationContext(
+            confirmation_id=result.confirmation_id,
+            mode=result.mode,
+            owner=owner,
+            original_text=original_text or (result.proposal.source_text if result.proposal else ""),
+            proposal=result.proposal,
+            execution_result=result.execution_result,
+            action_summary=self._presenter._confirmation_message(result),
+        )
+        return context
+
+    def _clear_pending_confirmation(self) -> None:
+        self._pending_confirmation_id = None
+        self._pending_confirmation_context = None
         self._pending_clarification = None
 
     def _remember_clarification_result(
@@ -402,6 +575,34 @@ def _pending_tool_result(
         return execution_result.steps[-1].result
 
     return None
+
+
+def _pending_chain_step(
+    execution_result: ToolRunResult | ToolChainResult | None,
+) -> ToolChainStepResult | None:
+    if isinstance(execution_result, ToolChainResult) and execution_result.steps:
+        return execution_result.steps[-1]
+    return None
+
+
+def _pending_confirmation_result(
+    context: PendingConfirmationContext,
+    message: str,
+) -> ExecutionCoordinationResult:
+    return ExecutionCoordinationResult(
+        status=ExecutionCoordinationStatus.CONFIRMATION_REQUIRED,
+        mode=context.mode,
+        decision=ExecutionDecision(
+            mode=context.mode,
+            reason=message,
+            confidence=1.0,
+        ),
+        proposal=context.proposal,
+        execution_result=context.execution_result,
+        message=message,
+        confirmation_id=context.confirmation_id,
+        executed=False,
+    )
 
 
 def _is_ambiguous_confirmation(

@@ -111,6 +111,21 @@ class ToolChainRunner:
         """Return pending chains without exposing internal storage."""
         return tuple(self._pending_chains.values())
 
+    def pending_chain(
+        self,
+        confirmation_id: str,
+    ) -> PendingToolChain | None:
+        """Return one pending chain by id without exposing storage."""
+        return self._pending_chains.get(confirmation_id)
+
+    def cancel_pending_chain(
+        self,
+        confirmation_id: str,
+    ) -> PendingToolChain | None:
+        """Remove one pending chain and its underlying tool confirmation."""
+        self._single_tool_runner.cancel_pending_confirmation(confirmation_id)
+        return self._pending_chains.pop(confirmation_id, None)
+
     def run(
         self,
         steps: tuple[ToolChainStep, ...],
@@ -196,6 +211,78 @@ class ToolChainRunner:
             steps=pending.steps,
             start_index=pending.next_index + 1,
             completed_results=results,
+        )
+
+    def reissue_pending_step(
+        self,
+        confirmation_id: str,
+        step_arguments: Mapping[str, Any],
+        resolved_arguments: Mapping[str, Any],
+    ) -> ToolChainResult:
+        """Replace the pending step arguments and issue a fresh confirmation id."""
+        pending = self._pending_chains.get(confirmation_id)
+        if pending is None:
+            return ToolChainResult(
+                success=False,
+                status="confirmation_not_found",
+                steps=(),
+                failed_step_id=None,
+                execution_count=0,
+                confirmation_id=confirmation_id,
+                error_code="confirmation_not_found",
+                error_message="confirmation id is not pending for this chain",
+            )
+
+        step = pending.steps[pending.next_index]
+        outcome = self._single_tool_runner.reissue_pending_confirmation(
+            confirmation_id,
+            resolved_arguments,
+        )
+        if outcome.status != "confirmation_required" or not outcome.confirmation_id:
+            return ToolChainResult(
+                success=False,
+                status=outcome.status,
+                steps=pending.completed_results,
+                failed_step_id=step.step_id,
+                execution_count=_execution_count(pending.completed_results),
+                confirmation_id=outcome.confirmation_id,
+                error_code=outcome.error_code,
+                error_message=outcome.error_message,
+            )
+
+        updated_steps = list(pending.steps)
+        updated_steps[pending.next_index] = ToolChainStep(
+            step_id=step.step_id,
+            tool_name=step.tool_name,
+            arguments=step_arguments,
+        )
+        updated_pending = PendingToolChain(
+            confirmation_id=outcome.confirmation_id,
+            steps=tuple(updated_steps),
+            next_index=pending.next_index,
+            completed_results=pending.completed_results,
+        )
+        del self._pending_chains[confirmation_id]
+        self._pending_chains[outcome.confirmation_id] = updated_pending
+
+        step_result = ToolChainStepResult(
+            step_id=step.step_id,
+            tool_name=step.tool_name,
+            arguments=step_arguments,
+            resolved_arguments=outcome.validated_arguments,
+            result=outcome,
+        )
+        results = pending.completed_results + (step_result,)
+        return ToolChainResult(
+            success=False,
+            status="confirmation_required",
+            steps=results,
+            failed_step_id=step.step_id,
+            execution_count=_execution_count(results),
+            confirmation_id=outcome.confirmation_id,
+            error_code="confirmation_required",
+            error_message=outcome.error_message,
+            metadata=outcome.metadata,
         )
 
     def _run_from(

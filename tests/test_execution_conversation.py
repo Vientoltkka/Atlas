@@ -583,3 +583,190 @@ def test_regression_chain_clarification_question_is_natural() -> None:
 
     assert outcome.text == "Que archivo quieres leer y en que archivo quieres guardarlo?"
     assert "path" not in outcome.text
+
+
+def test_pending_confirmation_inspection_does_not_execute_and_keeps_state(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notas.txt"
+    controller = _controller()
+
+    controller.handle(f"Escribe hola en {target}")
+    inspected = controller.handle("Que vas a hacer?")
+
+    assert inspected.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert target.exists() is False
+    assert controller.pending_confirmation_id is not None
+    assert "Operacion pendiente" in inspected.text
+    assert str(controller.pending_confirmation_id) not in inspected.text
+
+    confirmed = controller.handle("s")
+
+    assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert target.read_text(encoding="utf-8") == "hola"
+
+
+def test_pending_single_modification_changes_only_path_and_invalidates_old_id(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "notas.txt"
+    changed = tmp_path / "diario.txt"
+    controller = _controller()
+
+    pending = controller.handle(f"Escribe hola en {original}")
+    old_id = pending.result.confirmation_id
+    modified = controller.handle(f"Mejor en {changed}")
+    new_id = controller.pending_confirmation_id
+
+    assert modified.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert new_id is not None and new_id != old_id
+    assert original.exists() is False
+    assert changed.exists() is False
+
+    confirmed = controller.handle("s")
+
+    assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert original.exists() is False
+    assert changed.read_text(encoding="utf-8") == "hola"
+
+
+def test_pending_single_modification_changes_content_and_path_before_confirming(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "notas.txt"
+    changed = tmp_path / "diario.txt"
+    controller = _controller()
+
+    controller.handle(f"Escribe hola en {original}")
+    modified = controller.handle(f"Mejor escribe adios en {changed}")
+
+    assert modified.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert original.exists() is False
+    assert changed.exists() is False
+
+    confirmed = controller.handle("s")
+
+    assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert original.exists() is False
+    assert changed.read_text(encoding="utf-8") == "adios"
+
+
+def test_pending_single_content_only_keeps_original_path(tmp_path: Path) -> None:
+    target = tmp_path / "notas.txt"
+    controller = _controller()
+
+    controller.handle(f"Escribe hola en {target}")
+    modified = controller.handle("Escribe adios")
+
+    assert modified.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert target.exists() is False
+
+    confirmed = controller.handle("s")
+
+    assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert target.read_text(encoding="utf-8") == "adios"
+
+
+def test_old_confirmation_id_after_single_modification_does_not_execute(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "notas.txt"
+    changed = tmp_path / "diario.txt"
+    coordinator = Bootstrap.build_execution_coordinator()
+
+    pending = coordinator.execute(f"Escribe hola en {original}")
+    modified = coordinator.reissue_single_confirmation(
+        str(pending.confirmation_id),
+        {"path": str(changed), "content": "hola"},
+    )
+    stale = coordinator.confirm(str(pending.confirmation_id), "s")
+    confirmed = coordinator.confirm(str(modified.confirmation_id), "s")
+
+    assert stale.status == ExecutionCoordinationStatus.FAILED
+    assert original.exists() is False
+    assert confirmed.status == ExecutionCoordinationStatus.EXECUTED
+    assert changed.read_text(encoding="utf-8") == "hola"
+
+
+def test_pending_chain_modification_changes_only_write_path_without_repeating_read(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "resumen.txt"
+    changed = tmp_path / "docs" / "resumen.md"
+    changed.parent.mkdir()
+    controller = _controller()
+
+    pending = controller.handle(f"Lee README.md y guardalo en {original}")
+    modified = controller.handle(f"Mejor guardalo en {changed}")
+
+    assert pending.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert pending.result.execution_result.execution_count == 1
+    assert modified.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert modified.result.execution_result.execution_count == 1
+    assert original.exists() is False
+    assert changed.exists() is False
+
+    confirmed = controller.handle("s")
+
+    assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert confirmed.result.execution_result.execution_count == 2
+    assert original.exists() is False
+    assert changed.read_text(encoding="utf-8") == Path("README.md").read_text(encoding="utf-8")
+
+
+def test_pending_chain_rejects_retroactive_executed_read_change(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "resumen.txt"
+    controller = _controller()
+
+    pending = controller.handle(f"Lee README.md y guardalo en {target}")
+    blocked = controller.handle("En realidad lee LICENSE")
+
+    assert pending.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert blocked.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert controller.pending_confirmation_id == pending.result.confirmation_id
+    assert target.exists() is False
+    assert "cancelar" in blocked.text.lower()
+
+
+def test_pending_replacement_cancels_old_operation_and_processes_new_order(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notas.txt"
+    controller = _controller()
+
+    controller.handle(f"Escribe hola en {target}")
+    replaced = controller.handle("Cancela eso y lista la carpeta tools")
+
+    assert replaced.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert controller.pending_confirmation_id is None
+    assert target.exists() is False
+    assert "base_tool.py" in replaced.text
+
+
+def test_new_order_without_cancel_does_not_replace_pending_operation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notas.txt"
+    controller = _controller()
+
+    pending = controller.handle(f"Escribe hola en {target}")
+    response = controller.handle("Lista la carpeta tools")
+
+    assert response.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert controller.pending_confirmation_id == pending.result.confirmation_id
+    assert target.exists() is False
+    assert "confirmacion pendiente" in response.text.lower()
+
+
+def test_empty_input_keeps_pending_confirmation(tmp_path: Path) -> None:
+    target = tmp_path / "notas.txt"
+    controller = _controller()
+
+    pending = controller.handle(f"Escribe hola en {target}")
+    empty = controller.handle("   ")
+
+    assert empty.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+    assert controller.pending_confirmation_id == pending.result.confirmation_id
+    assert target.exists() is False

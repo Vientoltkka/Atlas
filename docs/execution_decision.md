@@ -181,3 +181,64 @@ Clarification and confirmation are mutually exclusive. Once clarification
 produces a `CONFIRMATION_REQUIRED` result, the clarification state is cleared and
 only the confirmation id remains pending. Completion, cancellation and failures
 also clear the clarification state.
+
+## Pending Confirmation Modification
+
+During a pending confirmation the text controller stores an explicit
+`PendingConfirmationContext`:
+
+- `confirmation_id`
+- `mode`
+- `owner` (`single` or `chain`)
+- `original_text`
+- `proposal`
+- `execution_result`
+- `action_summary`
+
+The context is conversational state only. Execution still belongs to
+`SingleToolRunner` and `ToolChainRunner`; the controller never calls
+`ToolExecutor` directly.
+
+Before any pending operation can execute, the next input is classified as:
+
+- `CONFIRM`: delegate to `ExecutionCoordinator.confirm(id, response)`.
+- `REJECT` or `CANCEL`: cancel through the owning runner and clear state.
+- `AMBIGUOUS`: execute nothing and keep the same confirmation pending.
+- `INSPECT`: describe the tool or chain, affected path, reasonable content
+  summary, completed chain steps and pending step without exposing the id.
+- `MODIFY`: apply only explicitly provided argument changes, revalidate through
+  the existing selector and `ArgumentValidator`, invalidate the old id and issue
+  a new confirmation.
+- `REPLACE`: only when the user clearly cancels/replaces the old operation;
+  cancel the old confirmation and process the remaining text as a new request.
+
+Single-tool modification reissues the pending `ValidatedToolRequest` with merged
+arguments for the same intent. The previous `confirmation_id` is removed before
+the new confirmation is stored, so stale ids return `confirmation_not_found` at
+runner level or `FAILED` at coordinator level and never execute.
+
+Chain modification is limited to the currently pending step. Completed step
+results are preserved and are not repeated; references such as
+`${steps.read.output.content}` remain in the chain definition while the
+underlying pending single-tool request holds the already resolved content needed
+for confirmation. A modified pending chain step receives a fresh
+`confirmation_id`.
+
+Already executed chain steps are immutable in this phase. For example, after
+`read` has executed and the chain is paused before `write`, a request to read a
+different source is rejected with an explanation that the user must cancel and
+start a new operation. Atlas does not silently rewrite completed history.
+
+A new command without an explicit cancel/replace signal is not treated as a
+replacement. Atlas asks the user to confirm, modify, inspect, or cancel the
+pending operation first. This prevents mixing arguments from unrelated
+operations.
+
+Natural confirmation prompts describe the pending action instead of showing only
+an internal state. Long content is summarized by size; the full internal value is
+kept for execution.
+
+This phase remains deterministic and does not add an LLM for modification
+parsing, general conversational memory, voice, wake word, planner behavior,
+ReAct, retries, rollback, parallelism, multiple pending operations, or
+retroactive mutation of executed chain steps.

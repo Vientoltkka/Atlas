@@ -132,6 +132,20 @@ class SingleToolRunner:
         """Return pending confirmations without exposing internal storage."""
         return tuple(self._pending_confirmations.values())
 
+    def pending_confirmation(
+        self,
+        confirmation_id: str,
+    ) -> PendingToolConfirmation | None:
+        """Return one pending confirmation by id without exposing storage."""
+        return self._pending_confirmations.get(confirmation_id)
+
+    def cancel_pending_confirmation(
+        self,
+        confirmation_id: str,
+    ) -> PendingToolConfirmation | None:
+        """Remove one pending confirmation without executing it."""
+        return self._pending_confirmations.pop(confirmation_id, None)
+
     def build_request(
         self,
         intent: ToolIntent,
@@ -266,6 +280,79 @@ class SingleToolRunner:
             )
 
         return self._execute_request(pending.request, confirmation_id=confirmation_id)
+
+    def reissue_pending_confirmation(
+        self,
+        confirmation_id: str,
+        arguments: Mapping[str, Any],
+    ) -> ToolRunResult:
+        """Replace a pending request with revalidated arguments and a new id."""
+        pending = self._pending_confirmations.get(confirmation_id)
+        if pending is None:
+            return ToolRunResult(
+                success=False,
+                status="confirmation_not_found",
+                intent=ToolIntent("confirmation.unknown"),
+                executed=False,
+                execution_count=0,
+                result=None,
+                error_code="confirmation_not_found",
+                error_message="confirmation id is not pending",
+                confirmation_id=confirmation_id,
+            )
+
+        try:
+            request = self.build_request(
+                ToolIntent(pending.request.intent.action, dict(arguments))
+            )
+        except ToolIntentNotSupportedError as error:
+            return self._error_result(
+                pending.request.intent,
+                "unknown_intent",
+                error,
+                original_arguments=arguments,
+            )
+        except ToolNotRegisteredError as error:
+            return self._error_result(
+                pending.request.intent,
+                "tool_not_registered",
+                error,
+                original_arguments=arguments,
+            )
+        except ArgumentSchemaNotRegisteredError as error:
+            return self._error_result(
+                pending.request.intent,
+                "schema_not_registered",
+                error,
+                tool_name=pending.request.tool_name,
+                original_arguments=arguments,
+            )
+        except ArgumentValidationError as error:
+            return self._validation_error_result(
+                ToolIntent(pending.request.intent.action, dict(arguments)),
+                error,
+                tool_name=pending.request.tool_name,
+            )
+
+        del self._pending_confirmations[confirmation_id]
+        self._last_request = request
+
+        if not request.descriptor.requires_confirmation:
+            return ToolRunResult(
+                success=False,
+                status="confirmation_not_required",
+                intent=request.intent,
+                tool_name=request.tool_name,
+                original_arguments=request.original_arguments,
+                validated_arguments=request.validated_arguments,
+                executed=False,
+                execution_count=0,
+                result=None,
+                error_code="confirmation_not_required",
+                error_message="modified pending request no longer requires confirmation",
+            )
+
+        return self._confirmation_required_result(request)
 
     def _execute_request(
         self,
