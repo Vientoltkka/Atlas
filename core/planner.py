@@ -20,7 +20,7 @@ class ExecutionStep:
 
     id: str
     description: str
-    tool: str
+    tool: str | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
 

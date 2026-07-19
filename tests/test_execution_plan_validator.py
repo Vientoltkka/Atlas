@@ -37,13 +37,13 @@ def _validate(plan: ExecutionPlan) -> PlanValidationResult:
 def test_valid_plan_returns_structured_valid_result() -> None:
     result = _validate(_valid_plan())
 
-    assert result == PlanValidationResult(
-        is_valid=True,
-        errors=[],
-        warnings=[],
-        requires_confirmation=True,
-        status="valid",
-    )
+    assert isinstance(result, PlanValidationResult)
+    assert result.is_valid is True
+    assert result.errors == []
+    assert result.warnings == []
+    assert result.requires_confirmation is True
+    assert result.status == "valid"
+    assert result.plan_signature
 
 
 def test_empty_goal_invalidates_plan() -> None:

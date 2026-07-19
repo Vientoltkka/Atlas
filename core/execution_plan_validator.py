@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import re
 
 from core.planner import ExecutionPlan
@@ -17,6 +19,7 @@ class PlanValidationResult:
     warnings: list[str] = field(default_factory=list)
     requires_confirmation: bool = False
     status: str = "invalid"
+    plan_signature: str | None = None
 
 
 class ExecutionPlanValidator:
@@ -57,6 +60,7 @@ class ExecutionPlanValidator:
             warnings=warnings,
             requires_confirmation=plan.requires_confirmation,
             status="valid" if is_valid else "invalid",
+            plan_signature=plan_signature(plan),
         )
 
     def _validate_goal(
@@ -132,6 +136,9 @@ class ExecutionPlanValidator:
                 errors.append(f"Malformed required tool: {required_tool}.")
 
         for step in plan.ordered_steps:
+            if step.tool is None:
+                continue
+
             if not self._is_well_formed_tool(step.tool):
                 errors.append(f"Malformed tool for step '{step.id}': {step.tool}.")
                 continue
@@ -182,7 +189,7 @@ class ExecutionPlanValidator:
         dangerous_tools = tuple(
             step.tool
             for step in plan.ordered_steps
-            if step.tool in self._DANGEROUS_TOOLS
+            if step.tool is not None and step.tool in self._DANGEROUS_TOOLS
         )
 
         if dangerous_tools and not plan.requires_confirmation:
@@ -206,7 +213,7 @@ class ExecutionPlanValidator:
         used_tools = {
             step.tool
             for step in plan.ordered_steps
-            if step.tool != "direct_response"
+            if step.tool is not None and step.tool != "direct_response"
         }
 
         for required_tool in plan.required_tools:
@@ -254,3 +261,34 @@ class ExecutionPlanValidator:
             visit(step_id, (step_id,))
 
         return tuple(cycles)
+
+
+def plan_signature(
+    plan: ExecutionPlan,
+) -> str:
+    """Return a deterministic signature for a plan's executable structure."""
+    payload = {
+        "goal": plan.goal,
+        "ordered_steps": [
+            {
+                "id": step.id,
+                "description": step.description,
+                "tool": step.tool,
+                "dependencies": list(step.dependencies),
+                "status": step.status,
+            }
+            for step in plan.ordered_steps
+        ],
+        "estimated_steps": plan.estimated_steps,
+        "required_tools": list(plan.required_tools),
+        "detected_risks": list(plan.detected_risks),
+        "requires_confirmation": plan.requires_confirmation,
+        "status": plan.status,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
