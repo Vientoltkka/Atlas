@@ -34,6 +34,10 @@ class ExecutionPlanValidator:
         "desktop.press_hotkey",
     }
     _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+    _REFERENCE_PATTERN = re.compile(
+        r"^steps\.([A-Za-z0-9_-]+)\.output(?:\.([A-Za-z0-9_.-]+))?$"
+    )
+    _BLOCKED_REFERENCE_PARTS = {"__class__", "__dict__", "__globals__"}
 
     def validate(
         self,
@@ -183,6 +187,126 @@ class ExecutionPlanValidator:
                 errors.append(
                     f"Step '{step.id}' arguments are not deterministically serializable: {error}."
                 )
+
+        self._validate_static_references(plan, errors)
+
+    def _validate_static_references(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        step_ids = {step.id for step in plan.ordered_steps}
+        dependencies_by_step = {
+            step.id: tuple(step.dependencies)
+            for step in plan.ordered_steps
+        }
+
+        for step in plan.ordered_steps:
+            allowed_references = self._transitive_dependencies(
+                step.id,
+                dependencies_by_step,
+            )
+
+            for reference in self._iter_reference_objects(step.arguments):
+                ref_keys = tuple(reference.keys())
+                if ref_keys != ("$ref",):
+                    errors.append(
+                        f"Step '{step.id}' reference objects must contain only '$ref'."
+                    )
+                    continue
+
+                raw_reference = reference["$ref"]
+                if not isinstance(raw_reference, str) or not raw_reference.strip():
+                    errors.append(
+                        f"Step '{step.id}' reference value must be a non-empty string."
+                    )
+                    continue
+
+                ref_value = raw_reference.strip()
+                match = self._REFERENCE_PATTERN.fullmatch(ref_value)
+                if match is None:
+                    errors.append(
+                        f"Step '{step.id}' has invalid reference syntax: {ref_value}."
+                    )
+                    continue
+
+                referenced_step_id = match.group(1)
+                ref_path = match.group(2)
+
+                if ref_path is not None:
+                    self._validate_reference_path(step.id, ref_path, errors)
+
+                if referenced_step_id not in step_ids:
+                    errors.append(
+                        f"Step '{step.id}' references unknown step '{referenced_step_id}'."
+                    )
+                    continue
+
+                if referenced_step_id == step.id:
+                    errors.append(f"Step '{step.id}' cannot reference itself.")
+                    continue
+
+                if referenced_step_id not in allowed_references:
+                    errors.append(
+                        f"Step '{step.id}' references non-dependent step '{referenced_step_id}'."
+                    )
+
+    def _iter_reference_objects(
+        self,
+        value: Any,
+    ) -> tuple[Mapping[str, Any], ...]:
+        references: list[Mapping[str, Any]] = []
+
+        def visit(item: Any) -> None:
+            if isinstance(item, Mapping):
+                if "$ref" in item:
+                    references.append(item)
+                    return
+
+                for nested in item.values():
+                    visit(nested)
+                return
+
+            if isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        return tuple(references)
+
+    def _validate_reference_path(
+        self,
+        step_id: str,
+        ref_path: str,
+        errors: list[str],
+    ) -> None:
+        for part in ref_path.split("."):
+            if (
+                not part
+                or part.startswith("_")
+                or part in self._BLOCKED_REFERENCE_PARTS
+            ):
+                errors.append(
+                    f"Step '{step_id}' has unsafe reference path segment: {part}."
+                )
+
+    def _transitive_dependencies(
+        self,
+        step_id: str,
+        dependencies_by_step: dict[str, tuple[str, ...]],
+    ) -> set[str]:
+        dependencies: set[str] = set()
+        pending = list(dependencies_by_step.get(step_id, ()))
+
+        while pending:
+            dependency = pending.pop()
+            if dependency in dependencies:
+                continue
+
+            dependencies.add(dependency)
+            pending.extend(dependencies_by_step.get(dependency, ()))
+
+        return dependencies
 
     def _validate_dependencies(
         self,

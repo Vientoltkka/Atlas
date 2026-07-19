@@ -360,6 +360,124 @@ def test_previous_results_are_available_to_later_steps_without_resolution() -> N
     }
 
 
+def test_resolved_arguments_are_delivered_to_tool_context() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"path": "README.md"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"path": {"$ref": "steps.step_1.output.path"}},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"path": "README.md"}
+    assert second.contexts[0].arguments == {"path": "README.md"}
+
+
+def test_step_result_can_feed_next_step() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SpyTool("second_tool", calls, output={"echo": "alpha"})
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"content": {"$ref": "steps.step_1.output.content"}},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert calls == ["first_tool", "second_tool"]
+    assert second.contexts[0].parameters == {"content": "alpha"}
+
+
+def test_different_steps_can_use_same_previous_result() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"path": "README.md"})
+    second = SpyTool("second_tool", calls)
+    third = SpyTool("third_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"path": {"$ref": "steps.step_1.output.path"}},
+            ),
+            _step(
+                "step_3",
+                "third_tool",
+                dependencies=("step_1", "step_2"),
+                arguments={"path": {"$ref": "steps.step_1.output.path"}},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second, third)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"path": "README.md"}
+    assert third.contexts[0].parameters == {"path": "README.md"}
+
+
+def test_parameter_resolution_failure_prevents_tool_call() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"name": "README.md"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"path": {"$ref": "steps.step_1.output.path"}},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is False
+    assert result.failed_step == "step_2"
+    assert result.error_code == ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value
+    assert result.step_results[-1].error_code == (
+        ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value
+    )
+    assert result.step_results[-1].metadata["parameter_resolution_error_code"] == (
+        "REFERENCED_FIELD_NOT_FOUND"
+    )
+    assert calls == ["first_tool"]
+
+
 def test_original_arguments_are_not_mutated_by_tool() -> None:
     class MutatingTool(SpyTool):
         def execute(

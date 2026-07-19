@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from core.execution_plan_validator import PlanValidationResult, plan_signature
+from core.parameter_resolver import ParameterResolver
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.executor import ToolExecutor
 from tools.registry import ToolNotRegisteredError, ToolRegistry
@@ -52,6 +53,7 @@ class ExecutionErrorCode(str, Enum):
     DEPENDENCY_NOT_COMPLETED = "DEPENDENCY_NOT_COMPLETED"
     EXECUTION_INTERRUPTED = "EXECUTION_INTERRUPTED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
+    PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
     INTERNAL_EXECUTOR_ERROR = "INTERNAL_EXECUTOR_ERROR"
 
 
@@ -128,9 +130,11 @@ class ExecutionPlanExecutor:
         self,
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor | None = None,
+        parameter_resolver: ParameterResolver | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)
+        self._parameter_resolver = parameter_resolver or ParameterResolver()
 
     def execute(
         self,
@@ -506,6 +510,27 @@ class ExecutionPlanExecutor:
 
         assert step.tool is not None
 
+        resolution = self._parameter_resolver.resolve(
+            step.arguments,
+            previous_results,
+        )
+        if not resolution.success:
+            error = "; ".join(resolution.errors)
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                tool_name=step.tool,
+                output=None,
+                error=error,
+                error_code=ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value,
+                metadata={
+                    "parameter_resolution_error_code": resolution.error_code,
+                    "unresolved_references": resolution.unresolved_references,
+                    "used_step_ids": resolution.used_step_ids,
+                },
+            )
+
         if not self._tool_registry.exists(step.tool):
             return StepExecutionResult(
                 step_id=step.id,
@@ -521,7 +546,7 @@ class ExecutionPlanExecutor:
             output = self._tool_executor.execute(
                 step.tool,
                 ToolContext(
-                    parameters=deepcopy(dict(step.arguments)),
+                    parameters=deepcopy(resolution.resolved_arguments),
                     step_id=step.id,
                     plan_signature=plan_signature,
                     previous_results=dict(previous_results),

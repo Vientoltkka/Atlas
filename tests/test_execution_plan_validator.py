@@ -377,3 +377,243 @@ def test_different_arguments_change_plan_signature() -> None:
     )
 
     assert _validate(first).plan_signature != _validate(second).plan_signature
+
+
+def test_static_reference_to_dependency_is_valid_and_signed_as_original() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1", arguments={"path": "README.md"}),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {"$ref": "steps.step_1.output.content"},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.plan_signature
+
+
+def test_reference_object_with_extra_keys_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$ref": "steps.step_1.output.content",
+                        "default": "",
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' reference objects must contain only '$ref'." in result.errors
+
+
+def test_reference_value_must_be_non_empty_string() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={"content": {"$ref": ""}},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' reference value must be a non-empty string." in result.errors
+
+
+def test_invalid_reference_syntax_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={"content": {"$ref": "step.step_1.output.content"}},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert (
+        "Step 'step_2' has invalid reference syntax: step.step_1.output.content."
+        in result.errors
+    )
+
+
+def test_reference_to_unknown_step_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={"content": {"$ref": "steps.missing.output.content"}},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' references unknown step 'missing'." in result.errors
+
+
+def test_reference_to_self_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                arguments={"path": {"$ref": "steps.step_1.output.path"}},
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_1' cannot reference itself." in result.errors
+
+
+def test_reference_to_future_step_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                arguments={"path": {"$ref": "steps.step_2.output.path"}},
+            ),
+            _step("step_2", tool="write_file", dependencies=("step_1",)),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_1' references non-dependent step 'step_2'." in result.errors
+
+
+def test_reference_to_non_dependent_step_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step("step_2", tool="read_file"),
+            _step(
+                "step_3",
+                tool="write_file",
+                dependencies=("step_2",),
+                arguments={"content": {"$ref": "steps.step_1.output.content"}},
+            ),
+        ),
+        estimated_steps=3,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_3' references non-dependent step 'step_1'." in result.errors
+
+
+def test_reference_to_transitive_dependency_is_valid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step("step_2", tool="read_file", dependencies=("step_1",)),
+            _step(
+                "step_3",
+                tool="write_file",
+                dependencies=("step_2",),
+                arguments={"content": {"$ref": "steps.step_1.output.content"}},
+            ),
+        ),
+        estimated_steps=3,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+
+
+def test_reference_blocks_private_and_dunder_path_segments() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "a": {"$ref": "steps.step_1.output._secret"},
+                    "b": {"$ref": "steps.step_1.output.__class__"},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' has unsafe reference path segment: _secret." in result.errors
+    assert "Step 'step_2' has unsafe reference path segment: __class__." in result.errors
