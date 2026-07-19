@@ -22,6 +22,7 @@ from tools.tool_proposal_builder import (
     ToolProposalBuilder,
     ToolProposalStatus,
 )
+from tools.semantic_catalog import SemanticToolCatalog
 
 
 @dataclass
@@ -137,6 +138,7 @@ class Planner:
         tool_selector: ToolSelector | None = None,
         schema_registry: ArgumentSchemaRegistry | None = None,
         argument_validator: ArgumentValidator | None = None,
+        semantic_tool_catalog: SemanticToolCatalog | None = None,
         plan_response_provider: Callable[[str, tuple[ToolDescriptor, ...]], str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -146,6 +148,7 @@ class Planner:
             argument_validator
             or (ArgumentValidator(schema_registry) if schema_registry is not None else None)
         )
+        self._semantic_tool_catalog = semantic_tool_catalog
         self._plan_response_provider = plan_response_provider
 
     def create_plan(self, prompt: str) -> Plan:

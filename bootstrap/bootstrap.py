@@ -36,6 +36,7 @@ from tools.tool_chain_runner import ToolChainRunner
 from tools.tool_chain_proposal_builder import ToolChainProposalBuilder
 from tools.tool_proposal_builder import ToolProposalBuilder
 from tools.single_tool_runner import SingleToolRunner
+from tools.semantic_catalog import SemanticToolCatalog
 
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
@@ -326,6 +327,20 @@ class Bootstrap:
         """Build the validator for selected tool intent arguments."""
         return ArgumentValidator(
             schema_registry or Bootstrap.build_argument_schema_registry()
+        )
+
+    @staticmethod
+    def build_semantic_tool_catalog(
+        tool_registry: ToolRegistry | None = None,
+        selector: ToolSelector | None = None,
+        schema_registry: ArgumentSchemaRegistry | None = None,
+    ) -> SemanticToolCatalog:
+        """Build the passive semantic catalog for registered tools."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        return SemanticToolCatalog.build_from_registry(
+            registry,
+            tool_selector=selector or Bootstrap.build_tool_selector(registry),
+            schema_registry=schema_registry or Bootstrap.build_argument_schema_registry(),
         )
 
     @staticmethod

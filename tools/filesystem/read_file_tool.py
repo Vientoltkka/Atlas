@@ -18,6 +18,23 @@ class ReadFileTool(BaseTool):
     def description(self) -> str:
         return "Read a UTF-8 text file."
 
+    def semantic_metadata(self) -> dict[str, object]:
+        """Return semantic metadata for catalog generation."""
+        return {
+            "capabilities": ["read_file"],
+            "supported_intents": ["read a local file"],
+            "input_description": "Requires a local text file path.",
+            "output_description": "UTF-8 file content as text.",
+            "risk_level": "low",
+            "preconditions": ["path must exist", "path must point to a file"],
+            "limitations": ["does not interpret file contents", "does not read remote paths"],
+            "negative_examples": ["explain what a file is", "write new file content"],
+            "compatible_tools": ["write_file"],
+            "tags": ["filesystem", "read"],
+            "positive_examples": ["lee el archivo notas.txt"],
+            "category": "filesystem",
+        }
+
     def execute(
         self,
         context: ToolContext,
