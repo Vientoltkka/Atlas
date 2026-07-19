@@ -400,10 +400,13 @@ def test_plan_signature_change_after_validation_produces_mismatch() -> None:
     pending = coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
     assert pending.confirmation_token is not None
     stored = coordinator._pending_plans[pending.confirmation_token]  # type: ignore[attr-defined]
-    changed_plan = replace(stored.plan, goal="changed")
+    changed_execution = replace(
+        stored.execution,
+        plan=replace(stored.execution.plan, goal="changed"),
+    )
     coordinator._pending_plans[pending.confirmation_token] = replace(  # type: ignore[attr-defined]
         stored,
-        plan=changed_plan,
+        execution=changed_execution,
     )
 
     result = coordinator.confirm(
@@ -413,3 +416,275 @@ def test_plan_signature_change_after_validation_produces_mismatch() -> None:
 
     assert result.status == "validation_mismatch"
     assert result.error_code == "VALIDATION_MISMATCH"
+
+
+def test_conversational_confirmation_si_executes_pending_plan_once() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    pending = orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+    response = orchestrator.process_prompt("si", confirm=lambda _prompt: "")
+    second = orchestrator.process_prompt("si", confirm=lambda _prompt: "")
+
+    assert "pendiente de confirmacion" in pending
+    assert "Plan confirmado" in response
+    assert calls == ["read_file", "write_file"]
+    assert second.startswith("fallback:model:chat:")
+    assert calls == ["read_file", "write_file"]
+
+
+def test_conversational_confirmation_confirmo_and_adelante_are_accepted() -> None:
+    for phrase in ("confirmo", "adelante"):
+        calls: list[str] = []
+        coordinator, _, _ = _structured_parts(calls)
+        orchestrator, _, _ = _orchestrator(
+            structured_execution_enabled=True,
+            coordinator=coordinator,
+        )
+
+        orchestrator.process_prompt(
+            "Lee README.md y copia su contenido en resumen.txt",
+            confirm=lambda _prompt: "",
+        )
+        response = orchestrator.process_prompt(phrase, confirm=lambda _prompt: "")
+
+        assert "Plan confirmado" in response
+        assert calls == ["read_file", "write_file"]
+
+
+def test_voice_like_confirmation_phrases_are_accepted() -> None:
+    for phrase in ("sí adelante", "vale hazlo"):
+        calls: list[str] = []
+        coordinator, _, _ = _structured_parts(calls)
+        orchestrator, _, _ = _orchestrator(
+            structured_execution_enabled=True,
+            coordinator=coordinator,
+        )
+        orchestrator.process_voice_prompt(
+            "Lee README.md y copia su contenido en resumen.txt",
+            confirm=lambda _prompt: "",
+        )
+
+        response = orchestrator.process_voice_prompt(phrase, confirm=lambda _prompt: "")
+
+        assert "Plan confirmado" in response
+        assert calls == ["read_file", "write_file"]
+
+
+def test_rejection_no_and_cancela_cancel_pending_plan_without_tools() -> None:
+    for phrase in ("no", "cancela", "no cancela"):
+        calls: list[str] = []
+        coordinator, _, _ = _structured_parts(calls)
+        orchestrator, _, _ = _orchestrator(
+            structured_execution_enabled=True,
+            coordinator=coordinator,
+        )
+        orchestrator.process_prompt(
+            "Lee README.md y copia su contenido en resumen.txt",
+            confirm=lambda _prompt: "",
+        )
+
+        response = orchestrator.process_prompt(phrase, confirm=lambda _prompt: "")
+
+        assert "fue cancelado" in response
+        assert calls == []
+
+
+def test_cancellation_invalidates_token_and_later_confirmation_has_no_pending_plan() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+    orchestrator.process_prompt("cancela", confirm=lambda _prompt: "")
+
+    response = coordinator.confirm_pending()
+
+    assert response.status == "no_pending_execution"
+    assert response.error_code == "NO_PENDING_EXECUTION"
+    assert calls == []
+
+
+def test_show_pending_plan_and_risks_keeps_plan_pending_without_tools() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+
+    plan = orchestrator.process_prompt("muéstrame el plan", confirm=lambda _prompt: "")
+    risks = orchestrator.process_prompt("cuáles son los riesgos", confirm=lambda _prompt: "")
+    confirmed = orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
+
+    assert "Objetivo:" in plan
+    assert "Herramientas:" in plan
+    assert "Riesgos:" in risks
+    assert "Plan confirmado" in confirmed
+    assert calls == ["read_file", "write_file"]
+
+
+def test_no_pending_confirmation_cancel_or_show_return_no_pending_message() -> None:
+    coordinator, _, _ = _structured_parts([])
+
+    assert coordinator.confirm_pending().error_code == "NO_PENDING_EXECUTION"
+    assert coordinator.cancel_pending().error_code == "NO_PENDING_EXECUTION"
+    assert coordinator.show_pending().error_code == "NO_PENDING_EXECUTION"
+
+
+def test_ambiguous_and_unrelated_replies_do_not_execute_or_fallback() -> None:
+    for phrase in ("quizá", "luego", "cuéntame otra cosa"):
+        calls: list[str] = []
+        coordinator, _, _ = _structured_parts(calls)
+        orchestrator, agent, _ = _orchestrator(
+            structured_execution_enabled=True,
+            coordinator=coordinator,
+        )
+        orchestrator.process_prompt(
+            "Lee README.md y copia su contenido en resumen.txt",
+            confirm=lambda _prompt: "",
+        )
+
+        response = orchestrator.process_prompt(phrase, confirm=lambda _prompt: "")
+
+        assert "No he ejecutado nada" in response
+        assert calls == []
+        assert agent.calls == 0
+
+
+def test_confirmation_with_goal_change_is_ambiguous_and_does_not_execute() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+
+    response = orchestrator.process_prompt(
+        "sí, pero usa otro archivo",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "No he ejecutado nada" in response
+    assert calls == []
+    assert agent.calls == 0
+
+
+def test_new_actionable_request_while_pending_does_not_bypass_confirmation() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert "Hay un plan pendiente" in response
+    assert calls == []
+    assert agent.calls == 0
+
+
+def test_disabling_flag_with_pending_plan_cancels_without_execution() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+    orchestrator._structured_execution_enabled = False  # type: ignore[attr-defined]
+
+    response = orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
+
+    assert "fue cancelado" in response
+    assert calls == []
+
+
+def test_pending_messages_do_not_show_token_or_signature() -> None:
+    coordinator, _, _ = _structured_parts([])
+    response = coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    assert response.confirmation_token is not None
+
+    assert response.confirmation_token not in response.message
+    assert "Token" not in response.message
+    assert "Firma" not in response.message
+
+
+def test_confirming_pending_plan_does_not_call_planner_again() -> None:
+    class PlannerCounting(Planner):
+        def __init__(self, wrapped: Planner) -> None:
+            self.wrapped = wrapped
+            self.calls = 0
+
+        def generate_execution_plan(self, prompt: str):
+            self.calls += 1
+            return self.wrapped.generate_execution_plan(prompt)
+
+    calls: list[str] = []
+    _, registry, planner = _structured_parts(calls)
+    counting = PlannerCounting(planner)
+    coordinator = StructuredExecutionCoordinator(
+        planner=counting,
+        validator=ExecutionPlanValidator(),
+        executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
+    )
+
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending()
+
+    assert counting.calls == 1
+    assert calls == ["read_file", "write_file"]
+
+
+def test_arguments_modified_after_validation_produce_mismatch_and_invalidate_plan() -> None:
+    coordinator, _, _ = _structured_parts([])
+    pending = coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    assert pending.confirmation_token is not None
+    stored = coordinator._pending_plans[pending.confirmation_token]  # type: ignore[attr-defined]
+    first, second = stored.execution.plan.ordered_steps
+    changed_step = replace(
+        second,
+        arguments={"path": "otro.txt", "content": {"$ref": "steps.step_1.output"}},
+    )
+    changed_plan = replace(stored.execution.plan, ordered_steps=(first, changed_step))
+    coordinator._pending_plans[pending.confirmation_token] = replace(  # type: ignore[attr-defined]
+        stored,
+        execution=replace(stored.execution, plan=changed_plan),
+    )
+
+    result = coordinator.confirm(
+        pending.confirmation_token,
+        objective="Lee README.md y copia su contenido en resumen.txt",
+    )
+    second_attempt = coordinator.confirm(pending.confirmation_token)
+
+    assert result.status == "validation_mismatch"
+    assert second_attempt.error_code == "NO_PENDING_EXECUTION"

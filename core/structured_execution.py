@@ -35,10 +35,22 @@ class StructuredExecutionResponse:
 
 
 @dataclass(frozen=True, slots=True)
-class _PendingPlan:
+class PendingStructuredExecution:
+    """Public read model for one pending structured execution."""
+
     objective: str
     plan: ExecutionPlan
     validation_result: PlanValidationResult
+    confirmation_token: str
+    status: str
+    summary: str
+    risks: list[str]
+    required_tools: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPlan:
+    execution: PendingStructuredExecution
 
 
 class StructuredExecutionCoordinator:
@@ -54,6 +66,7 @@ class StructuredExecutionCoordinator:
         self._validator = validator
         self._executor = executor
         self._pending_plans: dict[str, _PendingPlan] = {}
+        self._active_confirmation_token: str | None = None
 
     def handle(
         self,
@@ -125,19 +138,21 @@ class StructuredExecutionCoordinator:
         control: ExecutionControl | None = None,
     ) -> StructuredExecutionResponse:
         """Execute exactly the validated plan associated with a confirmation token."""
-        pending = self._pending_plans.get(confirmation_token)
+        pending_record = self._pending_plans.get(confirmation_token)
+        pending = pending_record.execution if pending_record is not None else None
         if pending is None:
             return StructuredExecutionResponse(
                 handled=True,
                 status="confirmation_not_found",
-                message="No hay ningun plan pendiente para esa confirmacion.",
+                message="No hay ninguna ejecucion pendiente que confirmar.",
                 requires_confirmation=False,
                 confirmation_token=confirmation_token,
-                error_code="CONFIRMATION_NOT_FOUND",
+                error_code="NO_PENDING_EXECUTION",
                 error="confirmation token is not pending",
             )
 
         if objective is not None and objective != pending.objective:
+            self._discard_pending(confirmation_token)
             return StructuredExecutionResponse(
                 handled=True,
                 status="validation_mismatch",
@@ -151,6 +166,7 @@ class StructuredExecutionCoordinator:
 
         current_signature = plan_signature(pending.plan)
         if current_signature != pending.validation_result.plan_signature:
+            self._discard_pending(confirmation_token)
             return StructuredExecutionResponse(
                 handled=True,
                 status="validation_mismatch",
@@ -162,14 +178,13 @@ class StructuredExecutionCoordinator:
                 error="plan signature changed after validation",
             )
 
+        self._discard_pending(confirmation_token)
         execution = self._executor.execute(
             pending.plan,
             pending.validation_result,
             confirmation_granted=True,
             control=control,
         )
-        if execution.success:
-            self._pending_plans.pop(confirmation_token, None)
 
         return self._execution_response(
             pending.plan,
@@ -184,7 +199,95 @@ class StructuredExecutionCoordinator:
     ) -> ExecutionPlan | None:
         """Return a pending plan by token without exposing internal mutation."""
         pending = self._pending_plans.get(confirmation_token)
-        return pending.plan if pending is not None else None
+        return pending.execution.plan if pending is not None else None
+
+    def has_pending_execution(self) -> bool:
+        """Return whether this coordinator has one active pending plan."""
+        return self._active_confirmation_token in self._pending_plans
+
+    def pending_execution(self) -> PendingStructuredExecution | None:
+        """Return the active pending execution summary, if any."""
+        if self._active_confirmation_token is None:
+            return None
+
+        pending = self._pending_plans.get(self._active_confirmation_token)
+        return pending.execution if pending is not None else None
+
+    def confirm_pending(
+        self,
+        *,
+        control: ExecutionControl | None = None,
+    ) -> StructuredExecutionResponse:
+        """Confirm the single active pending plan without exposing its token."""
+        pending = self.pending_execution()
+        if pending is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_pending_execution",
+                message="No hay ninguna ejecucion pendiente que confirmar.",
+                requires_confirmation=False,
+                error_code="NO_PENDING_EXECUTION",
+                error="no pending structured execution",
+            )
+
+        return self.confirm(
+            pending.confirmation_token,
+            objective=pending.objective,
+            control=control,
+        )
+
+    def cancel_pending(
+        self,
+    ) -> StructuredExecutionResponse:
+        """Cancel the single active pending plan without executing tools."""
+        pending = self.pending_execution()
+        if pending is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_pending_execution",
+                message="No hay ninguna ejecucion pendiente que cancelar.",
+                requires_confirmation=False,
+                error_code="NO_PENDING_EXECUTION",
+                error="no pending structured execution",
+            )
+
+        self._discard_pending(pending.confirmation_token)
+        return StructuredExecutionResponse(
+            handled=True,
+            status="pending_execution_cancelled",
+            message="El plan pendiente fue cancelado. No se ejecuto ninguna herramienta.",
+            plan=pending.plan,
+            validation_result=pending.validation_result,
+            requires_confirmation=False,
+            confirmation_token=pending.confirmation_token,
+            error_code="PENDING_EXECUTION_CANCELLED",
+        )
+
+    def show_pending(
+        self,
+    ) -> StructuredExecutionResponse:
+        """Show the active pending plan without consuming its confirmation."""
+        pending = self.pending_execution()
+        if pending is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_pending_execution",
+                message="No hay ninguna ejecucion pendiente que revisar.",
+                requires_confirmation=False,
+                error_code="NO_PENDING_EXECUTION",
+                error="no pending structured execution",
+            )
+
+        return StructuredExecutionResponse(
+            handled=True,
+            status="pending_plan",
+            message=pending.summary,
+            plan=pending.plan,
+            validation_result=pending.validation_result,
+            requires_confirmation=True,
+            confirmation_token=pending.confirmation_token,
+            error_code="CONFIRMATION_REQUIRED",
+        )
 
     def _should_handle_generation(
         self,
@@ -211,12 +314,31 @@ class StructuredExecutionCoordinator:
         validation: PlanValidationResult,
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
+        if self._active_confirmation_token is not None:
+            self._discard_pending(self._active_confirmation_token)
+        summary = self._pending_summary(plan)
         self._pending_plans[token] = _PendingPlan(
-            objective=objective,
-            plan=plan,
-            validation_result=validation,
+            execution=PendingStructuredExecution(
+                objective=objective,
+                plan=plan,
+                validation_result=validation,
+                confirmation_token=token,
+                status="pending_confirmation",
+                summary=summary,
+                risks=list(plan.detected_risks),
+                required_tools=list(plan.required_tools),
+            )
         )
+        self._active_confirmation_token = token
         return token
+
+    def _discard_pending(
+        self,
+        confirmation_token: str,
+    ) -> None:
+        self._pending_plans.pop(confirmation_token, None)
+        if self._active_confirmation_token == confirmation_token:
+            self._active_confirmation_token = None
 
     def _execution_response(
         self,
@@ -283,12 +405,35 @@ class StructuredExecutionCoordinator:
             lines.append("Herramientas: " + ", ".join(plan.required_tools))
         if plan.detected_risks:
             lines.append("Riesgos: " + "; ".join(plan.detected_risks))
-        lines.append(f"Token de confirmacion: {token}")
         lines.append(
             "La ejecucion no se realizo porque requiere confirmacion explicita."
         )
-        if validation.plan_signature:
-            lines.append(f"Firma del plan: {validation.plan_signature}")
+        lines.append(
+            "Responde 'confirmo' para ejecutarlo, 'cancela' para descartarlo "
+            "o 'muestrame el plan' para revisarlo."
+        )
+        return "\n".join(lines)
+
+    def _pending_summary(
+        self,
+        plan: ExecutionPlan,
+    ) -> str:
+        lines = [
+            "Plan estructurado pendiente de confirmacion.",
+            f"Objetivo: {plan.goal}",
+            "Pasos:",
+        ]
+        for step in plan.ordered_steps:
+            lines.append(f"- {step.id}: {step.description} [{step.tool}]")
+        if plan.required_tools:
+            lines.append("Herramientas: " + ", ".join(plan.required_tools))
+        if plan.detected_risks:
+            lines.append("Riesgos: " + "; ".join(plan.detected_risks))
+        lines.append("Confirmacion requerida: si.")
+        lines.append(
+            "Responde 'confirmo' para ejecutarlo, 'cancela' para descartarlo "
+            "o 'muestrame el plan' para revisarlo."
+        )
         return "\n".join(lines)
 
     def _completed_message(

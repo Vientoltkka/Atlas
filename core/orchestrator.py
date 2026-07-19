@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import re
+import unicodedata
 
 from agents.registry import AgentRegistry
 
@@ -300,17 +302,68 @@ class AtlasOrchestrator:
         self,
         prompt: str,
     ) -> StructuredExecutionResponse | None:
-        if (
-            not self._structured_execution_enabled
-            or self._structured_execution_coordinator is None
-        ):
+        if self._structured_execution_coordinator is None:
             return None
+
+        if not self._structured_execution_enabled:
+            if self._structured_execution_coordinator.has_pending_execution():
+                return self._structured_execution_coordinator.cancel_pending()
+            return None
+
+        if self._structured_execution_coordinator.has_pending_execution():
+            pending_response = self._handle_pending_structured_execution(prompt)
+            if pending_response is not None:
+                return pending_response
 
         response = self._structured_execution_coordinator.handle(prompt)
         if not response.handled:
             return None
 
         return response
+
+    def _handle_pending_structured_execution(
+        self,
+        prompt: str,
+    ) -> StructuredExecutionResponse:
+        assert self._structured_execution_coordinator is not None
+
+        intent = _classify_structured_confirmation_intent(prompt)
+        if intent == "confirm":
+            response = self._structured_execution_coordinator.confirm_pending()
+            if response.status == "completed":
+                return _with_message_prefix(
+                    response,
+                    "Plan confirmado. ",
+                )
+            return response
+
+        if intent == "cancel":
+            return self._structured_execution_coordinator.cancel_pending()
+
+        if intent == "show":
+            return self._structured_execution_coordinator.show_pending()
+
+        return StructuredExecutionResponse(
+            handled=True,
+            status="confirmation_ambiguous",
+            message=(
+                "No he ejecutado nada. Hay un plan pendiente. Responde "
+                "'confirmo', 'cancela' o 'muestrame el plan'."
+            ),
+            plan=(
+                self._structured_execution_coordinator.pending_execution().plan
+                if self._structured_execution_coordinator.pending_execution() is not None
+                else None
+            ),
+            validation_result=(
+                self._structured_execution_coordinator.pending_execution().validation_result
+                if self._structured_execution_coordinator.pending_execution() is not None
+                else None
+            ),
+            requires_confirmation=True,
+            error_code="CONFIRMATION_AMBIGUOUS",
+            error="pending structured execution requires an explicit response",
+        )
 
     def process_voice_prompt(
         self,
@@ -524,3 +577,89 @@ class AtlasOrchestrator:
             return tens[ten]
 
         return f"{tens[ten]} y {units[unit]}"
+
+
+def _classify_structured_confirmation_intent(
+    prompt: str,
+) -> str:
+    """Classify short conversational replies to a pending structured plan."""
+    normalized = _normalize_confirmation_text(prompt)
+
+    confirm_phrases = {
+        "si",
+        "si adelante",
+        "confirmo",
+        "confirma",
+        "adelante",
+        "hazlo",
+        "ejecuta",
+        "de acuerdo",
+        "vale",
+        "vale hazlo",
+        "correcto",
+        "acepto",
+        "puedes hacerlo",
+    }
+    cancel_phrases = {
+        "no",
+        "cancela",
+        "cancelar",
+        "no lo hagas",
+        "dejalo",
+        "olvidalo",
+        "rechazar",
+        "no confirmo",
+        "no cancela",
+    }
+    show_phrases = {
+        "que vas a hacer",
+        "muestrame el plan",
+        "muestra el plan",
+        "repite el plan",
+        "que se ejecutara",
+        "cuales son los riesgos",
+        "que riesgos hay",
+        "que herramientas usaras",
+    }
+
+    if normalized in confirm_phrases:
+        return "confirm"
+
+    if normalized in cancel_phrases:
+        return "cancel"
+
+    if normalized in show_phrases:
+        return "show"
+
+    return "ambiguous"
+
+
+def _normalize_confirmation_text(
+    text: str,
+) -> str:
+    normalized = unicodedata.normalize("NFKD", text.strip().lower())
+    without_accents = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Mn"
+    )
+    without_punctuation = re.sub(r"[^\w\s]", " ", without_accents)
+    return " ".join(without_punctuation.split())
+
+
+def _with_message_prefix(
+    response: StructuredExecutionResponse,
+    prefix: str,
+) -> StructuredExecutionResponse:
+    return StructuredExecutionResponse(
+        handled=response.handled,
+        status=response.status,
+        message=prefix + response.message,
+        plan=response.plan,
+        validation_result=response.validation_result,
+        execution_result=response.execution_result,
+        requires_confirmation=response.requires_confirmation,
+        confirmation_token=response.confirmation_token,
+        error_code=response.error_code,
+        error=response.error,
+    )
