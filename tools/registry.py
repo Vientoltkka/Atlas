@@ -17,6 +17,11 @@ class ToolDescriptor:
     description: str
     tool: BaseTool
     requires_confirmation: bool = False
+    argument_names: tuple[str, ...] = ()
+    required_arguments: tuple[str, ...] = ()
+    optional_arguments: tuple[str, ...] = ()
+    dangerous: bool = False
+    output_description: str | None = None
 
 
 class ToolAlreadyRegisteredError(ValueError):
@@ -65,6 +70,7 @@ class ToolRegistry:
             description=tool.description,
             tool=tool,
             requires_confirmation=tool.requires_confirmation,
+            dangerous=tool.requires_confirmation,
         )
 
     def exists(self, name: str) -> bool:

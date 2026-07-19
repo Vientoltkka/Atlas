@@ -21,7 +21,7 @@ def test_simple_goal_generates_single_execution_plan_step() -> None:
             tool="read_file",
             dependencies=(),
             status="pending",
-            arguments={},
+            arguments={"path": "README.md"},
         ),
     )
 
