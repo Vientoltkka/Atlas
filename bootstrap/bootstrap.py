@@ -12,6 +12,9 @@ from core.model_manager import ModelManager
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
 from core.router import Router
+from core.execution_plan_executor import ExecutionPlanExecutor
+from core.execution_plan_validator import ExecutionPlanValidator
+from core.structured_execution import StructuredExecutionCoordinator
 
 from memory.conversation import ConversationMemory
 
@@ -456,7 +459,17 @@ class Bootstrap:
         # Core
         # -----------------------
 
-        planner = Planner()
+        tool_registry = Bootstrap.build_tool_registry()
+        tool_executor = ToolExecutor(tool_registry)
+        tool_selector = Bootstrap.build_tool_selector(tool_registry)
+        schema_registry = Bootstrap.build_argument_schema_registry()
+        argument_validator = Bootstrap.build_argument_validator(schema_registry)
+        planner = Planner(
+            tool_registry=tool_registry,
+            tool_selector=tool_selector,
+            schema_registry=schema_registry,
+            argument_validator=argument_validator,
+        )
         router = Router()
         model_manager = ModelManager()
         memory = ConversationMemory()
@@ -467,9 +480,11 @@ class Bootstrap:
         # Tools
         # -----------------------
 
-        tool_registry = Bootstrap.build_tool_registry()
-
-        tool_executor = ToolExecutor(tool_registry)
+        structured_execution = StructuredExecutionCoordinator(
+            planner=planner,
+            validator=ExecutionPlanValidator(),
+            executor=ExecutionPlanExecutor(tool_registry, tool_executor),
+        )
 
         # -----------------------
         # Use Cases
@@ -649,6 +664,8 @@ class Bootstrap:
             wake_word_interaction=wake_word_interaction,
             voice_conversation=voice_conversation,
             permanent_assistant=permanent_assistant,
+            structured_execution_coordinator=structured_execution,
+            structured_execution_enabled=False,
         )
 
 

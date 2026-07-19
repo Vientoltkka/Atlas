@@ -10,6 +10,10 @@ from agents.registry import AgentRegistry
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
+from core.structured_execution import (
+    StructuredExecutionCoordinator,
+    StructuredExecutionResponse,
+)
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
@@ -42,6 +46,8 @@ class AtlasOrchestrator:
         wake_word_interaction: WakeWordInteractionUseCase | None = None,
         voice_conversation: VoiceConversationUseCase | None = None,
         permanent_assistant: PermanentAssistantUseCase | None = None,
+        structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
+        structured_execution_enabled: bool = False,
         project_root: Path | None = None,
         now_provider=None,
     ) -> None:
@@ -60,6 +66,8 @@ class AtlasOrchestrator:
         self._wake_word_interaction = wake_word_interaction
         self._voice_conversation = voice_conversation
         self._permanent_assistant = permanent_assistant
+        self._structured_execution_coordinator = structured_execution_coordinator
+        self._structured_execution_enabled = structured_execution_enabled
         self._project_root = project_root or Path(".")
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
 
@@ -75,6 +83,11 @@ class AtlasOrchestrator:
             if prompt.lower() in ("exit", "quit", "salir"):
                 print("\nHasta pronto.")
                 break
+
+            structured_response = self._handle_structured_execution(prompt)
+            if structured_response is not None:
+                self._print_atlas(structured_response.message)
+                continue
 
             if self._execution_conversation is not None:
                 outcome = self._execution_conversation.handle(prompt)
@@ -175,6 +188,10 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        structured_response = self._handle_structured_execution(prompt)
+        if structured_response is not None:
+            return structured_response.message
+
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(prompt)
 
@@ -184,6 +201,27 @@ class AtlasOrchestrator:
         return self._process_prompt_without_execution(
             prompt,
             confirm,
+        )
+
+    def confirm_structured_execution(
+        self,
+        confirmation_token: str,
+        *,
+        objective: str | None = None,
+    ) -> StructuredExecutionResponse:
+        """Continue a pending structured execution without regenerating its plan."""
+        if self._structured_execution_coordinator is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="structured_execution_unavailable",
+                message="Ejecucion estructurada no disponible.",
+                error_code="STRUCTURED_EXECUTION_UNAVAILABLE",
+                error="structured execution coordinator is not configured",
+            )
+
+        return self._structured_execution_coordinator.confirm(
+            confirmation_token,
+            objective=objective,
         )
 
     def _process_prompt_without_execution(
@@ -255,6 +293,22 @@ class AtlasOrchestrator:
             messages=self._memory.history(),
         )
         self._memory.add_assistant(response)
+
+        return response
+
+    def _handle_structured_execution(
+        self,
+        prompt: str,
+    ) -> StructuredExecutionResponse | None:
+        if (
+            not self._structured_execution_enabled
+            or self._structured_execution_coordinator is None
+        ):
+            return None
+
+        response = self._structured_execution_coordinator.handle(prompt)
+        if not response.handled:
+            return None
 
         return response
 
