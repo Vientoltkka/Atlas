@@ -142,6 +142,8 @@ class Planner:
         semantic_tool_catalog: SemanticToolCatalog | None = None,
         tool_selection_result: ToolSelectionResult | None = None,
         multi_tool_planner: Any | None = None,
+        hybrid_execution_planner: Any | None = None,
+        structured_plan_provider: Any | None = None,
         plan_response_provider: Callable[[str, tuple[ToolDescriptor, ...]], str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -154,6 +156,8 @@ class Planner:
         self._semantic_tool_catalog = semantic_tool_catalog
         self._tool_selection_result = tool_selection_result
         self._multi_tool_planner = multi_tool_planner
+        self._hybrid_execution_planner = hybrid_execution_planner
+        self._structured_plan_provider = structured_plan_provider
         self._plan_response_provider = plan_response_provider
 
     def create_plan(self, prompt: str) -> Plan:
@@ -245,6 +249,10 @@ class Planner:
         if multi_tool_result is not None:
             return multi_tool_result
 
+        hybrid_result = self._try_hybrid_plan(goal)
+        if hybrid_result is not None:
+            return hybrid_result
+
         decision = ExecutionDecisionEngine(self._supported_intents()).decide(goal)
         if decision.mode == ExecutionMode.DIRECT_RESPONSE:
             return PlanGenerationResult(
@@ -280,6 +288,37 @@ class Planner:
             warnings=warnings,
             generation_attempted=True,
             error_code=PlannerErrorCode.INSUFFICIENT_INFORMATION.value if errors else None,
+        )
+
+    def _try_hybrid_plan(
+        self,
+        goal: str,
+    ) -> PlanGenerationResult | None:
+        if (
+            self._hybrid_execution_planner is None
+            or self._semantic_tool_catalog is None
+            or self._tool_selector is None
+        ):
+            return None
+
+        result = self._hybrid_execution_planner.plan(
+            goal,
+            deterministic_planner=None,
+            catalog=self._semantic_tool_catalog,
+            selector=self._tool_selector,
+            plan_provider=self._structured_plan_provider,
+        )
+        if not result.handled:
+            return None
+
+        return PlanGenerationResult(
+            success=result.success,
+            plan=result.plan,
+            errors=list(result.errors),
+            warnings=list(result.warnings),
+            raw_response=result.raw_response,
+            generation_attempted=True,
+            error_code=result.error_code,
         )
 
     def _try_multi_tool_plan(
