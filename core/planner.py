@@ -16,6 +16,7 @@ from tools.argument_schema import (
 )
 from tools.execution_decision import ExecutionDecision, ExecutionDecisionEngine, ExecutionMode
 from tools.intent_selector import ToolIntent, ToolSelector
+from tools.intent_selector import ToolSelectionResult
 from tools.registry import ToolDescriptor, ToolNotRegisteredError, ToolRegistry
 from tools.tool_proposal_builder import (
     StructuredToolProposal,
@@ -139,6 +140,7 @@ class Planner:
         schema_registry: ArgumentSchemaRegistry | None = None,
         argument_validator: ArgumentValidator | None = None,
         semantic_tool_catalog: SemanticToolCatalog | None = None,
+        tool_selection_result: ToolSelectionResult | None = None,
         plan_response_provider: Callable[[str, tuple[ToolDescriptor, ...]], str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -149,6 +151,7 @@ class Planner:
             or (ArgumentValidator(schema_registry) if schema_registry is not None else None)
         )
         self._semantic_tool_catalog = semantic_tool_catalog
+        self._tool_selection_result = tool_selection_result
         self._plan_response_provider = plan_response_provider
 
     def create_plan(self, prompt: str) -> Plan:
