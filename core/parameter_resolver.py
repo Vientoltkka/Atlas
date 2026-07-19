@@ -5,8 +5,30 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 import re
 from typing import Any, Mapping
+
+
+REFERENCE_PATTERN = re.compile(
+    r"^steps\.([A-Za-z0-9_-]+)\.output(?:\.([A-Za-z0-9_.-]+))?$"
+)
+TEMPLATE_REFERENCE_PATTERN = re.compile(r"\{\{([^{}]+)\}\}")
+BLOCKED_REFERENCE_PARTS = {
+    "__class__",
+    "__dict__",
+    "__globals__",
+    "__mro__",
+    "__subclasses__",
+    "secret",
+    "password",
+    "token",
+    "credentials",
+}
+MAX_RESOLUTION_DEPTH = 32
+MAX_TEMPLATE_LENGTH = 8192
+MAX_TEMPLATE_REFERENCES = 32
+MAX_INTERPOLATED_RESULT_LENGTH = 65536
 
 
 class ParameterResolutionErrorCode(str, Enum):
@@ -19,6 +41,13 @@ class ParameterResolutionErrorCode(str, Enum):
     INVALID_LIST_INDEX = "INVALID_LIST_INDEX"
     REFERENCE_TO_INCOMPLETE_STEP = "REFERENCE_TO_INCOMPLETE_STEP"
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
+    INVALID_TEMPLATE_STRUCTURE = "INVALID_TEMPLATE_STRUCTURE"
+    INVALID_TEMPLATE_TYPE = "INVALID_TEMPLATE_TYPE"
+    INVALID_TEMPLATE_SYNTAX = "INVALID_TEMPLATE_SYNTAX"
+    UNRESOLVED_TEMPLATE_REFERENCE = "UNRESOLVED_TEMPLATE_REFERENCE"
+    UNSUPPORTED_TEMPLATE_EXPRESSION = "UNSUPPORTED_TEMPLATE_EXPRESSION"
+    TEMPLATE_VALUE_NOT_SERIALIZABLE = "TEMPLATE_VALUE_NOT_SERIALIZABLE"
+    TEMPLATE_RESOLUTION_FAILED = "TEMPLATE_RESOLUTION_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +59,8 @@ class ParameterResolutionResult:
     errors: list[str] = field(default_factory=list)
     unresolved_references: list[str] = field(default_factory=list)
     used_step_ids: list[str] = field(default_factory=list)
+    used_references: list[str] = field(default_factory=list)
+    templates_resolved: int = 0
     error_code: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 
@@ -57,14 +88,18 @@ class ParameterResolver:
     ) -> ParameterResolutionResult:
         """Return a new argument mapping with explicit references resolved."""
         used_step_ids: list[str] = []
+        used_references: list[str] = []
+        template_counter = [0]
 
         try:
             resolved = self._resolve_mapping(
                 arguments,
                 previous_results,
                 used_step_ids,
+                used_references,
                 depth=0,
                 seen=set(),
+                template_counter=template_counter,
             )
         except _ResolutionFailure as failure:
             return ParameterResolutionResult(
@@ -77,6 +112,8 @@ class ParameterResolver:
                     else []
                 ),
                 used_step_ids=used_step_ids,
+                used_references=used_references,
+                templates_resolved=template_counter[0],
                 error_code=failure.error.code,
                 metadata={"resolver": "ParameterResolver"},
             )
@@ -87,6 +124,8 @@ class ParameterResolver:
             errors=[],
             unresolved_references=[],
             used_step_ids=used_step_ids,
+            used_references=used_references,
+            templates_resolved=template_counter[0],
             error_code=None,
             metadata={"resolver": "ParameterResolver"},
         )
@@ -96,9 +135,11 @@ class ParameterResolver:
         value: Mapping[str, object],
         previous_results: Mapping[str, object],
         used_step_ids: list[str],
+        used_references: list[str],
         *,
         depth: int,
         seen: set[int],
+        template_counter: list[int],
     ) -> dict[str, object]:
         self._guard_depth(depth)
         self._guard_cycle(value, seen)
@@ -110,8 +151,10 @@ class ParameterResolver:
                     item,
                     previous_results,
                     used_step_ids,
+                    used_references,
                     depth=depth + 1,
                     seen=seen,
+                    template_counter=template_counter,
                 )
         finally:
             seen.remove(id(value))
@@ -123,9 +166,11 @@ class ParameterResolver:
         value: object,
         previous_results: Mapping[str, object],
         used_step_ids: list[str],
+        used_references: list[str],
         *,
         depth: int,
         seen: set[int],
+        template_counter: list[int],
     ) -> object:
         self._guard_depth(depth)
 
@@ -135,14 +180,26 @@ class ParameterResolver:
                     value,
                     previous_results,
                     used_step_ids,
+                    used_references,
+                )
+
+            if "$template" in value:
+                return self._resolve_template_object(
+                    value,
+                    previous_results,
+                    used_step_ids,
+                    used_references,
+                    template_counter,
                 )
 
             return self._resolve_mapping(
                 value,
                 previous_results,
                 used_step_ids,
+                used_references,
                 depth=depth,
                 seen=seen,
+                template_counter=template_counter,
             )
 
         if isinstance(value, list):
@@ -153,8 +210,10 @@ class ParameterResolver:
                         item,
                         previous_results,
                         used_step_ids,
+                        used_references,
                         depth=depth + 1,
                         seen=seen,
+                        template_counter=template_counter,
                     )
                     for item in value
                 ]
@@ -169,8 +228,10 @@ class ParameterResolver:
                         item,
                         previous_results,
                         used_step_ids,
+                        used_references,
                         depth=depth + 1,
                         seen=seen,
+                        template_counter=template_counter,
                     )
                     for item in value
                 )
@@ -184,6 +245,7 @@ class ParameterResolver:
         reference_object: Mapping[str, object],
         previous_results: Mapping[str, object],
         used_step_ids: list[str],
+        used_references: list[str],
     ) -> object:
         if tuple(reference_object.keys()) != ("$ref",):
             self._fail(
@@ -199,7 +261,7 @@ class ParameterResolver:
             )
 
         reference = raw_reference.strip()
-        match = self._REFERENCE_PATTERN.fullmatch(reference)
+        match = REFERENCE_PATTERN.fullmatch(reference)
         if match is None:
             self._fail(
                 ParameterResolutionErrorCode.INVALID_REFERENCE_SYNTAX.value,
@@ -226,7 +288,196 @@ class ParameterResolver:
         if step_id not in used_step_ids:
             used_step_ids.append(step_id)
 
+        used_references.append(reference)
+
         return deepcopy(value)
+
+    def _resolve_template_object(
+        self,
+        template_object: Mapping[str, object],
+        previous_results: Mapping[str, object],
+        used_step_ids: list[str],
+        used_references: list[str],
+        template_counter: list[int],
+    ) -> str:
+        if tuple(template_object.keys()) != ("$template",):
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_STRUCTURE.value,
+                "$template objects must contain only the '$template' key.",
+            )
+
+        template = template_object["$template"]
+        if not isinstance(template, str):
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_TYPE.value,
+                "$template value must be a string.",
+            )
+
+        if len(template) > MAX_TEMPLATE_LENGTH:
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_SYNTAX.value,
+                "Template exceeds the maximum supported length.",
+            )
+
+        escaped = (
+            template
+            .replace("{{{{", "\u0000ATLAS_OPEN_BRACE\u0000")
+            .replace("}}}}", "\u0000ATLAS_CLOSE_BRACE\u0000")
+        )
+        matches = list(TEMPLATE_REFERENCE_PATTERN.finditer(escaped))
+        if len(matches) > MAX_TEMPLATE_REFERENCES:
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_SYNTAX.value,
+                "Template exceeds the maximum number of references.",
+            )
+
+        self._validate_template_syntax(escaped)
+
+        result_parts: list[str] = []
+        cursor = 0
+        for match in matches:
+            result_parts.append(escaped[cursor:match.start()])
+            reference = match.group(1).strip()
+            value = self._resolve_template_reference(
+                reference,
+                previous_results,
+                used_step_ids,
+                used_references,
+            )
+            result_parts.append(self._to_template_text(value, reference))
+            cursor = match.end()
+
+        result_parts.append(escaped[cursor:])
+        interpolated = "".join(result_parts)
+        interpolated = (
+            interpolated
+            .replace("\u0000ATLAS_OPEN_BRACE\u0000", "{{")
+            .replace("\u0000ATLAS_CLOSE_BRACE\u0000", "}}")
+        )
+
+        if len(interpolated) > MAX_INTERPOLATED_RESULT_LENGTH:
+            self._fail(
+                ParameterResolutionErrorCode.TEMPLATE_RESOLUTION_FAILED.value,
+                "Interpolated template exceeds the maximum supported result length.",
+            )
+
+        template_counter[0] += 1
+        return interpolated
+
+    def _resolve_template_reference(
+        self,
+        reference: str,
+        previous_results: Mapping[str, object],
+        used_step_ids: list[str],
+        used_references: list[str],
+    ) -> object:
+        if REFERENCE_PATTERN.fullmatch(reference) is None:
+            if any(token in reference for token in ("(", ")", "+", "-", "*", "/", "[", "]", "|", "=", "<", ">")):
+                self._fail(
+                    ParameterResolutionErrorCode.UNSUPPORTED_TEMPLATE_EXPRESSION.value,
+                    f"Unsupported template expression: {self._safe_reference_label(reference)}.",
+                    reference,
+                )
+
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_SYNTAX.value,
+                f"Invalid template reference syntax: {self._safe_reference_label(reference)}.",
+                reference,
+            )
+
+        try:
+            return self._resolve_reference(reference, previous_results, used_step_ids, used_references)
+        except _ResolutionFailure as failure:
+            self._fail(
+                ParameterResolutionErrorCode.UNRESOLVED_TEMPLATE_REFERENCE.value,
+                failure.error.message,
+                reference,
+            )
+
+    def _resolve_reference(
+        self,
+        reference: str,
+        previous_results: Mapping[str, object],
+        used_step_ids: list[str],
+        used_references: list[str],
+    ) -> object:
+        match = REFERENCE_PATTERN.fullmatch(reference)
+        assert match is not None
+        step_id = match.group(1)
+        path = match.group(2)
+
+        if step_id not in previous_results:
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_NOT_FOUND.value,
+                f"Referenced step '{step_id}' was not found in previous results.",
+                reference,
+            )
+
+        output = self._extract_output(previous_results[step_id], reference)
+        value = output
+
+        if path is not None:
+            value = self._resolve_path(value, step_id, path, reference)
+
+        if step_id not in used_step_ids:
+            used_step_ids.append(step_id)
+
+        used_references.append(reference)
+        return value
+
+    def _validate_template_syntax(
+        self,
+        template: str,
+    ) -> None:
+        if "{{" in TEMPLATE_REFERENCE_PATTERN.sub("", template):
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_SYNTAX.value,
+                "Template contains an unclosed reference.",
+            )
+
+        if "}}" in TEMPLATE_REFERENCE_PATTERN.sub("", template):
+            self._fail(
+                ParameterResolutionErrorCode.INVALID_TEMPLATE_SYNTAX.value,
+                "Template contains an unopened reference.",
+            )
+
+    def _to_template_text(
+        self,
+        value: object,
+        reference: str,
+    ) -> str:
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, bool):
+            return "true" if value else "false"
+
+        if isinstance(value, (int, float)):
+            return str(value)
+
+        if isinstance(value, Mapping) or isinstance(value, (list, tuple)):
+            try:
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except TypeError:
+                self._fail(
+                    ParameterResolutionErrorCode.TEMPLATE_VALUE_NOT_SERIALIZABLE.value,
+                    "Template value is not JSON serializable.",
+                    reference,
+                )
+
+        self._fail(
+            ParameterResolutionErrorCode.TEMPLATE_VALUE_NOT_SERIALIZABLE.value,
+            f"Template value type '{type(value).__name__}' is not supported.",
+            reference,
+        )
 
     def _extract_output(
         self,
@@ -333,7 +584,7 @@ class ParameterResolver:
         if (
             not part
             or part.startswith("_")
-            or part in self._BLOCKED_PATH_PARTS
+            or part in BLOCKED_REFERENCE_PARTS
             or not re.fullmatch(r"[A-Za-z0-9_-]+", part)
         ):
             self._fail(
@@ -346,7 +597,7 @@ class ParameterResolver:
         self,
         depth: int,
     ) -> None:
-        if depth > self._MAX_DEPTH:
+        if depth > MAX_RESOLUTION_DEPTH:
             self._fail(
                 ParameterResolutionErrorCode.PARAMETER_RESOLUTION_FAILED.value,
                 "Parameter resolution exceeded the maximum supported depth.",
@@ -390,6 +641,19 @@ class ParameterResolver:
             and hasattr(result, "success")
             and hasattr(result, "output")
         )
+
+    def _safe_reference_label(
+        self,
+        reference: str,
+    ) -> str:
+        for sensitive in ("secret", "password", "token", "credentials"):
+            reference = re.sub(
+                sensitive,
+                "[redacted]",
+                reference,
+                flags=re.IGNORECASE,
+            )
+        return reference[:120]
 
 
 class _ResolutionFailure(Exception):

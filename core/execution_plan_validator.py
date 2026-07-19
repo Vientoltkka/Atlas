@@ -8,6 +8,13 @@ import json
 import re
 from typing import Any, Mapping
 
+from core.parameter_resolver import (
+    BLOCKED_REFERENCE_PARTS,
+    MAX_TEMPLATE_LENGTH,
+    MAX_TEMPLATE_REFERENCES,
+    REFERENCE_PATTERN,
+    TEMPLATE_REFERENCE_PATTERN,
+)
 from core.planner import ExecutionPlan
 
 
@@ -34,10 +41,6 @@ class ExecutionPlanValidator:
         "desktop.press_hotkey",
     }
     _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
-    _REFERENCE_PATTERN = re.compile(
-        r"^steps\.([A-Za-z0-9_-]+)\.output(?:\.([A-Za-z0-9_.-]+))?$"
-    )
-    _BLOCKED_REFERENCE_PARTS = {"__class__", "__dict__", "__globals__"}
 
     def validate(
         self,
@@ -207,7 +210,7 @@ class ExecutionPlanValidator:
                 dependencies_by_step,
             )
 
-            for reference in self._iter_reference_objects(step.arguments):
+            for reference in self._iter_special_objects(step.arguments, "$ref"):
                 ref_keys = tuple(reference.keys())
                 if ref_keys != ("$ref",):
                     errors.append(
@@ -223,7 +226,7 @@ class ExecutionPlanValidator:
                     continue
 
                 ref_value = raw_reference.strip()
-                match = self._REFERENCE_PATTERN.fullmatch(ref_value)
+                match = REFERENCE_PATTERN.fullmatch(ref_value)
                 if match is None:
                     errors.append(
                         f"Step '{step.id}' has invalid reference syntax: {ref_value}."
@@ -233,33 +236,93 @@ class ExecutionPlanValidator:
                 referenced_step_id = match.group(1)
                 ref_path = match.group(2)
 
-                if ref_path is not None:
-                    self._validate_reference_path(step.id, ref_path, errors)
+                self._validate_reference_parts(step.id, ref_path, errors)
+                self._validate_reference_dependency(
+                    step.id,
+                    referenced_step_id,
+                    step_ids,
+                    allowed_references,
+                    errors,
+                )
 
-                if referenced_step_id not in step_ids:
+            for template in self._iter_special_objects(step.arguments, "$template"):
+                template_keys = tuple(template.keys())
+                if template_keys != ("$template",):
                     errors.append(
-                        f"Step '{step.id}' references unknown step '{referenced_step_id}'."
+                        f"Step '{step.id}' template objects must contain only '$template'."
                     )
                     continue
 
-                if referenced_step_id == step.id:
-                    errors.append(f"Step '{step.id}' cannot reference itself.")
+                raw_template = template["$template"]
+                if not isinstance(raw_template, str):
+                    errors.append(
+                        f"Step '{step.id}' template value must be a string."
+                    )
                     continue
 
-                if referenced_step_id not in allowed_references:
+                if len(raw_template) > MAX_TEMPLATE_LENGTH:
                     errors.append(
-                        f"Step '{step.id}' references non-dependent step '{referenced_step_id}'."
+                        f"Step '{step.id}' template exceeds the maximum supported length."
+                    )
+                    continue
+
+                escaped_template = (
+                    raw_template
+                    .replace("{{{{", "\u0000ATLAS_OPEN_BRACE\u0000")
+                    .replace("}}}}", "\u0000ATLAS_CLOSE_BRACE\u0000")
+                )
+                template_references = list(TEMPLATE_REFERENCE_PATTERN.finditer(escaped_template))
+
+                if len(template_references) > MAX_TEMPLATE_REFERENCES:
+                    errors.append(
+                        f"Step '{step.id}' template exceeds the maximum number of references."
                     )
 
-    def _iter_reference_objects(
+                remainder = TEMPLATE_REFERENCE_PATTERN.sub("", escaped_template)
+                if "{{" in remainder or "}}" in remainder:
+                    errors.append(
+                        f"Step '{step.id}' has invalid template brace syntax."
+                    )
+                    continue
+
+                for template_reference in template_references:
+                    expression = template_reference.group(1).strip()
+                    match = REFERENCE_PATTERN.fullmatch(expression)
+                    if match is None:
+                        if any(
+                            token in expression
+                            for token in ("(", ")", "+", "-", "*", "/", "[", "]", "|", "=", "<", ">")
+                        ):
+                            errors.append(
+                                f"Step '{step.id}' has unsupported template expression: {expression}."
+                            )
+                        else:
+                            errors.append(
+                                f"Step '{step.id}' has invalid template reference syntax: {expression}."
+                            )
+                        continue
+
+                    referenced_step_id = match.group(1)
+                    ref_path = match.group(2)
+                    self._validate_reference_parts(step.id, ref_path, errors)
+                    self._validate_reference_dependency(
+                        step.id,
+                        referenced_step_id,
+                        step_ids,
+                        allowed_references,
+                        errors,
+                    )
+
+    def _iter_special_objects(
         self,
         value: Any,
+        key: str,
     ) -> tuple[Mapping[str, Any], ...]:
         references: list[Mapping[str, Any]] = []
 
         def visit(item: Any) -> None:
             if isinstance(item, Mapping):
-                if "$ref" in item:
+                if key in item:
                     references.append(item)
                     return
 
@@ -274,21 +337,47 @@ class ExecutionPlanValidator:
         visit(value)
         return tuple(references)
 
-    def _validate_reference_path(
+    def _validate_reference_parts(
         self,
         step_id: str,
-        ref_path: str,
+        ref_path: str | None,
         errors: list[str],
     ) -> None:
+        if ref_path is None:
+            return
+
         for part in ref_path.split("."):
             if (
                 not part
                 or part.startswith("_")
-                or part in self._BLOCKED_REFERENCE_PARTS
+                or part in BLOCKED_REFERENCE_PARTS
             ):
                 errors.append(
                     f"Step '{step_id}' has unsafe reference path segment: {part}."
                 )
+
+    def _validate_reference_dependency(
+        self,
+        step_id: str,
+        referenced_step_id: str,
+        step_ids: set[str],
+        allowed_references: set[str],
+        errors: list[str],
+    ) -> None:
+        if referenced_step_id not in step_ids:
+            errors.append(
+                f"Step '{step_id}' references unknown step '{referenced_step_id}'."
+            )
+            return
+
+        if referenced_step_id == step_id:
+            errors.append(f"Step '{step_id}' cannot reference itself.")
+            return
+
+        if referenced_step_id not in allowed_references:
+            errors.append(
+                f"Step '{step_id}' references non-dependent step '{referenced_step_id}'."
+            )
 
     def _transitive_dependencies(
         self,

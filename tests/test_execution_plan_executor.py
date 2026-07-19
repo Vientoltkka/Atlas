@@ -478,6 +478,70 @@ def test_parameter_resolution_failure_prevents_tool_call() -> None:
     assert calls == ["first_tool"]
 
 
+def test_template_resolution_delivers_final_text_to_tool_context() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"path": "README.md"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={
+                    "message": {
+                        "$template": "Archivo final: {{steps.step_1.output.path}}"
+                    }
+                },
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"message": "Archivo final: README.md"}
+    assert calls == ["first_tool", "second_tool"]
+
+
+def test_template_resolution_failure_prevents_tool_call() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"name": "README.md"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={
+                    "message": {
+                        "$template": "Archivo final: {{steps.step_1.output.path}}"
+                    }
+                },
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is False
+    assert result.failed_step == "step_2"
+    assert result.error_code == ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value
+    assert result.step_results[-1].metadata["parameter_resolution_error_code"] == (
+        "UNRESOLVED_TEMPLATE_REFERENCE"
+    )
+    assert calls == ["first_tool"]
+
+
 def test_original_arguments_are_not_mutated_by_tool() -> None:
     class MutatingTool(SpyTool):
         def execute(

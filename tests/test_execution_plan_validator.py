@@ -6,6 +6,7 @@ from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
 )
+from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
 from core.planner import ExecutionPlan, ExecutionStep, Planner
 
 
@@ -617,3 +618,316 @@ def test_reference_blocks_private_and_dunder_path_segments() -> None:
     assert result.is_valid is False
     assert "Step 'step_2' has unsafe reference path segment: _secret." in result.errors
     assert "Step 'step_2' has unsafe reference path segment: __class__." in result.errors
+
+
+def test_template_to_dependency_is_valid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1", arguments={"path": "README.md"}),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$template": "Archivo: {{steps.step_1.output.path}}"
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.plan_signature
+
+
+def test_template_object_with_extra_keys_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$template": "{{steps.step_1.output.path}}",
+                        "default": "",
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' template objects must contain only '$template'." in result.errors
+
+
+def test_template_value_must_be_string_static_validation() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={"content": {"$template": 123}},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' template value must be a string." in result.errors
+
+
+def test_template_invalid_braces_are_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$template": "Archivo: {{steps.step_1.output.path"
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' has invalid template brace syntax." in result.errors
+
+
+def test_template_invalid_reference_syntax_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {"$template": "{{step.step_1.output.path}}"},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert (
+        "Step 'step_2' has invalid template reference syntax: step.step_1.output.path."
+        in result.errors
+    )
+
+
+def test_template_rejects_unsupported_expression() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$template": "{{steps.step_1.output.path.upper()}}"
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert (
+        "Step 'step_2' has unsupported template expression: steps.step_1.output.path.upper()."
+        in result.errors
+    )
+
+
+def test_template_reference_to_unknown_step_is_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {"$template": "{{steps.missing.output.path}}"},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' references unknown step 'missing'." in result.errors
+
+
+def test_template_reference_to_self_future_and_non_dependent_steps_are_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                arguments={"path": {"$template": "{{steps.step_1.output.path}}"}},
+            ),
+            _step("step_2", tool="read_file"),
+            _step(
+                "step_3",
+                tool="write_file",
+                dependencies=("step_2",),
+                arguments={
+                    "a": {"$template": "{{steps.step_4.output.path}}"},
+                    "b": {"$template": "{{steps.step_1.output.path}}"},
+                },
+            ),
+            _step("step_4", tool="read_file", dependencies=("step_3",)),
+        ),
+        estimated_steps=4,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_1' cannot reference itself." in result.errors
+    assert "Step 'step_3' references non-dependent step 'step_4'." in result.errors
+    assert "Step 'step_3' references non-dependent step 'step_1'." in result.errors
+
+
+def test_template_blocks_private_and_sensitive_segments_static_validation() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "a": {"$template": "{{steps.step_1.output._secret}}"},
+                    "b": {"$template": "{{steps.step_1.output.password}}"},
+                    "c": {"$template": "{{steps.step_1.output.token}}"},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_2' has unsafe reference path segment: _secret." in result.errors
+    assert "Step 'step_2' has unsafe reference path segment: password." in result.errors
+    assert "Step 'step_2' has unsafe reference path segment: token." in result.errors
+
+
+def test_template_limits_are_validated_statically() -> None:
+    too_many_refs = "".join(
+        "{{steps.step_1.output.path}}"
+        for _ in range(MAX_TEMPLATE_REFERENCES + 1)
+    )
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "a": {"$template": "a" * (MAX_TEMPLATE_LENGTH + 1)},
+                    "b": {"$template": too_many_refs},
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert (
+        "Step 'step_2' template exceeds the maximum supported length."
+        in result.errors
+    )
+    assert (
+        "Step 'step_2' template exceeds the maximum number of references."
+        in result.errors
+    )
+
+
+def test_template_escaped_braces_do_not_create_references() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1"),
+            _step(
+                "step_2",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={
+                    "content": {
+                        "$template": "{{{{steps.missing.output.path}}}}"
+                    },
+                },
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
