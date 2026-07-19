@@ -111,7 +111,8 @@ The coordinator does not generate LLM answers, parse new arguments, call
 `ToolExecutor`, bypass selectors or validators, add artificial confirmations,
 retry, rollback, run a planner, or modify the conversational orchestrator. The
 CLI `python -B -m tools.run_execution_request "<prompt>"` is an isolated manual
-entry point for this phase.
+entry point for this phase. Its normal output uses the conversational execution
+presenter. Technical inspection is available only with `--debug`.
 
 ## Text Conversation Integration
 
@@ -129,7 +130,12 @@ pending and ask again. Accepted or rejected replies clear the id, so a completed
 confirmation cannot be reused and a second pending confirmation is not created
 accidentally.
 
-`ExecutionResultPresenter` formats coordination statuses for the user:
+`ExecutionResultPresenter` formats coordination statuses for the user. It is a
+pure presentation component: it receives `PresentationContext`, built from the
+original text, execution mode, proposal and structured execution result, and
+returns `PresentationResult` with text, summary, details and optional technical
+details. It never executes tools, mutates state, calls `ToolExecutor`, changes
+confirmations, or invents missing results.
 
 - `EXECUTED`: shows the real tool or chain output without dumping dataclasses.
 - `INFORMATION_REQUIRED`: asks for the missing fields.
@@ -140,6 +146,68 @@ accidentally.
   continue, without exposing the confirmation id.
 - `CANCELLED`: reports cancellation.
 - `FAILED`: reports a uniform failure.
+
+Presentation is intentionally separated from decision, proposal, validation,
+confirmation and execution:
+
+- `ExecutionConversationController` decides when a coordination result must be
+  presented.
+- `ExecutionCoordinator` returns the structured result.
+- `SingleToolRunner` and `ToolChainRunner` execute tools.
+- `ExecutionResultPresenter` only converts already available structured data
+  into console text.
+
+## Conversational Result Presentation
+
+Normal mode hides internal ids, dataclass reprs, runner internals,
+`confirmation_id`, step ids and execution counters. Debug mode can be enabled
+when constructing `ExecutionResultPresenter(debug=True)` or from the manual CLI
+with `--debug`; it appends technical mode, status, tool name, runner status,
+execution count and step ids where available. Debug mode still does not print
+confirmation ids.
+
+Tool formatting policies:
+
+- `file.read`: reports the path and prints the file content legibly, preserving
+  Unicode and line breaks. It never summarizes content semantically.
+- `file.write`: reports the written path and may show short written content;
+  long content is described by size instead of repeated.
+- `directory.list`: reports the queried folder and displays items as a bullet
+  list. Empty folders are reported explicitly.
+- `project.tree`: displays the returned Python-file tree as a readable list and
+  does not invent directories that the tool did not return.
+- desktop tools: report the performed action and relevant target, such as
+  application, window title, typed-text preview or hotkey.
+- unknown tools: use a safe fallback based on status and simple result values,
+  without dumping internal Python representations.
+
+Length is controlled by `PresentationLimits`:
+
+- `short_text_limit`: maximum content size printed in full for direct content.
+- `preview_character_limit`: maximum displayed preview when output is long.
+- `max_list_items`: maximum displayed list items.
+- `max_tree_lines`: maximum displayed project-tree lines.
+
+Truncation affects only presentation text. The internal `ToolRunResult` and
+`ToolChainResult` remain unchanged. When output is truncated, the presenter
+prints `Mostrando una vista parcial` and includes omitted characters or items
+when they can be calculated.
+
+Chain presentation uses the real step results:
+
+- Successful read -> write chains produce a natural completion message such as
+  `Listo. Leí README.md y guardé su contenido en resumen.txt.`
+- Generic successful chains report completion and show only the final step
+  result, with large intermediate content omitted.
+- Failed chains name the completed work and the failed step when available.
+- Cancelled chains report cancellation and make clear that the pending step did
+  not execute.
+- Steps that did not execute are not claimed as completed.
+
+The limits of this phase remain explicit: no LLM-generated final answers, no
+semantic summarization, no new planner, no retries, no rollback, no parallel
+execution, no mutation of results, and no presentation logic inside individual
+runners.
 
 Text integration remains out of scope for voice, wake word, autonomous memory,
 multi-agent flows, ReAct, advanced planning, LLM-generated proposals, retries,

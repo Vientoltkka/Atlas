@@ -256,7 +256,8 @@ def test_chain_pauses_and_confirmation_presents_final_result(tmp_path: Path) -> 
 
     assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
     assert target.exists() is True
-    assert "Cadena completada" in confirmed.text
+    assert "Leí README.md" in confirmed.text
+    assert "guardé su contenido" in confirmed.text
     assert "ToolChainResult" not in confirmed.text
 
 
@@ -297,7 +298,7 @@ def test_presenter_handles_failed_result_without_internal_dump() -> None:
 
     outcome = ExecutionConversationController(_FailingCoordinator()).handle("haz algo")
 
-    assert outcome.text == "No he podido completar la operacion."
+    assert outcome.text == "No he podido completar la operacion: forced failure."
     assert "ExecutionCoordinationResult" not in outcome.text
 
 
@@ -487,7 +488,8 @@ def test_chain_destination_can_be_completed_without_repeating_after_confirmation
 
     assert confirmed.result.status == ExecutionCoordinationStatus.EXECUTED
     assert target.exists() is True
-    assert "Cadena completada" in confirmed.text
+    assert "Leí README.md" in confirmed.text
+    assert "guardé su contenido" in confirmed.text
 
 
 def test_direct_response_still_works_without_pending_clarification() -> None:

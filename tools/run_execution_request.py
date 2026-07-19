@@ -1,31 +1,36 @@
-"""Manual CLI for coordinated Atlas execution requests."""
+"""Manual CLI for conversational Atlas execution requests."""
 
 from __future__ import annotations
 
-import json
 import sys
-from typing import Any
 
 from bootstrap.bootstrap import Bootstrap
 from tools.execution_coordinator import ExecutionCoordinationResult
+from use_cases.execution_result_presenter import ExecutionResultPresenter
 
 
 def main(argv: list[str] | None = None) -> int:
     """Coordinate one natural-language execution request."""
     args = list(sys.argv[1:] if argv is None else argv)
 
+    debug = False
+    if "--debug" in args:
+        debug = True
+        args.remove("--debug")
+
     if len(args) != 1:
-        print('Usage: python -m tools.run_execution_request "<prompt>"')
+        print('Usage: python -m tools.run_execution_request [--debug] "<prompt>"')
         return 2
 
     coordinator = Bootstrap.build_execution_coordinator()
+    presenter = ExecutionResultPresenter(debug=debug)
     result = coordinator.execute(args[0])
-    _print_result(result)
+    _print_result(presenter, result, args[0])
 
     while result.confirmation_id is not None:
-        response = input("Confirm? [s/N]: ")
+        response = input("Respuesta: ")
         result = coordinator.confirm(result.confirmation_id, response)
-        _print_result(result)
+        _print_result(presenter, result, args[0])
 
         if result.status.value == "CONFIRMATION_REQUIRED":
             continue
@@ -35,51 +40,18 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result.status.value in {"EXECUTED", "DIRECT_RESPONSE_REQUIRED"} else 1
 
 
-def _print_result(result: ExecutionCoordinationResult) -> None:
-    print(f"Status: {result.status.value}")
-    print(f"Mode: {result.mode.value}")
-    print(f"Executed: {str(result.executed).lower()}")
-    print(f"Message: {result.message}")
-
-    if result.confirmation_id:
-        print(f"Confirmation id: {result.confirmation_id}")
-
-    if result.missing_information:
-        print(f"Missing: {', '.join(result.missing_information)}")
-
-    if result.ambiguous_information:
-        print(f"Ambiguous: {', '.join(result.ambiguous_information)}")
-
-    if result.validation_errors:
-        print(f"Validation errors: {', '.join(result.validation_errors)}")
-
-    if result.execution_result is not None:
-        print(
-            "Execution result: "
-            + json.dumps(
-                _execution_summary(result.execution_result),
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        )
+def _print_result(
+    presenter: ExecutionResultPresenter,
+    result: ExecutionCoordinationResult,
+    original_text: str,
+) -> None:
+    print(_console_text(presenter.present(result, original_text=original_text)))
 
 
-def _execution_summary(execution_result: Any) -> dict[str, Any]:
-    summary = {
-        "status": getattr(execution_result, "status", None),
-        "success": getattr(execution_result, "success", None),
-        "execution_count": getattr(execution_result, "execution_count", None),
-    }
-
-    tool_name = getattr(execution_result, "tool_name", None)
-    if tool_name is not None:
-        summary["tool_name"] = tool_name
-
-    failed_step_id = getattr(execution_result, "failed_step_id", None)
-    if failed_step_id is not None:
-        summary["failed_step_id"] = failed_step_id
-
-    return summary
+def _console_text(value: object) -> str:
+    text = str(value)
+    encoding = sys.stdout.encoding or "utf-8"
+    return text.encode(encoding, errors="backslashreplace").decode(encoding)
 
 
 if __name__ == "__main__":
