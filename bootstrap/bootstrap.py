@@ -12,8 +12,14 @@ from core.model_manager import ModelManager
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
 from core.router import Router
+from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
+from core.hybrid_execution_planner import (
+    HybridExecutionPlanner,
+    PromptClientStructuredPlanProvider,
+    StructuredPlanProviderConfig,
+)
 from core.structured_execution import StructuredExecutionCoordinator
 
 from memory.conversation import ConversationMemory
@@ -344,6 +350,83 @@ class Bootstrap:
         )
 
     @staticmethod
+    def build_hybrid_execution_planner(
+        tool_registry: ToolRegistry | None = None,
+        schema_registry: ArgumentSchemaRegistry | None = None,
+        *,
+        hybrid_planning_enabled: bool | None = None,
+    ) -> HybridExecutionPlanner:
+        """Build the passive hybrid planner without invoking any provider."""
+        registry = tool_registry or Bootstrap.build_tool_registry()
+        return HybridExecutionPlanner(
+            tool_registry=registry,
+            schema_registry=schema_registry or Bootstrap.build_argument_schema_registry(),
+            hybrid_planning_enabled=(
+                _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", False)
+                if hybrid_planning_enabled is None
+                else hybrid_planning_enabled
+            ),
+        )
+
+    @staticmethod
+    def build_structured_plan_provider(
+        prompt_client: PromptClient | None = None,
+        model_manager: ModelManager | None = None,
+        *,
+        structured_plan_provider_enabled: bool | None = None,
+        structured_plan_model: str | None = None,
+        config: StructuredPlanProviderConfig | None = None,
+    ) -> PromptClientStructuredPlanProvider | None:
+        """Build the real PromptClient-backed provider only when explicitly enabled."""
+        if config is None:
+            enabled = (
+                _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
+                if structured_plan_provider_enabled is None
+                else structured_plan_provider_enabled
+            )
+            config = StructuredPlanProviderConfig(
+                enabled=enabled,
+                model_name=(
+                    structured_plan_model
+                    if structured_plan_model is not None
+                    else _read_text("ATLAS_STRUCTURED_PLAN_MODEL")
+                ),
+                max_objective_chars=_read_int(
+                    "ATLAS_STRUCTURED_PLAN_MAX_OBJECTIVE_CHARS",
+                    4000,
+                    minimum=1,
+                    maximum=20000,
+                ),
+                max_catalog_chars=_read_int(
+                    "ATLAS_STRUCTURED_PLAN_MAX_CATALOG_CHARS",
+                    50000,
+                    minimum=1000,
+                    maximum=200000,
+                ),
+                max_response_chars=_read_int(
+                    "ATLAS_STRUCTURED_PLAN_MAX_RESPONSE_CHARS",
+                    30000,
+                    minimum=1000,
+                    maximum=100000,
+                ),
+                max_steps=_read_int(
+                    "ATLAS_STRUCTURED_PLAN_MAX_STEPS",
+                    12,
+                    minimum=1,
+                    maximum=50,
+                ),
+            )
+
+        if not config.enabled:
+            return None
+
+        return PromptClientStructuredPlanProvider.from_config(
+            prompt_client or PromptClient(),
+            config,
+            model_manager=model_manager or ModelManager(),
+        )
+
+    @staticmethod
     def build_tool_proposal_builder(
         tool_registry: ToolRegistry | None = None,
         selector: ToolSelector | None = None,
@@ -479,17 +562,44 @@ class Bootstrap:
         tool_selector = Bootstrap.build_tool_selector(tool_registry)
         schema_registry = Bootstrap.build_argument_schema_registry()
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
+        model_manager = ModelManager()
+        prompt_client = PromptClient()
+        hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", False)
+        provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
+        semantic_catalog = None
+        hybrid_execution_planner = None
+        structured_plan_provider = None
+        multi_tool_planner = None
+        if hybrid_planning_enabled or provider_enabled:
+            semantic_catalog = Bootstrap.build_semantic_tool_catalog(
+                tool_registry,
+                tool_selector,
+                schema_registry,
+            )
+            multi_tool_planner = DeterministicMultiToolPlanner()
+            hybrid_execution_planner = Bootstrap.build_hybrid_execution_planner(
+                tool_registry,
+                schema_registry,
+                hybrid_planning_enabled=hybrid_planning_enabled,
+            )
+            structured_plan_provider = Bootstrap.build_structured_plan_provider(
+                prompt_client,
+                model_manager,
+                structured_plan_provider_enabled=provider_enabled,
+            )
+
         planner = Planner(
             tool_registry=tool_registry,
             tool_selector=tool_selector,
             schema_registry=schema_registry,
             argument_validator=argument_validator,
+            semantic_tool_catalog=semantic_catalog,
+            multi_tool_planner=multi_tool_planner,
+            hybrid_execution_planner=hybrid_execution_planner,
+            structured_plan_provider=structured_plan_provider,
         )
         router = Router()
-        model_manager = ModelManager()
         memory = ConversationMemory()
-
-        prompt_client = PromptClient()
 
         # -----------------------
         # Tools
@@ -713,6 +823,13 @@ def _read_bool(
         return default
 
     return raw in {"1", "true", "yes", "s", "si", "sí"}
+
+
+def _read_text(
+    name: str,
+) -> str | None:
+    raw = os.getenv(name, "").strip()
+    return raw or None
 
 
 def _assistant_wake_word_engine(
