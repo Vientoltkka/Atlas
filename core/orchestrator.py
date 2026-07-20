@@ -379,6 +379,9 @@ class AtlasOrchestrator:
                 return self._structured_execution_coordinator.cancel_pending()
             return None
 
+        if _is_structured_resume_intent(prompt):
+            return self._handle_resumable_structured_execution()
+
         if self._structured_execution_coordinator.has_pending_execution():
             pending_response = self._handle_pending_structured_execution(prompt)
             if pending_response is not None:
@@ -453,6 +456,65 @@ class AtlasOrchestrator:
             should_cancel=lambda: self._execution_cancel_requested,
             cancellation_reason="Ejecución cancelada por el usuario.",
         )
+
+    def _handle_resumable_structured_execution(self) -> StructuredExecutionResponse:
+        assert self._structured_execution_coordinator is not None
+
+        if not self._structured_plan_execution_enabled:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="structured_plan_execution_disabled",
+                message=(
+                    "Ejecucion estructurada desactivada. "
+                    "El plan no se ha ejecutado."
+                ),
+                error_code="STRUCTURED_PLAN_EXECUTION_DISABLED",
+            )
+
+        state = self._structured_execution_coordinator.resumable_execution()
+        if state is None:
+            return self._structured_execution_coordinator.resume_pending_execution()
+
+        total_steps = len(state.original_plan.ordered_steps)
+        next_index = _first_pending_step_index(
+            state.original_plan.ordered_steps,
+            state.pending_step_ids,
+        )
+        self._print_atlas("Reanudando ejecución...")
+        self._print_atlas(
+            f"Se conservarán {len(state.completed_step_ids)} pasos completados."
+        )
+        if next_index is not None:
+            self._print_atlas(
+                f"Continuando desde el paso {next_index} de {total_steps}..."
+            )
+        self._print_atlas("Ejecución reanudada.")
+
+        self._execution_progress_presenter.reset()
+        self._execution_cancel_requested = False
+        self._structured_execution_active = True
+        try:
+            response = self._structured_execution_coordinator.resume_pending_execution(
+                control=self._execution_control(),
+                on_execution_progress=self.on_execution_progress,
+            )
+        except KeyboardInterrupt:
+            self._execution_cancel_requested = True
+            return StructuredExecutionResponse(
+                handled=True,
+                status="cancelled",
+                message="Ejecución cancelada.",
+                error_code="EXECUTION_CANCELLED",
+            )
+        finally:
+            self._structured_execution_active = False
+
+        if response.status == "rejected":
+            self._print_atlas("No se puede reanudar la ejecución.")
+            if response.error_code == "VALIDATION_MISMATCH":
+                self._print_atlas("La ejecución pendiente ya no es válida.")
+
+        return response
 
     def _handle_pending_structured_execution(
         self,
@@ -953,6 +1015,35 @@ def _classify_structured_confirmation_intent(
     return "ambiguous"
 
 
+def _is_structured_resume_intent(
+    prompt: str,
+) -> bool:
+    normalized = _normalize_confirmation_text(prompt)
+    return normalized in {
+        "reanuda",
+        "continua",
+        "continuar ejecucion",
+        "sigue con el plan",
+        "retoma",
+        "retoma la ejecucion",
+    }
+
+
+def _first_pending_step_index(
+    steps,
+    pending_step_ids: tuple[str, ...],
+) -> int | None:
+    if not pending_step_ids:
+        return None
+
+    first_pending = pending_step_ids[0]
+    for index, step in enumerate(steps, start=1):
+        if step.id == first_pending:
+            return index
+
+    return None
+
+
 def _normalize_confirmation_text(
     text: str,
 ) -> str:
@@ -981,4 +1072,5 @@ def _with_message_prefix(
         confirmation_token=response.confirmation_token,
         error_code=response.error_code,
         error=response.error,
+        resumable_state=response.resumable_state,
     )

@@ -11,6 +11,7 @@ from core.execution_plan_executor import (
     ExecutionPlanExecutor,
     PlanExecutionStatus,
     PlanExecutionResult,
+    ResumableExecutionState,
     StepExecutionStatus,
     StepExecutionResult,
 )
@@ -133,6 +134,34 @@ def _manual_valid_result(
         requires_confirmation=requires_confirmation,
         status="valid",
         plan_signature=None,
+    )
+
+
+def _state_from_result(
+    *,
+    objective: str,
+    plan: ExecutionPlan,
+    validation: PlanValidationResult,
+    result: PlanExecutionResult,
+    confirmation_granted: bool = False,
+) -> ResumableExecutionState:
+    return ResumableExecutionState(
+        objective=objective,
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=tuple(result.completed_steps),
+        pending_step_ids=tuple(result.pending_steps),
+        failed_step_ids=tuple(result.failed_steps),
+        interrupted_step_id=result.current_step,
+        previous_results={
+            step.step_id: step.output
+            for step in result.step_results
+            if step.success and step.status == StepExecutionStatus.COMPLETED.value
+        },
+        resumable=result.resumable,
+        interruption_reason=result.interruption_reason,
+        confirmation_granted=confirmation_granted,
     )
 
 
@@ -866,6 +895,170 @@ def test_interruption_after_one_step_preserves_completed_and_pending_steps() -> 
         StepExecutionStatus.NOT_STARTED.value,
     ]
     assert calls == ["first_tool"]
+
+
+def test_resume_continues_from_first_pending_step_without_repeating_completed() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SpyTool("second_tool", calls)
+    third = SpyTool("third_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"content": {"$ref": "steps.step_1.output.content"}},
+            ),
+            _step("step_3", "third_tool", dependencies=("step_2",)),
+        )
+    )
+    validation = _validation(plan)
+    interrupted = ExecutionPlanExecutor(_registry(first, second, third)).execute(
+        plan,
+        validation,
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    state = _state_from_result(
+        objective="resume",
+        plan=plan,
+        validation=validation,
+        result=interrupted,
+    )
+
+    resumed = ExecutionPlanExecutor(_registry(first, second, third)).resume(state)
+
+    assert resumed.success is True
+    assert calls == ["first_tool", "second_tool", "third_tool"]
+    assert resumed.completed_steps == ["step_1", "step_2", "step_3"]
+    assert second.contexts[0].parameters == {"content": "alpha"}
+
+
+def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls)
+    plan = _plan((_step("step_1", "first_tool"), _step("step_2", "second_tool")))
+    validation = _validation(plan)
+    interrupted = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        validation,
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    state = _state_from_result(
+        objective="resume",
+        plan=replace(plan, goal="changed"),
+        validation=validation,
+        result=interrupted,
+    )
+
+    resumed = ExecutionPlanExecutor(_registry(first, second)).resume(state)
+
+    assert resumed.plan_status == PlanExecutionStatus.REJECTED.value
+    assert resumed.error_code == ExecutionErrorCode.VALIDATION_MISMATCH.value
+    assert calls == ["first_tool"]
+
+
+def test_resume_rejects_missing_previous_result() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+    validation = _validation(plan)
+    interrupted = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        validation,
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    state = replace(
+        _state_from_result(
+            objective="resume",
+            plan=plan,
+            validation=validation,
+            result=interrupted,
+        ),
+        previous_results={},
+    )
+
+    resumed = ExecutionPlanExecutor(_registry(first, second)).resume(state)
+
+    assert resumed.plan_status == PlanExecutionStatus.REJECTED.value
+    assert "missing" in (resumed.error or "")
+    assert calls == ["first_tool"]
+
+
+def test_cancelled_completed_and_failed_states_are_not_resumable() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"success": False, "error": "bad"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan((_step("step_1", "first_tool"), _step("step_2", "second_tool")))
+    validation = _validation(plan)
+    executor = ExecutionPlanExecutor(_registry(first, second))
+
+    cancelled = executor.execute(
+        plan,
+        validation,
+        control=ExecutionControl(should_cancel=lambda: True),
+    )
+    completed = ExecutionPlanExecutor(
+        _registry(SpyTool("first_tool", []), SpyTool("second_tool", []))
+    ).execute(plan, validation)
+    failed = executor.execute(plan, validation)
+
+    for result in (cancelled, completed, failed):
+        state = replace(
+            _state_from_result(
+                objective="resume",
+                plan=plan,
+                validation=validation,
+                result=result,
+            ),
+            resumable=result.resumable,
+        )
+        resumed = executor.resume(state)
+        assert resumed.plan_status == PlanExecutionStatus.REJECTED.value
+
+
+def test_resume_confirmation_required_blocks_without_consuming_state() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("write_file", calls)
+    plan = _plan(
+        (_step("step_1", "first_tool"), _step("step_2", "write_file")),
+        requires_confirmation=True,
+    )
+    validation = _validation(plan)
+    interrupted = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        validation,
+        confirmation_granted=True,
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    state = replace(
+        _state_from_result(
+            objective="resume",
+            plan=plan,
+            validation=validation,
+            result=interrupted,
+        ),
+        confirmation_granted=False,
+    )
+
+    blocked = ExecutionPlanExecutor(_registry(first, second)).resume(state)
+    resumed = ExecutionPlanExecutor(_registry(first, second)).resume(
+        state,
+        confirmation_granted=True,
+    )
+
+    assert blocked.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+    assert calls == ["first_tool", "write_file"]
+    assert resumed.success is True
 
 
 def test_controlled_cancellation_is_not_a_technical_failure() -> None:

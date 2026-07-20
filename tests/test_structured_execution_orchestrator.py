@@ -9,6 +9,7 @@ from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionPlanExecutor,
     ExecutionProgress,
+    ResumableExecutionState,
 )
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.hybrid_execution_planner import StructuredPlanningProgress
@@ -168,6 +169,35 @@ def _structured_parts(
         executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
     )
     return coordinator, registry, planner
+
+
+def _resumable_state_from_response(
+    response: StructuredExecutionResponse,
+    *,
+    objective: str,
+    confirmation_granted: bool = False,
+) -> ResumableExecutionState:
+    assert response.plan is not None
+    assert response.validation_result is not None
+    assert response.execution_result is not None
+    return ResumableExecutionState(
+        objective=objective,
+        original_plan=response.plan,
+        validation_result=response.validation_result,
+        validated_plan_signature=response.validation_result.plan_signature,
+        completed_step_ids=tuple(response.execution_result.completed_steps),
+        pending_step_ids=tuple(response.execution_result.pending_steps),
+        failed_step_ids=tuple(response.execution_result.failed_steps),
+        interrupted_step_id=response.execution_result.current_step,
+        previous_results={
+            step.step_id: step.output
+            for step in response.execution_result.step_results
+            if step.success and step.status == "completed"
+        },
+        resumable=response.execution_result.resumable,
+        interruption_reason=response.execution_result.interruption_reason,
+        confirmation_granted=confirmation_granted,
+    )
 
 
 def _orchestrator(
@@ -656,6 +686,92 @@ def test_interruption_returns_structured_status() -> None:
     assert response.execution_result.interrupted is True
 
 
+def test_interrupted_structured_execution_can_resume_without_regenerating_plan() -> None:
+    class PlannerCounting(Planner):
+        def __init__(self, wrapped: Planner) -> None:
+            self.wrapped = wrapped
+            self.calls = 0
+
+        def generate_execution_plan(self, prompt: str, **kwargs):
+            self.calls += 1
+            return self.wrapped.generate_execution_plan(prompt, **kwargs)
+
+    calls: list[str] = []
+    _, registry, planner = _structured_parts(calls)
+    counting = PlannerCounting(planner)
+    coordinator = StructuredExecutionCoordinator(
+        planner=counting,
+        validator=ExecutionPlanValidator(),
+        executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
+    )
+    pending = coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    assert pending.status == "confirmation_required"
+
+    interrupted = coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    resumed = coordinator.resume_pending_execution()
+
+    assert interrupted.status == "interrupted"
+    assert interrupted.execution_result is not None
+    assert interrupted.execution_result.resumable is True
+    assert coordinator.has_resumable_execution() is False
+    assert resumed.status == "completed"
+    assert counting.calls == 1
+    assert calls == ["read_file", "write_file"]
+    assert registry.get("write_file").contexts[0].parameters == {  # type: ignore[attr-defined]
+        "path": "resumen.txt",
+        "content": "contenido",
+    }
+
+
+def test_resumable_state_signature_change_blocks_resume_without_tools() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    interrupted = coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    assert coordinator.resumable_execution() is not None
+    changed_state = replace(
+        coordinator.resumable_execution(),  # type: ignore[arg-type]
+        original_plan=replace(interrupted.plan, goal="changed"),
+    )
+    coordinator._resumable_execution = changed_state  # type: ignore[attr-defined]
+
+    response = coordinator.resume_pending_execution()
+
+    assert response.status == "rejected"
+    assert response.error_code == "VALIDATION_MISMATCH"
+    assert calls == ["read_file"]
+
+
+def test_resume_confirmation_block_keeps_resumable_state_until_valid_confirmation() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    interrupted = coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    state = replace(
+        _resumable_state_from_response(
+            interrupted,
+            objective="Lee README.md y copia su contenido en resumen.txt",
+            confirmation_granted=False,
+        ),
+        confirmation_granted=False,
+    )
+    coordinator._resumable_execution = state  # type: ignore[attr-defined]
+
+    blocked = coordinator.resume_pending_execution()
+    resumed = coordinator.resume_pending_execution(confirmation_granted=True)
+
+    assert blocked.status == "blocked_confirmation"
+    assert blocked.requires_confirmation is True
+    assert resumed.status == "completed"
+    assert calls == ["read_file", "write_file"]
+
+
 def test_cancellation_returns_structured_status() -> None:
     coordinator, _, _ = _structured_parts([])
 
@@ -874,6 +990,102 @@ def test_show_pending_plan_and_risks_keeps_plan_pending_without_tools() -> None:
     assert "Riesgos:" in risks
     assert "Plan confirmado" in confirmed
     assert calls == ["read_file", "write_file"]
+
+
+def test_conversational_resume_phrases_are_accepted(capsys) -> None:
+    for phrase in ("reanuda", "continúa", "continuar ejecución", "sigue con el plan", "retoma", "retoma la ejecución"):
+        calls: list[str] = []
+        coordinator, _, _ = _structured_parts(calls)
+        orchestrator, _, _ = _orchestrator(
+            structured_execution_enabled=True,
+            structured_plan_execution_enabled=True,
+            coordinator=coordinator,
+        )
+        orchestrator.process_prompt(
+            "Lee README.md y copia su contenido en resumen.txt",
+            confirm=lambda _prompt: "",
+        )
+        orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
+        coordinator._resumable_execution = None  # type: ignore[attr-defined]
+        coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+        coordinator.confirm_pending(
+            control=ExecutionControl(should_stop=lambda: len(calls) >= 3),
+        )
+
+        response = orchestrator.process_prompt(phrase, confirm=lambda _prompt: "")
+
+        assert "Ejecucion estructurada completada" in response
+        assert calls[-1] == "write_file"
+
+    output = capsys.readouterr().out
+    assert "Reanudando ejecuci" in output
+    assert "Se conservar" in output
+    assert "Continuando desde el paso 2 de 2" in output
+
+
+def test_resume_without_resumable_execution_returns_safe_message() -> None:
+    coordinator, _, _ = _structured_parts([])
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+
+    assert response == "No hay ninguna ejecución pendiente que pueda reanudarse."
+    assert agent.calls == 0
+
+
+def test_new_request_does_not_resume_interrupted_execution_implicitly() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(control=ExecutionControl(should_stop=lambda: len(calls) >= 1))
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert "Ejecucion estructurada completada" in response
+    assert calls == ["read_file", "read_file"]
+    assert coordinator.has_resumable_execution() is True
+
+
+def test_double_resume_does_not_duplicate_tools() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(control=ExecutionControl(should_stop=lambda: len(calls) >= 1))
+
+    first = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+    second = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+
+    assert "Ejecucion estructurada completada" in first
+    assert second == "No hay ninguna ejecución pendiente que pueda reanudarse."
+    assert calls == ["read_file", "write_file"]
+
+
+def test_resume_request_during_execution_is_rejected() -> None:
+    coordinator, _, _ = _structured_parts([])
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+    orchestrator._structured_execution_active = True  # type: ignore[attr-defined]
+
+    response = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+
+    assert response == "Atlas está ejecutando un plan."
 
 
 def test_no_pending_confirmation_cancel_or_show_return_no_pending_message() -> None:

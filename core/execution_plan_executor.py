@@ -83,6 +83,25 @@ class ExecutionProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class ResumableExecutionState:
+    """In-memory state required to safely resume an interrupted execution."""
+
+    objective: str
+    original_plan: ExecutionPlan
+    validation_result: PlanValidationResult
+    validated_plan_signature: str | None
+    completed_step_ids: tuple[str, ...]
+    pending_step_ids: tuple[str, ...]
+    failed_step_ids: tuple[str, ...]
+    interrupted_step_id: str | None
+    previous_results: dict[str, object] = field(default_factory=dict)
+    resumable: bool = False
+    interruption_reason: str | None = None
+    confirmation_granted: bool = False
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class StepExecutionResult:
     """Structured execution outcome for one plan step."""
 
@@ -160,6 +179,63 @@ class ExecutionPlanExecutor:
         on_progress: Callable[[ExecutionProgress], None] | None = None,
     ) -> PlanExecutionResult:
         """Execute a previously validated plan in dependency order."""
+        return self._execute_from_checkpoint(
+            plan,
+            validation_result,
+            confirmation_granted=confirmation_granted,
+            control=control,
+            on_progress=on_progress,
+            initial_completed_step_ids=(),
+            initial_previous_results={},
+        )
+
+    def resume(
+        self,
+        state: ResumableExecutionState,
+        *,
+        confirmation_granted: bool = False,
+        control: ExecutionControl | None = None,
+        on_progress: Callable[[ExecutionProgress], None] | None = None,
+    ) -> PlanExecutionResult:
+        """Resume an interrupted execution from the first pending step."""
+        resume_error = self._resume_precondition_error(state)
+        if resume_error is not None:
+            return PlanExecutionResult(
+                plan_status=PlanExecutionStatus.REJECTED.value,
+                success=False,
+                error=resume_error,
+                requires_confirmation=state.validation_result.requires_confirmation,
+                failed=True,
+                resumable=False,
+                pending_steps=list(state.pending_step_ids),
+                current_step=state.interrupted_step_id,
+                failure_reason=resume_error,
+                error_code=self._precondition_error_code(resume_error),
+                metadata={"plan_signature": state.validated_plan_signature},
+            )
+
+        return self._execute_from_checkpoint(
+            state.original_plan,
+            state.validation_result,
+            confirmation_granted=confirmation_granted or state.confirmation_granted,
+            control=control,
+            on_progress=on_progress,
+            initial_completed_step_ids=state.completed_step_ids,
+            initial_previous_results=state.previous_results,
+        )
+
+    def _execute_from_checkpoint(
+        self,
+        plan: ExecutionPlan,
+        validation_result: PlanValidationResult | None,
+        *,
+        confirmation_granted: bool,
+        control: ExecutionControl | None,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        initial_completed_step_ids: tuple[str, ...],
+        initial_previous_results: dict[str, object],
+    ) -> PlanExecutionResult:
+        """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
         precondition_error = self._precondition_error(plan, validation_result)
         if precondition_error is not None:
@@ -209,8 +285,11 @@ class ExecutionPlanExecutor:
             for step in plan.ordered_steps
             if step.status == self._COMPLETED_STEP_STATUS
         ]
+        for step_id in initial_completed_step_ids:
+            if step_id not in completed_steps:
+                completed_steps.append(step_id)
         completed: set[str] = set(completed_steps)
-        previous_results: dict[str, object] = {}
+        previous_results: dict[str, object] = dict(initial_previous_results)
         step_results: list[StepExecutionResult] = []
         self._emit_progress(
             on_progress,
@@ -409,6 +488,9 @@ class ExecutionPlanExecutor:
         if "does not match" in message:
             return ExecutionErrorCode.VALIDATION_MISMATCH.value
 
+        if "signature" in message:
+            return ExecutionErrorCode.VALIDATION_MISMATCH.value
+
         if "serializable" in message:
             return ExecutionErrorCode.INVALID_PLAN.value
 
@@ -416,6 +498,64 @@ class ExecutionPlanExecutor:
             return ExecutionErrorCode.INVALID_PLAN.value
 
         return ExecutionErrorCode.INVALID_PLAN.value
+
+    def _resume_precondition_error(
+        self,
+        state: ResumableExecutionState,
+    ) -> str | None:
+        if not state.resumable:
+            return "Execution state is not resumable."
+
+        current_signature = self._safe_plan_signature(state.original_plan)
+        if current_signature is None:
+            return "Execution plan is not deterministically serializable."
+
+        if state.validated_plan_signature != current_signature:
+            return "Resumable execution signature does not match the execution plan."
+
+        if state.validation_result.plan_signature != state.validated_plan_signature:
+            return "PlanValidationResult does not match resumable execution signature."
+
+        if not state.validation_result.is_valid:
+            return "Cannot resume an invalid execution plan."
+
+        all_step_ids = tuple(step.id for step in state.original_plan.ordered_steps)
+        all_step_id_set = set(all_step_ids)
+        completed = set(state.completed_step_ids)
+        pending = set(state.pending_step_ids)
+        failed = set(state.failed_step_ids)
+
+        if not completed.issubset(all_step_id_set):
+            return "Resumable execution contains unknown completed steps."
+
+        if not pending.issubset(all_step_id_set):
+            return "Resumable execution contains unknown pending steps."
+
+        if failed:
+            return "Failed executions are not resumable."
+
+        if not pending:
+            return "Completed executions are not resumable."
+
+        if completed & pending:
+            return "Resumable execution has inconsistent completed and pending steps."
+
+        expected_pending = tuple(step_id for step_id in all_step_ids if step_id not in completed)
+        if tuple(state.pending_step_ids) != expected_pending:
+            return "Resumable execution pending steps are inconsistent."
+
+        if state.interrupted_step_id not in state.pending_step_ids:
+            return "Interrupted step is not pending."
+
+        for step in state.original_plan.ordered_steps:
+            if step.id not in completed:
+                continue
+            if step.tool in self._LOGICAL_TOOLS:
+                continue
+            if step.id not in state.previous_results:
+                return "Completed step result is missing."
+
+        return None
 
     def _control_result(
         self,

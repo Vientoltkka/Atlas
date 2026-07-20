@@ -11,6 +11,7 @@ from core.execution_plan_executor import (
     ExecutionPlanExecutor,
     PlanExecutionResult,
     PlanExecutionStatus,
+    ResumableExecutionState,
 )
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
@@ -34,6 +35,7 @@ class StructuredExecutionResponse:
     confirmation_token: str | None = None
     error_code: str | None = None
     error: str | None = None
+    resumable_state: ResumableExecutionState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,7 @@ class StructuredExecutionCoordinator:
         self._executor = executor
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
+        self._resumable_execution: ResumableExecutionState | None = None
 
     def handle(
         self,
@@ -157,7 +160,17 @@ class StructuredExecutionCoordinator:
             control=control,
             on_progress=on_execution_progress,
         )
-        return self._execution_response(generation.plan, validation, execution)
+        response = self._execution_response(
+            generation.plan,
+            validation,
+            execution,
+        )
+        self._sync_resumable_state(
+            response,
+            objective=objective,
+            confirmation_granted=confirmation_granted,
+        )
+        return response
 
     def confirm(
         self,
@@ -217,12 +230,18 @@ class StructuredExecutionCoordinator:
             on_progress=on_execution_progress,
         )
 
-        return self._execution_response(
+        response = self._execution_response(
             pending.plan,
             pending.validation_result,
             execution,
             confirmation_token=confirmation_token,
         )
+        self._sync_resumable_state(
+            response,
+            objective=pending.objective,
+            confirmation_granted=True,
+        )
+        return response
 
     def pending_plan(
         self,
@@ -243,6 +262,51 @@ class StructuredExecutionCoordinator:
 
         pending = self._pending_plans.get(self._active_confirmation_token)
         return pending.execution if pending is not None else None
+
+    def has_resumable_execution(self) -> bool:
+        """Return whether there is one valid interrupted execution to resume."""
+        return self._resumable_execution is not None
+
+    def resumable_execution(self) -> ResumableExecutionState | None:
+        """Return the current in-memory resumable execution state."""
+        return self._resumable_execution
+
+    def resume_pending_execution(
+        self,
+        *,
+        confirmation_granted: bool = False,
+        control: ExecutionControl | None = None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
+    ) -> StructuredExecutionResponse:
+        """Resume the current interrupted execution without regenerating a plan."""
+        state = self._resumable_execution
+        if state is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_resumable_execution",
+                message="No hay ninguna ejecución pendiente que pueda reanudarse.",
+                requires_confirmation=False,
+                error_code="NO_RESUMABLE_EXECUTION",
+                error="no resumable structured execution",
+            )
+
+        execution = self._executor.resume(
+            state,
+            confirmation_granted=confirmation_granted,
+            control=control,
+            on_progress=on_execution_progress,
+        )
+        response = self._execution_response(
+            state.original_plan,
+            state.validation_result,
+            execution,
+        )
+        self._sync_resumable_state(
+            response,
+            objective=state.objective,
+            confirmation_granted=confirmation_granted or state.confirmation_granted,
+        )
+        return response
 
     def confirm_pending(
         self,
@@ -406,6 +470,7 @@ class StructuredExecutionCoordinator:
                 execution_result=execution,
                 requires_confirmation=False,
                 confirmation_token=confirmation_token,
+                resumable_state=None,
             )
 
         return StructuredExecutionResponse(
@@ -419,6 +484,76 @@ class StructuredExecutionCoordinator:
             confirmation_token=confirmation_token,
             error_code=execution.error_code,
             error=execution.error,
+            resumable_state=None,
+        )
+
+    def _sync_resumable_state(
+        self,
+        response: StructuredExecutionResponse,
+        *,
+        objective: str,
+        confirmation_granted: bool,
+    ) -> None:
+        execution = response.execution_result
+        if (
+            execution is not None
+            and execution.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+        ):
+            return
+
+        if (
+            response.plan is None
+            or response.validation_result is None
+            or execution is None
+            or execution.plan_status != PlanExecutionStatus.INTERRUPTED.value
+            or not execution.resumable
+        ):
+            if (
+                self._resumable_execution is not None
+                and response.validation_result is not None
+                and response.validation_result.plan_signature
+                != self._resumable_execution.validated_plan_signature
+            ):
+                return
+            self._resumable_execution = None
+            return
+
+        state = self._build_resumable_state(
+            objective=objective,
+            plan=response.plan,
+            validation=response.validation_result,
+            execution=execution,
+            confirmation_granted=confirmation_granted,
+        )
+        self._resumable_execution = state
+
+    def _build_resumable_state(
+        self,
+        *,
+        objective: str,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        execution: PlanExecutionResult,
+        confirmation_granted: bool,
+    ) -> ResumableExecutionState:
+        previous_results = {
+            result.step_id: result.output
+            for result in execution.step_results
+            if result.success and result.status == "completed"
+        }
+        return ResumableExecutionState(
+            objective=objective,
+            original_plan=plan,
+            validation_result=validation,
+            validated_plan_signature=validation.plan_signature,
+            completed_step_ids=tuple(execution.completed_steps),
+            pending_step_ids=tuple(execution.pending_steps),
+            failed_step_ids=tuple(execution.failed_steps),
+            interrupted_step_id=execution.current_step,
+            previous_results=previous_results,
+            resumable=execution.resumable,
+            interruption_reason=execution.interruption_reason,
+            confirmation_granted=confirmation_granted,
         )
 
     def _planning_failed_message(
