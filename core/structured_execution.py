@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from core.execution_plan_executor import (
     ExecutionControl,
@@ -74,9 +75,16 @@ class StructuredExecutionCoordinator:
         *,
         confirmation_granted: bool = False,
         control: ExecutionControl | None = None,
+        on_planning_progress: Callable[[Any], None] | None = None,
+        planning_control: Any | None = None,
+        execute_after_planning: bool = True,
     ) -> StructuredExecutionResponse:
         """Generate, validate and optionally execute one structured plan."""
-        generation = self._planner.generate_execution_plan(objective)
+        generation = self._planner.generate_execution_plan(
+            objective,
+            on_planning_progress=on_planning_progress,
+            planning_control=planning_control,
+        )
 
         if not self._should_handle_generation(generation):
             return StructuredExecutionResponse(
@@ -89,6 +97,14 @@ class StructuredExecutionCoordinator:
             )
 
         if generation.plan is None:
+            if generation.error_code == "STRUCTURED_PLAN_PROVIDER_CANCELLED":
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="planning_cancelled",
+                    message="Planificación cancelada.",
+                    error_code=generation.error_code,
+                    error="; ".join(generation.errors) if generation.errors else None,
+                )
             return StructuredExecutionResponse(
                 handled=True,
                 status="planning_failed",
@@ -120,6 +136,16 @@ class StructuredExecutionCoordinator:
                 requires_confirmation=True,
                 confirmation_token=token,
                 error_code="CONFIRMATION_REQUIRED",
+            )
+
+        if not execute_after_planning:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="planned",
+                message=self._planned_message(generation.plan, validation),
+                plan=generation.plan,
+                validation_result=validation,
+                requires_confirmation=False,
             )
 
         execution = self._executor.execute(
@@ -293,7 +319,22 @@ class StructuredExecutionCoordinator:
         self,
         generation: PlanGenerationResult,
     ) -> bool:
-        if generation.error_code in {"PLAN_PARSE_ERROR", "INVALID_PLAN_RESPONSE", "UNKNOWN_TOOL"}:
+        if generation.error_code in {
+            "PLAN_PARSE_ERROR",
+            "INVALID_PLAN_RESPONSE",
+            "UNKNOWN_TOOL",
+            "INVALID_MODEL_RESPONSE",
+            "MODEL_PLAN_PARSE_ERROR",
+            "MODEL_PROPOSED_UNKNOWN_TOOL",
+            "MODEL_PLAN_VALIDATION_FAILED",
+            "MODEL_INSUFFICIENT_INFORMATION",
+            "UNSUPPORTED_OBJECTIVE",
+            "STRUCTURED_PLAN_PROVIDER_TIMEOUT",
+            "STRUCTURED_PLAN_EMPTY_RESPONSE",
+            "STRUCTURED_PLAN_PROVIDER_ERROR",
+            "STRUCTURED_PLAN_PROVIDER_CANCELLED",
+            "STRUCTURED_PLAN_RESPONSE_TOO_LARGE",
+        }:
             return True
 
         if not generation.success:
@@ -434,6 +475,25 @@ class StructuredExecutionCoordinator:
             "Responde 'confirmo' para ejecutarlo, 'cancela' para descartarlo "
             "o 'muestrame el plan' para revisarlo."
         )
+        return "\n".join(lines)
+
+    def _planned_message(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+    ) -> str:
+        lines = [
+            "Plan estructurado generado.",
+            f"Objetivo: {plan.goal}",
+            "Pasos:",
+        ]
+        for step in plan.ordered_steps:
+            lines.append(f"- {step.id}: {step.description} [{step.tool}]")
+        if plan.required_tools:
+            lines.append("Herramientas: " + ", ".join(plan.required_tools))
+        if validation.warnings:
+            lines.append("Advertencias: " + "; ".join(validation.warnings))
+        lines.append("La ejecucion no se realizo en esta fase.")
         return "\n".join(lines)
 
     def _completed_message(

@@ -232,6 +232,11 @@ class PromptClientStructuredPlanProvider:
             diagnostic_sink=diagnostic_sink,
         )
 
+    @property
+    def streaming_enabled(self) -> bool:
+        """Return whether this provider should use streaming generation."""
+        return self._streaming_enabled
+
     def generate_plan(
         self,
         objective: str,
@@ -1190,6 +1195,8 @@ class HybridExecutionPlanner:
         catalog: SemanticToolCatalog,
         selector: ToolSelector,
         plan_provider: StructuredPlanProvider | None,
+        on_planning_progress: Callable[[StructuredPlanningProgress], None] | None = None,
+        planning_control: Any | None = None,
     ) -> HybridPlanningResult:
         """Plan with deterministic routes first, then optional structured provider."""
         goal = objective.strip()
@@ -1263,7 +1270,16 @@ class HybridExecutionPlanner:
             catalog,
             max_tools=8,
         )
-        provider_result = plan_provider.generate_plan(goal, provider_catalog_json)
+        generate_plan_streaming = getattr(plan_provider, "generate_plan_streaming", None)
+        if getattr(plan_provider, "streaming_enabled", False) and callable(generate_plan_streaming):
+            provider_result = generate_plan_streaming(
+                goal,
+                provider_catalog_json,
+                on_progress=on_planning_progress,
+                control=planning_control,
+            )
+        else:
+            provider_result = plan_provider.generate_plan(goal, provider_catalog_json)
         parser = StructuredPlanParser(
             tool_registry=self._tool_registry,
             catalog=catalog,

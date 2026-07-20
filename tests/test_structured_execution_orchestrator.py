@@ -7,10 +7,11 @@ from typing import Any
 from agents.registry import AgentRegistry
 from core.execution_plan_executor import ExecutionControl, ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
+from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
 from core.router import Router
-from core.structured_execution import StructuredExecutionCoordinator
+from core.structured_execution import StructuredExecutionCoordinator, StructuredExecutionResponse
 from memory.conversation import ConversationMemory
 from tools.argument_schema import (
     ArgumentField,
@@ -83,6 +84,43 @@ class PlannerSpy:
         return SimpleNamespace(task="chat", objective=prompt)
 
 
+class CoordinatorFake:
+    def __init__(
+        self,
+        response: StructuredExecutionResponse | None = None,
+        *,
+        raise_keyboard_interrupt: bool = False,
+    ) -> None:
+        self.response = response or StructuredExecutionResponse(
+            handled=True,
+            status="planned",
+            message="Plan estructurado generado.",
+        )
+        self.raise_keyboard_interrupt = raise_keyboard_interrupt
+        self.calls: list[dict[str, Any]] = []
+        self.pending = False
+        self.on_handle = None
+
+    def has_pending_execution(self) -> bool:
+        return self.pending
+
+    def handle(self, objective: str, **kwargs):
+        self.calls.append({"objective": objective, **kwargs})
+        if self.on_handle is not None:
+            self.on_handle(kwargs)
+        if self.raise_keyboard_interrupt:
+            raise KeyboardInterrupt
+        return self.response
+
+    def cancel_pending(self):
+        self.pending = False
+        return StructuredExecutionResponse(
+            handled=True,
+            status="pending_execution_cancelled",
+            message="El plan pendiente fue cancelado. No se ejecuto ninguna herramienta.",
+        )
+
+
 def _structured_parts(
     calls: list[str] | None = None,
     *,
@@ -133,6 +171,8 @@ def _orchestrator(
     structured_execution_enabled: bool,
     coordinator: StructuredExecutionCoordinator | None,
     planner: Any | None = None,
+    structured_plan_streaming_enabled: bool = False,
+    structured_planning_progress_enabled: bool = True,
 ) -> tuple[AtlasOrchestrator, ChatAgentFake, PlannerSpy | None]:
     agent = ChatAgentFake()
     registry = AgentRegistry()
@@ -147,6 +187,8 @@ def _orchestrator(
         write_file=SimpleNamespace(execute=lambda *_args: "write legacy"),
         structured_execution_coordinator=coordinator,
         structured_execution_enabled=structured_execution_enabled,
+        structured_plan_streaming_enabled=structured_plan_streaming_enabled,
+        structured_planning_progress_enabled=structured_planning_progress_enabled,
     )
     return orchestrator, agent, planner_spy
 
@@ -185,6 +227,168 @@ def test_conversational_request_uses_previous_flow_without_executor() -> None:
     assert calls == []
 
 
+def test_streaming_flag_false_uses_non_streaming_structured_route() -> None:
+    coordinator = CoordinatorFake()
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=False,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response == "Plan estructurado generado."
+    assert coordinator.calls[0]["on_planning_progress"] is None
+    assert coordinator.calls[0]["execute_after_planning"] is True
+
+
+def test_streaming_flag_true_uses_streaming_structured_route_without_execution() -> None:
+    coordinator = CoordinatorFake()
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response == "Plan estructurado generado."
+    assert callable(coordinator.calls[0]["on_planning_progress"])
+    assert isinstance(coordinator.calls[0]["planning_control"], ExecutionControl)
+    assert coordinator.calls[0]["execute_after_planning"] is False
+
+
+def test_structured_execution_disabled_preserves_old_flow_even_if_streaming_flag_true() -> None:
+    coordinator = CoordinatorFake()
+    planner = PlannerSpy()
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=False,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+        planner=planner,
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response.startswith("fallback:model:chat:")
+    assert coordinator.calls == []
+    assert agent.calls == 1
+    assert planner.calls == ["Lee README.md"]
+
+
+def test_streaming_progress_messages_are_safe_and_ordered(capsys) -> None:
+    coordinator = CoordinatorFake()
+
+    def emit_progress(kwargs):
+        on_progress = kwargs["on_planning_progress"]
+        on_progress(StructuredPlanningProgress("preparing", 0, message='{"secret":"x"}'))
+        on_progress(StructuredPlanningProgress("waiting_model", 1))
+        on_progress(StructuredPlanningProgress("receiving", 2, received_chars=1, chunk_count=1, first_token_received=True, message="{"))
+        on_progress(StructuredPlanningProgress("completed", 3, received_chars=10, chunk_count=2, message="}"))
+
+    coordinator.on_handle = emit_progress
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    output = capsys.readouterr().out
+    assert "Preparando el plan" in output
+    assert "Esperando al modelo" in output
+    assert "El modelo ha comenzado a responder" in output
+    assert "Plan generado" in output
+    assert "secret" not in output
+    assert "{" not in output
+    assert output.index("Preparando el plan") < output.index("Esperando al modelo")
+    assert output.index("Esperando al modelo") < output.index("El modelo ha comenzado")
+
+
+def test_first_token_and_receiving_messages_are_not_repeated(monkeypatch, capsys) -> None:
+    times = iter([0.0, 0.0, 6.0, 12.0])
+    monkeypatch.setattr("core.orchestrator.time.monotonic", lambda: next(times))
+    coordinator = CoordinatorFake()
+
+    def emit_progress(kwargs):
+        on_progress = kwargs["on_planning_progress"]
+        on_progress(StructuredPlanningProgress("receiving", 1, received_chars=1, chunk_count=1, first_token_received=True))
+        on_progress(StructuredPlanningProgress("receiving", 6000, received_chars=2, chunk_count=2, first_token_received=True))
+        on_progress(StructuredPlanningProgress("receiving", 12000, received_chars=3, chunk_count=3, first_token_received=True))
+
+    coordinator.on_handle = emit_progress
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    output = capsys.readouterr().out
+    assert output.count("El modelo ha comenzado a responder") == 1
+    assert output.count("Generando el plan") == 1
+
+
+def test_progress_messages_can_be_disabled(capsys) -> None:
+    coordinator = CoordinatorFake()
+
+    def emit_progress(kwargs):
+        assert kwargs["on_planning_progress"] is None
+
+    coordinator.on_handle = emit_progress
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        structured_planning_progress_enabled=False,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert "Preparando el plan" not in capsys.readouterr().out
+
+
+def test_keyboard_interrupt_cancels_streaming_plan_and_keeps_orchestrator_usable() -> None:
+    coordinator = CoordinatorFake(raise_keyboard_interrupt=True)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    cancelled = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+    coordinator.raise_keyboard_interrupt = False
+    next_response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert cancelled == "Planificación cancelada."
+    assert next_response == "Plan estructurado generado."
+    assert len(coordinator.calls) == 2
+
+
+def test_second_request_during_streaming_is_rejected_without_new_plan() -> None:
+    coordinator = CoordinatorFake()
+    nested_responses: list[str] = []
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    def reenter(_kwargs):
+        nested_responses.append(
+            orchestrator.process_prompt("Lee otro archivo", confirm=lambda _prompt: "")
+        )
+
+    coordinator.on_handle = reenter
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response == "Plan estructurado generado."
+    assert nested_responses == ["Atlas está generando un plan."]
+    assert len(coordinator.calls) == 1
+
+
 def test_actionable_safe_request_uses_structured_pipeline() -> None:
     calls: list[str] = []
     coordinator, _, _ = _structured_parts(calls)
@@ -198,6 +402,24 @@ def test_actionable_safe_request_uses_structured_pipeline() -> None:
     assert "Ejecucion estructurada completada" in response
     assert agent.calls == 0
     assert calls == ["read_file"]
+
+
+def test_streaming_real_coordinator_generates_safe_plan_without_tool_execution() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert "Plan estructurado generado" in response
+    assert "La ejecucion no se realizo en esta fase" in response
+    assert "Ejecucion estructurada completada" not in response
+    assert agent.calls == 0
+    assert calls == []
 
 
 def test_dangerous_request_blocks_for_confirmation_without_tool_calls() -> None:
@@ -215,6 +437,25 @@ def test_dangerous_request_blocks_for_confirmation_without_tool_calls() -> None:
 
     assert "pendiente de confirmacion" in response
     assert "write_file" in response
+    assert calls == []
+
+
+def test_streaming_confirmation_keeps_pending_plan_without_tool_calls() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_streaming_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt(
+        "Lee README.md y copia su contenido en resumen.txt",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "pendiente de confirmacion" in response
+    assert coordinator.has_pending_execution()
     assert calls == []
 
 
@@ -644,9 +885,9 @@ def test_confirming_pending_plan_does_not_call_planner_again() -> None:
             self.wrapped = wrapped
             self.calls = 0
 
-        def generate_execution_plan(self, prompt: str):
+        def generate_execution_plan(self, prompt: str, **kwargs):
             self.calls += 1
-            return self.wrapped.generate_execution_plan(prompt)
+            return self.wrapped.generate_execution_plan(prompt, **kwargs)
 
     calls: list[str] = []
     _, registry, planner = _structured_parts(calls)

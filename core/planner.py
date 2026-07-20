@@ -227,6 +227,9 @@ class Planner:
     def generate_execution_plan(
         self,
         prompt: str,
+        *,
+        on_planning_progress: Callable[[Any], None] | None = None,
+        planning_control: Any | None = None,
     ) -> PlanGenerationResult:
         """Create a structured execution plan with generation diagnostics."""
         goal = prompt.strip()
@@ -249,7 +252,11 @@ class Planner:
         if multi_tool_result is not None:
             return multi_tool_result
 
-        hybrid_result = self._try_hybrid_plan(goal)
+        hybrid_result = self._try_hybrid_plan(
+            goal,
+            on_planning_progress=on_planning_progress,
+            planning_control=planning_control,
+        )
         if hybrid_result is not None:
             return hybrid_result
 
@@ -293,6 +300,9 @@ class Planner:
     def _try_hybrid_plan(
         self,
         goal: str,
+        *,
+        on_planning_progress: Callable[[Any], None] | None = None,
+        planning_control: Any | None = None,
     ) -> PlanGenerationResult | None:
         if (
             self._hybrid_execution_planner is None
@@ -307,6 +317,8 @@ class Planner:
             catalog=self._semantic_tool_catalog,
             selector=self._tool_selector,
             plan_provider=self._structured_plan_provider,
+            on_planning_progress=on_planning_progress,
+            planning_control=planning_control,
         )
         if not result.handled:
             return None

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+import time
 import unicodedata
 
 from agents.registry import AgentRegistry
@@ -12,6 +13,8 @@ from agents.registry import AgentRegistry
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
+from core.execution_plan_executor import ExecutionControl
+from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
     StructuredExecutionResponse,
@@ -50,6 +53,8 @@ class AtlasOrchestrator:
         permanent_assistant: PermanentAssistantUseCase | None = None,
         structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
         structured_execution_enabled: bool = False,
+        structured_plan_streaming_enabled: bool = False,
+        structured_planning_progress_enabled: bool = True,
         project_root: Path | None = None,
         now_provider=None,
     ) -> None:
@@ -70,6 +75,12 @@ class AtlasOrchestrator:
         self._permanent_assistant = permanent_assistant
         self._structured_execution_coordinator = structured_execution_coordinator
         self._structured_execution_enabled = structured_execution_enabled
+        self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
+        self._structured_planning_progress_enabled = structured_planning_progress_enabled
+        self._structured_planning_active = False
+        self._planning_progress_presenter = _PlanningProgressPresenter(
+            self._print_atlas
+        )
         self._project_root = project_root or Path(".")
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
 
@@ -305,6 +316,14 @@ class AtlasOrchestrator:
         if self._structured_execution_coordinator is None:
             return None
 
+        if self._structured_planning_active:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="planning_in_progress",
+                message="Atlas está generando un plan.",
+                error_code="STRUCTURED_PLANNING_IN_PROGRESS",
+            )
+
         if not self._structured_execution_enabled:
             if self._structured_execution_coordinator.has_pending_execution():
                 return self._structured_execution_coordinator.cancel_pending()
@@ -315,11 +334,42 @@ class AtlasOrchestrator:
             if pending_response is not None:
                 return pending_response
 
-        response = self._structured_execution_coordinator.handle(prompt)
+        use_streaming = self._structured_plan_streaming_enabled
+        on_progress = (
+            self.on_planning_progress
+            if use_streaming and self._structured_planning_progress_enabled
+            else None
+        )
+        self._planning_progress_presenter.reset()
+        self._structured_planning_active = True
+        try:
+            response = self._structured_execution_coordinator.handle(
+                prompt,
+                on_planning_progress=on_progress,
+                planning_control=ExecutionControl(),
+                execute_after_planning=not use_streaming,
+            )
+        except KeyboardInterrupt:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="planning_cancelled",
+                message="Planificación cancelada.",
+                error_code="STRUCTURED_PLAN_PROVIDER_CANCELLED",
+            )
+        finally:
+            self._structured_planning_active = False
+
         if not response.handled:
             return None
 
         return response
+
+    def on_planning_progress(
+        self,
+        progress: StructuredPlanningProgress,
+    ) -> None:
+        """Receive safe structured-planning progress metadata."""
+        self._planning_progress_presenter.handle(progress)
 
     def _handle_pending_structured_execution(
         self,
@@ -577,6 +627,74 @@ class AtlasOrchestrator:
             return tens[ten]
 
         return f"{tens[ten]} y {units[unit]}"
+
+
+class _PlanningProgressPresenter:
+    """Render safe structured-planning progress without exposing model content."""
+
+    _RECEIVING_INTERVAL_SECONDS = 5.0
+
+    def __init__(
+        self,
+        sink,
+    ) -> None:
+        self._sink = sink
+        self._printed_phases: set[str] = set()
+        self._first_token_printed = False
+        self._receiving_printed = False
+        self._last_receiving_printed_at = 0.0
+
+    def handle(
+        self,
+        progress: StructuredPlanningProgress,
+    ) -> None:
+        message = self._message_for(progress)
+        if message is None:
+            return
+        self._sink(message)
+
+    def reset(self) -> None:
+        self._printed_phases.clear()
+        self._first_token_printed = False
+        self._receiving_printed = False
+        self._last_receiving_printed_at = 0.0
+
+    def _message_for(
+        self,
+        progress: StructuredPlanningProgress,
+    ) -> str | None:
+        if progress.phase == "preparing":
+            return self._once("preparing", "Preparando el plan...")
+        if progress.phase == "waiting_model":
+            return self._once("waiting_model", "Esperando al modelo...")
+        if progress.phase == "receiving" and not self._first_token_printed:
+            self._first_token_printed = True
+            self._last_receiving_printed_at = time.monotonic()
+            return "El modelo ha comenzado a responder."
+        if progress.phase == "receiving":
+            now = time.monotonic()
+            if self._receiving_printed:
+                return None
+            if now - self._last_receiving_printed_at < self._RECEIVING_INTERVAL_SECONDS:
+                return None
+            self._receiving_printed = True
+            self._last_receiving_printed_at = now
+            return "Generando el plan..."
+        if progress.phase == "completed":
+            return self._once("completed", "Plan generado.")
+        if progress.phase == "failed":
+            return self._once("failed", "No se pudo generar el plan.")
+        return None
+
+    def _once(
+        self,
+        phase: str,
+        message: str,
+    ) -> str | None:
+        if phase in self._printed_phases:
+            return None
+        self._printed_phases.add(phase)
+        return message
 
 
 def _classify_structured_confirmation_intent(

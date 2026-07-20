@@ -1056,6 +1056,37 @@ def test_streaming_provider_does_not_parse_partial_json_before_final_result() ->
     assert result.plan.required_tools == ("read_file",)
 
 
+def test_hybrid_planner_uses_streaming_provider_when_enabled_and_forwards_progress() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json()
+    prompt_client = PromptClientFake("", stream_chunks=[response[:10], response[10:]])
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="planning-model",
+        streaming_enabled=True,
+    )
+    progress: list[StructuredPlanningProgress] = []
+
+    result = _hybrid(registry, schemas).plan(
+        "lee el archivo C:/Temp/a.txt",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=provider,
+        on_planning_progress=progress.append,
+    )
+
+    assert result.success is True
+    assert result.plan is not None
+    assert prompt_client.stream_messages_calls
+    assert prompt_client.ask_messages_calls == []
+    assert [event.phase for event in progress][:3] == [
+        "preparing",
+        "waiting_model",
+        "receiving",
+    ]
+
+
 def test_streaming_provider_throttles_receiving_progress() -> None:
     response = _model_json()
     provider = PromptClientStructuredPlanProvider(
@@ -1282,6 +1313,35 @@ def test_bootstrap_builds_provider_only_when_enabled_without_calling_model(monke
     assert provider is not None
     assert prompt_client.calls == []
     assert model_manager.calls == 0
+
+
+def test_bootstrap_injects_structured_plan_streaming_flag(monkeypatch) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_MODEL", "planning-model")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED", "true")
+
+    provider = Bootstrap.build_structured_plan_provider(
+        prompt_client=PromptClientFake(_model_json()),
+        model_manager=ModelManagerFake(["planning-model"]),
+    )
+
+    assert provider is not None
+    assert provider.streaming_enabled is True
+
+
+def test_bootstrap_invalid_streaming_bool_warns_and_uses_false(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_MODEL", "planning-model")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED", "si")
+
+    provider = Bootstrap.build_structured_plan_provider(
+        prompt_client=PromptClientFake(_model_json()),
+        model_manager=ModelManagerFake(["planning-model"]),
+    )
+
+    assert provider is not None
+    assert provider.streaming_enabled is False
+    assert "invalid boolean value" in capsys.readouterr().err
 
 
 def test_bootstrap_builds_provider_from_explicit_config() -> None:

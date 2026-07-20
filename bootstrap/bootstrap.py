@@ -1,6 +1,7 @@
 """Bootstrap module for Atlas."""
 
 import os
+import sys
 from pathlib import Path
 
 from agents.chat_agent import ChatAgent
@@ -575,6 +576,10 @@ class Bootstrap:
         prompt_client = PromptClient()
         hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", False)
         provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
+        structured_plan_streaming_enabled = _read_bool(
+            "ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED",
+            False,
+        )
         semantic_catalog = None
         hybrid_execution_planner = None
         structured_plan_provider = None
@@ -595,6 +600,7 @@ class Bootstrap:
                 prompt_client,
                 model_manager,
                 structured_plan_provider_enabled=provider_enabled,
+                structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             )
 
         planner = Planner(
@@ -799,7 +805,8 @@ class Bootstrap:
             voice_conversation=voice_conversation,
             permanent_assistant=permanent_assistant,
             structured_execution_coordinator=structured_execution,
-            structured_execution_enabled=False,
+            structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
+            structured_plan_streaming_enabled=structured_plan_streaming_enabled,
         )
 
 
@@ -831,7 +838,16 @@ def _read_bool(
     if not raw:
         return default
 
-    return raw in {"1", "true", "yes", "s", "si", "sí"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+
+    print(
+        f"Warning: invalid boolean value for {name}; using false.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _read_text(
