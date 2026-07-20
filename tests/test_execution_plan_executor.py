@@ -900,6 +900,12 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     assert result.trace.events[0].component == "ExecutionPlanExecutor"
     assert result.trace.events[0].details["step_id"] == "step_1"
     assert result.trace.events[1].duration_ms is not None
+    assert result.metrics is not None
+    assert result.metrics.execution_id == result.trace.execution_id
+    assert result.metrics.started_steps == 1
+    assert result.metrics.successful_steps == 1
+    assert result.metrics.failed_steps == 0
+    assert result.metrics.success_rate == 1.0
 
 
 def test_executor_trace_records_failed_step_event() -> None:
@@ -920,6 +926,10 @@ def test_executor_trace_records_failed_step_event() -> None:
         ExecutionErrorCode.TOOL_EXCEPTION.value
     )
     assert result.trace.events[1].duration_ms is not None
+    assert result.metrics is not None
+    assert result.metrics.execution_status == TraceStatus.FAILED.value
+    assert result.metrics.started_steps == 1
+    assert result.metrics.failed_steps == 1
 
 
 def test_executor_trace_marks_cancelled_execution() -> None:
@@ -936,6 +946,9 @@ def test_executor_trace_marks_cancelled_execution() -> None:
     assert result.trace is not None
     assert result.trace.status == TraceStatus.CANCELLED.value
     assert result.trace.events == []
+    assert result.metrics is not None
+    assert result.metrics.execution_status == TraceStatus.CANCELLED.value
+    assert result.metrics.total_events == 0
     assert calls == []
 
 
@@ -1227,6 +1240,12 @@ def test_resume_continues_from_first_pending_step_without_repeating_completed() 
     assert resumed.partial_state is not None
     assert resumed.partial_state.completed_step_ids == ("step_1", "step_2", "step_3")
     assert resumed.partial_state.pending_step_ids == ()
+    assert resumed.trace is not None
+    assert resumed.metrics is not None
+    assert resumed.metrics.execution_id == resumed.trace.execution_id
+    assert resumed.metrics.started_steps == 2
+    assert resumed.metrics.successful_steps == 2
+    assert resumed.metrics.failed_steps == 0
 
 
 def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:

@@ -8,6 +8,7 @@ from enum import Enum
 import time
 from typing import Any, Callable
 
+from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_retry import RetryPolicy
 from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
@@ -216,6 +217,7 @@ class PlanExecutionResult:
     metadata: dict[str, object] = field(default_factory=dict)
     partial_state: PartialExecutionState | None = None
     trace: ExecutionTrace | None = None
+    metrics: ExecutionMetrics | None = None
 
     @property
     def status(self) -> str:
@@ -1359,7 +1361,13 @@ class ExecutionPlanExecutor:
         active_trace = trace or result.trace or ExecutionTrace()
         if active_trace.finished_at is None:
             active_trace.finish(_trace_status_for_result(result))
-        return replace(result, partial_state=partial_state, trace=active_trace)
+        metrics = ExecutionMetricsCalculator().calculate(active_trace)
+        return replace(
+            result,
+            partial_state=partial_state,
+            trace=active_trace,
+            metrics=metrics,
+        )
 
     def _trace_step_event(
         self,
