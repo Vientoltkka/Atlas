@@ -24,6 +24,7 @@ from core.execution_plan_executor import (
     partial_execution_state_to_dict,
 )
 from core.execution_retry import RetryPolicy
+from core.execution_trace import TraceEventStatus, TraceStatus
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
@@ -876,6 +877,66 @@ def test_global_result_is_structured() -> None:
     assert isinstance(result, PlanExecutionResult)
     assert isinstance(result.step_results[0], StepExecutionResult)
     assert result.plan_status == "completed"
+
+
+def test_executor_creates_trace_and_records_successful_step_events() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.trace is not None
+    assert result.trace.status == TraceStatus.SUCCESS.value
+    assert result.trace.finished_at is not None
+    assert [event.action for event in result.trace.events] == [
+        "STEP_STARTED",
+        "STEP_FINISHED",
+    ]
+    assert [event.status for event in result.trace.events] == [
+        TraceEventStatus.STARTED.value,
+        TraceEventStatus.FINISHED.value,
+    ]
+    assert result.trace.events[0].component == "ExecutionPlanExecutor"
+    assert result.trace.events[0].details["step_id"] == "step_1"
+    assert result.trace.events[1].duration_ms is not None
+
+
+def test_executor_trace_records_failed_step_event() -> None:
+    calls: list[str] = []
+    tool = SpyTool("failing_tool", calls, fail=True)
+    plan = _plan((_step("step_1", "failing_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.trace is not None
+    assert result.trace.status == TraceStatus.FAILED.value
+    assert [event.action for event in result.trace.events] == [
+        "STEP_STARTED",
+        "STEP_FAILED",
+    ]
+    assert result.trace.events[1].status == TraceEventStatus.FAILED.value
+    assert result.trace.events[1].details["error_code"] == (
+        ExecutionErrorCode.TOOL_EXCEPTION.value
+    )
+    assert result.trace.events[1].duration_ms is not None
+
+
+def test_executor_trace_marks_cancelled_execution() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        control=ExecutionControl(should_cancel=lambda: True),
+    )
+
+    assert result.trace is not None
+    assert result.trace.status == TraceStatus.CANCELLED.value
+    assert result.trace.events == []
+    assert calls == []
 
 
 def test_partial_state_for_completed_plan_is_safe_and_ordered() -> None:

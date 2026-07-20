@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_retry import RetryPolicy
+from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
 from core.parameter_resolver import ParameterResolver
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.executor import ToolExecutor
@@ -214,6 +215,7 @@ class PlanExecutionResult:
     finished_at: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     partial_state: PartialExecutionState | None = None
+    trace: ExecutionTrace | None = None
 
     @property
     def status(self) -> str:
@@ -319,6 +321,7 @@ class ExecutionPlanExecutor:
     ) -> PlanExecutionResult:
         """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
+        trace = ExecutionTrace()
         precondition_error = self._precondition_error(plan, validation_result)
         if precondition_error is not None:
             return self._finalize_result(
@@ -340,6 +343,7 @@ class ExecutionPlanExecutor:
                 failure_reason=precondition_error,
                 metadata={"plan_signature": self._safe_plan_signature(plan)},
                 ),
+                trace=trace,
             )
 
         assert validation_result is not None
@@ -368,6 +372,7 @@ class ExecutionPlanExecutor:
                 error_code=ExecutionErrorCode.CONFIRMATION_REQUIRED.value,
                 metadata={"plan_signature": self._safe_plan_signature(plan)},
                 ),
+                trace=trace,
             )
 
         completed_steps = [
@@ -409,6 +414,7 @@ class ExecutionPlanExecutor:
                 on_progress=on_progress,
                 step_index=progress_index,
                 total_steps=total_steps,
+                trace=trace,
             )
             if control_result is not None:
                 return control_result
@@ -457,8 +463,18 @@ class ExecutionPlanExecutor:
                     error_code=ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value,
                     metadata={"plan_signature": validation_result.plan_signature},
                     ),
+                    trace=trace,
                 )
 
+            step_started = time.perf_counter()
+            self._trace_step_event(
+                trace,
+                action="STEP_STARTED",
+                status=TraceEventStatus.STARTED.value,
+                step=step,
+                step_index=progress_index,
+                total_steps=total_steps,
+            )
             self._emit_progress(
                 on_progress,
                 "step_started",
@@ -485,6 +501,21 @@ class ExecutionPlanExecutor:
                 ExecutionErrorCode.EXECUTION_CANCELLED.value,
                 ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
             }:
+                self._trace_step_event(
+                    trace,
+                    action="STEP_FAILED",
+                    status=TraceEventStatus.FAILED.value,
+                    step=step,
+                    step_index=progress_index,
+                    total_steps=total_steps,
+                    duration_ms=_elapsed_ms(step_started),
+                    details={
+                        "error_code": outcome.error_code,
+                        "error_message": _safe_error_message(
+                            outcome.interruption_reason or outcome.error
+                        ),
+                    },
+                )
                 return self._retry_stop_result(
                     plan=plan,
                     validation_result=validation_result,
@@ -492,10 +523,20 @@ class ExecutionPlanExecutor:
                     step_results=step_results,
                     outcome=outcome,
                     current_index=index,
+                    trace=trace,
                 )
             step_results.append(outcome)
 
             if outcome.success:
+                self._trace_step_event(
+                    trace,
+                    action="STEP_FINISHED",
+                    status=TraceEventStatus.FINISHED.value,
+                    step=step,
+                    step_index=progress_index,
+                    total_steps=total_steps,
+                    duration_ms=_elapsed_ms(step_started),
+                )
                 completed.add(step.id)
                 completed_steps.append(step.id)
                 previous_results[step.id] = outcome.output
@@ -509,6 +550,19 @@ class ExecutionPlanExecutor:
                 )
                 continue
 
+            self._trace_step_event(
+                trace,
+                action="STEP_FAILED",
+                status=TraceEventStatus.FAILED.value,
+                step=step,
+                step_index=progress_index,
+                total_steps=total_steps,
+                duration_ms=_elapsed_ms(step_started),
+                details={
+                    "error_code": outcome.error_code,
+                    "error_message": _safe_error_message(outcome.error),
+                },
+            )
             self._emit_progress(
                 on_progress,
                 "step_failed",
@@ -544,6 +598,7 @@ class ExecutionPlanExecutor:
                 error_code=outcome.error_code,
                 metadata={"plan_signature": validation_result.plan_signature},
                 ),
+                trace=trace,
             )
 
         self._emit_progress(
@@ -572,6 +627,7 @@ class ExecutionPlanExecutor:
             pending_steps=[],
             metadata={"plan_signature": validation_result.plan_signature},
             ),
+            trace=trace,
         )
 
     def _precondition_error(
@@ -698,6 +754,7 @@ class ExecutionPlanExecutor:
         on_progress: Callable[[ExecutionProgress], None] | None,
         step_index: int,
         total_steps: int,
+        trace: ExecutionTrace,
     ) -> PlanExecutionResult | None:
         if control is None:
             return None
@@ -736,8 +793,9 @@ class ExecutionPlanExecutor:
                     current_step=plan.ordered_steps[current_index].id,
                     failure_reason=message,
                     error_code=ExecutionErrorCode.INTERNAL_EXECUTOR_ERROR.value,
-                    metadata={"exception_type": type(error).__name__},
+                metadata={"exception_type": type(error).__name__},
                 ),
+                trace=trace,
             )
 
         if should_cancel:
@@ -757,6 +815,7 @@ class ExecutionPlanExecutor:
                 on_progress=on_progress,
                 step_index=step_index,
                 total_steps=total_steps,
+                trace=trace,
             )
 
         if should_stop:
@@ -776,6 +835,7 @@ class ExecutionPlanExecutor:
                 on_progress=on_progress,
                 step_index=step_index,
                 total_steps=total_steps,
+                trace=trace,
             )
 
         return None
@@ -798,6 +858,7 @@ class ExecutionPlanExecutor:
         on_progress: Callable[[ExecutionProgress], None] | None,
         step_index: int,
         total_steps: int,
+        trace: ExecutionTrace,
     ) -> PlanExecutionResult:
         current_step = plan.ordered_steps[current_index]
         self._emit_progress(
@@ -852,6 +913,7 @@ class ExecutionPlanExecutor:
                 error_code=error_code,
                 metadata={"plan_signature": validation_result.plan_signature},
             ),
+            trace=trace,
         )
 
     def _execute_step(
@@ -1235,6 +1297,7 @@ class ExecutionPlanExecutor:
         step_results: list[StepExecutionResult],
         outcome: StepExecutionResult,
         current_index: int,
+        trace: ExecutionTrace,
     ) -> PlanExecutionResult:
         cancelled = outcome.error_code == ExecutionErrorCode.EXECUTION_CANCELLED.value
         status = (
@@ -1275,6 +1338,7 @@ class ExecutionPlanExecutor:
             error_code=outcome.error_code,
             metadata={"plan_signature": validation_result.plan_signature},
             ),
+            trace=trace,
         )
 
     def _finalize_result(
@@ -1284,6 +1348,7 @@ class ExecutionPlanExecutor:
         result: PlanExecutionResult,
         *,
         objective: str | None = None,
+        trace: ExecutionTrace | None = None,
     ) -> PlanExecutionResult:
         partial_state = build_partial_execution_state(
             objective=objective or plan.goal,
@@ -1291,7 +1356,45 @@ class ExecutionPlanExecutor:
             validation_result=validation_result,
             execution=result,
         )
-        return replace(result, partial_state=partial_state)
+        active_trace = trace or result.trace or ExecutionTrace()
+        if active_trace.finished_at is None:
+            active_trace.finish(_trace_status_for_result(result))
+        return replace(result, partial_state=partial_state, trace=active_trace)
+
+    def _trace_step_event(
+        self,
+        trace: ExecutionTrace,
+        *,
+        action: str,
+        status: str,
+        step: ExecutionStep,
+        step_index: int,
+        total_steps: int,
+        duration_ms: int | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        event_details: dict[str, object] = {
+            "step_id": step.id,
+            "step_index": step_index,
+            "total_steps": total_steps,
+        }
+        if step.tool is not None:
+            event_details["tool_name"] = step.tool
+        if details:
+            event_details.update(
+                {
+                    key: value
+                    for key, value in details.items()
+                    if value is not None
+                }
+            )
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action=action,
+            status=status,
+            duration_ms=duration_ms,
+            details=event_details,
+        )
 
     def _emit_progress(
         self,
@@ -1507,6 +1610,22 @@ def build_partial_execution_state(
         retry_attempts=retry_attempts,
         metadata=_partial_metadata(execution),
     )
+
+
+def _trace_status_for_result(
+    result: PlanExecutionResult,
+) -> str:
+    if result.cancelled or result.plan_status == PlanExecutionStatus.CANCELLED.value:
+        return TraceStatus.CANCELLED.value
+    if result.success or result.plan_status == PlanExecutionStatus.COMPLETED.value:
+        return TraceStatus.SUCCESS.value
+    return TraceStatus.FAILED.value
+
+
+def _elapsed_ms(
+    started: float,
+) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
 
 
 def partial_execution_state_to_dict(
