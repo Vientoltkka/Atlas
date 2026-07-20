@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+import time
 from typing import Any, Callable
 
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -66,6 +67,19 @@ class ExecutionControl:
     interruption_reason: str = "Execution interrupted by control signal."
     cancellation_reason: str = "Execution cancelled by control signal."
     interruption_resumable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProgress:
+    """Safe progress metadata for plan execution."""
+
+    phase: str
+    step_id: str | None = None
+    step_index: int | None = None
+    total_steps: int | None = None
+    tool_name: str | None = None
+    elapsed_ms: int = 0
+    message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,8 +157,10 @@ class ExecutionPlanExecutor:
         *,
         confirmation_granted: bool = False,
         control: ExecutionControl | None = None,
+        on_progress: Callable[[ExecutionProgress], None] | None = None,
     ) -> PlanExecutionResult:
         """Execute a previously validated plan in dependency order."""
+        started = time.perf_counter()
         precondition_error = self._precondition_error(plan, validation_result)
         if precondition_error is not None:
             return PlanExecutionResult(
@@ -165,6 +181,13 @@ class ExecutionPlanExecutor:
             )
 
         assert validation_result is not None
+        total_steps = len(
+            [
+                step
+                for step in plan.ordered_steps
+                if step.status != self._COMPLETED_STEP_STATUS
+            ]
+        )
 
         if validation_result.requires_confirmation and not confirmation_granted:
             return PlanExecutionResult(
@@ -189,11 +212,18 @@ class ExecutionPlanExecutor:
         completed: set[str] = set(completed_steps)
         previous_results: dict[str, object] = {}
         step_results: list[StepExecutionResult] = []
+        self._emit_progress(
+            on_progress,
+            "preparing",
+            started,
+            total_steps=total_steps,
+        )
 
         for index, step in enumerate(plan.ordered_steps):
             if step.id in completed:
                 continue
 
+            progress_index = len(completed_steps) + 1
             control_result = self._control_result(
                 plan=plan,
                 validation_result=validation_result,
@@ -201,6 +231,10 @@ class ExecutionPlanExecutor:
                 completed_steps=completed_steps,
                 step_results=step_results,
                 current_index=index,
+                started=started,
+                on_progress=on_progress,
+                step_index=progress_index,
+                total_steps=total_steps,
             )
             if control_result is not None:
                 return control_result
@@ -247,6 +281,14 @@ class ExecutionPlanExecutor:
                     metadata={"plan_signature": validation_result.plan_signature},
                 )
 
+            self._emit_progress(
+                on_progress,
+                "step_started",
+                started,
+                step=step,
+                step_index=progress_index,
+                total_steps=total_steps,
+            )
             outcome = self._execute_step(
                 step,
                 plan_signature=validation_result.plan_signature,
@@ -258,8 +300,24 @@ class ExecutionPlanExecutor:
                 completed.add(step.id)
                 completed_steps.append(step.id)
                 previous_results[step.id] = outcome.output
+                self._emit_progress(
+                    on_progress,
+                    "step_completed",
+                    started,
+                    step=step,
+                    step_index=progress_index,
+                    total_steps=total_steps,
+                )
                 continue
 
+            self._emit_progress(
+                on_progress,
+                "step_failed",
+                started,
+                step=step,
+                step_index=progress_index,
+                total_steps=total_steps,
+            )
             return PlanExecutionResult(
                 plan_status=self._failure_status(completed_steps),
                 success=False,
@@ -285,6 +343,12 @@ class ExecutionPlanExecutor:
                 metadata={"plan_signature": validation_result.plan_signature},
             )
 
+        self._emit_progress(
+            on_progress,
+            "completed",
+            started,
+            total_steps=total_steps,
+        )
         return PlanExecutionResult(
             plan_status=PlanExecutionStatus.COMPLETED.value,
             success=True,
@@ -362,6 +426,10 @@ class ExecutionPlanExecutor:
         completed_steps: list[str],
         step_results: list[StepExecutionResult],
         current_index: int,
+        started: float,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        step_index: int,
+        total_steps: int,
     ) -> PlanExecutionResult | None:
         if control is None:
             return None
@@ -413,6 +481,10 @@ class ExecutionPlanExecutor:
                 error_code=ExecutionErrorCode.EXECUTION_CANCELLED.value,
                 resumable=False,
                 cancelled=True,
+                started=started,
+                on_progress=on_progress,
+                step_index=step_index,
+                total_steps=total_steps,
             )
 
         if should_stop:
@@ -428,6 +500,10 @@ class ExecutionPlanExecutor:
                 error_code=ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
                 resumable=control.interruption_resumable,
                 cancelled=False,
+                started=started,
+                on_progress=on_progress,
+                step_index=step_index,
+                total_steps=total_steps,
             )
 
         return None
@@ -446,8 +522,20 @@ class ExecutionPlanExecutor:
         error_code: str,
         resumable: bool,
         cancelled: bool,
+        started: float,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        step_index: int,
+        total_steps: int,
     ) -> PlanExecutionResult:
         current_step = plan.ordered_steps[current_index]
+        self._emit_progress(
+            on_progress,
+            "cancelled" if cancelled else "interrupted",
+            started,
+            step=current_step,
+            step_index=step_index,
+            total_steps=total_steps,
+        )
         pending_steps = self._remaining_step_ids(plan.ordered_steps, current_index)
         current_result = StepExecutionResult(
             step_id=current_step.id,
@@ -658,6 +746,30 @@ class ExecutionPlanExecutor:
             return PlanExecutionStatus.PARTIALLY_COMPLETED.value
 
         return PlanExecutionStatus.FAILED.value
+
+    def _emit_progress(
+        self,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        phase: str,
+        started: float,
+        *,
+        step: ExecutionStep | None = None,
+        step_index: int | None = None,
+        total_steps: int | None = None,
+    ) -> None:
+        if on_progress is None:
+            return
+
+        on_progress(
+            ExecutionProgress(
+                phase=phase,
+                step_id=step.id if step is not None else None,
+                step_index=step_index,
+                total_steps=total_steps,
+                tool_name=step.tool if step is not None else None,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
+        )
 
     def _failed_output_error(
         self,

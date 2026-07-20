@@ -5,7 +5,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from agents.registry import AgentRegistry
-from core.execution_plan_executor import ExecutionControl, ExecutionPlanExecutor
+from core.execution_plan_executor import (
+    ExecutionControl,
+    ExecutionPlanExecutor,
+    ExecutionProgress,
+)
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.orchestrator import AtlasOrchestrator
@@ -172,6 +176,7 @@ def _orchestrator(
     coordinator: StructuredExecutionCoordinator | None,
     planner: Any | None = None,
     structured_plan_streaming_enabled: bool = False,
+    structured_plan_execution_enabled: bool = False,
     structured_planning_progress_enabled: bool = True,
 ) -> tuple[AtlasOrchestrator, ChatAgentFake, PlannerSpy | None]:
     agent = ChatAgentFake()
@@ -188,6 +193,7 @@ def _orchestrator(
         structured_execution_coordinator=coordinator,
         structured_execution_enabled=structured_execution_enabled,
         structured_plan_streaming_enabled=structured_plan_streaming_enabled,
+        structured_plan_execution_enabled=structured_plan_execution_enabled,
         structured_planning_progress_enabled=structured_planning_progress_enabled,
     )
     return orchestrator, agent, planner_spy
@@ -239,6 +245,22 @@ def test_streaming_flag_false_uses_non_streaming_structured_route() -> None:
 
     assert response == "Plan estructurado generado."
     assert coordinator.calls[0]["on_planning_progress"] is None
+    assert coordinator.calls[0]["execute_after_planning"] is False
+
+
+def test_execution_flag_true_allows_structured_route_to_execute() -> None:
+    coordinator = CoordinatorFake()
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response == "Plan estructurado generado."
+    assert isinstance(coordinator.calls[0]["control"], ExecutionControl)
+    assert callable(coordinator.calls[0]["on_execution_progress"])
     assert coordinator.calls[0]["execute_after_planning"] is True
 
 
@@ -394,6 +416,7 @@ def test_actionable_safe_request_uses_structured_pipeline() -> None:
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, agent, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
 
@@ -402,6 +425,71 @@ def test_actionable_safe_request_uses_structured_pipeline() -> None:
     assert "Ejecucion estructurada completada" in response
     assert agent.calls == 0
     assert calls == ["read_file"]
+
+
+def test_execution_disabled_by_default_returns_plan_without_tool_execution() -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert "Plan estructurado generado" in response
+    assert "La ejecucion no se realizo" in response
+    assert agent.calls == 0
+    assert calls == []
+
+
+def test_execution_enabled_shows_safe_progress_messages(capsys) -> None:
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(calls)
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    output = capsys.readouterr().out
+    assert "Plan validado" in output
+    assert "Iniciando ejecuci" in output
+    assert "Preparando la ejecuci" in output
+    assert "Ejecutando paso 1 de 1" in output
+    assert "Paso 1 completado" in output
+    assert "Ejecuci" in output and "completada" in output
+    assert "plan_signature" not in output
+    assert "raw_response" not in output
+    assert "confirmation_token" not in output
+    assert "Ejecucion estructurada completada" in response
+    assert calls == ["read_file"]
+
+
+def test_second_request_during_execution_is_rejected_without_new_plan() -> None:
+    coordinator = CoordinatorFake()
+    nested_responses: list[str] = []
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    def reenter(kwargs):
+        on_execution_progress = kwargs["on_execution_progress"]
+        on_execution_progress(ExecutionProgress("preparing", total_steps=1))
+        nested_responses.append(
+            orchestrator.process_prompt("Lee otro archivo", confirm=lambda _prompt: "")
+        )
+
+    coordinator.on_handle = reenter
+    response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    assert response == "Plan estructurado generado."
+    assert nested_responses == ["Atlas está ejecutando un plan."]
+    assert len(coordinator.calls) == 1
 
 
 def test_streaming_real_coordinator_generates_safe_plan_without_tool_execution() -> None:
@@ -427,6 +515,7 @@ def test_dangerous_request_blocks_for_confirmation_without_tool_calls() -> None:
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, _, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
 
@@ -622,6 +711,7 @@ def test_orchestrator_confirmation_method_delegates_without_regeneration() -> No
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, _, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
     pending = coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
@@ -664,6 +754,7 @@ def test_conversational_confirmation_si_executes_pending_plan_once() -> None:
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, _, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
 
@@ -687,6 +778,7 @@ def test_conversational_confirmation_confirmo_and_adelante_are_accepted() -> Non
         coordinator, _, _ = _structured_parts(calls)
         orchestrator, _, _ = _orchestrator(
             structured_execution_enabled=True,
+            structured_plan_execution_enabled=True,
             coordinator=coordinator,
         )
 
@@ -706,6 +798,7 @@ def test_voice_like_confirmation_phrases_are_accepted() -> None:
         coordinator, _, _ = _structured_parts(calls)
         orchestrator, _, _ = _orchestrator(
             structured_execution_enabled=True,
+            structured_plan_execution_enabled=True,
             coordinator=coordinator,
         )
         orchestrator.process_voice_prompt(
@@ -743,6 +836,7 @@ def test_cancellation_invalidates_token_and_later_confirmation_has_no_pending_pl
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, _, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
     orchestrator.process_prompt(
@@ -763,6 +857,7 @@ def test_show_pending_plan_and_risks_keeps_plan_pending_without_tools() -> None:
     coordinator, _, _ = _structured_parts(calls)
     orchestrator, _, _ = _orchestrator(
         structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
         coordinator=coordinator,
     )
     orchestrator.process_prompt(

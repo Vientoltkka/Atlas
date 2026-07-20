@@ -13,7 +13,7 @@ from agents.registry import AgentRegistry
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
-from core.execution_plan_executor import ExecutionControl
+from core.execution_plan_executor import ExecutionControl, ExecutionProgress
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
@@ -54,6 +54,7 @@ class AtlasOrchestrator:
         structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
+        structured_plan_execution_enabled: bool = False,
         structured_planning_progress_enabled: bool = True,
         project_root: Path | None = None,
         now_provider=None,
@@ -76,9 +77,15 @@ class AtlasOrchestrator:
         self._structured_execution_coordinator = structured_execution_coordinator
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
+        self._structured_plan_execution_enabled = structured_plan_execution_enabled
         self._structured_planning_progress_enabled = structured_planning_progress_enabled
         self._structured_planning_active = False
+        self._structured_execution_active = False
+        self._execution_cancel_requested = False
         self._planning_progress_presenter = _PlanningProgressPresenter(
+            self._print_atlas
+        )
+        self._execution_progress_presenter = _ExecutionProgressPresenter(
             self._print_atlas
         )
         self._project_root = project_root or Path(".")
@@ -232,10 +239,45 @@ class AtlasOrchestrator:
                 error="structured execution coordinator is not configured",
             )
 
-        return self._structured_execution_coordinator.confirm(
-            confirmation_token,
-            objective=objective,
-        )
+        if not self._structured_plan_execution_enabled:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="structured_plan_execution_disabled",
+                message=(
+                    "Ejecucion estructurada desactivada. "
+                    "El plan no se ha ejecutado."
+                ),
+                error_code="STRUCTURED_PLAN_EXECUTION_DISABLED",
+            )
+
+        if self._structured_execution_active:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="execution_in_progress",
+                message="Atlas está ejecutando un plan.",
+                error_code="STRUCTURED_EXECUTION_IN_PROGRESS",
+            )
+
+        self._execution_progress_presenter.reset()
+        self._execution_cancel_requested = False
+        self._structured_execution_active = True
+        try:
+            return self._structured_execution_coordinator.confirm(
+                confirmation_token,
+                objective=objective,
+                control=self._execution_control(),
+                on_execution_progress=self.on_execution_progress,
+            )
+        except KeyboardInterrupt:
+            self._execution_cancel_requested = True
+            return StructuredExecutionResponse(
+                handled=True,
+                status="cancelled",
+                message="Ejecución cancelada.",
+                error_code="EXECUTION_CANCELLED",
+            )
+        finally:
+            self._structured_execution_active = False
 
     def _process_prompt_without_execution(
         self,
@@ -324,6 +366,14 @@ class AtlasOrchestrator:
                 error_code="STRUCTURED_PLANNING_IN_PROGRESS",
             )
 
+        if self._structured_execution_active:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="execution_in_progress",
+                message="Atlas está ejecutando un plan.",
+                error_code="STRUCTURED_EXECUTION_IN_PROGRESS",
+            )
+
         if not self._structured_execution_enabled:
             if self._structured_execution_coordinator.has_pending_execution():
                 return self._structured_execution_coordinator.cancel_pending()
@@ -335,21 +385,37 @@ class AtlasOrchestrator:
                 return pending_response
 
         use_streaming = self._structured_plan_streaming_enabled
+        execute_plan = self._structured_plan_execution_enabled
         on_progress = (
             self.on_planning_progress
             if use_streaming and self._structured_planning_progress_enabled
             else None
         )
         self._planning_progress_presenter.reset()
+        self._execution_progress_presenter.reset()
+        self._execution_cancel_requested = False
         self._structured_planning_active = True
+        self._structured_execution_active = execute_plan
         try:
             response = self._structured_execution_coordinator.handle(
                 prompt,
                 on_planning_progress=on_progress,
                 planning_control=ExecutionControl(),
-                execute_after_planning=not use_streaming,
+                control=self._execution_control() if execute_plan else None,
+                on_execution_progress=(
+                    self.on_execution_progress if execute_plan else None
+                ),
+                execute_after_planning=execute_plan,
             )
         except KeyboardInterrupt:
+            self._execution_cancel_requested = True
+            if execute_plan:
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="cancelled",
+                    message="Ejecución cancelada.",
+                    error_code="EXECUTION_CANCELLED",
+                )
             return StructuredExecutionResponse(
                 handled=True,
                 status="planning_cancelled",
@@ -358,6 +424,7 @@ class AtlasOrchestrator:
             )
         finally:
             self._structured_planning_active = False
+            self._structured_execution_active = False
 
         if not response.handled:
             return None
@@ -371,6 +438,22 @@ class AtlasOrchestrator:
         """Receive safe structured-planning progress metadata."""
         self._planning_progress_presenter.handle(progress)
 
+    def on_execution_progress(
+        self,
+        progress: ExecutionProgress,
+    ) -> None:
+        """Receive safe execution progress metadata."""
+        if progress.phase == "preparing":
+            self._structured_planning_active = False
+            self._structured_execution_active = True
+        self._execution_progress_presenter.handle(progress)
+
+    def _execution_control(self) -> ExecutionControl:
+        return ExecutionControl(
+            should_cancel=lambda: self._execution_cancel_requested,
+            cancellation_reason="Ejecución cancelada por el usuario.",
+        )
+
     def _handle_pending_structured_execution(
         self,
         prompt: str,
@@ -379,7 +462,35 @@ class AtlasOrchestrator:
 
         intent = _classify_structured_confirmation_intent(prompt)
         if intent == "confirm":
-            response = self._structured_execution_coordinator.confirm_pending()
+            if not self._structured_plan_execution_enabled:
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="structured_plan_execution_disabled",
+                    message=(
+                        "Ejecucion estructurada desactivada. "
+                        "El plan no se ha ejecutado."
+                    ),
+                    error_code="STRUCTURED_PLAN_EXECUTION_DISABLED",
+                )
+
+            self._execution_progress_presenter.reset()
+            self._execution_cancel_requested = False
+            self._structured_execution_active = True
+            try:
+                response = self._structured_execution_coordinator.confirm_pending(
+                    control=self._execution_control(),
+                    on_execution_progress=self.on_execution_progress,
+                )
+            except KeyboardInterrupt:
+                self._execution_cancel_requested = True
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="cancelled",
+                    message="Ejecución cancelada.",
+                    error_code="EXECUTION_CANCELLED",
+                )
+            finally:
+                self._structured_execution_active = False
             if response.status == "completed":
                 return _with_message_prefix(
                     response,
@@ -697,6 +808,95 @@ class _PlanningProgressPresenter:
         return message
 
 
+class _ExecutionProgressPresenter:
+    """Render safe execution progress without exposing tool internals."""
+
+    def __init__(
+        self,
+        sink,
+    ) -> None:
+        self._sink = sink
+        self._printed_start = False
+        self._printed_completed = False
+        self._printed_terminal: set[str] = set()
+
+    def reset(self) -> None:
+        self._printed_start = False
+        self._printed_completed = False
+        self._printed_terminal.clear()
+
+    def handle(
+        self,
+        progress: ExecutionProgress,
+    ) -> None:
+        for message in self._messages_for(progress):
+            self._sink(message)
+
+    def _messages_for(
+        self,
+        progress: ExecutionProgress,
+    ) -> tuple[str, ...]:
+        if progress.phase == "preparing":
+            if self._printed_start:
+                return ()
+            self._printed_start = True
+            return (
+                "Plan validado.",
+                "Iniciando ejecución...",
+                "Preparando la ejecución...",
+            )
+
+        if progress.phase == "step_started":
+            return (self._step_message(progress, "Ejecutando paso"),)
+
+        if progress.phase == "step_completed":
+            return (self._step_done_message(progress, "completado"),)
+
+        if progress.phase == "step_failed":
+            return (self._step_done_message(progress, "ha fallado"),)
+
+        if progress.phase == "interrupted":
+            return self._terminal_once("interrupted", "Ejecución interrumpida.")
+
+        if progress.phase == "cancelled":
+            return self._terminal_once("cancelled", "Ejecución cancelada.")
+
+        if progress.phase == "completed":
+            if self._printed_completed:
+                return ()
+            self._printed_completed = True
+            return ("Ejecución completada.",)
+
+        return ()
+
+    def _terminal_once(
+        self,
+        phase: str,
+        message: str,
+    ) -> tuple[str, ...]:
+        if phase in self._printed_terminal:
+            return ()
+        self._printed_terminal.add(phase)
+        return (message,)
+
+    def _step_message(
+        self,
+        progress: ExecutionProgress,
+        prefix: str,
+    ) -> str:
+        index = progress.step_index or 0
+        total = progress.total_steps or index
+        return f"{prefix} {index} de {total}..."
+
+    def _step_done_message(
+        self,
+        progress: ExecutionProgress,
+        suffix: str,
+    ) -> str:
+        index = progress.step_index or 0
+        return f"Paso {index} {suffix}."
+
+
 def _classify_structured_confirmation_intent(
     prompt: str,
 ) -> str:
@@ -722,6 +922,7 @@ def _classify_structured_confirmation_intent(
         "no",
         "cancela",
         "cancelar",
+        "deten el plan",
         "no lo hagas",
         "dejalo",
         "olvidalo",

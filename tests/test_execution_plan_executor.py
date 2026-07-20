@@ -7,6 +7,7 @@ from typing import Any
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionErrorCode,
+    ExecutionProgress,
     ExecutionPlanExecutor,
     PlanExecutionStatus,
     PlanExecutionResult,
@@ -189,6 +190,41 @@ def test_executes_multiple_steps_in_order() -> None:
     assert result.success is True
     assert result.completed_steps == ["step_1", "step_2"]
     assert calls == ["first_tool", "second_tool"]
+
+
+def test_execution_progress_is_typed_safe_and_ordered() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool", arguments={"secret": "hidden"}),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+    progress: list[ExecutionProgress] = []
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+        on_progress=progress.append,
+    )
+
+    assert result.success is True
+    assert [event.phase for event in progress] == [
+        "preparing",
+        "step_started",
+        "step_completed",
+        "step_started",
+        "step_completed",
+        "completed",
+    ]
+    assert progress[1].step_id == "step_1"
+    assert progress[1].step_index == 1
+    assert progress[1].total_steps == 2
+    assert progress[1].tool_name == "first_tool"
+    assert all(event.message is None for event in progress)
+    assert "hidden" not in repr(progress)
 
 
 def test_dependencies_are_respected() -> None:

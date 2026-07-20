@@ -580,6 +580,10 @@ class Bootstrap:
             "ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED",
             False,
         )
+        structured_plan_execution_enabled = _read_bool(
+            "ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED",
+            False,
+        )
         semantic_catalog = None
         hybrid_execution_planner = None
         structured_plan_provider = None
@@ -807,6 +811,7 @@ class Bootstrap:
             structured_execution_coordinator=structured_execution,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
+            structured_plan_execution_enabled=structured_plan_execution_enabled,
         )
 
 

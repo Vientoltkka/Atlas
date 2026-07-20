@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from core.execution_plan_executor import (
     ExecutionControl,
+    ExecutionProgress,
     ExecutionPlanExecutor,
     PlanExecutionResult,
     PlanExecutionStatus,
@@ -77,6 +78,7 @@ class StructuredExecutionCoordinator:
         control: ExecutionControl | None = None,
         on_planning_progress: Callable[[Any], None] | None = None,
         planning_control: Any | None = None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
         execute_after_planning: bool = True,
     ) -> StructuredExecutionResponse:
         """Generate, validate and optionally execute one structured plan."""
@@ -153,6 +155,7 @@ class StructuredExecutionCoordinator:
             validation,
             confirmation_granted=confirmation_granted,
             control=control,
+            on_progress=on_execution_progress,
         )
         return self._execution_response(generation.plan, validation, execution)
 
@@ -162,6 +165,7 @@ class StructuredExecutionCoordinator:
         *,
         objective: str | None = None,
         control: ExecutionControl | None = None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
     ) -> StructuredExecutionResponse:
         """Execute exactly the validated plan associated with a confirmation token."""
         pending_record = self._pending_plans.get(confirmation_token)
@@ -210,6 +214,7 @@ class StructuredExecutionCoordinator:
             pending.validation_result,
             confirmation_granted=True,
             control=control,
+            on_progress=on_execution_progress,
         )
 
         return self._execution_response(
@@ -243,6 +248,7 @@ class StructuredExecutionCoordinator:
         self,
         *,
         control: ExecutionControl | None = None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
     ) -> StructuredExecutionResponse:
         """Confirm the single active pending plan without exposing its token."""
         pending = self.pending_execution()
@@ -260,6 +266,7 @@ class StructuredExecutionCoordinator:
             pending.confirmation_token,
             objective=pending.objective,
             control=control,
+            on_execution_progress=on_execution_progress,
         )
 
     def cancel_pending(

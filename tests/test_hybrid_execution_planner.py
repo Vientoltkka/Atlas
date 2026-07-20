@@ -4,7 +4,7 @@ import inspect
 import json
 from typing import Any
 
-from bootstrap.bootstrap import Bootstrap
+from bootstrap.bootstrap import Bootstrap, _read_bool
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
@@ -1341,6 +1341,18 @@ def test_bootstrap_invalid_streaming_bool_warns_and_uses_false(monkeypatch, caps
 
     assert provider is not None
     assert provider.streaming_enabled is False
+    assert "invalid boolean value" in capsys.readouterr().err
+
+
+def test_bootstrap_structured_plan_execution_bool_is_robust(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", "on")
+    assert _read_bool("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", False) is True
+
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", "off")
+    assert _read_bool("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", True) is False
+
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", "si")
+    assert _read_bool("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", True) is False
     assert "invalid boolean value" in capsys.readouterr().err
 
 
