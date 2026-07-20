@@ -19,7 +19,7 @@ from tools.registry import ToolNotRegisteredError, ToolRegistry
 from tools.tool_context import ToolContext
 
 if TYPE_CHECKING:
-    from core.execution_history import ExecutionHistory
+    from core.execution_history import ExecutionHistorySink
 
 
 class PlanExecutionStatus(str, Enum):
@@ -241,7 +241,7 @@ class ExecutionPlanExecutor:
         tool_executor: ToolExecutor | None = None,
         parameter_resolver: ParameterResolver | None = None,
         retry_policy: RetryPolicy | None = None,
-        execution_history: ExecutionHistory | None = None,
+        execution_history: ExecutionHistorySink | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)

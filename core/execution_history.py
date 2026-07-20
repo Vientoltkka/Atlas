@@ -5,13 +5,23 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterator, Protocol
 
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_trace import ExecutionTrace, TraceStatus
 
 if TYPE_CHECKING:
     from core.execution_plan_executor import PlanExecutionResult
+
+
+class ExecutionHistorySink(Protocol):
+    """Minimal sink accepted by executors that record final execution results."""
+
+    def add(
+        self,
+        result: PlanExecutionResult,
+    ) -> "ExecutionHistoryEntry":
+        """Store one completed execution result and return its history entry."""
 
 
 @dataclass(frozen=True, slots=True)
