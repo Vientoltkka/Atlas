@@ -71,6 +71,18 @@ class ExecutionHistory:
             self._entries.popitem(last=False)
         return entry
 
+    def add_entry(
+        self,
+        entry: ExecutionHistoryEntry,
+    ) -> ExecutionHistoryEntry:
+        """Store a validated history entry without requiring a live execution result."""
+        if entry.execution_id in self._entries:
+            del self._entries[entry.execution_id]
+        self._entries[entry.execution_id] = entry
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+        return entry
+
     def latest(self) -> ExecutionHistoryEntry | None:
         """Return the most recently stored entry, if any."""
         if not self._entries:
