@@ -8,7 +8,7 @@ import json
 import re
 import time
 import unicodedata
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from core.deterministic_multi_tool_planner import (
     DeterministicMultiToolPlanner,
@@ -43,6 +43,7 @@ class HybridPlanningErrorCode(str, Enum):
     STRUCTURED_PLAN_PROVIDER_TIMEOUT = "STRUCTURED_PLAN_PROVIDER_TIMEOUT"
     STRUCTURED_PLAN_EMPTY_RESPONSE = "STRUCTURED_PLAN_EMPTY_RESPONSE"
     STRUCTURED_PLAN_PROVIDER_ERROR = "STRUCTURED_PLAN_PROVIDER_ERROR"
+    STRUCTURED_PLAN_PROVIDER_CANCELLED = "STRUCTURED_PLAN_PROVIDER_CANCELLED"
     STRUCTURED_PLAN_OBJECTIVE_TOO_LONG = "STRUCTURED_PLAN_OBJECTIVE_TOO_LONG"
     STRUCTURED_PLAN_CATALOG_TOO_LARGE = "STRUCTURED_PLAN_CATALOG_TOO_LARGE"
     STRUCTURED_PLAN_RESPONSE_TOO_LARGE = "STRUCTURED_PLAN_RESPONSE_TOO_LARGE"
@@ -81,6 +82,19 @@ class StructuredPlanProviderResult:
     catalog_total_tools: int | None = None
     catalog_sent_tools: int | None = None
     catalog_token_reduction: int | None = None
+    progress_events: tuple["StructuredPlanningProgress", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredPlanningProgress:
+    """Safe metadata-only progress event for structured planning."""
+
+    phase: str
+    elapsed_ms: int
+    received_chars: int = 0
+    chunk_count: int = 0
+    first_token_received: bool = False
+    message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +108,7 @@ class StructuredPlanProviderConfig:
     max_catalog_chars: int = 50000
     max_response_chars: int = 30000
     max_steps: int = 12
+    streaming_enabled: bool = False
 
 
 class StructuredPlanProvider(Protocol):
@@ -178,6 +193,7 @@ class PromptClientStructuredPlanProvider:
         max_catalog_chars: int = 50000,
         max_response_chars: int = 30000,
         max_steps: int = 12,
+        streaming_enabled: bool = False,
         diagnostic_sink: Any | None = None,
     ) -> None:
         self._prompt_client = prompt_client
@@ -189,6 +205,7 @@ class PromptClientStructuredPlanProvider:
         self._max_catalog_chars = max_catalog_chars
         self._max_response_chars = max_response_chars
         self._max_steps = max_steps
+        self._streaming_enabled = streaming_enabled
         self._diagnostic_sink = diagnostic_sink
 
     @classmethod
@@ -211,6 +228,7 @@ class PromptClientStructuredPlanProvider:
             max_catalog_chars=config.max_catalog_chars,
             max_response_chars=config.max_response_chars,
             max_steps=config.max_steps,
+            streaming_enabled=config.streaming_enabled,
             diagnostic_sink=diagnostic_sink,
         )
 
@@ -219,6 +237,9 @@ class PromptClientStructuredPlanProvider:
         objective: str,
         catalog_json: str,
     ) -> StructuredPlanProviderResult:
+        if self._streaming_enabled:
+            return self.generate_plan_streaming(objective, catalog_json)
+
         model_name = self._model_name.strip() if isinstance(self._model_name, str) else ""
         if not self._enabled:
             return self._error_result(
@@ -426,6 +447,323 @@ class PromptClientStructuredPlanProvider:
             catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
         )
 
+    def generate_plan_streaming(
+        self,
+        objective: str,
+        catalog_json: str,
+        *,
+        on_progress: Callable[[StructuredPlanningProgress], None] | None = None,
+        control: Any | None = None,
+        min_progress_interval_ms: int = 1000,
+    ) -> StructuredPlanProviderResult:
+        """Generate a structured plan response by streaming then returning final text."""
+        started = time.monotonic()
+        progress_events: list[StructuredPlanningProgress] = []
+        last_receiving_emit_ms = -min_progress_interval_ms
+        first_token_received = False
+
+        def emit_progress(
+            phase: str,
+            *,
+            received_chars: int = 0,
+            chunk_count: int = 0,
+            message: str = "",
+            force: bool = False,
+        ) -> None:
+            nonlocal last_receiving_emit_ms
+            elapsed_ms = _duration_ms(started)
+            if phase == "receiving" and not force:
+                if elapsed_ms - last_receiving_emit_ms < max(0, min_progress_interval_ms):
+                    return
+            if phase == "receiving":
+                last_receiving_emit_ms = elapsed_ms
+            event = StructuredPlanningProgress(
+                phase=phase,
+                elapsed_ms=elapsed_ms,
+                received_chars=received_chars,
+                chunk_count=chunk_count,
+                first_token_received=first_token_received,
+                message=message,
+            )
+            progress_events.append(event)
+            if on_progress is not None:
+                on_progress(event)
+
+        def with_progress(result: StructuredPlanProviderResult) -> StructuredPlanProviderResult:
+            return _result_with_progress(result, tuple(progress_events))
+
+        emit_progress("preparing", message="preparing structured planning context", force=True)
+        model_name = self._model_name.strip() if isinstance(self._model_name, str) else ""
+        if not self._enabled:
+            emit_progress("failed", message="structured plan provider is disabled", force=True)
+            return with_progress(
+                self._error_result(
+                    "Structured plan provider is disabled.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_DISABLED.value,
+                )
+            )
+        if not model_name:
+            emit_progress("failed", message="structured plan model is not configured", force=True)
+            return with_progress(
+                self._error_result(
+                    "Structured plan model is not configured.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_NOT_CONFIGURED.value,
+                )
+            )
+        if len(objective) > self._max_objective_chars:
+            emit_progress("failed", message="objective exceeds structured planning limit", force=True)
+            return with_progress(
+                self._error_result(
+                    "Objective exceeds structured planning limit.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_OBJECTIVE_TOO_LONG.value,
+                )
+            )
+        if len(catalog_json) > self._max_catalog_chars:
+            emit_progress("failed", message="catalog exceeds structured planning limit", force=True)
+            return with_progress(
+                self._error_result(
+                    "Semantic catalog exceeds structured planning limit.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_CATALOG_TOO_LARGE.value,
+                )
+            )
+        catalog_filter_metrics = _catalog_filter_metrics(catalog_json)
+
+        availability_error = self._model_availability_error(model_name)
+        if availability_error is not None:
+            emit_progress("failed", message="structured plan model is unavailable", force=True)
+            return with_progress(availability_error)
+
+        prompt_build_started = time.monotonic()
+        prompt = build_structured_planning_prompt(
+            objective,
+            catalog_json,
+            max_steps=self._max_steps,
+        )
+        prompt_build_ms = _duration_ms(prompt_build_started)
+        prompt_system_chars = len(prompt.messages[0]["content"]) if prompt.messages else 0
+        prompt_user_chars = len(prompt.messages[1]["content"]) if len(prompt.messages) > 1 else 0
+        prompt_size = prompt_system_chars + prompt_user_chars
+        prompt_approx_tokens = _approx_tokens(prompt_size)
+        message_roles = tuple(message["role"] for message in prompt.messages)
+        self._emit_diagnostic(
+            {
+                "event": "structured_planning_prompt_built",
+                "provider_name": self._provider_name,
+                "model_name": model_name,
+                "planning_prompt_version": prompt.version,
+                "prompt_system_chars": prompt_system_chars,
+                "prompt_user_chars": prompt_user_chars,
+                "prompt_total_chars": prompt_size,
+                "prompt_approx_tokens": prompt_approx_tokens,
+                "prompt_build_ms": prompt_build_ms,
+                "message_count": len(prompt.messages),
+                "message_roles": message_roles,
+                **catalog_filter_metrics,
+            }
+        )
+
+        emit_progress("waiting_model", message="waiting for model response", force=True)
+        response_started = time.monotonic()
+        chunks: list[str] = []
+        chunk_count = 0
+        received_chars = 0
+        try:
+            for chunk in self._stream_explicit_messages(model_name, list(prompt.messages)):
+                if _control_should_cancel(control):
+                    emit_progress("failed", received_chars=received_chars, chunk_count=chunk_count, message="stream cancelled", force=True)
+                    return with_progress(
+                        StructuredPlanProviderResult(
+                            success=False,
+                            error="Structured plan streaming was cancelled.",
+                            error_code=HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_CANCELLED.value,
+                            provider_name=self._provider_name,
+                            model_name=model_name,
+                            duration_ms=_duration_ms(response_started),
+                            prompt_size_chars=prompt_size,
+                            response_size_chars=received_chars,
+                            message_count=len(prompt.messages),
+                            message_roles=message_roles,
+                            planning_prompt_version=prompt.version,
+                            prompt_system_chars=prompt_system_chars,
+                            prompt_user_chars=prompt_user_chars,
+                            prompt_total_chars=prompt_size,
+                            prompt_approx_tokens=prompt_approx_tokens,
+                            prompt_build_ms=prompt_build_ms,
+                            ollama_response_ms=_duration_ms(response_started),
+                            catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                            catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                            catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+                        )
+                    )
+                if not isinstance(chunk, str):
+                    raise ValueError("Structured plan stream yielded a non-text chunk.")
+                if not chunk:
+                    continue
+                chunk_count += 1
+                chunks.append(chunk)
+                received_chars += len(chunk)
+                if not first_token_received:
+                    first_token_received = True
+                    emit_progress(
+                        "receiving",
+                        received_chars=received_chars,
+                        chunk_count=chunk_count,
+                        message="first token received",
+                        force=True,
+                    )
+                else:
+                    emit_progress(
+                        "receiving",
+                        received_chars=received_chars,
+                        chunk_count=chunk_count,
+                        message="receiving model response",
+                    )
+        except TimeoutError as error:
+            emit_progress("failed", received_chars=received_chars, chunk_count=chunk_count, message="stream timed out", force=True)
+            return with_progress(
+                StructuredPlanProviderResult(
+                    success=False,
+                    error=str(error),
+                    error_code=HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_TIMEOUT.value,
+                    provider_name=self._provider_name,
+                    model_name=model_name,
+                    duration_ms=_duration_ms(response_started),
+                    prompt_size_chars=prompt_size,
+                    response_size_chars=received_chars,
+                    message_count=len(prompt.messages),
+                    message_roles=message_roles,
+                    planning_prompt_version=prompt.version,
+                    prompt_system_chars=prompt_system_chars,
+                    prompt_user_chars=prompt_user_chars,
+                    prompt_total_chars=prompt_size,
+                    prompt_approx_tokens=prompt_approx_tokens,
+                    prompt_build_ms=prompt_build_ms,
+                    ollama_response_ms=_duration_ms(response_started),
+                    catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                    catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                    catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+                )
+            )
+        except Exception as error:
+            emit_progress("failed", received_chars=received_chars, chunk_count=chunk_count, message="stream failed", force=True)
+            return with_progress(
+                StructuredPlanProviderResult(
+                    success=False,
+                    error=str(error),
+                    error_code=HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_ERROR.value,
+                    provider_name=self._provider_name,
+                    model_name=model_name,
+                    duration_ms=_duration_ms(response_started),
+                    prompt_size_chars=prompt_size,
+                    response_size_chars=received_chars,
+                    message_count=len(prompt.messages),
+                    message_roles=message_roles,
+                    planning_prompt_version=prompt.version,
+                    prompt_system_chars=prompt_system_chars,
+                    prompt_user_chars=prompt_user_chars,
+                    prompt_total_chars=prompt_size,
+                    prompt_approx_tokens=prompt_approx_tokens,
+                    prompt_build_ms=prompt_build_ms,
+                    ollama_response_ms=_duration_ms(response_started),
+                    catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                    catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                    catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+                )
+            )
+
+        response = "".join(chunks)
+        response_ms = _duration_ms(response_started)
+        self._emit_diagnostic(
+            {
+                "event": "structured_planning_ollama_response",
+                "provider_name": self._provider_name,
+                "model_name": model_name,
+                "ollama_response_ms": response_ms,
+                "response_size_chars": len(response),
+                "response_is_string": True,
+                "streaming": True,
+                "stream_chunk_count": chunk_count,
+                **catalog_filter_metrics,
+            }
+        )
+        if not response:
+            emit_progress("failed", received_chars=0, chunk_count=chunk_count, message="stream returned empty response", force=True)
+            return with_progress(
+                StructuredPlanProviderResult(
+                    success=False,
+                    error="Structured plan provider returned an empty response.",
+                    error_code=HybridPlanningErrorCode.STRUCTURED_PLAN_EMPTY_RESPONSE.value,
+                    provider_name=self._provider_name,
+                    model_name=model_name,
+                    duration_ms=response_ms,
+                    prompt_size_chars=prompt_size,
+                    response_size_chars=0,
+                    message_count=len(prompt.messages),
+                    message_roles=message_roles,
+                    planning_prompt_version=prompt.version,
+                    prompt_system_chars=prompt_system_chars,
+                    prompt_user_chars=prompt_user_chars,
+                    prompt_total_chars=prompt_size,
+                    prompt_approx_tokens=prompt_approx_tokens,
+                    prompt_build_ms=prompt_build_ms,
+                    ollama_response_ms=response_ms,
+                    catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                    catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                    catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+                )
+            )
+        if len(response) > self._max_response_chars:
+            emit_progress("failed", received_chars=len(response), chunk_count=chunk_count, message="stream response exceeds configured limit", force=True)
+            return with_progress(
+                StructuredPlanProviderResult(
+                    success=False,
+                    error="Structured plan provider response exceeds configured limit.",
+                    error_code=HybridPlanningErrorCode.STRUCTURED_PLAN_RESPONSE_TOO_LARGE.value,
+                    provider_name=self._provider_name,
+                    model_name=model_name,
+                    duration_ms=response_ms,
+                    prompt_size_chars=prompt_size,
+                    response_size_chars=len(response),
+                    message_count=len(prompt.messages),
+                    message_roles=message_roles,
+                    planning_prompt_version=prompt.version,
+                    prompt_system_chars=prompt_system_chars,
+                    prompt_user_chars=prompt_user_chars,
+                    prompt_total_chars=prompt_size,
+                    prompt_approx_tokens=prompt_approx_tokens,
+                    prompt_build_ms=prompt_build_ms,
+                    ollama_response_ms=response_ms,
+                    catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                    catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                    catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+                )
+            )
+
+        emit_progress("completed", received_chars=len(response), chunk_count=chunk_count, message="response complete", force=True)
+        return with_progress(
+            StructuredPlanProviderResult(
+                success=True,
+                response_text=response,
+                provider_name=self._provider_name,
+                model_name=model_name,
+                duration_ms=response_ms,
+                prompt_size_chars=prompt_size,
+                response_size_chars=len(response),
+                message_count=len(prompt.messages),
+                message_roles=message_roles,
+                planning_prompt_version=prompt.version,
+                prompt_system_chars=prompt_system_chars,
+                prompt_user_chars=prompt_user_chars,
+                prompt_total_chars=prompt_size,
+                prompt_approx_tokens=prompt_approx_tokens,
+                prompt_build_ms=prompt_build_ms,
+                ollama_response_ms=response_ms,
+                catalog_total_tools=catalog_filter_metrics.get("catalog_total_tools"),
+                catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
+                catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
+            )
+        )
+
     def _emit_diagnostic(
         self,
         payload: Mapping[str, Any],
@@ -442,6 +780,16 @@ class PromptClientStructuredPlanProvider:
         if callable(ask_messages):
             return ask_messages(model=model_name, messages=messages)
         return self._prompt_client.ask(model=model_name, messages=messages)
+
+    def _stream_explicit_messages(
+        self,
+        model_name: str,
+        messages: list[dict[str, str]],
+    ):
+        stream_messages = getattr(self._prompt_client, "stream_messages", None)
+        if not callable(stream_messages):
+            raise RuntimeError("Prompt client does not support streaming messages.")
+        return stream_messages(model=model_name, messages=messages)
 
     def _model_availability_error(
         self,
@@ -1245,6 +1593,47 @@ def _provider_metrics(
         "catalog_sent_tools": provider_result.catalog_sent_tools,
         "catalog_token_reduction": provider_result.catalog_token_reduction,
     }
+
+
+def _result_with_progress(
+    result: StructuredPlanProviderResult,
+    progress_events: tuple[StructuredPlanningProgress, ...],
+) -> StructuredPlanProviderResult:
+    return StructuredPlanProviderResult(
+        success=result.success,
+        response_text=result.response_text,
+        error=result.error,
+        error_code=result.error_code,
+        provider_name=result.provider_name,
+        model_name=result.model_name,
+        duration_ms=result.duration_ms,
+        prompt_size_chars=result.prompt_size_chars,
+        response_size_chars=result.response_size_chars,
+        message_count=result.message_count,
+        message_roles=result.message_roles,
+        planning_prompt_version=result.planning_prompt_version,
+        prompt_system_chars=result.prompt_system_chars,
+        prompt_user_chars=result.prompt_user_chars,
+        prompt_total_chars=result.prompt_total_chars,
+        prompt_approx_tokens=result.prompt_approx_tokens,
+        prompt_build_ms=result.prompt_build_ms,
+        ollama_response_ms=result.ollama_response_ms,
+        catalog_total_tools=result.catalog_total_tools,
+        catalog_sent_tools=result.catalog_sent_tools,
+        catalog_token_reduction=result.catalog_token_reduction,
+        progress_events=progress_events,
+    )
+
+
+def _control_should_cancel(control: Any | None) -> bool:
+    if control is None:
+        return False
+    should_cancel = getattr(control, "should_cancel", None)
+    if callable(should_cancel):
+        return bool(should_cancel())
+    if callable(control):
+        return bool(control())
+    return False
 
 
 def _model_parse_error(

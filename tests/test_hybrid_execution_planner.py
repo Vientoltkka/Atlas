@@ -11,6 +11,7 @@ from core.execution_plan_validator import ExecutionPlanValidator
 from core.hybrid_execution_planner import (
     HybridExecutionPlanner,
     PromptClientStructuredPlanProvider,
+    StructuredPlanningProgress,
     StructuredPlanProviderConfig,
     StructuredPlanParser,
     StructuredPlanProviderResult,
@@ -85,11 +86,18 @@ class FakeStructuredProvider:
 
 
 class PromptClientFake:
-    def __init__(self, response: str | Exception) -> None:
+    def __init__(
+        self,
+        response: str | Exception,
+        *,
+        stream_chunks: list[str] | Exception | None = None,
+    ) -> None:
         self.response = response
+        self.stream_chunks = stream_chunks
         self.calls: list[tuple[str, list[dict[str, str]]]] = []
         self.ask_calls: list[tuple[str, list[dict[str, str]]]] = []
         self.ask_messages_calls: list[tuple[str, list[dict[str, str]]]] = []
+        self.stream_messages_calls: list[tuple[str, list[dict[str, str]]]] = []
 
     def ask(self, model: str, messages: list[dict[str, str]]) -> str:
         self.calls.append((model, messages))
@@ -97,6 +105,17 @@ class PromptClientFake:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+    def stream_messages(self, model: str, messages: list[dict[str, str]]):
+        self.calls.append((model, messages))
+        self.stream_messages_calls.append((model, messages))
+        if isinstance(self.stream_chunks, Exception):
+            raise self.stream_chunks
+        chunks = self.stream_chunks if self.stream_chunks is not None else [self.response]
+        for chunk in chunks:
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
 
     def ask_messages(self, model: str, messages: list[dict[str, str]]) -> str:
         self.calls.append((model, messages))
@@ -116,6 +135,18 @@ class ModelManagerFake:
         if isinstance(self.models, Exception):
             raise self.models
         return self.models
+
+
+class _StreamingProviderForTest:
+    def __init__(self, provider: PromptClientStructuredPlanProvider) -> None:
+        self._provider = provider
+
+    def generate_plan(
+        self,
+        objective: str,
+        catalog_json: str,
+    ) -> StructuredPlanProviderResult:
+        return self._provider.generate_plan_streaming(objective, catalog_json)
 
 
 def _descriptor(
@@ -963,6 +994,167 @@ def test_prompt_client_adapter_uses_exact_configured_model_and_single_call() -> 
     assert result.prompt_approx_tokens is not None
     assert result.prompt_build_ms is not None
     assert result.ollama_response_ms is not None
+
+
+def test_streaming_provider_accumulates_chunks_and_returns_complete_response_only() -> None:
+    response = _model_json()
+    prompt_client = PromptClientFake("", stream_chunks=[response[:10], response[10:40], response[40:]])
+    provider = PromptClientStructuredPlanProvider(prompt_client, model_name="planning-model")
+    progress: list[StructuredPlanningProgress] = []
+
+    result = provider.generate_plan_streaming(
+        "lee",
+        json.dumps({"tools": []}),
+        on_progress=progress.append,
+        min_progress_interval_ms=0,
+    )
+
+    assert result.success is True
+    assert result.response_text == response
+    assert prompt_client.stream_messages_calls
+    assert prompt_client.ask_messages_calls == []
+    assert [event.phase for event in progress][:3] == ["preparing", "waiting_model", "receiving"]
+    assert progress[-1].phase == "completed"
+    assert progress[2].first_token_received is True
+    assert result.progress_events == tuple(progress)
+
+
+def test_streaming_provider_and_non_streaming_provider_return_same_fake_response() -> None:
+    response = _model_json()
+    non_streaming = PromptClientStructuredPlanProvider(PromptClientFake(response), model_name="planning-model")
+    streaming = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=[response[:5], response[5:]]),
+        model_name="planning-model",
+    )
+
+    regular_result = non_streaming.generate_plan("lee", json.dumps({"tools": []}))
+    stream_result = streaming.generate_plan_streaming("lee", json.dumps({"tools": []}))
+
+    assert regular_result.success is True
+    assert stream_result.success is True
+    assert stream_result.response_text == regular_result.response_text
+
+
+def test_streaming_provider_does_not_parse_partial_json_before_final_result() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json()
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=[response[:1], response[1:20], response[20:]]),
+        model_name="planning-model",
+    )
+
+    result = _hybrid(registry, schemas).plan(
+        "lee el archivo C:/Temp/a.txt",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=_StreamingProviderForTest(provider),
+    )
+
+    assert result.success is True
+    assert result.plan is not None
+    assert result.plan.required_tools == ("read_file",)
+
+
+def test_streaming_provider_throttles_receiving_progress() -> None:
+    response = _model_json()
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=list(response)),
+        model_name="planning-model",
+    )
+    progress: list[StructuredPlanningProgress] = []
+
+    provider.generate_plan_streaming(
+        "lee",
+        json.dumps({"tools": []}),
+        on_progress=progress.append,
+        min_progress_interval_ms=10_000,
+    )
+
+    receiving = [event for event in progress if event.phase == "receiving"]
+    assert len(receiving) == 1
+    assert receiving[0].message == "first token received"
+
+
+def test_streaming_provider_empty_stream_is_structured_error() -> None:
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=[]),
+        model_name="planning-model",
+    )
+
+    result = provider.generate_plan_streaming("lee", json.dumps({"tools": []}))
+
+    assert result.success is False
+    assert result.error_code == "STRUCTURED_PLAN_EMPTY_RESPONSE"
+    assert result.progress_events[-1].phase == "failed"
+
+
+def test_streaming_provider_exception_before_first_token_is_structured_error() -> None:
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=RuntimeError("boom")),
+        model_name="planning-model",
+    )
+
+    result = provider.generate_plan_streaming("lee", json.dumps({"tools": []}))
+
+    assert result.success is False
+    assert result.error_code == "STRUCTURED_PLAN_PROVIDER_ERROR"
+    assert result.response_size_chars == 0
+    assert not any(event.first_token_received for event in result.progress_events)
+
+
+def test_streaming_provider_exception_mid_stream_does_not_return_partial_response() -> None:
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=["{", RuntimeError("midstream")]),
+        model_name="planning-model",
+    )
+
+    result = provider.generate_plan_streaming("lee", json.dumps({"tools": []}))
+
+    assert result.success is False
+    assert result.error_code == "STRUCTURED_PLAN_PROVIDER_ERROR"
+    assert result.response_text is None
+    assert result.response_size_chars == 1
+
+
+def test_streaming_provider_cancellation_returns_safe_structured_error() -> None:
+    provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=["{", "\"status\":\"plan\"}"]),
+        model_name="planning-model",
+    )
+    calls = {"count": 0}
+
+    def should_cancel() -> bool:
+        calls["count"] += 1
+        return calls["count"] > 1
+
+    result = provider.generate_plan_streaming(
+        "lee",
+        json.dumps({"tools": []}),
+        control=should_cancel,
+    )
+
+    assert result.success is False
+    assert result.error_code == "STRUCTURED_PLAN_PROVIDER_CANCELLED"
+    assert result.response_text is None
+    assert result.progress_events[-1].phase == "failed"
+
+
+def test_streaming_config_is_off_by_default_and_can_be_enabled() -> None:
+    default_provider = PromptClientStructuredPlanProvider(PromptClientFake(_model_json()), model_name="planning-model")
+    streaming_provider = PromptClientStructuredPlanProvider(
+        PromptClientFake("", stream_chunks=[_model_json()]),
+        model_name="planning-model",
+        streaming_enabled=True,
+    )
+
+    default_result = default_provider.generate_plan("lee", json.dumps({"tools": []}))
+    streaming_result = streaming_provider.generate_plan("lee", json.dumps({"tools": []}))
+
+    assert default_result.success is True
+    assert default_provider._streaming_enabled is False
+    assert streaming_result.success is True
+    assert streaming_result.progress_events
 
 
 def test_prompt_client_adapter_emits_temporary_performance_diagnostics() -> None:

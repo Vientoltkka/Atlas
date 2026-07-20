@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from scripts.test_structured_planning import (
+    _StreamingPlanProvider,
     _plan_diagnostic,
     _provider_performance_diagnostic,
+    _progress_printer,
     _raw_response_diagnostic,
 )
 
@@ -180,3 +182,38 @@ def test_provider_performance_diagnostic_reports_prompt_sizes_and_timings() -> N
         "catalog_sent_tools": 5,
         "catalog_token_reduction": 7000,
     }
+
+
+def test_streaming_script_adapter_uses_streaming_provider_path() -> None:
+    calls = []
+
+    class Provider:
+        def generate_plan_streaming(self, objective, catalog_json, *, on_progress=None):
+            calls.append((objective, catalog_json, on_progress))
+            return "ok"
+
+    def on_progress(_progress):
+        return None
+
+    adapter = _StreamingPlanProvider(Provider(), on_progress=on_progress)
+
+    assert adapter.generate_plan("lee", "{}") == "ok"
+    assert calls == [("lee", "{}", on_progress)]
+
+
+def test_progress_printer_emits_safe_metadata_without_partial_json(capsys) -> None:
+    printer = _progress_printer()
+    progress = SimpleNamespace(
+        phase="receiving",
+        elapsed_ms=800,
+        received_chars=20,
+        chunk_count=2,
+        first_token_received=True,
+        message='{"status":"partial"}',
+    )
+
+    printer(progress)
+
+    captured = capsys.readouterr()
+    assert "primer token recibido" in captured.err
+    assert "status" not in captured.err

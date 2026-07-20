@@ -9,10 +9,11 @@ import argparse
 import json
 import re
 import sys
+from typing import Any
 
 from bootstrap.bootstrap import Bootstrap
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
-from core.hybrid_execution_planner import HybridExecutionPlanner
+from core.hybrid_execution_planner import HybridExecutionPlanner, StructuredPlanningProgress
 
 
 def main() -> int:
@@ -34,6 +35,16 @@ def main() -> int:
         action="store_true",
         help="Print temporary provider prompt-size and timing diagnostics to stderr.",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Use opt-in provider streaming while still parsing only the complete response.",
+    )
+    parser.add_argument(
+        "--show-progress",
+        action="store_true",
+        help="Print safe provider progress metadata to stderr during streaming.",
+    )
     args = parser.parse_args()
 
     registry = Bootstrap.build_tool_registry()
@@ -49,8 +60,18 @@ def main() -> int:
             _print_provider_performance_diagnostic
             if args.diagnose_provider_performance
             else None
-        )
+        ),
+        structured_plan_streaming_enabled=False,
     )
+    if args.stream and provider is not None:
+        provider = _StreamingPlanProvider(
+            provider,
+            on_progress=(
+                _progress_printer()
+                if args.show_progress
+                else None
+            ),
+        )
 
     result = hybrid_planner.plan(
         args.objective,
@@ -247,6 +268,58 @@ def _print_provider_performance_diagnostic(payload: dict) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+class _StreamingPlanProvider:
+    """Script-only adapter that opts into streaming without changing the planner."""
+
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        on_progress=None,
+    ) -> None:
+        self._provider = provider
+        self._on_progress = on_progress
+
+    def generate_plan(
+        self,
+        objective: str,
+        catalog_json: str,
+    ):
+        return self._provider.generate_plan_streaming(
+            objective,
+            catalog_json,
+            on_progress=self._on_progress,
+        )
+
+
+def _progress_printer():
+    state = {
+        "first_token_printed": False,
+        "receiving_printed": False,
+    }
+
+    def print_progress(progress: StructuredPlanningProgress) -> None:
+        if progress.phase == "preparing":
+            line = "[planning] preparando contexto"
+        elif progress.phase == "waiting_model":
+            line = "[planning] esperando modelo"
+        elif progress.phase == "receiving" and not state["first_token_printed"]:
+            state["first_token_printed"] = True
+            line = f"[planning] primer token recibido en {progress.elapsed_ms / 1000:.1f} s"
+        elif progress.phase == "receiving" and not state["receiving_printed"]:
+            state["receiving_printed"] = True
+            line = "[planning] recibiendo respuesta..."
+        elif progress.phase == "completed":
+            line = f"[planning] respuesta completa en {progress.elapsed_ms / 1000:.1f} s"
+        elif progress.phase == "failed":
+            line = f"[planning] fallo: {progress.message}"
+        else:
+            return
+        print(line, file=sys.stderr, flush=True)
+
+    return print_progress
 
 
 def _clip(text: str, limit: int, *, from_end: bool) -> str:

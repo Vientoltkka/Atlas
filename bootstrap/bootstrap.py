@@ -375,6 +375,7 @@ class Bootstrap:
         *,
         structured_plan_provider_enabled: bool | None = None,
         structured_plan_model: str | None = None,
+        structured_plan_streaming_enabled: bool | None = None,
         config: StructuredPlanProviderConfig | None = None,
         diagnostic_sink=None,
     ) -> PromptClientStructuredPlanProvider | None:
@@ -416,6 +417,12 @@ class Bootstrap:
                     minimum=1,
                     maximum=50,
                 ),
+                streaming_enabled=_read_bool(
+                    "ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED",
+                    False,
+                )
+                if structured_plan_streaming_enabled is None
+                else structured_plan_streaming_enabled,
             )
 
         if not config.enabled:
