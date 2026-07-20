@@ -6,10 +6,10 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 import json
 import re
-from types import MappingProxyType
 from typing import Any, Callable, Mapping
 import unicodedata
 
+from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
 from tools.argument_schema import (
     ArgumentSchemaRegistry,
     ArgumentValidator,
@@ -41,14 +41,14 @@ class ExecutionStep:
     tool: str | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
-    arguments: Mapping[str, Any] = field(default_factory=dict)
+    arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "arguments",
-            MappingProxyType(dict(self.arguments)),
-        )
+        if isinstance(self.arguments, ExecutionArguments):
+            arguments = self.arguments
+        else:
+            arguments = ExecutionArguments(self.arguments)
+        object.__setattr__(self, "arguments", arguments)
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,6 +770,13 @@ class Planner:
             raise PlannerPayloadError(PlannerErrorCode.UNKNOWN_TOOL.value, f"Step '{step_id}' uses unknown tool '{tool}'.")
         if not isinstance(arguments, Mapping):
             raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' arguments must be an object.")
+        try:
+            normalized_arguments = ExecutionArguments(arguments)
+        except InvalidExecutionArgumentError as error:
+            raise PlannerPayloadError(
+                PlannerErrorCode.INVALID_PLAN_RESPONSE.value,
+                f"Step '{step_id}' arguments are invalid: {error}.",
+            ) from error
         if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
             raise PlannerPayloadError(PlannerErrorCode.INVALID_STEP_REFERENCE.value, f"Step '{step_id}' dependencies must be a list of strings.")
 
@@ -779,7 +786,7 @@ class Planner:
             tool=tool,
             dependencies=tuple(dependencies),
             status="pending",
-            arguments=dict(arguments),
+            arguments=normalized_arguments,
         )
 
     def _is_architecture_query(

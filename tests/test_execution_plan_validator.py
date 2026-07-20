@@ -299,11 +299,11 @@ def test_logical_step_rejects_arguments() -> None:
 
 
 def test_argument_keys_must_be_non_empty_strings() -> None:
+    step = _step("step_1")
+    object.__setattr__(step, "arguments", {"": "empty", 3: "number"})
     plan = replace(
         _valid_plan(),
-        ordered_steps=(
-            _step("step_1", arguments={"": "empty", 3: "number"}),
-        ),
+        ordered_steps=(step,),
         estimated_steps=1,
         required_tools=("read_file",),
         requires_confirmation=False,
@@ -317,9 +317,11 @@ def test_argument_keys_must_be_non_empty_strings() -> None:
 
 
 def test_non_serializable_argument_value_is_rejected() -> None:
+    step = _step("step_1")
+    object.__setattr__(step, "arguments", {"value": object()})
     plan = replace(
         _valid_plan(),
-        ordered_steps=(_step("step_1", arguments={"value": object()}),),
+        ordered_steps=(step,),
         estimated_steps=1,
         required_tools=("read_file",),
         requires_confirmation=False,
@@ -329,9 +331,7 @@ def test_non_serializable_argument_value_is_rejected() -> None:
 
     assert result.is_valid is False
     assert any(
-        error.startswith(
-            "Step 'step_1' arguments are not deterministically serializable:"
-        )
+        error.startswith("Step 'step_1' arguments are invalid:")
         for error in result.errors
     )
 

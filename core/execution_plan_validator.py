@@ -5,9 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import re
 from typing import Any, Mapping
 
+from core.execution_arguments import (
+    ExecutionArguments,
+    InvalidExecutionArgumentError,
+)
 from core.parameter_resolver import (
     BLOCKED_REFERENCE_PARTS,
     MAX_TEMPLATE_LENGTH,
@@ -185,11 +190,15 @@ class ExecutionPlanValidator:
                     )
 
             try:
-                _signature_safe_value(dict(step.arguments))
-            except TypeError as error:
-                errors.append(
-                    f"Step '{step.id}' arguments are not deterministically serializable: {error}."
+                validate_source = (
+                    step.arguments.as_dict()
+                    if isinstance(step.arguments, ExecutionArguments)
+                    else step.arguments
                 )
+                ExecutionArguments(validate_source)
+                _signature_safe_value(validate_source)
+            except (InvalidExecutionArgumentError, TypeError) as error:
+                errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
         self._validate_static_references(plan, errors)
 
@@ -525,7 +534,11 @@ def plan_signature(
                 "tool": step.tool,
                 "dependencies": list(step.dependencies),
                 "status": step.status,
-                "arguments": _signature_safe_value(dict(step.arguments)),
+                "arguments": _signature_safe_value(
+                    step.arguments.as_dict()
+                    if isinstance(step.arguments, ExecutionArguments)
+                    else dict(step.arguments)
+                ),
             }
             for step in plan.ordered_steps
         ],
@@ -547,7 +560,12 @@ def plan_signature(
 def _signature_safe_value(
     value: Any,
 ) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError("non-finite float values are not supported")
         return value
 
     if isinstance(value, list):

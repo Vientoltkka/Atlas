@@ -41,6 +41,19 @@ class FakeTool(BaseTool):
         return self._result
 
 
+class CapturingTool(FakeTool):
+    def __init__(self) -> None:
+        super().__init__("capture.tool")
+        self.context: ToolContext | None = None
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> Any:
+        self.context = context
+        return context.parameters
+
+
 def test_read_file_tool(tmp_path: Path):
 
     file = tmp_path / "demo.txt"
@@ -136,6 +149,21 @@ def test_tool_executor_uses_registry_missing_tool_error() -> None:
 
     with pytest.raises(ToolNotRegisteredError, match="Tool 'missing' is not registered"):
         executor.execute("missing", ToolContext())
+
+
+def test_tool_executor_accepts_arguments_without_explicit_context() -> None:
+    registry = ToolRegistry()
+    tool = CapturingTool()
+    registry.register(tool)
+
+    result = ToolExecutor(registry).execute(
+        "capture.tool",
+        arguments={"query": "is:unread"},
+    )
+
+    assert result == {"query": "is:unread"}
+    assert tool.context is not None
+    assert tool.context.parameters == {"query": "is:unread"}
 
 
 def test_bootstrap_tool_registry_lists_real_registered_tools() -> None:

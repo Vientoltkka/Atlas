@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from core.execution_arguments import ExecutionArguments
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionErrorCode,
@@ -687,6 +688,33 @@ def test_original_arguments_are_not_mutated_by_tool() -> None:
     assert nested == {"value": "original"}
 
 
+def test_nested_arguments_are_delivered_as_plain_structures_to_tool_context() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={
+                    "query": "is:unread",
+                    "filters": {"labels": ["inbox"]},
+                },
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert tool.contexts[0].parameters == {
+        "query": "is:unread",
+        "filters": {"labels": ["inbox"]},
+    }
+    assert isinstance(tool.contexts[0].parameters["filters"], dict)
+    assert isinstance(tool.contexts[0].parameters["filters"]["labels"], list)
+
+
 def test_argument_change_after_validation_is_rejected() -> None:
     calls: list[str] = []
     tool = SpyTool("safe_tool", calls)
@@ -727,6 +755,90 @@ def test_dangerous_step_with_arguments_still_requires_confirmation() -> None:
     assert result.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
     assert result.error_code == ExecutionErrorCode.CONFIRMATION_REQUIRED.value
     assert calls == []
+
+
+def test_execution_step_normalizes_mapping_arguments() -> None:
+    source = {"query": "is:unread", "nested": {"labels": ["inbox"]}}
+
+    step = _step("step_1", "safe_tool", arguments=source)
+    source["query"] = "changed"
+    source["nested"]["labels"].append("changed")  # type: ignore[index]
+
+    assert isinstance(step.arguments, ExecutionArguments)
+    assert step.arguments.as_dict() == {
+        "query": "is:unread",
+        "nested": {"labels": ["inbox"]},
+    }
+
+
+def test_plan_with_invalid_arguments_fails_validation() -> None:
+    step = _step("step_1", "safe_tool")
+    object.__setattr__(step, "arguments", {"bad": object()})
+    plan = _plan((step,))
+
+    validation = _validation(plan)
+
+    assert validation.is_valid is False
+    assert any("arguments are invalid" in error for error in validation.errors)
+
+
+def test_plan_signature_includes_arguments_and_is_key_order_stable() -> None:
+    first = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"query": "is:unread", "max_results": 20},
+            ),
+        )
+    )
+    same_different_order = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"max_results": 20, "query": "is:unread"},
+            ),
+        )
+    )
+    changed = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"query": "from:openai", "max_results": 20},
+            ),
+        )
+    )
+
+    first_signature = _validation(first).plan_signature
+
+    assert first_signature == _validation(same_different_order).plan_signature
+    assert first_signature != _validation(changed).plan_signature
+
+
+def test_trace_records_argument_metadata_without_argument_values() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"password": "secret-value", "query": "private email"},
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.trace is not None
+    started = result.trace.events[0].details
+    assert started["argument_count"] == 2
+    assert started["argument_keys"] == ["password", "query"]
+    assert started["has_arguments"] is True
+    assert "secret-value" not in repr(result.trace.events)
+    assert "private email" not in repr(result.trace.events)
 
 
 def test_missing_tool_fails_step_without_execution() -> None:

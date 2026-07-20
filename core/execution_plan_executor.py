@@ -8,6 +8,7 @@ from enum import Enum
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_retry import RetryPolicy
@@ -956,7 +957,7 @@ class ExecutionPlanExecutor:
         assert step.tool is not None
 
         resolution = self._parameter_resolver.resolve(
-            step.arguments,
+            _step_arguments_dict(step),
             previous_results,
         )
         if not resolution.success:
@@ -1393,6 +1394,9 @@ class ExecutionPlanExecutor:
             "step_id": step.id,
             "step_index": step_index,
             "total_steps": total_steps,
+            "argument_count": len(step.arguments),
+            "argument_keys": sorted(step.arguments.keys()),
+            "has_arguments": bool(step.arguments),
         }
         if step.tool is not None:
             event_details["tool_name"] = step.tool
@@ -1636,6 +1640,14 @@ def _trace_status_for_result(
     if result.success or result.plan_status == PlanExecutionStatus.COMPLETED.value:
         return TraceStatus.SUCCESS.value
     return TraceStatus.FAILED.value
+
+
+def _step_arguments_dict(
+    step: ExecutionStep,
+) -> dict[str, object]:
+    if isinstance(step.arguments, ExecutionArguments):
+        return step.arguments.as_dict()
+    return dict(step.arguments)
 
 
 def _elapsed_ms(
