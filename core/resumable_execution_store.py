@@ -67,6 +67,8 @@ class JsonResumableExecutionStore:
         "resumable",
         "interruption_reason",
         "confirmation_granted",
+        "retry_attempts",
+        "retry_history",
         "metadata",
     }
 
@@ -193,6 +195,11 @@ class JsonResumableExecutionStore:
             "resumable": state.resumable,
             "interruption_reason": state.interruption_reason,
             "confirmation_granted": state.confirmation_granted,
+            "retry_attempts": state.retry_attempts,
+            "retry_history": {
+                step_id: list(history)
+                for step_id, history in state.retry_history.items()
+            },
             "metadata": _safe_metadata(state.metadata, created_at=created_at),
         }
 
@@ -231,6 +238,8 @@ class JsonResumableExecutionStore:
         previous_results = _required_dict(payload, "previous_results")
         resumable = _required_bool(payload, "resumable")
         confirmation_granted = _required_bool(payload, "confirmation_granted")
+        retry_attempts = _int_mapping(payload, "retry_attempts", default={})
+        retry_history = _retry_history(payload, "retry_history", default={})
         metadata = _required_dict(payload, "metadata")
 
         if not resumable:
@@ -274,6 +283,8 @@ class JsonResumableExecutionStore:
             resumable=resumable,
             interruption_reason=_optional_str(payload, "interruption_reason"),
             confirmation_granted=confirmation_granted,
+            retry_attempts=retry_attempts,
+            retry_history=retry_history,
             metadata=metadata,
         )
 
@@ -540,6 +551,67 @@ def _str_tuple(
             f"Execution state field '{key}' must be a list of strings.",
         )
     return tuple(value)
+
+
+def _int_mapping(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: dict[str, int],
+) -> dict[str, int]:
+    value = payload.get(key, default)
+    if not isinstance(value, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be an object.",
+        )
+    result: dict[str, int] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str) or not isinstance(item_value, int):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                f"Execution state field '{key}' must map strings to integers.",
+            )
+        result[item_key] = item_value
+    return result
+
+
+def _retry_history(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: dict[str, tuple[dict[str, object], ...]],
+) -> dict[str, tuple[dict[str, object], ...]]:
+    value = payload.get(key, default)
+    if not isinstance(value, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be an object.",
+        )
+    result: dict[str, tuple[dict[str, object], ...]] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str) or not isinstance(item_value, list):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                f"Execution state field '{key}' must map strings to lists.",
+            )
+        entries: list[dict[str, object]] = []
+        for entry in item_value:
+            if not isinstance(entry, dict):
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    f"Execution state field '{key}' has invalid entries.",
+                )
+            safe_entry = {
+                entry_key: entry_value
+                for entry_key, entry_value in entry.items()
+                if isinstance(entry_key, str)
+                and entry_key in {"attempt_number", "error_code", "error"}
+                and _is_json_safe(entry_value)
+            }
+            entries.append(safe_entry)
+        result[item_key] = tuple(entries)
+    return result
 
 
 def _utc_now() -> str:

@@ -632,6 +632,20 @@ class StructuredExecutionCoordinator:
             for result in execution.step_results
             if result.success and result.status == "completed"
         }
+        retry_attempts = {
+            result.step_id: int(result.metadata["attempt_number"])
+            for result in execution.step_results
+            if isinstance(result.metadata.get("attempt_number"), int)
+        }
+        retry_history = {
+            result.step_id: tuple(
+                entry
+                for entry in result.metadata.get("retry_history", ())
+                if isinstance(entry, dict)
+            )
+            for result in execution.step_results
+            if result.metadata.get("retry_history")
+        }
         return ResumableExecutionState(
             objective=objective,
             original_plan=plan,
@@ -645,6 +659,8 @@ class StructuredExecutionCoordinator:
             resumable=execution.resumable,
             interruption_reason=execution.interruption_reason,
             confirmation_granted=confirmation_granted,
+            retry_attempts=retry_attempts,
+            retry_history=retry_history,
         )
 
     def _save_resumable_state(

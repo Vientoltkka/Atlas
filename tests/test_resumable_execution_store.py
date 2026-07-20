@@ -57,6 +57,16 @@ def _state() -> ResumableExecutionState:
         resumable=True,
         interruption_reason="pause",
         confirmation_granted=True,
+        retry_attempts={"step_2": 1},
+        retry_history={
+            "step_2": (
+                {
+                    "attempt_number": 1,
+                    "error_code": "TEMPORARY_UNAVAILABLE",
+                    "error": "temporary unavailable",
+                },
+            )
+        },
     )
 
 
@@ -75,6 +85,8 @@ def test_json_store_saves_and_loads_valid_state(tmp_path) -> None:
     assert loaded.objective == "resume"  # type: ignore[union-attr]
     assert loaded.completed_step_ids == ("step_1",)  # type: ignore[union-attr]
     assert loaded.previous_results == {"step_1": {"content": "alpha"}}  # type: ignore[union-attr]
+    assert loaded.retry_attempts == {"step_2": 1}  # type: ignore[union-attr]
+    assert loaded.retry_history["step_2"][0]["error_code"] == "TEMPORARY_UNAVAILABLE"  # type: ignore[union-attr]
     assert store.exists() is True
 
 

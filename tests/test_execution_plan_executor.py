@@ -15,6 +15,7 @@ from core.execution_plan_executor import (
     StepExecutionStatus,
     StepExecutionResult,
 )
+from core.execution_retry import RetryPolicy
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
@@ -59,6 +60,45 @@ class SpyTool(BaseTool):
             raise RuntimeError(f"{self._name} exploded")
 
         return self._output
+
+
+class SequenceTool(BaseTool):
+    def __init__(
+        self,
+        name: str,
+        calls: list[str],
+        outputs: list[Any],
+        *,
+        requires_confirmation: bool = False,
+    ) -> None:
+        self._name = name
+        self._calls = calls
+        self._outputs = list(outputs)
+        self._requires_confirmation = requires_confirmation
+        self.contexts: list[ToolContext] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"Sequence tool {self._name}."
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return self._requires_confirmation
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> Any:
+        self._calls.append(self._name)
+        self.contexts.append(context)
+        output = self._outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
 
 
 def _step(
@@ -186,16 +226,14 @@ def test_executes_valid_single_step_plan() -> None:
     assert result.interrupted is False
     assert result.resumable is False
     assert result.metadata["plan_signature"]
-    assert result.step_results == [
-        StepExecutionResult(
-            step_id="step_1",
-            status=StepExecutionStatus.COMPLETED.value,
-            success=True,
-            tool_name="safe_tool",
-            output="done",
-            error=None,
-        )
-    ]
+    assert result.step_results[0].step_id == "step_1"
+    assert result.step_results[0].status == StepExecutionStatus.COMPLETED.value
+    assert result.step_results[0].success is True
+    assert result.step_results[0].tool_name == "safe_tool"
+    assert result.step_results[0].output == "done"
+    assert result.step_results[0].error is None
+    assert result.step_results[0].metadata["attempt_number"] == 1
+    assert result.step_results[0].metadata["max_attempts"] == 1
     assert calls == ["safe_tool"]
     assert tool.contexts[0].parameters == {}
 
@@ -1061,6 +1099,56 @@ def test_resume_confirmation_required_blocks_without_consuming_state() -> None:
     assert resumed.success is True
 
 
+def test_resume_preserves_retry_counter_and_does_not_exceed_limit() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SequenceTool(
+        "second_tool",
+        calls,
+        [
+            {"success": False, "error": "transient", "error_code": "TRANSIENT_ERROR"},
+            "must not run",
+        ],
+    )
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+    validation = _validation(plan)
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": {"content": "alpha"}},
+        resumable=True,
+        confirmation_granted=False,
+        retry_attempts={"step_2": 1},
+        retry_history={
+            "step_2": (
+                {"attempt_number": 1, "error_code": "TRANSIENT_ERROR", "error": "transient"},
+            )
+        },
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(first, second),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).resume(state)
+
+    assert result.success is False
+    assert calls == ["second_tool"]
+    assert result.step_results[0].metadata["attempt_number"] == 2
+    assert result.step_results[0].metadata["retry_exhausted"] is True
+    assert len(result.step_results[0].metadata["retry_history"]) == 2
+
+
 def test_controlled_cancellation_is_not_a_technical_failure() -> None:
     calls: list[str] = []
     tool = SpyTool("safe_tool", calls)
@@ -1230,6 +1318,163 @@ def test_executor_does_not_retry_failed_tool() -> None:
 
     assert result.success is False
     assert calls == ["failing_tool"]
+
+
+def test_retry_policy_retries_transient_failure_and_then_completes() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "temporary unavailable", "error_code": "TEMPORARY_UNAVAILABLE"},
+            "done",
+        ],
+    )
+    plan = _plan((_step("step_1", "safe_tool", arguments={"path": "same.txt"}),))
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert calls == ["safe_tool", "safe_tool"]
+    assert tool.contexts[0].parameters == tool.contexts[1].parameters == {"path": "same.txt"}
+    assert tool.contexts[0].step_id == tool.contexts[1].step_id == "step_1"
+    assert result.step_results[0].metadata["attempt_number"] == 2
+    assert result.step_results[0].metadata["completed_after_retry"] is True
+    assert len(result.step_results[0].metadata["retry_history"]) == 1
+
+
+def test_retry_policy_stops_at_max_attempts() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "transient", "error_code": "TRANSIENT_ERROR"},
+            {"success": False, "error": "transient", "error_code": "TRANSIENT_ERROR"},
+            "must not run",
+        ],
+    )
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert calls == ["safe_tool", "safe_tool"]
+    assert result.step_results[0].metadata["retry_exhausted"] is True
+    assert result.step_results[0].metadata["attempt_number"] == 2
+
+
+def test_retry_policy_does_not_retry_non_retryable_error() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "permission denied", "error_code": "PERMISSION_DENIED"},
+            "must not run",
+        ],
+    )
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert calls == ["safe_tool"]
+    assert result.step_results[0].metadata["retry_reason"] == "non_retryable_error"
+
+
+def test_retry_policy_does_not_retry_unknown_exception() -> None:
+    calls: list[str] = []
+    tool = SequenceTool("safe_tool", calls, [RuntimeError("boom"), "must not run"])
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert calls == ["safe_tool"]
+    assert result.step_results[0].error_code == ExecutionErrorCode.TOOL_EXCEPTION.value
+    assert result.step_results[0].metadata["retry_reason"] == "non_retryable_error"
+
+
+def test_confirmed_dangerous_step_can_retry_same_validated_step() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "write_file",
+        calls,
+        [
+            {"success": False, "error": "temporary unavailable", "error_code": "TEMPORARY_UNAVAILABLE"},
+            "written",
+        ],
+        requires_confirmation=True,
+    )
+    plan = _plan(
+        (_step("step_1", "write_file", arguments={"path": "out.txt", "content": "x"}),),
+        requires_confirmation=True,
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan), confirmation_granted=True)
+
+    assert result.success is True
+    assert calls == ["write_file", "write_file"]
+    assert tool.contexts[0].parameters == tool.contexts[1].parameters
+
+
+def test_confirmation_pending_blocks_before_retry_policy() -> None:
+    calls: list[str] = []
+    tool = SequenceTool("write_file", calls, ["must not run"], requires_confirmation=True)
+    plan = _plan((_step("step_1", "write_file"),), requires_confirmation=True)
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    assert result.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+    assert calls == []
+
+
+def test_cancellation_during_retry_delay_prevents_next_attempt() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "temporary unavailable", "error_code": "TEMPORARY_UNAVAILABLE"},
+            "must not run",
+        ],
+    )
+    control_calls = {"count": 0}
+
+    def should_cancel() -> bool:
+        control_calls["count"] += 1
+        return control_calls["count"] > 1
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2, delay_ms=1),
+    ).execute(
+        _plan((_step("step_1", "safe_tool"),)),
+        _validation(_plan((_step("step_1", "safe_tool"),))),
+        control=ExecutionControl(should_cancel=should_cancel),
+    )
+
+    assert result.plan_status == PlanExecutionStatus.CANCELLED.value
+    assert calls == ["safe_tool"]
 
 
 def test_executor_does_not_call_planner_or_replan() -> None:

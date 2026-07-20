@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable
 
 from core.execution_plan_validator import PlanValidationResult, plan_signature
+from core.execution_retry import RetryPolicy
 from core.parameter_resolver import ParameterResolver
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.executor import ToolExecutor
@@ -80,6 +81,9 @@ class ExecutionProgress:
     tool_name: str | None = None
     elapsed_ms: int = 0
     message: str | None = None
+    attempt_number: int | None = None
+    max_attempts: int | None = None
+    retry_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,8 @@ class ResumableExecutionState:
     resumable: bool = False
     interruption_reason: str | None = None
     confirmation_granted: bool = False
+    retry_attempts: dict[str, int] = field(default_factory=dict)
+    retry_history: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -164,10 +170,12 @@ class ExecutionPlanExecutor:
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor | None = None,
         parameter_resolver: ParameterResolver | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)
         self._parameter_resolver = parameter_resolver or ParameterResolver()
+        self._retry_policy = retry_policy or RetryPolicy()
 
     def execute(
         self,
@@ -187,6 +195,8 @@ class ExecutionPlanExecutor:
             on_progress=on_progress,
             initial_completed_step_ids=(),
             initial_previous_results={},
+            initial_retry_attempts={},
+            initial_retry_history={},
         )
 
     def resume(
@@ -222,6 +232,8 @@ class ExecutionPlanExecutor:
             on_progress=on_progress,
             initial_completed_step_ids=state.completed_step_ids,
             initial_previous_results=state.previous_results,
+            initial_retry_attempts=state.retry_attempts,
+            initial_retry_history=state.retry_history,
         )
 
     def _execute_from_checkpoint(
@@ -234,6 +246,8 @@ class ExecutionPlanExecutor:
         on_progress: Callable[[ExecutionProgress], None] | None,
         initial_completed_step_ids: tuple[str, ...],
         initial_previous_results: dict[str, object],
+        initial_retry_attempts: dict[str, int],
+        initial_retry_history: dict[str, tuple[dict[str, object], ...]],
     ) -> PlanExecutionResult:
         """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
@@ -290,6 +304,11 @@ class ExecutionPlanExecutor:
                 completed_steps.append(step_id)
         completed: set[str] = set(completed_steps)
         previous_results: dict[str, object] = dict(initial_previous_results)
+        retry_attempts: dict[str, int] = dict(initial_retry_attempts)
+        retry_history: dict[str, list[dict[str, object]]] = {
+            step_id: list(history)
+            for step_id, history in initial_retry_history.items()
+        }
         step_results: list[StepExecutionResult] = []
         self._emit_progress(
             on_progress,
@@ -372,7 +391,28 @@ class ExecutionPlanExecutor:
                 step,
                 plan_signature=validation_result.plan_signature,
                 previous_results=previous_results,
+                control=control,
+                on_progress=on_progress,
+                started=started,
+                step_index=progress_index,
+                total_steps=total_steps,
+                retry_attempts=retry_attempts,
+                retry_history=retry_history,
             )
+            if isinstance(outcome, PlanExecutionResult):
+                return outcome
+            if outcome.error_code in {
+                ExecutionErrorCode.EXECUTION_CANCELLED.value,
+                ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
+            }:
+                return self._retry_stop_result(
+                    plan=plan,
+                    validation_result=validation_result,
+                    completed_steps=completed_steps,
+                    step_results=step_results,
+                    outcome=outcome,
+                    current_index=index,
+                )
             step_results.append(outcome)
 
             if outcome.success:
@@ -724,7 +764,14 @@ class ExecutionPlanExecutor:
         *,
         plan_signature: str | None,
         previous_results: dict[str, object],
-    ) -> StepExecutionResult:
+        control: ExecutionControl | None,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        started: float,
+        step_index: int,
+        total_steps: int,
+        retry_attempts: dict[str, int],
+        retry_history: dict[str, list[dict[str, object]]],
+    ) -> StepExecutionResult | PlanExecutionResult:
         if step.tool in self._LOGICAL_TOOLS:
             return StepExecutionResult(
                 step_id=step.id,
@@ -733,7 +780,12 @@ class ExecutionPlanExecutor:
                 tool_name=step.tool,
                 output=None,
                 error=None,
-                metadata={"logical_step": True},
+                metadata={
+                    "logical_step": True,
+                    "attempt_number": 1,
+                    "max_attempts": 1,
+                    "retry_history": [],
+                },
             )
 
         assert step.tool is not None
@@ -768,13 +820,194 @@ class ExecutionPlanExecutor:
                 output=None,
                 error=f"Tool '{step.tool}' is not registered.",
                 error_code=ExecutionErrorCode.TOOL_NOT_FOUND.value,
+                metadata={
+                    "attempt_number": 1,
+                    "max_attempts": self._retry_policy.max_attempts,
+                    "retry_history": [],
+                    "retry_scheduled": False,
+                    "retry_reason": "non_retryable_error",
+                },
             )
+
+        return self._execute_resolved_step_with_retries(
+            step,
+            plan_signature=plan_signature,
+            previous_results=previous_results,
+            resolved_arguments=resolution.resolved_arguments,
+            control=control,
+            on_progress=on_progress,
+            started=started,
+            step_index=step_index,
+            total_steps=total_steps,
+            retry_attempts=retry_attempts,
+            retry_history=retry_history,
+        )
+
+    def _execute_resolved_step_with_retries(
+        self,
+        step: ExecutionStep,
+        *,
+        plan_signature: str | None,
+        previous_results: dict[str, object],
+        resolved_arguments: dict[str, object],
+        control: ExecutionControl | None,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        started: float,
+        step_index: int,
+        total_steps: int,
+        retry_attempts: dict[str, int],
+        retry_history: dict[str, list[dict[str, object]]],
+    ) -> StepExecutionResult | PlanExecutionResult:
+        attempt_number = retry_attempts.get(step.id, 0) + 1
+        history = retry_history.setdefault(step.id, [])
+
+        while True:
+            retry_attempts[step.id] = attempt_number
+            outcome = self._execute_resolved_step_once(
+                step,
+                plan_signature=plan_signature,
+                previous_results=previous_results,
+                resolved_arguments=resolved_arguments,
+                attempt_number=attempt_number,
+                history=history,
+            )
+
+            if outcome.success:
+                metadata = dict(outcome.metadata)
+                metadata["attempt_number"] = attempt_number
+                metadata["max_attempts"] = self._retry_policy.max_attempts
+                metadata["retry_history"] = list(history)
+                metadata["completed_after_retry"] = attempt_number > 1
+                if attempt_number > 1:
+                    self._emit_progress(
+                        on_progress,
+                        "step_completed_after_retry",
+                        started,
+                        step=step,
+                        step_index=step_index,
+                        total_steps=total_steps,
+                        attempt_number=attempt_number,
+                        max_attempts=self._retry_policy.max_attempts,
+                    )
+                return StepExecutionResult(
+                    step_id=outcome.step_id,
+                    status=outcome.status,
+                    success=outcome.success,
+                    tool_name=outcome.tool_name,
+                    output=outcome.output,
+                    error=outcome.error,
+                    error_code=outcome.error_code,
+                    interruption_reason=outcome.interruption_reason,
+                    started_at=outcome.started_at,
+                    finished_at=outcome.finished_at,
+                    metadata=metadata,
+                )
+
+            history.append(
+                {
+                    "attempt_number": attempt_number,
+                    "error_code": outcome.error_code,
+                    "error": outcome.error,
+                }
+            )
+            decision = self._retry_policy.decide(
+                attempt_number=attempt_number,
+                error_code=outcome.error_code,
+                error=outcome.error,
+                metadata=outcome.metadata,
+            )
+            if not decision.should_retry:
+                metadata = dict(outcome.metadata)
+                metadata["attempt_number"] = attempt_number
+                metadata["max_attempts"] = decision.max_attempts
+                metadata["retry_history"] = list(history)
+                metadata["retry_scheduled"] = False
+                metadata["retry_reason"] = decision.reason
+                metadata["retry_exhausted"] = (
+                    decision.reason == "max_attempts_reached"
+                )
+                if metadata["retry_exhausted"]:
+                    self._emit_progress(
+                        on_progress,
+                        "step_retry_exhausted",
+                        started,
+                        step=step,
+                        step_index=step_index,
+                        total_steps=total_steps,
+                        attempt_number=attempt_number,
+                        max_attempts=decision.max_attempts,
+                        retry_reason=decision.reason,
+                    )
+                return StepExecutionResult(
+                    step_id=outcome.step_id,
+                    status=outcome.status,
+                    success=outcome.success,
+                    tool_name=outcome.tool_name,
+                    output=outcome.output,
+                    error=outcome.error,
+                    error_code=outcome.error_code,
+                    interruption_reason=outcome.interruption_reason,
+                    started_at=outcome.started_at,
+                    finished_at=outcome.finished_at,
+                    metadata=metadata,
+                )
+
+            self._emit_progress(
+                on_progress,
+                "step_retry_scheduled",
+                started,
+                step=step,
+                step_index=step_index,
+                total_steps=total_steps,
+                attempt_number=decision.attempt_number,
+                max_attempts=decision.max_attempts,
+                retry_reason=decision.reason,
+            )
+            stop_result = self._wait_before_retry(
+                control=control,
+                delay_ms=decision.delay_ms,
+            )
+            if stop_result is not None:
+                return StepExecutionResult(
+                    step_id=step.id,
+                    status=stop_result,
+                    success=False,
+                    tool_name=step.tool,
+                    output=None,
+                    error=None,
+                    error_code=(
+                        ExecutionErrorCode.EXECUTION_CANCELLED.value
+                        if stop_result == StepExecutionStatus.CANCELLED.value
+                        else ExecutionErrorCode.EXECUTION_INTERRUPTED.value
+                    ),
+                    interruption_reason="Execution stopped before retry.",
+                    metadata={
+                        "attempt_number": attempt_number,
+                        "max_attempts": decision.max_attempts,
+                        "retry_history": list(history),
+                        "retry_scheduled": True,
+                        "retry_reason": decision.reason,
+                    },
+                )
+            attempt_number = decision.attempt_number
+
+    def _execute_resolved_step_once(
+        self,
+        step: ExecutionStep,
+        *,
+        plan_signature: str | None,
+        previous_results: dict[str, object],
+        resolved_arguments: dict[str, object],
+        attempt_number: int,
+        history: list[dict[str, object]],
+    ) -> StepExecutionResult:
+        assert step.tool is not None
 
         try:
             output = self._tool_executor.execute(
                 step.tool,
                 ToolContext(
-                    parameters=deepcopy(resolution.resolved_arguments),
+                    parameters=deepcopy(resolved_arguments),
                     step_id=step.id,
                     plan_signature=plan_signature,
                     previous_results=dict(previous_results),
@@ -790,6 +1023,7 @@ class ExecutionPlanExecutor:
                 output=None,
                 error=str(error),
                 error_code=ExecutionErrorCode.TOOL_NOT_FOUND.value,
+                metadata={"attempt_number": attempt_number},
             )
         except Exception as error:
             return StepExecutionResult(
@@ -800,11 +1034,15 @@ class ExecutionPlanExecutor:
                 output=None,
                 error=str(error),
                 error_code=ExecutionErrorCode.TOOL_EXCEPTION.value,
-                metadata={"exception_type": type(error).__name__},
+                metadata={
+                    "attempt_number": attempt_number,
+                    "exception_type": type(error).__name__,
+                },
             )
 
         failed_error = self._failed_output_error(output)
         if failed_error is not None:
+            error_code = self._failed_output_error_code(output)
             return StepExecutionResult(
                 step_id=step.id,
                 status=StepExecutionStatus.FAILED.value,
@@ -812,7 +1050,8 @@ class ExecutionPlanExecutor:
                 tool_name=step.tool,
                 output=output,
                 error=failed_error,
-                error_code=ExecutionErrorCode.TOOL_EXECUTION_FAILED.value,
+                error_code=error_code,
+                metadata={"attempt_number": attempt_number},
             )
 
         return StepExecutionResult(
@@ -822,6 +1061,10 @@ class ExecutionPlanExecutor:
             tool_name=step.tool,
             output=output,
             error=None,
+            metadata={
+                "attempt_number": attempt_number,
+                "retry_history": list(history),
+            },
         )
 
     def _missing_dependency(
@@ -887,6 +1130,53 @@ class ExecutionPlanExecutor:
 
         return PlanExecutionStatus.FAILED.value
 
+    def _retry_stop_result(
+        self,
+        *,
+        plan: ExecutionPlan,
+        validation_result: PlanValidationResult,
+        completed_steps: list[str],
+        step_results: list[StepExecutionResult],
+        outcome: StepExecutionResult,
+        current_index: int,
+    ) -> PlanExecutionResult:
+        cancelled = outcome.error_code == ExecutionErrorCode.EXECUTION_CANCELLED.value
+        status = (
+            PlanExecutionStatus.CANCELLED.value
+            if cancelled
+            else PlanExecutionStatus.INTERRUPTED.value
+        )
+        remaining_status = (
+            StepExecutionStatus.CANCELLED.value
+            if cancelled
+            else StepExecutionStatus.NOT_STARTED.value
+        )
+        return PlanExecutionResult(
+            plan_status=status,
+            success=False,
+            completed_steps=completed_steps,
+            failed_step=None,
+            skipped_steps=[],
+            pending_steps=self._remaining_step_ids(plan.ordered_steps, current_index),
+            step_results=step_results
+            + [outcome]
+            + self._not_executed_results(
+                plan.ordered_steps,
+                current_index + 1,
+                remaining_status,
+            ),
+            error=None if cancelled else outcome.interruption_reason,
+            requires_confirmation=validation_result.requires_confirmation,
+            interrupted=not cancelled,
+            cancelled=cancelled,
+            failed=False,
+            resumable=not cancelled,
+            current_step=outcome.step_id,
+            interruption_reason=outcome.interruption_reason,
+            error_code=outcome.error_code,
+            metadata={"plan_signature": validation_result.plan_signature},
+        )
+
     def _emit_progress(
         self,
         on_progress: Callable[[ExecutionProgress], None] | None,
@@ -896,6 +1186,9 @@ class ExecutionPlanExecutor:
         step: ExecutionStep | None = None,
         step_index: int | None = None,
         total_steps: int | None = None,
+        attempt_number: int | None = None,
+        max_attempts: int | None = None,
+        retry_reason: str | None = None,
     ) -> None:
         if on_progress is None:
             return
@@ -908,6 +1201,9 @@ class ExecutionPlanExecutor:
                 total_steps=total_steps,
                 tool_name=step.tool if step is not None else None,
                 elapsed_ms=int((time.perf_counter() - started) * 1000),
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                retry_reason=retry_reason,
             )
         )
 
@@ -929,5 +1225,52 @@ class ExecutionPlanExecutor:
                 or output.get("error_message")
                 or "Tool returned an unsuccessful result."
             )
+
+        return None
+
+    def _failed_output_error_code(
+        self,
+        output: Any,
+    ) -> str:
+        error_code = getattr(output, "error_code", None)
+        if isinstance(error_code, str) and error_code:
+            return error_code
+
+        if isinstance(output, dict):
+            value = output.get("error_code") or output.get("code")
+            if isinstance(value, str) and value:
+                return value
+
+        return ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+
+    def _wait_before_retry(
+        self,
+        *,
+        control: ExecutionControl | None,
+        delay_ms: int,
+    ) -> str | None:
+        before = self._retry_control_status(control)
+        if before is not None:
+            return before
+
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+
+        return self._retry_control_status(control)
+
+    def _retry_control_status(
+        self,
+        control: ExecutionControl | None,
+    ) -> str | None:
+        if control is None:
+            return None
+
+        try:
+            if control.should_cancel is not None and control.should_cancel():
+                return StepExecutionStatus.CANCELLED.value
+            if control.should_stop is not None and control.should_stop():
+                return StepExecutionStatus.INTERRUPTED.value
+        except Exception:
+            return StepExecutionStatus.INTERRUPTED.value
 
         return None

@@ -502,6 +502,57 @@ def test_execution_enabled_shows_safe_progress_messages(capsys) -> None:
     assert calls == ["read_file"]
 
 
+def test_retry_progress_messages_are_safe(capsys) -> None:
+    coordinator = CoordinatorFake()
+
+    def emit_progress(kwargs):
+        on_execution_progress = kwargs["on_execution_progress"]
+        on_execution_progress(
+            ExecutionProgress(
+                "step_retry_scheduled",
+                step_index=1,
+                total_steps=1,
+                attempt_number=2,
+                max_attempts=2,
+                retry_reason="temporary_unavailable",
+            )
+        )
+        on_execution_progress(
+            ExecutionProgress(
+                "step_completed_after_retry",
+                step_index=1,
+                total_steps=1,
+                attempt_number=2,
+                max_attempts=2,
+            )
+        )
+        on_execution_progress(
+            ExecutionProgress(
+                "step_retry_exhausted",
+                step_index=1,
+                total_steps=1,
+                attempt_number=2,
+                max_attempts=2,
+            )
+        )
+
+    coordinator.on_handle = emit_progress
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,  # type: ignore[arg-type]
+    )
+
+    orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+
+    output = capsys.readouterr().out
+    assert "Reintentando paso 1, intento 2 de 2" in output
+    assert "Paso 1 se completó tras un reintento" in output
+    assert "Paso 1 agotó sus intentos" in output
+    assert "plan_signature" not in output
+    assert "raw_response" not in output
+
+
 def test_second_request_during_execution_is_rejected_without_new_plan() -> None:
     coordinator = CoordinatorFake()
     nested_responses: list[str] = []

@@ -16,6 +16,7 @@ from core.router import Router
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
+from core.execution_retry import RetryPolicy
 from core.hybrid_execution_planner import (
     HybridExecutionPlanner,
     PromptClientStructuredPlanProvider,
@@ -589,6 +590,22 @@ class Bootstrap:
             "ATLAS_EXECUTION_PERSISTENCE_ENABLED",
             False,
         )
+        execution_retry_enabled = _read_bool(
+            "ATLAS_EXECUTION_RETRY_ENABLED",
+            False,
+        )
+        execution_max_attempts = _read_int(
+            "ATLAS_EXECUTION_MAX_ATTEMPTS",
+            2,
+            minimum=1,
+            maximum=5,
+        )
+        execution_retry_delay_ms = _read_int(
+            "ATLAS_EXECUTION_RETRY_DELAY_MS",
+            0,
+            minimum=0,
+            maximum=10_000,
+        )
         semantic_catalog = None
         hybrid_execution_planner = None
         structured_plan_provider = None
@@ -632,7 +649,22 @@ class Bootstrap:
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=ExecutionPlanValidator(),
-            executor=ExecutionPlanExecutor(tool_registry, tool_executor),
+            executor=ExecutionPlanExecutor(
+                tool_registry,
+                tool_executor,
+                retry_policy=RetryPolicy(
+                    max_attempts=(
+                        execution_max_attempts
+                        if execution_retry_enabled
+                        else 1
+                    ),
+                    delay_ms=(
+                        execution_retry_delay_ms
+                        if execution_retry_enabled
+                        else 0
+                    ),
+                ),
+            ),
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
@@ -839,6 +871,10 @@ def _read_int(
     try:
         value = int(raw)
     except ValueError:
+        print(
+            f"Warning: invalid integer value for {name}; using {default}.",
+            file=sys.stderr,
+        )
         return default
 
     return min(max(value, minimum), maximum)

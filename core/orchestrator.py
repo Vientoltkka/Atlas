@@ -939,6 +939,20 @@ class _ExecutionProgressPresenter:
         if progress.phase == "step_failed":
             return (self._step_done_message(progress, "ha fallado"),)
 
+        if progress.phase == "step_retry_scheduled":
+            return (self._retry_message(progress),)
+
+        if progress.phase == "step_completed_after_retry":
+            return (
+                self._step_done_message(
+                    progress,
+                    "se completó tras un reintento",
+                ),
+            )
+
+        if progress.phase == "step_retry_exhausted":
+            return (self._step_done_message(progress, "agotó sus intentos"),)
+
         if progress.phase == "interrupted":
             return self._terminal_once("interrupted", "Ejecución interrumpida.")
 
@@ -979,6 +993,15 @@ class _ExecutionProgressPresenter:
     ) -> str:
         index = progress.step_index or 0
         return f"Paso {index} {suffix}."
+
+    def _retry_message(
+        self,
+        progress: ExecutionProgress,
+    ) -> str:
+        index = progress.step_index or 0
+        attempt = progress.attempt_number or 0
+        maximum = progress.max_attempts or attempt
+        return f"Reintentando paso {index}, intento {attempt} de {maximum}..."
 
 
 def _classify_structured_confirmation_intent(

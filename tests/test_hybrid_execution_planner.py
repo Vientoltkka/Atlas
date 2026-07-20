@@ -4,7 +4,7 @@ import inspect
 import json
 from typing import Any
 
-from bootstrap.bootstrap import Bootstrap, _execution_state_path, _read_bool
+from bootstrap.bootstrap import Bootstrap, _execution_state_path, _read_bool, _read_int
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
@@ -1366,6 +1366,23 @@ def test_bootstrap_execution_persistence_config_is_conservative(monkeypatch, tmp
     monkeypatch.setenv("ATLAS_EXECUTION_STATE_PATH", str(configured))
 
     assert _execution_state_path() == configured
+
+
+def test_bootstrap_execution_retry_config_is_conservative(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("ATLAS_EXECUTION_RETRY_ENABLED", raising=False)
+    monkeypatch.delenv("ATLAS_EXECUTION_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("ATLAS_EXECUTION_RETRY_DELAY_MS", raising=False)
+
+    assert _read_bool("ATLAS_EXECUTION_RETRY_ENABLED", False) is False
+    assert _read_int("ATLAS_EXECUTION_MAX_ATTEMPTS", 2, minimum=1, maximum=5) == 2
+    assert _read_int("ATLAS_EXECUTION_RETRY_DELAY_MS", 0, minimum=0, maximum=10_000) == 0
+
+    monkeypatch.setenv("ATLAS_EXECUTION_MAX_ATTEMPTS", "bad")
+    monkeypatch.setenv("ATLAS_EXECUTION_RETRY_DELAY_MS", "bad")
+
+    assert _read_int("ATLAS_EXECUTION_MAX_ATTEMPTS", 2, minimum=1, maximum=5) == 2
+    assert _read_int("ATLAS_EXECUTION_RETRY_DELAY_MS", 0, minimum=0, maximum=10_000) == 0
+    assert "invalid integer value" in capsys.readouterr().err
 
 
 def test_bootstrap_builds_provider_from_explicit_config() -> None:
