@@ -4,7 +4,7 @@ import inspect
 import json
 from typing import Any
 
-from bootstrap.bootstrap import Bootstrap, _read_bool
+from bootstrap.bootstrap import Bootstrap, _execution_state_path, _read_bool
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
@@ -1354,6 +1354,18 @@ def test_bootstrap_structured_plan_execution_bool_is_robust(monkeypatch, capsys)
     monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", "si")
     assert _read_bool("ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED", True) is False
     assert "invalid boolean value" in capsys.readouterr().err
+
+
+def test_bootstrap_execution_persistence_config_is_conservative(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("ATLAS_EXECUTION_PERSISTENCE_ENABLED", raising=False)
+    monkeypatch.delenv("ATLAS_EXECUTION_STATE_PATH", raising=False)
+    assert _read_bool("ATLAS_EXECUTION_PERSISTENCE_ENABLED", False) is False
+    assert _execution_state_path().as_posix() == ".atlas/execution_state.json"
+
+    configured = tmp_path / "state.json"
+    monkeypatch.setenv("ATLAS_EXECUTION_STATE_PATH", str(configured))
+
+    assert _execution_state_path() == configured
 
 
 def test_bootstrap_builds_provider_from_explicit_config() -> None:

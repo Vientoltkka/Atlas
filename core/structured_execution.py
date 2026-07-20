@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from core.execution_plan_executor import (
@@ -19,6 +19,10 @@ from core.execution_plan_validator import (
     plan_signature,
 )
 from core.planner import ExecutionPlan, PlanGenerationResult, Planner
+from core.resumable_execution_store import (
+    ResumableExecutionStore,
+    ResumableExecutionStoreError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +69,7 @@ class StructuredExecutionCoordinator:
         planner: Planner,
         validator: ExecutionPlanValidator,
         executor: ExecutionPlanExecutor,
+        resumable_store: ResumableExecutionStore | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -72,6 +77,7 @@ class StructuredExecutionCoordinator:
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
+        self._resumable_store = resumable_store
 
     def handle(
         self,
@@ -165,11 +171,13 @@ class StructuredExecutionCoordinator:
             validation,
             execution,
         )
-        self._sync_resumable_state(
+        persistence_error = self._sync_resumable_state(
             response,
             objective=objective,
             confirmation_granted=confirmation_granted,
         )
+        if persistence_error is not None:
+            return replace(response, error_code=persistence_error)
         return response
 
     def confirm(
@@ -236,11 +244,13 @@ class StructuredExecutionCoordinator:
             execution,
             confirmation_token=confirmation_token,
         )
-        self._sync_resumable_state(
+        persistence_error = self._sync_resumable_state(
             response,
             objective=pending.objective,
             confirmation_granted=True,
         )
+        if persistence_error is not None:
+            return replace(response, error_code=persistence_error)
         return response
 
     def pending_plan(
@@ -265,11 +275,64 @@ class StructuredExecutionCoordinator:
 
     def has_resumable_execution(self) -> bool:
         """Return whether there is one valid interrupted execution to resume."""
-        return self._resumable_execution is not None
+        return self.resumable_execution() is not None
 
     def resumable_execution(self) -> ResumableExecutionState | None:
         """Return the current in-memory resumable execution state."""
+        if self._resumable_execution is None:
+            self.load_persisted_resumable_execution()
         return self._resumable_execution
+
+    def load_persisted_resumable_execution(self) -> StructuredExecutionResponse:
+        """Load a persisted resumable execution state without executing it."""
+        if self._resumable_store is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_resumable_execution",
+                message="No hay ninguna ejecución pendiente que pueda reanudarse.",
+                error_code="EXECUTION_STATE_NOT_FOUND",
+            )
+
+        try:
+            state = self._resumable_store.load()
+        except ResumableExecutionStoreError as error:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="resumable_execution_invalid",
+                message="No se puede reanudar la ejecución.",
+                error_code=error.error_code,
+                error=error.message,
+            )
+
+        if state is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="no_resumable_execution",
+                message="No hay ninguna ejecución pendiente que pueda reanudarse.",
+                error_code="EXECUTION_STATE_NOT_FOUND",
+            )
+
+        self._resumable_execution = state
+        return StructuredExecutionResponse(
+            handled=True,
+            status="resumable_execution_loaded",
+            message="Atlas encontró una ejecución interrumpida que puede reanudarse.",
+            plan=state.original_plan,
+            validation_result=state.validation_result,
+            requires_confirmation=state.validation_result.requires_confirmation,
+            resumable_state=state,
+        )
+
+    def discard_resumable_execution(self) -> StructuredExecutionResponse:
+        """Discard any in-memory and persisted resumable execution state."""
+        self._resumable_execution = None
+        delete_error = self._delete_persisted_resumable_state()
+        return StructuredExecutionResponse(
+            handled=True,
+            status="resumable_execution_discarded",
+            message="La ejecución pendiente fue descartada.",
+            error_code=delete_error or "EXECUTION_STATE_DISCARDED",
+        )
 
     def resume_pending_execution(
         self,
@@ -281,6 +344,13 @@ class StructuredExecutionCoordinator:
         """Resume the current interrupted execution without regenerating a plan."""
         state = self._resumable_execution
         if state is None:
+            load_response = self.load_persisted_resumable_execution()
+            if load_response.status == "resumable_execution_loaded":
+                state = self._resumable_execution
+                assert state is not None
+            else:
+                return load_response
+        if state is None:
             return StructuredExecutionResponse(
                 handled=True,
                 status="no_resumable_execution",
@@ -288,6 +358,19 @@ class StructuredExecutionCoordinator:
                 requires_confirmation=False,
                 error_code="NO_RESUMABLE_EXECUTION",
                 error="no resumable structured execution",
+            )
+
+        claim_error = self._delete_persisted_resumable_state()
+        if claim_error is not None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="resumable_execution_claim_failed",
+                message="No se puede reanudar la ejecución.",
+                plan=state.original_plan,
+                validation_result=state.validation_result,
+                requires_confirmation=state.validation_result.requires_confirmation,
+                error_code=claim_error,
+                error="could not claim persisted resumable execution state",
             )
 
         execution = self._executor.resume(
@@ -301,11 +384,13 @@ class StructuredExecutionCoordinator:
             state.validation_result,
             execution,
         )
-        self._sync_resumable_state(
+        persistence_error = self._sync_resumable_state(
             response,
             objective=state.objective,
             confirmation_granted=confirmation_granted or state.confirmation_granted,
         )
+        if persistence_error is not None:
+            return replace(response, error_code=persistence_error)
         return response
 
     def confirm_pending(
@@ -349,6 +434,8 @@ class StructuredExecutionCoordinator:
             )
 
         self._discard_pending(pending.confirmation_token)
+        self._resumable_execution = None
+        delete_error = self._delete_persisted_resumable_state()
         return StructuredExecutionResponse(
             handled=True,
             status="pending_execution_cancelled",
@@ -357,7 +444,7 @@ class StructuredExecutionCoordinator:
             validation_result=pending.validation_result,
             requires_confirmation=False,
             confirmation_token=pending.confirmation_token,
-            error_code="PENDING_EXECUTION_CANCELLED",
+            error_code=delete_error or "PENDING_EXECUTION_CANCELLED",
         )
 
     def show_pending(
@@ -493,13 +580,15 @@ class StructuredExecutionCoordinator:
         *,
         objective: str,
         confirmation_granted: bool,
-    ) -> None:
+    ) -> str | None:
         execution = response.execution_result
         if (
             execution is not None
             and execution.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
         ):
-            return
+            if self._resumable_execution is not None:
+                return self._save_resumable_state(self._resumable_execution)
+            return None
 
         if (
             response.plan is None
@@ -514,9 +603,10 @@ class StructuredExecutionCoordinator:
                 and response.validation_result.plan_signature
                 != self._resumable_execution.validated_plan_signature
             ):
-                return
+                return None
             self._resumable_execution = None
-            return
+            self._delete_persisted_resumable_state()
+            return None
 
         state = self._build_resumable_state(
             objective=objective,
@@ -526,6 +616,7 @@ class StructuredExecutionCoordinator:
             confirmation_granted=confirmation_granted,
         )
         self._resumable_execution = state
+        return self._save_resumable_state(state)
 
     def _build_resumable_state(
         self,
@@ -555,6 +646,29 @@ class StructuredExecutionCoordinator:
             interruption_reason=execution.interruption_reason,
             confirmation_granted=confirmation_granted,
         )
+
+    def _save_resumable_state(
+        self,
+        state: ResumableExecutionState,
+    ) -> str | None:
+        if self._resumable_store is None:
+            return None
+
+        try:
+            self._resumable_store.save(state)
+        except ResumableExecutionStoreError as error:
+            return error.error_code
+        return None
+
+    def _delete_persisted_resumable_state(self) -> str | None:
+        if self._resumable_store is None:
+            return None
+
+        try:
+            self._resumable_store.delete()
+        except ResumableExecutionStoreError as error:
+            return error.error_code
+        return None
 
     def _planning_failed_message(
         self,

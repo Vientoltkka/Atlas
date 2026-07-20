@@ -95,6 +95,9 @@ class AtlasOrchestrator:
 
         print("Atlas iniciado correctamente.")
         print()
+        startup_response = self._load_persisted_structured_execution()
+        if startup_response is not None:
+            self._print_atlas(startup_response.message)
 
         while True:
 
@@ -379,6 +382,9 @@ class AtlasOrchestrator:
                 return self._structured_execution_coordinator.cancel_pending()
             return None
 
+        if _is_structured_resume_cancel_intent(prompt):
+            return self._structured_execution_coordinator.discard_resumable_execution()
+
         if _is_structured_resume_intent(prompt):
             return self._handle_resumable_structured_execution()
 
@@ -433,6 +439,22 @@ class AtlasOrchestrator:
             return None
 
         return response
+
+    def _load_persisted_structured_execution(self) -> StructuredExecutionResponse | None:
+        if (
+            self._structured_execution_coordinator is None
+            or not self._structured_execution_enabled
+        ):
+            return None
+
+        response = (
+            self._structured_execution_coordinator.load_persisted_resumable_execution()
+        )
+        if response.status == "resumable_execution_loaded":
+            return response
+        if response.status == "resumable_execution_invalid":
+            return response
+        return None
 
     def on_planning_progress(
         self,
@@ -1026,6 +1048,18 @@ def _is_structured_resume_intent(
         "sigue con el plan",
         "retoma",
         "retoma la ejecucion",
+    }
+
+
+def _is_structured_resume_cancel_intent(
+    prompt: str,
+) -> bool:
+    normalized = _normalize_confirmation_text(prompt)
+    return normalized in {
+        "cancela la ejecucion pendiente",
+        "cancelar la ejecucion pendiente",
+        "descarta el plan",
+        "descartar el plan",
     }
 
 

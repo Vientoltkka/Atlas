@@ -21,6 +21,7 @@ from core.hybrid_execution_planner import (
     PromptClientStructuredPlanProvider,
     StructuredPlanProviderConfig,
 )
+from core.resumable_execution_store import JsonResumableExecutionStore
 from core.structured_execution import StructuredExecutionCoordinator
 
 from memory.conversation import ConversationMemory
@@ -584,6 +585,10 @@ class Bootstrap:
             "ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED",
             False,
         )
+        execution_persistence_enabled = _read_bool(
+            "ATLAS_EXECUTION_PERSISTENCE_ENABLED",
+            False,
+        )
         semantic_catalog = None
         hybrid_execution_planner = None
         structured_plan_provider = None
@@ -628,6 +633,11 @@ class Bootstrap:
             planner=planner,
             validator=ExecutionPlanValidator(),
             executor=ExecutionPlanExecutor(tool_registry, tool_executor),
+            resumable_store=(
+                JsonResumableExecutionStore(_execution_state_path())
+                if execution_persistence_enabled
+                else None
+            ),
         )
 
         # -----------------------
@@ -860,6 +870,14 @@ def _read_text(
 ) -> str | None:
     raw = os.getenv(name, "").strip()
     return raw or None
+
+
+def _execution_state_path() -> Path:
+    configured = _read_text("ATLAS_EXECUTION_STATE_PATH")
+    if configured is not None:
+        return Path(configured).expanduser()
+
+    return Path(".atlas") / "execution_state.json"
 
 
 def _assistant_wake_word_engine(

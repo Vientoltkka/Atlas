@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +16,7 @@ from core.execution_plan_validator import ExecutionPlanValidator, PlanValidation
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
+from core.resumable_execution_store import JsonResumableExecutionStore
 from core.router import Router
 from core.structured_execution import StructuredExecutionCoordinator, StructuredExecutionResponse
 from memory.conversation import ConversationMemory
@@ -130,6 +132,7 @@ def _structured_parts(
     calls: list[str] | None = None,
     *,
     read_fail: bool = False,
+    resumable_store: Any | None = None,
 ) -> tuple[StructuredExecutionCoordinator, ToolRegistry, Planner]:
     active_calls = calls if calls is not None else []
     registry = ToolRegistry()
@@ -167,6 +170,7 @@ def _structured_parts(
         planner=planner,
         validator=ExecutionPlanValidator(),
         executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
+        resumable_store=resumable_store,
     )
     return coordinator, registry, planner
 
@@ -723,6 +727,158 @@ def test_interrupted_structured_execution_can_resume_without_regenerating_plan()
         "path": "resumen.txt",
         "content": "contenido",
     }
+
+
+def test_interrupted_execution_is_persisted_and_loaded_after_rebuild(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    first_calls: list[str] = []
+    store = JsonResumableExecutionStore(state_path)
+    coordinator, _, _ = _structured_parts(first_calls, resumable_store=store)
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+
+    interrupted = coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(first_calls) >= 1),
+    )
+
+    assert interrupted.status == "interrupted"
+    assert state_path.exists()
+
+    second_calls: list[str] = []
+    rebuilt_store = JsonResumableExecutionStore(state_path)
+    rebuilt, registry, _ = _structured_parts(
+        second_calls,
+        resumable_store=rebuilt_store,
+    )
+    loaded = rebuilt.load_persisted_resumable_execution()
+    resumed = rebuilt.resume_pending_execution()
+
+    assert loaded.status == "resumable_execution_loaded"
+    assert resumed.status == "completed"
+    assert second_calls == ["write_file"]
+    assert registry.get("write_file").contexts[0].parameters == {  # type: ignore[attr-defined]
+        "path": "resumen.txt",
+        "content": "contenido",
+    }
+    assert not state_path.exists()
+
+
+def test_orchestrator_detects_persisted_state_without_executing_tools(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    calls: list[str] = []
+    store = JsonResumableExecutionStore(state_path)
+    coordinator, _, _ = _structured_parts(calls, resumable_store=store)
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+
+    rebuilt_calls: list[str] = []
+    rebuilt, _, _ = _structured_parts(
+        rebuilt_calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=rebuilt,
+    )
+
+    response = orchestrator._load_persisted_structured_execution()  # type: ignore[attr-defined]
+
+    assert response is not None
+    assert response.status == "resumable_execution_loaded"
+    assert "puede reanudarse" in response.message
+    assert rebuilt_calls == []
+
+
+def test_orchestrator_resumes_persisted_state_and_deletes_file(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    first_calls: list[str] = []
+    coordinator, _, _ = _structured_parts(
+        first_calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(first_calls) >= 1),
+    )
+    second_calls: list[str] = []
+    rebuilt, _, _ = _structured_parts(
+        second_calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=rebuilt,
+    )
+
+    response = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+    second = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+
+    assert "Ejecucion estructurada completada" in response
+    assert second == "No hay ninguna ejecución pendiente que pueda reanudarse."
+    assert second_calls == ["write_file"]
+    assert not state_path.exists()
+
+
+def test_tampered_persisted_state_never_reaches_executor(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(
+        calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["validated_plan_signature"] = "tampered"
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    rebuilt_calls: list[str] = []
+    rebuilt, _, _ = _structured_parts(
+        rebuilt_calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=rebuilt,
+    )
+
+    response = orchestrator.process_prompt("reanuda", confirm=lambda _prompt: "")
+
+    assert response == "No se puede reanudar la ejecución."
+    assert rebuilt_calls == []
+    assert state_path.exists()
+
+
+def test_discard_resume_phrase_deletes_persisted_state(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    calls: list[str] = []
+    coordinator, _, _ = _structured_parts(
+        calls,
+        resumable_store=JsonResumableExecutionStore(state_path),
+    )
+    coordinator.handle("Lee README.md y copia su contenido en resumen.txt")
+    coordinator.confirm_pending(
+        control=ExecutionControl(should_stop=lambda: len(calls) >= 1),
+    )
+    orchestrator, _, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt(
+        "cancela la ejecución pendiente",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "La ejecución pendiente fue descartada."
+    assert not state_path.exists()
+    assert calls == ["read_file"]
 
 
 def test_resumable_state_signature_change_blocks_resume_without_tools() -> None:
