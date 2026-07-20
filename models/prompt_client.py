@@ -19,6 +19,14 @@ class PromptClient:
         messages: list[dict[str, str]],
     ) -> str:
         """Send a conversation to the selected model."""
+        return self.ask_messages(model=model, messages=messages)
+
+    def ask_messages(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+    ) -> str:
+        """Send exactly the provided messages to the selected model."""
         response = self._client.chat(
             model=model,
             messages=messages,

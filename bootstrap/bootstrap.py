@@ -376,6 +376,7 @@ class Bootstrap:
         structured_plan_provider_enabled: bool | None = None,
         structured_plan_model: str | None = None,
         config: StructuredPlanProviderConfig | None = None,
+        diagnostic_sink=None,
     ) -> PromptClientStructuredPlanProvider | None:
         """Build the real PromptClient-backed provider only when explicitly enabled."""
         if config is None:
@@ -424,6 +425,7 @@ class Bootstrap:
             prompt_client or PromptClient(),
             config,
             model_manager=model_manager or ModelManager(),
+            diagnostic_sink=diagnostic_sink,
         )
 
     @staticmethod

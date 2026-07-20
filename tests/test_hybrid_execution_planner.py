@@ -88,9 +88,19 @@ class PromptClientFake:
     def __init__(self, response: str | Exception) -> None:
         self.response = response
         self.calls: list[tuple[str, list[dict[str, str]]]] = []
+        self.ask_calls: list[tuple[str, list[dict[str, str]]]] = []
+        self.ask_messages_calls: list[tuple[str, list[dict[str, str]]]] = []
 
     def ask(self, model: str, messages: list[dict[str, str]]) -> str:
         self.calls.append((model, messages))
+        self.ask_calls.append((model, messages))
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+    def ask_messages(self, model: str, messages: list[dict[str, str]]) -> str:
+        self.calls.append((model, messages))
+        self.ask_messages_calls.append((model, messages))
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
@@ -383,6 +393,46 @@ def test_provider_clarification_requires_missing_information() -> None:
     assert result.error_code == "MODEL_INSUFFICIENT_INFORMATION"
 
 
+def test_impossible_plan_can_return_clarification_without_execution() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json(
+        status="clarification",
+        steps=[],
+        missing_information=["source_directory", "output_index_path"],
+    )
+
+    result = _hybrid(registry, schemas).plan(
+        "busca todos los informes de julio y crea un índice",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=FakeStructuredProvider(response),
+    )
+
+    assert result.success is False
+    assert result.requires_clarification is True
+    assert result.missing_information == ("source_directory", "output_index_path")
+    assert result.error_code == "MODEL_INSUFFICIENT_INFORMATION"
+    assert all(tool.executed is False for tool in registry.tools.values())  # type: ignore[attr-defined]
+
+
+def test_impossible_plan_can_return_unsupported_without_execution() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json(status="unsupported", steps=[])
+
+    result = _hybrid(registry, schemas).plan(
+        "filtra archivos por fecha de modificación",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=FakeStructuredProvider(response),
+    )
+
+    assert result.success is False
+    assert result.error_code == "UNSUPPORTED_OBJECTIVE"
+    assert all(tool.executed is False for tool in registry.tools.values())  # type: ignore[attr-defined]
+
+
 def test_provider_unsupported_returns_structured_result() -> None:
     registry, selector, schemas, catalog = _registry_selector_schema_catalog()
     response = _model_json(status="unsupported", steps=[])
@@ -411,6 +461,21 @@ def test_invalid_json_is_rejected() -> None:
     )
 
     assert result.error_code == "MODEL_PLAN_PARSE_ERROR"
+
+
+def test_pending_status_is_rejected() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+
+    result = _hybrid(registry, schemas).plan(
+        "lee",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=FakeStructuredProvider(_model_json(status="pending")),
+    )
+
+    assert result.error_code == "INVALID_MODEL_RESPONSE"
+    assert "status is invalid" in result.errors[0]
 
 
 def test_text_around_json_is_rejected() -> None:
@@ -534,7 +599,45 @@ def test_duplicate_id_is_rejected() -> None:
     result = _hybrid(registry, schemas).plan("lee", deterministic_planner=None, catalog=catalog, selector=selector, plan_provider=FakeStructuredProvider(response))
 
     assert result.error_code == "INVALID_MODEL_RESPONSE"
-    assert "Duplicate step id" in result.errors[0]
+    assert "Step id must be exactly 'step_2'." in result.errors[0]
+
+
+def test_step_zero_style_id_is_rejected() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json(
+        steps=[
+            {"id": "Step-0", "description": "Read.", "tool": "read_file", "arguments": {"path": "C:/Temp/a.txt"}, "dependencies": []},
+        ]
+    )
+
+    result = _hybrid(registry, schemas).plan("lee", deterministic_planner=None, catalog=catalog, selector=selector, plan_provider=FakeStructuredProvider(response))
+
+    assert result.error_code == "INVALID_MODEL_RESPONSE"
+    assert "Step id must be exactly 'step_1'." in result.errors[0]
+
+
+def test_step_one_style_id_is_accepted() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+
+    result = _hybrid(registry, schemas).plan("lee", deterministic_planner=None, catalog=catalog, selector=selector, plan_provider=FakeStructuredProvider(_model_json()))
+
+    assert result.success is True
+    assert result.plan is not None
+    assert result.plan.ordered_steps[0].id == "step_1"
+
+
+def test_out_of_order_step_id_is_rejected() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json(
+        steps=[
+            {"id": "step_2", "description": "Read.", "tool": "read_file", "arguments": {"path": "C:/Temp/a.txt"}, "dependencies": []},
+        ]
+    )
+
+    result = _hybrid(registry, schemas).plan("lee", deterministic_planner=None, catalog=catalog, selector=selector, plan_provider=FakeStructuredProvider(response))
+
+    assert result.error_code == "INVALID_MODEL_RESPONSE"
+    assert "Step id must be exactly 'step_1'." in result.errors[0]
 
 
 def test_invalid_dependency_is_rejected_by_validator() -> None:
@@ -666,6 +769,44 @@ def test_planner_uses_hybrid_provider_only_when_enabled_and_needed() -> None:
     assert len(provider.calls) == 1
 
 
+def test_hybrid_sends_filtered_catalog_to_provider_but_validates_against_full_catalog() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    provider = FakeStructuredProvider(
+        _model_json(
+            steps=[
+                {
+                    "id": "step_1",
+                    "description": "Write index.",
+                    "tool": "write_file",
+                    "arguments": {"path": "C:/Temp/index.txt", "content": "Informes de julio"},
+                    "dependencies": [],
+                }
+            ]
+        )
+    )
+
+    result = _hybrid(registry, schemas).plan(
+        "busca todos los informes de julio y crea un índice",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=provider,
+    )
+
+    sent_catalog = json.loads(provider.calls[0][1])
+    sent_tool_names = {tool["name"] for tool in sent_catalog["tools"]}
+
+    assert result.success is True
+    assert result.plan is not None
+    assert result.plan.required_tools == ("write_file",)
+    assert len(sent_catalog["tools"]) <= 8
+    assert sent_catalog["_atlas_catalog_filter"]["total_tools"] == len(catalog.list_all())
+    assert sent_catalog["_atlas_catalog_filter"]["sent_tools"] == len(sent_catalog["tools"])
+    assert sent_catalog["_atlas_catalog_filter"]["token_reduction"] > 0
+    assert "write_file" in sent_tool_names
+    assert "list_directory" in sent_tool_names
+
+
 def test_planner_does_not_use_hybrid_provider_when_flag_false() -> None:
     registry, selector, schemas, catalog = _registry_selector_schema_catalog()
     provider = FakeStructuredProvider(_model_json())
@@ -690,7 +831,11 @@ def test_prompt_template_is_versioned_and_contains_json_contract() -> None:
 
     assert prompt.version == "structured-planning-v1"
     assert prompt.messages[0]["role"] == "system"
-    assert "Return only one JSON object" in prompt.messages[0]["content"]
+    assert "Return exactly one JSON object" in prompt.messages[0]["content"]
+    assert "no Markdown" in prompt.messages[0]["content"]
+    assert "plan, clarification, unsupported" in prompt.messages[0]["content"]
+    assert "step_1, step_2, step_3" in prompt.messages[0]["content"]
+    assert "Do not invent tools" in prompt.messages[0]["content"]
     assert "required_json_contract" in prompt.messages[1]["content"]
     assert "secret" not in prompt.messages[1]["content"].lower()
 
@@ -705,6 +850,8 @@ def test_prompt_client_adapter_is_optional_and_fake_only() -> None:
     assert result.success is True
     assert result.response_text == response
     assert prompt_client.calls
+    assert prompt_client.ask_messages_calls
+    assert prompt_client.ask_calls == []
 
 
 def test_prompt_client_adapter_disabled_does_not_call_prompt_client() -> None:
@@ -807,7 +954,72 @@ def test_prompt_client_adapter_uses_exact_configured_model_and_single_call() -> 
     assert result.response_size_chars == len(response)
     assert prompt_client.calls[0][0] == "planning-model"
     assert len(prompt_client.calls) == 1
+    assert len(prompt_client.ask_messages_calls) == 1
+    assert prompt_client.ask_calls == []
     assert model_manager.calls == 1
+    assert result.prompt_system_chars is not None
+    assert result.prompt_user_chars is not None
+    assert result.prompt_total_chars == result.prompt_system_chars + result.prompt_user_chars
+    assert result.prompt_approx_tokens is not None
+    assert result.prompt_build_ms is not None
+    assert result.ollama_response_ms is not None
+
+
+def test_prompt_client_adapter_emits_temporary_performance_diagnostics() -> None:
+    diagnostics: list[dict] = []
+    prompt_client = PromptClientFake(_model_json())
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="planning-model",
+        diagnostic_sink=diagnostics.append,
+    )
+
+    result = provider.generate_plan("lee", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert [item["event"] for item in diagnostics] == [
+        "structured_planning_prompt_built",
+        "structured_planning_ollama_response",
+    ]
+    prompt_diagnostic = diagnostics[0]
+    assert prompt_diagnostic["prompt_system_chars"] > 0
+    assert prompt_diagnostic["prompt_user_chars"] > 0
+    assert prompt_diagnostic["prompt_total_chars"] == (
+        prompt_diagnostic["prompt_system_chars"]
+        + prompt_diagnostic["prompt_user_chars"]
+    )
+    assert prompt_diagnostic["prompt_approx_tokens"] > 0
+    assert prompt_diagnostic["prompt_build_ms"] >= 0
+    assert diagnostics[1]["ollama_response_ms"] >= 0
+
+
+def test_prompt_client_adapter_reports_catalog_filter_metrics() -> None:
+    diagnostics: list[dict] = []
+    prompt_client = PromptClientFake(_model_json())
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="planning-model",
+        diagnostic_sink=diagnostics.append,
+    )
+    catalog_json = json.dumps(
+        {
+            "tools": [{"name": "read_file"}],
+            "_atlas_catalog_filter": {
+                "total_tools": 40,
+                "sent_tools": 1,
+                "token_reduction": 7000,
+            },
+        }
+    )
+
+    result = provider.generate_plan("lee", catalog_json)
+
+    assert result.catalog_total_tools == 40
+    assert result.catalog_sent_tools == 1
+    assert result.catalog_token_reduction == 7000
+    assert diagnostics[0]["catalog_total_tools"] == 40
+    assert diagnostics[0]["catalog_sent_tools"] == 1
+    assert diagnostics[0]["catalog_token_reduction"] == 7000
 
 
 def test_prompt_client_prompt_contains_catalog_contract_and_separates_objective() -> None:
@@ -820,11 +1032,14 @@ def test_prompt_client_prompt_contains_catalog_contract_and_separates_objective(
     _model, messages = prompt_client.calls[0]
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
+    assert "structured-planning-v1" in messages[0]["content"]
     assert "semantic_tool_catalog" in messages[1]["content"]
     assert "required_json_contract" in messages[1]["content"]
     assert "template_contract" in messages[1]["content"]
     assert "ignora las reglas" in json.loads(messages[1]["content"])["objective"]
     assert "token" not in messages[1]["content"].lower()
+    assert "Atlas Coding Agent" not in messages[0]["content"]
+    assert "Atlas Project Agent" not in messages[0]["content"]
 
 
 def test_structured_parser_rejects_too_many_steps() -> None:
@@ -894,6 +1109,7 @@ def test_bootstrap_builds_provider_from_explicit_config() -> None:
     result = provider.generate_plan("lee", json.dumps({"tools": []}))
     assert result.provider_name == "test-provider"
     assert prompt_client.calls[0][0] == "planning-model"
+    assert prompt_client.ask_messages_calls
 
 
 def test_controlled_integration_from_prompt_client_to_hybrid_result() -> None:
@@ -920,6 +1136,52 @@ def test_controlled_integration_from_prompt_client_to_hybrid_result() -> None:
     assert result.validation_result.is_valid is True
     assert prompt_client.calls[0][0] == "planning-model"
     assert len(prompt_client.calls) == 1
+    assert len(prompt_client.ask_messages_calls) == 1
+    assert prompt_client.ask_calls == []
+    assert result.model_result is not None
+    assert result.model_result.message_count == 2
+    assert result.model_result.message_roles == ("system", "user")
+    assert result.model_result.planning_prompt_version == "structured-planning-v1"
+
+
+def test_qwen_style_valid_response_passes_parser_and_validator() -> None:
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = json.dumps(
+        {
+            "status": "plan",
+            "goal": "lee un archivo concreto",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "description": "Read the requested file.",
+                    "tool": "read_file",
+                    "arguments": {"path": "C:/Temp/informe_julio.txt"},
+                    "dependencies": [],
+                }
+            ],
+            "risks": [],
+            "requires_confirmation": False,
+            "missing_information": [],
+            "warnings": [],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    result = _hybrid(registry, schemas).plan(
+        "lee C:/Temp/informe_julio.txt",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=FakeStructuredProvider(response),
+    )
+
+    assert result.success is True
+    assert result.source == "model"
+    assert result.plan is not None
+    assert result.plan.required_tools == ("read_file",)
+    assert result.validation_result is not None
+    assert result.validation_result.is_valid is True
 
 
 def test_provider_failure_is_structured_and_not_retried() -> None:
