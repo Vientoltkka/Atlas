@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -17,6 +17,9 @@ from core.planner import ExecutionPlan, ExecutionStep
 from tools.executor import ToolExecutor
 from tools.registry import ToolNotRegisteredError, ToolRegistry
 from tools.tool_context import ToolContext
+
+if TYPE_CHECKING:
+    from core.execution_history import ExecutionHistory
 
 
 class PlanExecutionStatus(str, Enum):
@@ -238,11 +241,13 @@ class ExecutionPlanExecutor:
         tool_executor: ToolExecutor | None = None,
         parameter_resolver: ParameterResolver | None = None,
         retry_policy: RetryPolicy | None = None,
+        execution_history: ExecutionHistory | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)
         self._parameter_resolver = parameter_resolver or ParameterResolver()
         self._retry_policy = retry_policy or RetryPolicy()
+        self._execution_history = execution_history
 
     def execute(
         self,
@@ -1362,12 +1367,15 @@ class ExecutionPlanExecutor:
         if active_trace.finished_at is None:
             active_trace.finish(_trace_status_for_result(result))
         metrics = ExecutionMetricsCalculator().calculate(active_trace)
-        return replace(
+        final_result = replace(
             result,
             partial_state=partial_state,
             trace=active_trace,
             metrics=metrics,
         )
+        if self._execution_history is not None:
+            self._execution_history.add(final_result)
+        return final_result
 
     def _trace_step_event(
         self,
