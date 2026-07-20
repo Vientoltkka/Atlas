@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import time
 from typing import Any, Callable
@@ -41,6 +41,22 @@ class StepExecutionStatus(str, Enum):
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
     NOT_STARTED = "not_started"
+
+
+class PartialStepStatus(str, Enum):
+    """Closed statuses for partial execution step state."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    SKIPPED = "skipped"
+    BLOCKED_CONFIRMATION = "blocked_confirmation"
+
+
+_PARTIAL_PLAN_STATUSES = frozenset(status.value for status in PlanExecutionStatus)
+_PARTIAL_STEP_STATUSES = frozenset(status.value for status in PartialStepStatus)
 
 
 class ExecutionErrorCode(str, Enum):
@@ -125,6 +141,52 @@ class StepExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PartialStepExecutionState:
+    """Safe state snapshot for one plan step."""
+
+    step_id: str
+    tool_name: str | None
+    status: str
+    attempt_count: int = 0
+    started_at: str | None = None
+    finished_at: str | None = None
+    result: object | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
+    confirmation_required: bool = False
+
+    def __post_init__(self) -> None:
+        if self.status not in _PARTIAL_STEP_STATUSES:
+            raise ValueError(f"Invalid partial step status: {self.status}")
+
+
+@dataclass(frozen=True, slots=True)
+class PartialExecutionState:
+    """Explicit, safe and verifiable snapshot of partial plan execution."""
+
+    objective: str
+    original_plan: ExecutionPlan
+    validated_plan_signature: str | None
+    overall_status: str
+    completed_step_ids: tuple[str, ...]
+    failed_step_ids: tuple[str, ...]
+    interrupted_step_id: str | None
+    pending_step_ids: tuple[str, ...]
+    skipped_step_ids: tuple[str, ...]
+    step_results: tuple[PartialStepExecutionState, ...]
+    failure_reason: str | None
+    interruption_reason: str | None
+    resumable: bool
+    requires_confirmation: bool
+    retry_attempts: dict[str, int] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_partial_execution_state(self)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanExecutionResult:
     """Structured execution outcome for an execution plan."""
 
@@ -151,6 +213,7 @@ class PlanExecutionResult:
     started_at: str | None = None
     finished_at: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    partial_state: PartialExecutionState | None = None
 
     @property
     def status(self) -> str:
@@ -210,7 +273,10 @@ class ExecutionPlanExecutor:
         """Resume an interrupted execution from the first pending step."""
         resume_error = self._resume_precondition_error(state)
         if resume_error is not None:
-            return PlanExecutionResult(
+            return self._finalize_result(
+                state.original_plan,
+                state.validation_result,
+                PlanExecutionResult(
                 plan_status=PlanExecutionStatus.REJECTED.value,
                 success=False,
                 error=resume_error,
@@ -222,6 +288,8 @@ class ExecutionPlanExecutor:
                 failure_reason=resume_error,
                 error_code=self._precondition_error_code(resume_error),
                 metadata={"plan_signature": state.validated_plan_signature},
+                ),
+                objective=state.objective,
             )
 
         return self._execute_from_checkpoint(
@@ -253,7 +321,10 @@ class ExecutionPlanExecutor:
         started = time.perf_counter()
         precondition_error = self._precondition_error(plan, validation_result)
         if precondition_error is not None:
-            return PlanExecutionResult(
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
                 plan_status=PlanExecutionStatus.REJECTED.value,
                 success=False,
                 error=precondition_error,
@@ -268,6 +339,7 @@ class ExecutionPlanExecutor:
                 pending_steps=self._pending_step_ids(plan),
                 failure_reason=precondition_error,
                 metadata={"plan_signature": self._safe_plan_signature(plan)},
+                ),
             )
 
         assert validation_result is not None
@@ -280,7 +352,10 @@ class ExecutionPlanExecutor:
         )
 
         if validation_result.requires_confirmation and not confirmation_granted:
-            return PlanExecutionResult(
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
                 plan_status=PlanExecutionStatus.BLOCKED_CONFIRMATION.value,
                 success=False,
                 error="Plan execution requires explicit confirmation.",
@@ -292,6 +367,7 @@ class ExecutionPlanExecutor:
                 current_step=self._first_pending_step_id(plan),
                 error_code=ExecutionErrorCode.CONFIRMATION_REQUIRED.value,
                 metadata={"plan_signature": self._safe_plan_signature(plan)},
+                ),
             )
 
         completed_steps = [
@@ -344,7 +420,10 @@ class ExecutionPlanExecutor:
                     f"Dependency '{missing_dependency}' is not completed "
                     f"for step '{step.id}'."
                 )
-                return PlanExecutionResult(
+                return self._finalize_result(
+                    plan,
+                    validation_result,
+                    PlanExecutionResult(
                     plan_status=self._failure_status(completed_steps),
                     success=False,
                     completed_steps=completed_steps,
@@ -377,6 +456,7 @@ class ExecutionPlanExecutor:
                     failure_reason=error,
                     error_code=ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value,
                     metadata={"plan_signature": validation_result.plan_signature},
+                    ),
                 )
 
             self._emit_progress(
@@ -437,7 +517,10 @@ class ExecutionPlanExecutor:
                 step_index=progress_index,
                 total_steps=total_steps,
             )
-            return PlanExecutionResult(
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
                 plan_status=self._failure_status(completed_steps),
                 success=False,
                 completed_steps=completed_steps,
@@ -460,6 +543,7 @@ class ExecutionPlanExecutor:
                 failure_reason=outcome.error,
                 error_code=outcome.error_code,
                 metadata={"plan_signature": validation_result.plan_signature},
+                ),
             )
 
         self._emit_progress(
@@ -468,7 +552,10 @@ class ExecutionPlanExecutor:
             started,
             total_steps=total_steps,
         )
-        return PlanExecutionResult(
+        return self._finalize_result(
+            plan,
+            validation_result,
+            PlanExecutionResult(
             plan_status=PlanExecutionStatus.COMPLETED.value,
             success=True,
             completed_steps=completed_steps,
@@ -484,6 +571,7 @@ class ExecutionPlanExecutor:
             resumable=False,
             pending_steps=[],
             metadata={"plan_signature": validation_result.plan_signature},
+            ),
         )
 
     def _precondition_error(
@@ -623,29 +711,33 @@ class ExecutionPlanExecutor:
             )
         except Exception as error:
             message = f"Internal executor control error: {error}"
-            return PlanExecutionResult(
-                plan_status=self._failure_status(completed_steps),
-                success=False,
-                completed_steps=completed_steps,
-                failed_step=None,
-                skipped_steps=self._remaining_step_ids(
-                    plan.ordered_steps,
-                    current_index,
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
+                    plan_status=self._failure_status(completed_steps),
+                    success=False,
+                    completed_steps=completed_steps,
+                    failed_step=None,
+                    skipped_steps=self._remaining_step_ids(
+                        plan.ordered_steps,
+                        current_index,
+                    ),
+                    step_results=step_results
+                    + self._not_executed_results(
+                        plan.ordered_steps,
+                        current_index,
+                        StepExecutionStatus.SKIPPED.value,
+                    ),
+                    error=message,
+                    requires_confirmation=validation_result.requires_confirmation,
+                    failed=True,
+                    resumable=False,
+                    current_step=plan.ordered_steps[current_index].id,
+                    failure_reason=message,
+                    error_code=ExecutionErrorCode.INTERNAL_EXECUTOR_ERROR.value,
+                    metadata={"exception_type": type(error).__name__},
                 ),
-                step_results=step_results
-                + self._not_executed_results(
-                    plan.ordered_steps,
-                    current_index,
-                    StepExecutionStatus.SKIPPED.value,
-                ),
-                error=message,
-                requires_confirmation=validation_result.requires_confirmation,
-                failed=True,
-                resumable=False,
-                current_step=plan.ordered_steps[current_index].id,
-                failure_reason=message,
-                error_code=ExecutionErrorCode.INTERNAL_EXECUTOR_ERROR.value,
-                metadata={"exception_type": type(error).__name__},
             )
 
         if should_cancel:
@@ -733,29 +825,33 @@ class ExecutionPlanExecutor:
             else StepExecutionStatus.CANCELLED.value
         )
 
-        return PlanExecutionResult(
-            plan_status=status,
-            success=False,
-            completed_steps=completed_steps,
-            failed_step=None,
-            skipped_steps=[],
-            pending_steps=pending_steps,
-            step_results=step_results
-            + [current_result]
-            + self._not_executed_results(
-                plan.ordered_steps,
-                current_index + 1,
-                remaining_status,
+        return self._finalize_result(
+            plan,
+            validation_result,
+            PlanExecutionResult(
+                plan_status=status,
+                success=False,
+                completed_steps=completed_steps,
+                failed_step=None,
+                skipped_steps=[],
+                pending_steps=pending_steps,
+                step_results=step_results
+                + [current_result]
+                + self._not_executed_results(
+                    plan.ordered_steps,
+                    current_index + 1,
+                    remaining_status,
+                ),
+                error=None if cancelled else reason,
+                requires_confirmation=validation_result.requires_confirmation,
+                interrupted=not cancelled,
+                cancelled=cancelled,
+                resumable=resumable,
+                current_step=current_step.id,
+                interruption_reason=reason,
+                error_code=error_code,
+                metadata={"plan_signature": validation_result.plan_signature},
             ),
-            error=None if cancelled else reason,
-            requires_confirmation=validation_result.requires_confirmation,
-            interrupted=not cancelled,
-            cancelled=cancelled,
-            resumable=resumable,
-            current_step=current_step.id,
-            interruption_reason=reason,
-            error_code=error_code,
-            metadata={"plan_signature": validation_result.plan_signature},
         )
 
     def _execute_step(
@@ -1151,7 +1247,10 @@ class ExecutionPlanExecutor:
             if cancelled
             else StepExecutionStatus.NOT_STARTED.value
         )
-        return PlanExecutionResult(
+        return self._finalize_result(
+            plan,
+            validation_result,
+            PlanExecutionResult(
             plan_status=status,
             success=False,
             completed_steps=completed_steps,
@@ -1175,7 +1274,24 @@ class ExecutionPlanExecutor:
             interruption_reason=outcome.interruption_reason,
             error_code=outcome.error_code,
             metadata={"plan_signature": validation_result.plan_signature},
+            ),
         )
+
+    def _finalize_result(
+        self,
+        plan: ExecutionPlan,
+        validation_result: PlanValidationResult | None,
+        result: PlanExecutionResult,
+        *,
+        objective: str | None = None,
+    ) -> PlanExecutionResult:
+        partial_state = build_partial_execution_state(
+            objective=objective or plan.goal,
+            plan=plan,
+            validation_result=validation_result,
+            execution=result,
+        )
+        return replace(result, partial_state=partial_state)
 
     def _emit_progress(
         self,
@@ -1274,3 +1390,479 @@ class ExecutionPlanExecutor:
             return StepExecutionStatus.INTERRUPTED.value
 
         return None
+
+
+def build_partial_execution_state(
+    *,
+    objective: str,
+    plan: ExecutionPlan,
+    validation_result: PlanValidationResult | None,
+    execution: PlanExecutionResult,
+) -> PartialExecutionState:
+    """Build a safe partial execution state from the executor result."""
+    step_by_id = {step.id: step for step in plan.ordered_steps}
+    raw_result_by_id = {result.step_id: result for result in execution.step_results}
+    ordered_step_ids = tuple(step.id for step in plan.ordered_steps)
+    raw_failed_step_ids = tuple(execution.failed_steps)
+    if (
+        not raw_failed_step_ids
+        and execution.plan_status == PlanExecutionStatus.FAILED.value
+        and execution.current_step is not None
+    ):
+        raw_failed_step_ids = (execution.current_step,)
+    completed = tuple(step_id for step_id in ordered_step_ids if step_id in execution.completed_steps)
+    failed = tuple(step_id for step_id in ordered_step_ids if step_id in raw_failed_step_ids)
+    skipped = tuple(
+        step_id
+        for step_id in ordered_step_ids
+        if step_id in execution.skipped_steps and step_id not in failed
+    )
+    pending = tuple(
+        step_id
+        for step_id in ordered_step_ids
+        if step_id not in completed
+        and step_id not in failed
+        and step_id not in skipped
+        and step_id != execution.current_step
+    )
+    if execution.plan_status in {
+        PlanExecutionStatus.INTERRUPTED.value,
+        PlanExecutionStatus.CANCELLED.value,
+    }:
+        pending = tuple(
+            step_id
+            for step_id in execution.pending_steps
+            if step_id in step_by_id and step_id != execution.current_step
+        )
+    elif execution.pending_steps:
+        pending = tuple(step_id for step_id in execution.pending_steps if step_id in step_by_id)
+
+    partial_steps: list[PartialStepExecutionState] = []
+    retry_attempts: dict[str, int] = {}
+    for step in plan.ordered_steps:
+        raw_result = raw_result_by_id.get(step.id)
+        if raw_result is None:
+            status = _implicit_partial_step_status(step.id, execution)
+            partial_steps.append(
+                PartialStepExecutionState(
+                    step_id=step.id,
+                    tool_name=step.tool,
+                    status=status,
+                    attempt_count=0,
+                    confirmation_required=(
+                        execution.plan_status
+                        == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+                        and step.id == execution.current_step
+                    ),
+                )
+            )
+            continue
+
+        attempt_count = _attempt_count(raw_result)
+        if attempt_count:
+            retry_attempts[step.id] = attempt_count
+        partial_steps.append(
+            PartialStepExecutionState(
+                step_id=step.id,
+                tool_name=raw_result.tool_name,
+                status=_partial_step_status(raw_result.status, execution, step.id),
+                attempt_count=attempt_count,
+                started_at=raw_result.started_at,
+                finished_at=raw_result.finished_at,
+                result=_safe_result_reference(raw_result),
+                error_code=raw_result.error_code,
+                error_message=_safe_error_message(raw_result.error),
+                retryable=_is_retryable(raw_result),
+                confirmation_required=(
+                    raw_result.error_code
+                    == ExecutionErrorCode.CONFIRMATION_REQUIRED.value
+                ),
+            )
+        )
+
+    return PartialExecutionState(
+        objective=objective,
+        original_plan=plan,
+        validated_plan_signature=(
+            validation_result.plan_signature
+            if validation_result is not None
+            else _metadata_signature(execution)
+        ),
+        overall_status=execution.plan_status,
+        completed_step_ids=completed,
+        failed_step_ids=failed,
+        interrupted_step_id=(
+            execution.current_step
+            if execution.plan_status
+            in {PlanExecutionStatus.INTERRUPTED.value, PlanExecutionStatus.CANCELLED.value}
+            else None
+        ),
+        pending_step_ids=pending,
+        skipped_step_ids=skipped,
+        step_results=tuple(partial_steps),
+        failure_reason=_safe_error_message(execution.failure_reason or execution.error),
+        interruption_reason=_safe_error_message(execution.interruption_reason),
+        resumable=execution.resumable,
+        requires_confirmation=execution.requires_confirmation,
+        retry_attempts=retry_attempts,
+        metadata=_partial_metadata(execution),
+    )
+
+
+def partial_execution_state_to_dict(
+    state: PartialExecutionState,
+) -> dict[str, object]:
+    """Serialize a partial state without model raw responses or tool outputs."""
+    return {
+        "objective": state.objective,
+        "validated_plan_signature": state.validated_plan_signature,
+        "overall_status": state.overall_status,
+        "completed_step_ids": list(state.completed_step_ids),
+        "failed_step_ids": list(state.failed_step_ids),
+        "interrupted_step_id": state.interrupted_step_id,
+        "pending_step_ids": list(state.pending_step_ids),
+        "skipped_step_ids": list(state.skipped_step_ids),
+        "step_results": [
+            {
+                "step_id": step.step_id,
+                "tool_name": step.tool_name,
+                "status": step.status,
+                "attempt_count": step.attempt_count,
+                "started_at": step.started_at,
+                "finished_at": step.finished_at,
+                "result": step.result,
+                "error_code": step.error_code,
+                "error_message": step.error_message,
+                "retryable": step.retryable,
+                "confirmation_required": step.confirmation_required,
+            }
+            for step in state.step_results
+        ],
+        "failure_reason": state.failure_reason,
+        "interruption_reason": state.interruption_reason,
+        "resumable": state.resumable,
+        "requires_confirmation": state.requires_confirmation,
+        "retry_attempts": dict(state.retry_attempts),
+        "metadata": dict(state.metadata),
+    }
+
+
+def partial_execution_state_from_dict(
+    payload: dict[str, object],
+    *,
+    original_plan: ExecutionPlan,
+) -> PartialExecutionState:
+    """Load and validate a serialized partial state."""
+    step_payloads = payload.get("step_results")
+    if not isinstance(step_payloads, list):
+        raise ValueError("Partial execution step_results must be a list.")
+
+    return PartialExecutionState(
+        objective=_payload_str(payload, "objective"),
+        original_plan=original_plan,
+        validated_plan_signature=_payload_optional_str(
+            payload,
+            "validated_plan_signature",
+        ),
+        overall_status=_payload_str(payload, "overall_status"),
+        completed_step_ids=_payload_str_tuple(payload, "completed_step_ids"),
+        failed_step_ids=_payload_str_tuple(payload, "failed_step_ids"),
+        interrupted_step_id=_payload_optional_str(payload, "interrupted_step_id"),
+        pending_step_ids=_payload_str_tuple(payload, "pending_step_ids"),
+        skipped_step_ids=_payload_str_tuple(payload, "skipped_step_ids"),
+        step_results=tuple(
+            PartialStepExecutionState(
+                step_id=_payload_str(step_payload, "step_id"),
+                tool_name=_payload_optional_str(step_payload, "tool_name"),
+                status=_payload_str(step_payload, "status"),
+                attempt_count=_payload_int(step_payload, "attempt_count"),
+                started_at=_payload_optional_str(step_payload, "started_at"),
+                finished_at=_payload_optional_str(step_payload, "finished_at"),
+                result=step_payload.get("result"),
+                error_code=_payload_optional_str(step_payload, "error_code"),
+                error_message=_payload_optional_str(step_payload, "error_message"),
+                retryable=_payload_bool(step_payload, "retryable"),
+                confirmation_required=_payload_bool(
+                    step_payload,
+                    "confirmation_required",
+                ),
+            )
+            for step_payload in step_payloads
+            if isinstance(step_payload, dict)
+        ),
+        failure_reason=_payload_optional_str(payload, "failure_reason"),
+        interruption_reason=_payload_optional_str(payload, "interruption_reason"),
+        resumable=_payload_bool(payload, "resumable"),
+        requires_confirmation=_payload_bool(payload, "requires_confirmation"),
+        retry_attempts=_payload_int_mapping(payload, "retry_attempts"),
+        metadata=_payload_dict(payload, "metadata"),
+    )
+
+
+def _validate_partial_execution_state(
+    state: PartialExecutionState,
+) -> None:
+    if state.overall_status not in _PARTIAL_PLAN_STATUSES:
+        raise ValueError(f"Invalid partial execution status: {state.overall_status}")
+
+    plan_step_ids = tuple(step.id for step in state.original_plan.ordered_steps)
+    plan_step_set = set(plan_step_ids)
+    buckets = (
+        state.completed_step_ids,
+        state.failed_step_ids,
+        state.pending_step_ids,
+        state.skipped_step_ids,
+    )
+    for bucket in buckets:
+        _reject_duplicates(bucket, "step state bucket")
+        if not set(bucket).issubset(plan_step_set):
+            raise ValueError("Partial execution state contains unknown step IDs.")
+
+    listed: set[str] = set()
+    for bucket in buckets:
+        current = set(bucket)
+        if listed & current:
+            raise ValueError("Partial execution state has contradictory step IDs.")
+        listed.update(current)
+
+    if state.interrupted_step_id is not None:
+        if state.interrupted_step_id not in plan_step_set:
+            raise ValueError("Interrupted step is unknown.")
+        if state.interrupted_step_id in listed:
+            raise ValueError("Interrupted step has contradictory status.")
+
+    step_result_ids = tuple(step.step_id for step in state.step_results)
+    _reject_duplicates(step_result_ids, "partial step results")
+    if step_result_ids != plan_step_ids:
+        raise ValueError("Partial step results must preserve the plan order.")
+
+    if state.overall_status == PlanExecutionStatus.COMPLETED.value:
+        if state.pending_step_ids or state.failed_step_ids or state.skipped_step_ids:
+            raise ValueError("Completed execution cannot contain unfinished steps.")
+
+    if state.overall_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value:
+        if not state.completed_step_ids:
+            raise ValueError("Partially completed execution requires completed steps.")
+        unfinished = (
+            state.failed_step_ids
+            or state.pending_step_ids
+            or state.skipped_step_ids
+            or state.interrupted_step_id
+        )
+        if not unfinished:
+            raise ValueError("Partially completed execution requires unfinished steps.")
+
+    if state.overall_status == PlanExecutionStatus.INTERRUPTED.value:
+        if state.interrupted_step_id is None and not state.interruption_reason:
+            raise ValueError("Interrupted execution requires a step or reason.")
+
+    if state.overall_status == PlanExecutionStatus.FAILED.value:
+        if not state.failed_step_ids:
+            raise ValueError("Failed execution requires at least one failed step.")
+
+    if state.overall_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value:
+        blocked = [
+            step
+            for step in state.step_results
+            if step.status == PartialStepStatus.BLOCKED_CONFIRMATION.value
+        ]
+        if not blocked:
+            raise ValueError("Blocked confirmation requires a blocked step.")
+        if any(step.attempt_count for step in blocked):
+            raise ValueError("Blocked confirmation step must not execute.")
+
+
+def _implicit_partial_step_status(
+    step_id: str,
+    execution: PlanExecutionResult,
+) -> str:
+    if step_id in execution.completed_steps:
+        return PartialStepStatus.COMPLETED.value
+    if step_id in execution.failed_steps:
+        return PartialStepStatus.FAILED.value
+    if step_id in execution.skipped_steps:
+        return PartialStepStatus.SKIPPED.value
+    if (
+        execution.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+        and step_id == execution.current_step
+    ):
+        return PartialStepStatus.BLOCKED_CONFIRMATION.value
+    if (
+        execution.plan_status
+        in {PlanExecutionStatus.INTERRUPTED.value, PlanExecutionStatus.CANCELLED.value}
+        and step_id == execution.current_step
+    ):
+        return PartialStepStatus.INTERRUPTED.value
+    return PartialStepStatus.PENDING.value
+
+
+def _partial_step_status(
+    status: str,
+    execution: PlanExecutionResult,
+    step_id: str,
+) -> str:
+    if (
+        execution.plan_status == PlanExecutionStatus.FAILED.value
+        and execution.current_step == step_id
+    ):
+        return PartialStepStatus.FAILED.value
+    if status == StepExecutionStatus.COMPLETED.value:
+        return PartialStepStatus.COMPLETED.value
+    if status == StepExecutionStatus.FAILED.value:
+        return PartialStepStatus.FAILED.value
+    if status == StepExecutionStatus.SKIPPED.value:
+        return PartialStepStatus.SKIPPED.value
+    if status in {
+        StepExecutionStatus.INTERRUPTED.value,
+        StepExecutionStatus.CANCELLED.value,
+    }:
+        return PartialStepStatus.INTERRUPTED.value
+    if status == StepExecutionStatus.BLOCKED.value:
+        return PartialStepStatus.BLOCKED_CONFIRMATION.value
+    if status == StepExecutionStatus.NOT_STARTED.value:
+        return _implicit_partial_step_status(step_id, execution)
+    return PartialStepStatus.PENDING.value
+
+
+def _attempt_count(
+    result: StepExecutionResult,
+) -> int:
+    value = result.metadata.get("attempt_number")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
+
+
+def _safe_result_reference(
+    result: StepExecutionResult,
+) -> object | None:
+    if not result.success:
+        return None
+    return {"result_ref": result.step_id}
+
+
+def _safe_error_message(
+    value: str | None,
+) -> str | None:
+    if not value:
+        return None
+    normalized = " ".join(value.split())
+    return normalized[:300]
+
+
+def _is_retryable(
+    result: StepExecutionResult,
+) -> bool:
+    if result.success:
+        return False
+    reason = result.metadata.get("retry_reason")
+    exhausted = result.metadata.get("retry_exhausted")
+    scheduled = result.metadata.get("retry_scheduled")
+    return bool(scheduled or exhausted or reason == "max_attempts_reached")
+
+
+def _metadata_signature(
+    execution: PlanExecutionResult,
+) -> str | None:
+    value = execution.metadata.get("plan_signature")
+    return value if isinstance(value, str) else None
+
+
+def _partial_metadata(
+    execution: PlanExecutionResult,
+) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    if execution.error_code:
+        safe["error_code"] = execution.error_code
+    safe["completed_count"] = len(execution.completed_steps)
+    safe["failed_count"] = len(execution.failed_steps)
+    safe["pending_count"] = len(execution.pending_steps)
+    safe["skipped_count"] = len(execution.skipped_steps)
+    return safe
+
+
+def _reject_duplicates(
+    values: tuple[str, ...],
+    label: str,
+) -> None:
+    if len(values) != len(set(values)):
+        raise ValueError(f"Partial execution state contains duplicate {label}.")
+
+
+def _payload_str(
+    payload: dict[str, object],
+    key: str,
+) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"Partial execution field '{key}' must be a string.")
+    return value
+
+
+def _payload_optional_str(
+    payload: dict[str, object],
+    key: str,
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Partial execution field '{key}' must be a string or null.")
+    return value
+
+
+def _payload_bool(
+    payload: dict[str, object],
+    key: str,
+) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Partial execution field '{key}' must be a boolean.")
+    return value
+
+
+def _payload_int(
+    payload: dict[str, object],
+    key: str,
+) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Partial execution field '{key}' must be an integer.")
+    return value
+
+
+def _payload_dict(
+    payload: dict[str, object],
+    key: str,
+) -> dict[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"Partial execution field '{key}' must be an object.")
+    return dict(value)
+
+
+def _payload_str_tuple(
+    payload: dict[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"Partial execution field '{key}' must be a list of strings.")
+    return tuple(value)
+
+
+def _payload_int_mapping(
+    payload: dict[str, object],
+    key: str,
+) -> dict[str, int]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"Partial execution field '{key}' must be an object.")
+    result: dict[str, int] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str) or not isinstance(item_value, int):
+            raise ValueError(
+                f"Partial execution field '{key}' must map strings to integers."
+            )
+        result[item_key] = item_value
+    return result

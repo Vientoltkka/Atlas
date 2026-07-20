@@ -15,7 +15,7 @@ from core.execution_plan_executor import (
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.orchestrator import AtlasOrchestrator
-from core.planner import Planner
+from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
 from core.resumable_execution_store import JsonResumableExecutionStore
 from core.router import Router
 from core.structured_execution import StructuredExecutionCoordinator, StructuredExecutionResponse
@@ -726,6 +726,61 @@ def test_tool_failure_returns_structured_failure() -> None:
     assert response.execution_result is not None
     assert response.execution_result.failed_step == "step_1"
     assert calls == ["read_file"]
+
+
+def test_partial_execution_response_uses_safe_visible_summary() -> None:
+    class FixedPlanner:
+        def __init__(self, plan: ExecutionPlan) -> None:
+            self.plan = plan
+
+        def generate_execution_plan(self, _objective: str, **_kwargs):
+            return PlanGenerationResult(
+                success=True,
+                plan=self.plan,
+                generation_attempted=True,
+            )
+
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register(SpyTool("first_tool", {"secret": "raw"}, calls))
+    registry.register(SpyTool("second_tool", "unused", calls, fail=True))
+    registry.register(SpyTool("third_tool", "unused", calls))
+    plan = ExecutionPlan(
+        goal="partial fake plan",
+        ordered_steps=(
+            ExecutionStep("step_1", "first", "first_tool"),
+            ExecutionStep("step_2", "second", "second_tool", ("step_1",)),
+            ExecutionStep("step_3", "third", "third_tool", ("step_2",)),
+        ),
+        estimated_steps=3,
+        required_tools=("first_tool", "second_tool", "third_tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=ExecutionPlanValidator(),
+        executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
+    )
+
+    response = coordinator.handle("ejecuta parcial")
+
+    assert response.status == "partially_completed"
+    assert response.partial_state is not None
+    assert response.partial_state.completed_step_ids == ("step_1",)
+    assert response.partial_state.failed_step_ids == ("step_2",)
+    assert response.partial_state.skipped_step_ids == ("step_3",)
+    assert response.message == "\n".join(
+        [
+            "Atlas: Ejecucion completada parcialmente.",
+            "Atlas: Se completaron 1 de 3 pasos.",
+            "Atlas: El paso step_2 ha fallado.",
+            "Atlas: Quedan 0 pasos pendientes.",
+            "Atlas: La ejecucion no puede reanudarse.",
+        ]
+    )
+    assert "raw" not in response.message
+    assert calls == ["first_tool", "second_tool"]
 
 
 def test_interruption_returns_structured_status() -> None:

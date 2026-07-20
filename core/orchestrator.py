@@ -1130,4 +1130,5 @@ def _with_message_prefix(
         error_code=response.error_code,
         error=response.error,
         resumable_state=response.resumable_state,
+        partial_state=response.partial_state,
     )

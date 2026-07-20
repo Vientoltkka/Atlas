@@ -9,6 +9,7 @@ from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionProgress,
     ExecutionPlanExecutor,
+    PartialExecutionState,
     PlanExecutionResult,
     PlanExecutionStatus,
     ResumableExecutionState,
@@ -40,6 +41,7 @@ class StructuredExecutionResponse:
     error_code: str | None = None
     error: str | None = None
     resumable_state: ResumableExecutionState | None = None
+    partial_state: PartialExecutionState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +560,7 @@ class StructuredExecutionCoordinator:
                 requires_confirmation=False,
                 confirmation_token=confirmation_token,
                 resumable_state=None,
+                partial_state=execution.partial_state,
             )
 
         return StructuredExecutionResponse(
@@ -572,6 +575,7 @@ class StructuredExecutionCoordinator:
             error_code=execution.error_code,
             error=execution.error,
             resumable_state=None,
+            partial_state=execution.partial_state,
         )
 
     def _sync_resumable_state(
@@ -781,6 +785,8 @@ class StructuredExecutionCoordinator:
         self,
         execution: PlanExecutionResult,
     ) -> str:
+        if execution.plan_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value:
+            return self._partial_execution_message(execution)
         if execution.plan_status == PlanExecutionStatus.INTERRUPTED.value:
             return execution.interruption_reason or "Ejecucion estructurada interrumpida."
         if execution.plan_status == PlanExecutionStatus.CANCELLED.value:
@@ -794,3 +800,35 @@ class StructuredExecutionCoordinator:
             else ""
         )
         return f"Ejecucion estructurada fallida en {failed}: {reason}.{skipped}"
+
+    def _partial_execution_message(
+        self,
+        execution: PlanExecutionResult,
+    ) -> str:
+        partial = execution.partial_state
+        completed = len(execution.completed_steps)
+        total = (
+            len(partial.step_results)
+            if partial is not None
+            else completed + len(execution.failed_steps) + len(execution.skipped_steps)
+        )
+        failed_step = execution.failed_step or execution.current_step or "desconocido"
+        pending_count = (
+            len(partial.pending_step_ids)
+            if partial is not None
+            else len(execution.pending_steps)
+        )
+        resumable = (
+            "Atlas: La ejecucion puede reanudarse."
+            if execution.resumable
+            else "Atlas: La ejecucion no puede reanudarse."
+        )
+        return "\n".join(
+            [
+                "Atlas: Ejecucion completada parcialmente.",
+                f"Atlas: Se completaron {completed} de {total} pasos.",
+                f"Atlas: El paso {failed_step} ha fallado.",
+                f"Atlas: Quedan {pending_count} pasos pendientes.",
+                resumable,
+            ]
+        )

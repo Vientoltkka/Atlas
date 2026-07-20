@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionErrorCode,
     ExecutionProgress,
     ExecutionPlanExecutor,
+    PartialExecutionState,
+    PartialStepExecutionState,
+    PartialStepStatus,
     PlanExecutionStatus,
     PlanExecutionResult,
     ResumableExecutionState,
     StepExecutionStatus,
     StepExecutionResult,
+    partial_execution_state_from_dict,
+    partial_execution_state_to_dict,
 )
 from core.execution_retry import RetryPolicy
 from core.execution_plan_validator import (
@@ -870,6 +878,180 @@ def test_global_result_is_structured() -> None:
     assert result.plan_status == "completed"
 
 
+def test_partial_state_for_completed_plan_is_safe_and_ordered() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"secret": "raw content"})
+    second = SpyTool("second_tool", calls, output="done")
+    plan = _plan((_step("step_1", "first_tool"), _step("step_2", "second_tool")))
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    state = result.partial_state
+    assert state is not None
+    assert state.overall_status == PlanExecutionStatus.COMPLETED.value
+    assert state.completed_step_ids == ("step_1", "step_2")
+    assert state.failed_step_ids == ()
+    assert state.pending_step_ids == ()
+    assert [step.step_id for step in state.step_results] == ["step_1", "step_2"]
+    assert state.step_results[0].status == PartialStepStatus.COMPLETED.value
+    assert state.step_results[0].result == {"result_ref": "step_1"}
+    assert "raw content" not in repr(partial_execution_state_to_dict(state))
+
+
+def test_partial_state_for_first_step_failure_marks_rest_skipped() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, fail=True)
+    second = SpyTool("second_tool", calls)
+    plan = _plan((_step("step_1", "first_tool"), _step("step_2", "second_tool")))
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    state = result.partial_state
+    assert state is not None
+    assert state.overall_status == PlanExecutionStatus.FAILED.value
+    assert state.completed_step_ids == ()
+    assert state.failed_step_ids == ("step_1",)
+    assert state.skipped_step_ids == ("step_2",)
+    assert [step.status for step in state.step_results] == [
+        PartialStepStatus.FAILED.value,
+        PartialStepStatus.SKIPPED.value,
+    ]
+    assert calls == ["first_tool"]
+
+
+def test_partial_state_for_late_failure_is_partially_completed() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls, fail=True)
+    third = SpyTool("third_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+            _step("step_3", "third_tool", dependencies=("step_2",)),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second, third)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    state = result.partial_state
+    assert state is not None
+    assert state.overall_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value
+    assert state.completed_step_ids == ("step_1",)
+    assert state.failed_step_ids == ("step_2",)
+    assert state.skipped_step_ids == ("step_3",)
+    assert state.resumable is False
+
+
+def test_partial_state_for_cancellation_between_steps_is_not_resumable() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls)
+    second = SpyTool("second_tool", calls)
+    plan = _plan((_step("step_1", "first_tool"), _step("step_2", "second_tool")))
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+        control=ExecutionControl(should_cancel=lambda: len(calls) >= 1),
+    )
+
+    state = result.partial_state
+    assert state is not None
+    assert state.overall_status == PlanExecutionStatus.CANCELLED.value
+    assert state.completed_step_ids == ("step_1",)
+    assert state.interrupted_step_id == "step_2"
+    assert state.resumable is False
+    assert calls == ["first_tool"]
+
+
+def test_partial_state_for_confirmation_pending_blocks_without_tool_call() -> None:
+    calls: list[str] = []
+    tool = SequenceTool("write_file", calls, ["must not run"], requires_confirmation=True)
+    plan = _plan((_step("step_1", "write_file"),), requires_confirmation=True)
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    state = result.partial_state
+    assert state is not None
+    assert state.overall_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value
+    assert state.step_results[0].status == PartialStepStatus.BLOCKED_CONFIRMATION.value
+    assert state.step_results[0].attempt_count == 0
+    assert state.step_results[0].confirmation_required is True
+    assert calls == []
+
+
+def test_partial_state_for_retry_exhausted_records_attempt_count() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "transient", "error_code": "TRANSIENT_ERROR"},
+            {"success": False, "error": "transient", "error_code": "TRANSIENT_ERROR"},
+        ],
+    )
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan))
+
+    state = result.partial_state
+    assert state is not None
+    assert state.step_results[0].status == PartialStepStatus.FAILED.value
+    assert state.step_results[0].attempt_count == 2
+    assert state.step_results[0].retryable is True
+    assert state.retry_attempts == {"step_1": 2}
+    assert calls == ["safe_tool", "safe_tool"]
+
+
+def test_partial_state_serializes_loads_and_rejects_contradictions() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+    assert result.partial_state is not None
+
+    encoded = json.dumps(partial_execution_state_to_dict(result.partial_state))
+    loaded = partial_execution_state_from_dict(json.loads(encoded), original_plan=plan)
+
+    assert loaded.overall_status == PlanExecutionStatus.COMPLETED.value
+    assert loaded.completed_step_ids == ("step_1",)
+    with pytest.raises(ValueError):
+        PartialExecutionState(
+            objective="bad",
+            original_plan=plan,
+            validated_plan_signature=None,
+            overall_status=PlanExecutionStatus.FAILED.value,
+            completed_step_ids=("step_1",),
+            failed_step_ids=("step_1",),
+            interrupted_step_id=None,
+            pending_step_ids=(),
+            skipped_step_ids=(),
+            step_results=(
+                PartialStepExecutionState(
+                    step_id="step_1",
+                    tool_name="safe_tool",
+                    status=PartialStepStatus.COMPLETED.value,
+                ),
+            ),
+            failure_reason="bad",
+            interruption_reason=None,
+            resumable=False,
+            requires_confirmation=False,
+        )
+
+
 def test_interruption_before_first_step_is_structured_and_resumable() -> None:
     calls: list[str] = []
     tool = SpyTool("safe_tool", calls)
@@ -938,7 +1120,7 @@ def test_interruption_after_one_step_preserves_completed_and_pending_steps() -> 
 def test_resume_continues_from_first_pending_step_without_repeating_completed() -> None:
     calls: list[str] = []
     first = SpyTool("first_tool", calls, output={"content": "alpha"})
-    second = SpyTool("second_tool", calls)
+    second = SpyTool("second_tool", calls, output={"name": "beta"})
     third = SpyTool("third_tool", calls)
     plan = _plan(
         (
@@ -949,7 +1131,16 @@ def test_resume_continues_from_first_pending_step_without_repeating_completed() 
                 dependencies=("step_1",),
                 arguments={"content": {"$ref": "steps.step_1.output.content"}},
             ),
-            _step("step_3", "third_tool", dependencies=("step_2",)),
+            _step(
+                "step_3",
+                "third_tool",
+                dependencies=("step_2",),
+                arguments={
+                    "message": {
+                        "$template": "Nombre: {{steps.step_2.output.name}}"
+                    }
+                },
+            ),
         )
     )
     validation = _validation(plan)
@@ -971,6 +1162,10 @@ def test_resume_continues_from_first_pending_step_without_repeating_completed() 
     assert calls == ["first_tool", "second_tool", "third_tool"]
     assert resumed.completed_steps == ["step_1", "step_2", "step_3"]
     assert second.contexts[0].parameters == {"content": "alpha"}
+    assert third.contexts[0].parameters == {"message": "Nombre: beta"}
+    assert resumed.partial_state is not None
+    assert resumed.partial_state.completed_step_ids == ("step_1", "step_2", "step_3")
+    assert resumed.partial_state.pending_step_ids == ()
 
 
 def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:
