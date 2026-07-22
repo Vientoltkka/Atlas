@@ -769,7 +769,8 @@ def test_partial_execution_response_uses_safe_visible_summary() -> None:
     assert response.partial_state is not None
     assert response.partial_state.completed_step_ids == ("step_1",)
     assert response.partial_state.failed_step_ids == ("step_2",)
-    assert response.partial_state.skipped_step_ids == ("step_3",)
+    assert response.partial_state.blocked_step_ids == ("step_3",)
+    assert response.partial_state.skipped_step_ids == ()
     assert response.message == "\n".join(
         [
             "Atlas: Ejecucion completada parcialmente.",

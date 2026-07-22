@@ -19,6 +19,11 @@ from core.execution_dependency_checker import (
     ImplicitStepDependencyError,
     TooManyStepDependenciesError,
 )
+from core.execution_plan_topology import (
+    ExecutionPlanCycleError,
+    ExecutionPlanTopologicalSorter,
+    ExecutionPlanTopologyError,
+)
 from core.execution_condition import (
     AllOfCondition,
     AnyOfCondition,
@@ -71,8 +76,10 @@ class ExecutionPlanValidator:
     def __init__(
         self,
         tool_registry: ToolRegistry | None = None,
+        topological_sorter: ExecutionPlanTopologicalSorter | None = None,
     ) -> None:
         self._tool_registry = tool_registry
+        self._topological_sorter = topological_sorter or ExecutionPlanTopologicalSorter()
 
     def validate(
         self,
@@ -91,6 +98,7 @@ class ExecutionPlanValidator:
         self._validate_arguments(plan, errors)
         self._validate_tool_argument_schemas(plan, errors)
         self._validate_dependencies(plan, errors)
+        self._validate_topology(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
 
@@ -344,10 +352,6 @@ class ExecutionPlanValidator:
                         if referenced == step.id:
                             errors.append(f"Step '{step.id}' cannot reference itself.")
                             continue
-                        if first_index_by_id[referenced] >= index:
-                            errors.append(
-                                f"Step '{step.id}' references future step '{referenced}'."
-                            )
                         if referenced not in step.depends_on:
                             errors.append(
                                 f"{ImplicitStepDependencyError.__name__}: "
@@ -601,7 +605,6 @@ class ExecutionPlanValidator:
     ) -> None:
         step_ids = [step.id for step in plan.ordered_steps]
         unique_ids = set(step_ids)
-        seen_ids: set[str] = set()
         dependency_graph: dict[str, tuple[str, ...]] = {}
 
         for step in plan.ordered_steps:
@@ -650,15 +653,22 @@ class ExecutionPlanValidator:
                 if dependency == step.id:
                     errors.append(f"Step '{step.id}' cannot depend on itself.")
 
-                if dependency in unique_ids and dependency not in seen_ids:
-                    errors.append(
-                        f"Step '{step.id}' depends on '{dependency}' before it is executable."
-                    )
-
-            seen_ids.add(step.id)
-
         for cycle in self._find_cycles(dependency_graph):
             errors.append(f"Circular dependency detected: {' -> '.join(cycle)}.")
+
+    def _validate_topology(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        try:
+            self._topological_sorter.sort(plan)
+        except ExecutionPlanCycleError as error:
+            errors.append(f"ExecutionPlanCycleError: {error}.")
+        except ExecutionPlanTopologyError as error:
+            errors.append(f"ExecutionPlanTopologyError: {error}.")
+        except ValueError as error:
+            errors.append(f"ExecutionPlanTopologyError: {error}.")
 
     def _validate_confirmation(
         self,

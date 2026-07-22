@@ -172,7 +172,10 @@ def test_validator_walks_short_circuitable_composite_nodes_statically() -> None:
     result = _validate(plan)
 
     assert result.is_valid is False
-    assert any("future step 'step_3'" in error for error in result.errors)
+    assert any(
+        "references step 'step_3' without declaring it in depends_on" in error
+        for error in result.errors
+    )
 
 
 def test_validator_rejects_self_reference_inside_composite_condition() -> None:
@@ -518,7 +521,7 @@ def test_circular_dependency_is_invalid() -> None:
     assert any(error.startswith("Circular dependency detected:") for error in result.errors)
 
 
-def test_invalid_dependency_order_is_invalid() -> None:
+def test_future_dependency_order_is_valid_when_acyclic() -> None:
     plan = replace(
         _valid_plan(),
         ordered_steps=(
@@ -529,8 +532,8 @@ def test_invalid_dependency_order_is_invalid() -> None:
 
     result = _validate(plan)
 
-    assert result.is_valid is False
-    assert "Step 'step_1' depends on 'step_2' before it is executable." in result.errors
+    assert result.is_valid is True
+    assert result.errors == []
 
 
 def test_incorrect_estimated_steps_is_invalid() -> None:
@@ -1360,7 +1363,10 @@ def test_step_output_reference_to_unknown_self_and_future_steps_are_invalid() ->
     assert result.is_valid is False
     assert "Step 'step_1' references unknown step 'missing'." in result.errors
     assert "Step 'step_2' cannot reference itself." in result.errors
-    assert "Step 'step_3' references future step 'step_4'." in result.errors
+    assert (
+        "ImplicitStepDependencyError: Step 'step_3' references step 'step_4' "
+        "without declaring it in depends_on."
+    ) in result.errors
 
 
 def test_step_output_reference_path_changes_plan_signature() -> None:

@@ -33,6 +33,12 @@ from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_plan_validator import ExecutionPlanValidator
+from core.execution_plan_topology import (
+    ExecutionDependencyStateInconsistencyError,
+    ExecutionPlanTopologicalSorter,
+    ExecutionPlanTopologyError,
+    TopologicalExecutionOrder,
+)
 from core.execution_retry import RetryPolicy
 from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
 from core.parameter_resolver import ParameterResolver
@@ -104,6 +110,7 @@ class ExecutionErrorCode(str, Enum):
     TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED"
     TOOL_EXCEPTION = "TOOL_EXCEPTION"
     DEPENDENCY_NOT_COMPLETED = "DEPENDENCY_NOT_COMPLETED"
+    DEPENDENCY_STATE_INCONSISTENCY = "DEPENDENCY_STATE_INCONSISTENCY"
     EXECUTION_INTERRUPTED = "EXECUTION_INTERRUPTED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
@@ -270,6 +277,20 @@ class ExecutionPlanExecutor:
     _EXECUTABLE_PLAN_STATUSES = {"planned"}
     _COMPLETED_STEP_STATUS = "completed"
     _LOGICAL_TOOLS = {None, "direct_response"}
+    _INCONSISTENT_DEPENDENCY_STATES = frozenset(
+        {
+            ExecutionStepState.PENDING.value,
+            ExecutionStepState.RUNNING.value,
+        }
+    )
+    _TERMINAL_UNSATISFIED_DEPENDENCY_STATES = frozenset(
+        {
+            ExecutionStepState.FAILED.value,
+            ExecutionStepState.SKIPPED.value,
+            ExecutionStepState.CANCELLED.value,
+            ExecutionStepState.BLOCKED.value,
+        }
+    )
 
     def __init__(
         self,
@@ -278,6 +299,7 @@ class ExecutionPlanExecutor:
         parameter_resolver: ParameterResolver | None = None,
         condition_evaluator: ExecutionConditionEvaluator | None = None,
         dependency_checker: ExecutionDependencyChecker | None = None,
+        topological_sorter: ExecutionPlanTopologicalSorter | None = None,
         retry_policy: RetryPolicy | None = None,
         execution_history: ExecutionHistorySink | None = None,
     ) -> None:
@@ -289,6 +311,7 @@ class ExecutionPlanExecutor:
             or ExecutionConditionEvaluator(self._parameter_resolver)
         )
         self._dependency_checker = dependency_checker or ExecutionDependencyChecker()
+        self._topological_sorter = topological_sorter or ExecutionPlanTopologicalSorter()
         self._retry_policy = retry_policy or RetryPolicy()
         self._execution_history = execution_history
 
@@ -446,10 +469,18 @@ class ExecutionPlanExecutor:
             )
 
         assert validation_result is not None
+        topology = self._topology_or_rejected(
+            plan,
+            validation_result,
+            trace,
+        )
+        if isinstance(topology, PlanExecutionResult):
+            return topology
+        execution_steps = topology.ordered_steps(plan)
         total_steps = len(
             [
                 step
-                for step in plan.ordered_steps
+                for step in execution_steps
                 if step.status != self._COMPLETED_STEP_STATUS
             ]
         )
@@ -466,8 +497,8 @@ class ExecutionPlanExecutor:
                 interrupted=False,
                 blocked=True,
                 resumable=True,
-                pending_steps=self._pending_step_ids(plan),
-                current_step=self._first_pending_step_id(plan),
+                pending_steps=self._pending_step_ids(plan, topology=topology),
+                current_step=self._first_pending_step_id(plan, topology=topology),
                 error_code=ExecutionErrorCode.CONFIRMATION_REQUIRED.value,
                 metadata={"plan_signature": self._safe_plan_signature(plan)},
                 ),
@@ -476,7 +507,7 @@ class ExecutionPlanExecutor:
 
         completed_steps = [
             step.id
-            for step in plan.ordered_steps
+            for step in execution_steps
             if step.status == self._COMPLETED_STEP_STATUS
         ]
         for step_id in initial_completed_step_ids:
@@ -490,13 +521,13 @@ class ExecutionPlanExecutor:
         completed: set[str] = set(completed_steps)
         skipped_steps = [
             step.id
-            for step in plan.ordered_steps
+            for step in execution_steps
             if active_context.state_for_step(step.id) == ExecutionStepState.SKIPPED.value
         ]
         skipped: set[str] = set(skipped_steps)
         blocked_steps = [
             step.id
-            for step in plan.ordered_steps
+            for step in execution_steps
             if active_context.state_for_step(step.id) == ExecutionStepState.BLOCKED.value
         ]
         blocked: set[str] = set(blocked_steps)
@@ -513,13 +544,14 @@ class ExecutionPlanExecutor:
             total_steps=total_steps,
         )
 
-        for index, step in enumerate(plan.ordered_steps):
+        for index, step in enumerate(execution_steps):
             if step.id in completed or step.id in skipped or step.id in blocked:
                 continue
 
             progress_index = len(completed_steps) + len(skipped_steps) + len(blocked_steps) + 1
             control_result = self._control_result(
                 plan=plan,
+                execution_steps=execution_steps,
                 validation_result=validation_result,
                 control=control,
                 execution_context=active_context,
@@ -538,6 +570,7 @@ class ExecutionPlanExecutor:
 
             dependency_outcome = self._check_step_dependencies(
                 plan=plan,
+                execution_steps=execution_steps,
                 validation_result=validation_result,
                 step=step,
                 execution_context=active_context,
@@ -571,6 +604,18 @@ class ExecutionPlanExecutor:
                     skipped_steps.append(step.id)
                     continue
 
+                (
+                    trailing_pending,
+                    trailing_results,
+                ) = self._propagated_not_executed_results(
+                    execution_steps=execution_steps,
+                    start_index=index + 1,
+                    execution_context=active_context,
+                    trace=trace,
+                    blocked_steps=blocked_steps,
+                    skipped_steps=skipped_steps,
+                    default_status=StepExecutionStatus.SKIPPED.value,
+                )
                 self._trace_execution_context_snapshot_created(trace, active_context)
                 return self._finalize_result(
                     plan,
@@ -581,14 +626,10 @@ class ExecutionPlanExecutor:
                     completed_steps=completed_steps,
                     failed_step=step.id,
                     failed_steps=[step.id],
-                    skipped_steps=skipped_steps + self._remaining_step_ids(plan.ordered_steps, index + 1),
-                    pending_steps=[],
-                    step_results=step_results
-                    + self._not_executed_results(
-                        plan.ordered_steps,
-                        index + 1,
-                        StepExecutionStatus.SKIPPED.value,
-                    ),
+                    skipped_steps=skipped_steps,
+                    blocked_steps=blocked_steps,
+                    pending_steps=trailing_pending,
+                    step_results=step_results + trailing_results,
                     error=condition_outcome.error,
                     requires_confirmation=validation_result.requires_confirmation,
                     interrupted=False,
@@ -655,6 +696,7 @@ class ExecutionPlanExecutor:
                 )
                 return self._retry_stop_result(
                     plan=plan,
+                    execution_steps=execution_steps,
                     validation_result=validation_result,
                     completed_steps=completed_steps,
                     step_results=step_results,
@@ -707,6 +749,15 @@ class ExecutionPlanExecutor:
                 step_index=progress_index,
                 total_steps=total_steps,
             )
+            trailing_pending, trailing_results = self._propagated_not_executed_results(
+                execution_steps=execution_steps,
+                start_index=index + 1,
+                execution_context=active_context,
+                trace=trace,
+                blocked_steps=blocked_steps,
+                skipped_steps=skipped_steps,
+                default_status=StepExecutionStatus.SKIPPED.value,
+            )
             self._trace_execution_context_snapshot_created(trace, active_context)
             return self._finalize_result(
                 plan,
@@ -717,14 +768,10 @@ class ExecutionPlanExecutor:
                 completed_steps=completed_steps,
                 failed_step=step.id,
                 failed_steps=[step.id],
-                skipped_steps=skipped_steps + self._remaining_step_ids(plan.ordered_steps, index + 1),
-                pending_steps=[],
-                step_results=step_results
-                + self._not_executed_results(
-                    plan.ordered_steps,
-                    index + 1,
-                    StepExecutionStatus.SKIPPED.value,
-                ),
+                skipped_steps=skipped_steps,
+                blocked_steps=blocked_steps,
+                pending_steps=trailing_pending,
+                step_results=step_results + trailing_results,
                 error=outcome.error,
                 requires_confirmation=validation_result.requires_confirmation,
                 interrupted=False,
@@ -807,6 +854,47 @@ class ExecutionPlanExecutor:
             return plan_signature(plan)
         except TypeError:
             return None
+
+    def _topology_or_rejected(
+        self,
+        plan: ExecutionPlan,
+        validation_result: PlanValidationResult,
+        trace: ExecutionTrace,
+    ) -> TopologicalExecutionOrder | PlanExecutionResult:
+        self._trace_topology_started(trace, plan)
+        try:
+            topology = self._topological_sorter.sort(plan)
+        except (ExecutionPlanTopologyError, ValueError) as error:
+            self._trace_topology_failed(trace, plan, error)
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.REJECTED.value,
+                    success=False,
+                    error=str(error),
+                    requires_confirmation=validation_result.requires_confirmation,
+                    failed=True,
+                    error_code=ExecutionErrorCode.INVALID_PLAN.value,
+                    pending_steps=[],
+                    failure_reason=str(error),
+                    metadata={"plan_signature": validation_result.plan_signature},
+                ),
+                trace=trace,
+            )
+        self._trace_topology_succeeded(trace, topology)
+        if topology.reordered:
+            self._trace_plan_reordered(trace, topology)
+        return topology
+
+    def _safe_topological_steps(
+        self,
+        plan: ExecutionPlan,
+    ) -> tuple[ExecutionStep, ...]:
+        try:
+            return self._topological_sorter.sort(plan).ordered_steps(plan)
+        except Exception:
+            return tuple(plan.ordered_steps)
 
     def _precondition_error_code(
         self,
@@ -1152,6 +1240,7 @@ class ExecutionPlanExecutor:
         self,
         *,
         plan: ExecutionPlan,
+        execution_steps: tuple[ExecutionStep, ...],
         validation_result: PlanValidationResult,
         step: ExecutionStep,
         execution_context: ExecutionContext,
@@ -1171,6 +1260,22 @@ class ExecutionPlanExecutor:
         if check.satisfied:
             self._trace_dependency_check_succeeded(trace, execution_context, step, check)
             return None
+
+        if self._has_inconsistent_dependency_state(check):
+            return self._dependency_state_inconsistency_result(
+                plan=plan,
+                execution_steps=execution_steps,
+                validation_result=validation_result,
+                step=step,
+                execution_context=execution_context,
+                trace=trace,
+                completed_steps=completed_steps,
+                skipped_steps=skipped_steps,
+                blocked_steps=blocked_steps,
+                step_results=step_results,
+                current_index=current_index,
+                check=check,
+            )
 
         previous, current = execution_context.mark_step_blocked(step.id)
         self._trace_step_state_changed(
@@ -1192,7 +1297,15 @@ class ExecutionPlanExecutor:
             total_steps=total_steps,
         )
         blocked_steps.append(step.id)
-        remaining = self._remaining_step_ids(plan.ordered_steps, current_index + 1)
+        remaining, trailing_results = self._propagated_not_executed_results(
+            execution_steps=execution_steps,
+            start_index=current_index + 1,
+            execution_context=execution_context,
+            trace=trace,
+            blocked_steps=blocked_steps,
+            skipped_steps=skipped_steps,
+            default_status=StepExecutionStatus.NOT_STARTED.value,
+        )
         error = self._dependency_blocked_error(step, check)
         self._trace_execution_context_snapshot_created(trace, execution_context)
         return self._finalize_result(
@@ -1225,11 +1338,7 @@ class ExecutionPlanExecutor:
                         },
                     )
                 ]
-                + self._not_executed_results(
-                    plan.ordered_steps,
-                    current_index + 1,
-                    StepExecutionStatus.NOT_STARTED.value,
-                ),
+                + trailing_results,
                 error=error,
                 requires_confirmation=validation_result.requires_confirmation,
                 interrupted=False,
@@ -1244,6 +1353,214 @@ class ExecutionPlanExecutor:
             ),
             trace=trace,
         )
+
+    def _has_inconsistent_dependency_state(
+        self,
+        check: ExecutionDependencyCheckResult,
+    ) -> bool:
+        return any(
+            state in self._INCONSISTENT_DEPENDENCY_STATES
+            for state in check.blocking_states.values()
+        )
+
+    def _dependency_state_inconsistency_result(
+        self,
+        *,
+        plan: ExecutionPlan,
+        execution_steps: tuple[ExecutionStep, ...],
+        validation_result: PlanValidationResult,
+        step: ExecutionStep,
+        execution_context: ExecutionContext,
+        trace: ExecutionTrace,
+        completed_steps: list[str],
+        skipped_steps: list[str],
+        blocked_steps: list[str],
+        step_results: list[StepExecutionResult],
+        current_index: int,
+        check: ExecutionDependencyCheckResult,
+    ) -> PlanExecutionResult:
+        error = (
+            f"{ExecutionDependencyStateInconsistencyError.__name__}: step "
+            f"'{step.id}' has unresolved dependency states in topological order: "
+            f"{self._dependency_state_details(check)}."
+        )
+        self._trace_dependency_check_failed(trace, execution_context, step, check)
+        self._trace_execution_context_snapshot_created(trace, execution_context)
+        return self._finalize_result(
+            plan,
+            validation_result,
+            PlanExecutionResult(
+                plan_status=PlanExecutionStatus.REJECTED.value,
+                success=False,
+                completed_steps=completed_steps,
+                failed_step=step.id,
+                failed_steps=[step.id],
+                skipped_steps=skipped_steps,
+                blocked_steps=blocked_steps,
+                pending_steps=self._remaining_step_ids(
+                    execution_steps,
+                    current_index + 1,
+                ),
+                step_results=step_results
+                + [
+                    StepExecutionResult(
+                        step_id=step.id,
+                        status=StepExecutionStatus.FAILED.value,
+                        success=False,
+                        tool_name=step.tool,
+                        output=None,
+                        error=error,
+                        error_code=(
+                            ExecutionErrorCode
+                            .DEPENDENCY_STATE_INCONSISTENCY
+                            .value
+                        ),
+                        metadata={
+                            "dependency_ids": list(check.dependency_ids),
+                            "blocking_dependency_ids": list(
+                                check.blocking_dependency_ids
+                            ),
+                            "blocking_states": dict(check.blocking_states),
+                            "checked_count": check.checked_count,
+                        },
+                    )
+                ]
+                + self._not_executed_results(
+                    execution_steps,
+                    current_index + 1,
+                    StepExecutionStatus.NOT_STARTED.value,
+                ),
+                error=error,
+                requires_confirmation=validation_result.requires_confirmation,
+                interrupted=False,
+                completed=False,
+                failed=True,
+                blocked=False,
+                resumable=False,
+                current_step=step.id,
+                failure_reason=error,
+                error_code=ExecutionErrorCode.DEPENDENCY_STATE_INCONSISTENCY.value,
+                metadata={"plan_signature": validation_result.plan_signature},
+            ),
+            trace=trace,
+        )
+
+    def _dependency_state_details(
+        self,
+        check: ExecutionDependencyCheckResult,
+    ) -> str:
+        return ", ".join(
+            f"{dependency_id}:{check.blocking_states.get(dependency_id)}"
+            for dependency_id in check.blocking_dependency_ids
+        )
+
+    def _propagated_not_executed_results(
+        self,
+        *,
+        execution_steps: tuple[ExecutionStep, ...],
+        start_index: int,
+        execution_context: ExecutionContext,
+        trace: ExecutionTrace,
+        blocked_steps: list[str],
+        skipped_steps: list[str],
+        default_status: str,
+    ) -> tuple[list[str], list[StepExecutionResult]]:
+        pending_steps: list[str] = []
+        results: list[StepExecutionResult] = []
+
+        for step in execution_steps[start_index:]:
+            if step.status == self._COMPLETED_STEP_STATUS:
+                continue
+
+            blocking_states = self._terminal_dependency_states(step, execution_context)
+            if blocking_states:
+                check = ExecutionDependencyCheckResult(
+                    satisfied=False,
+                    dependency_ids=tuple(step.depends_on),
+                    blocking_dependency_ids=tuple(blocking_states),
+                    blocking_states=blocking_states,
+                    checked_count=len(step.depends_on),
+                    error_code="EXECUTION_DEPENDENCY_NOT_SATISFIED",
+                )
+                if execution_context.state_for_step(step.id) == (
+                    ExecutionStepState.PENDING.value
+                ):
+                    previous, current = execution_context.mark_step_blocked(step.id)
+                    self._trace_step_state_changed(
+                        trace,
+                        execution_context,
+                        step.id,
+                        previous,
+                        current,
+                        None,
+                    )
+                self._trace_step_blocked(trace, execution_context, step, check)
+                if step.id not in blocked_steps:
+                    blocked_steps.append(step.id)
+                results.append(
+                    StepExecutionResult(
+                        step_id=step.id,
+                        status=StepExecutionStatus.BLOCKED.value,
+                        success=False,
+                        tool_name=step.tool,
+                        output=None,
+                        error=self._dependency_blocked_error(step, check),
+                        error_code=ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value,
+                        metadata={
+                            "dependency_ids": list(check.dependency_ids),
+                            "blocking_dependency_ids": list(
+                                check.blocking_dependency_ids
+                            ),
+                            "blocking_states": dict(check.blocking_states),
+                            "checked_count": check.checked_count,
+                            "propagated": True,
+                        },
+                    )
+                )
+                continue
+
+            if default_status == StepExecutionStatus.SKIPPED.value:
+                if step.id not in skipped_steps:
+                    skipped_steps.append(step.id)
+                results.append(
+                    StepExecutionResult(
+                        step_id=step.id,
+                        status=StepExecutionStatus.SKIPPED.value,
+                        success=False,
+                        tool_name=step.tool,
+                        output=None,
+                        error=None,
+                    )
+                )
+                continue
+
+            pending_steps.append(step.id)
+            results.append(
+                StepExecutionResult(
+                    step_id=step.id,
+                    status=default_status,
+                    success=False,
+                    tool_name=step.tool,
+                    output=None,
+                    error=None,
+                )
+            )
+
+        return pending_steps, results
+
+    def _terminal_dependency_states(
+        self,
+        step: ExecutionStep,
+        execution_context: ExecutionContext,
+    ) -> dict[str, str]:
+        return {
+            dependency_id: state
+            for dependency_id in step.depends_on
+            if (
+                state := execution_context.state_for_step(dependency_id)
+            )
+            in self._TERMINAL_UNSATISFIED_DEPENDENCY_STATES
+        }
 
     def _dependency_blocked_error(
         self,
@@ -1321,6 +1638,7 @@ class ExecutionPlanExecutor:
         self,
         *,
         plan: ExecutionPlan,
+        execution_steps: tuple[ExecutionStep, ...],
         validation_result: PlanValidationResult,
         control: ExecutionControl | None,
         execution_context: ExecutionContext,
@@ -1355,12 +1673,12 @@ class ExecutionPlanExecutor:
                     completed_steps=completed_steps,
                     failed_step=None,
                     skipped_steps=self._remaining_step_ids(
-                        plan.ordered_steps,
+                        execution_steps,
                         current_index,
                     ) + skipped_steps,
                     step_results=step_results
                     + self._not_executed_results(
-                        plan.ordered_steps,
+                        execution_steps,
                         current_index,
                         StepExecutionStatus.SKIPPED.value,
                     ),
@@ -1368,7 +1686,7 @@ class ExecutionPlanExecutor:
                     requires_confirmation=validation_result.requires_confirmation,
                     failed=True,
                     resumable=False,
-                    current_step=plan.ordered_steps[current_index].id,
+                    current_step=execution_steps[current_index].id,
                     failure_reason=message,
                     error_code=ExecutionErrorCode.INTERNAL_EXECUTOR_ERROR.value,
                 metadata={"exception_type": type(error).__name__},
@@ -1377,11 +1695,12 @@ class ExecutionPlanExecutor:
             )
 
         if should_cancel:
-            current_step_id = plan.ordered_steps[current_index].id
+            current_step_id = execution_steps[current_index].id
             self._mark_context_started(trace, execution_context, current_step_id, 1)
             self._mark_context_cancelled(trace, execution_context, current_step_id)
             return self._controlled_stop_result(
                 plan=plan,
+                execution_steps=execution_steps,
                 validation_result=validation_result,
                 completed_steps=completed_steps,
                 skipped_steps=skipped_steps,
@@ -1401,11 +1720,12 @@ class ExecutionPlanExecutor:
             )
 
         if should_stop:
-            current_step_id = plan.ordered_steps[current_index].id
+            current_step_id = execution_steps[current_index].id
             self._mark_context_started(trace, execution_context, current_step_id, 1)
             self._mark_context_failed(trace, execution_context, current_step_id)
             return self._controlled_stop_result(
                 plan=plan,
+                execution_steps=execution_steps,
                 validation_result=validation_result,
                 completed_steps=completed_steps,
                 skipped_steps=skipped_steps,
@@ -1430,6 +1750,7 @@ class ExecutionPlanExecutor:
         self,
         *,
         plan: ExecutionPlan,
+        execution_steps: tuple[ExecutionStep, ...],
         validation_result: PlanValidationResult,
         completed_steps: list[str],
         skipped_steps: list[str],
@@ -1447,7 +1768,7 @@ class ExecutionPlanExecutor:
         total_steps: int,
         trace: ExecutionTrace,
     ) -> PlanExecutionResult:
-        current_step = plan.ordered_steps[current_index]
+        current_step = execution_steps[current_index]
         self._emit_progress(
             on_progress,
             "cancelled" if cancelled else "interrupted",
@@ -1456,7 +1777,7 @@ class ExecutionPlanExecutor:
             step_index=step_index,
             total_steps=total_steps,
         )
-        pending_steps = self._remaining_step_ids(plan.ordered_steps, current_index)
+        pending_steps = self._remaining_step_ids(execution_steps, current_index)
         current_result = StepExecutionResult(
             step_id=current_step.id,
             status=step_status,
@@ -1486,7 +1807,7 @@ class ExecutionPlanExecutor:
                 step_results=step_results
                 + [current_result]
                 + self._not_executed_results(
-                    plan.ordered_steps,
+                    execution_steps,
                     current_index + 1,
                     remaining_status,
                 ),
@@ -1930,14 +2251,23 @@ class ExecutionPlanExecutor:
     def _pending_step_ids(
         self,
         plan: ExecutionPlan,
+        *,
+        topology: TopologicalExecutionOrder | None = None,
     ) -> list[str]:
-        return self._remaining_step_ids(plan.ordered_steps, 0)
+        steps = (
+            topology.ordered_steps(plan)
+            if topology is not None
+            else self._safe_topological_steps(plan)
+        )
+        return self._remaining_step_ids(steps, 0)
 
     def _first_pending_step_id(
         self,
         plan: ExecutionPlan,
+        *,
+        topology: TopologicalExecutionOrder | None = None,
     ) -> str | None:
-        pending = self._pending_step_ids(plan)
+        pending = self._pending_step_ids(plan, topology=topology)
         return pending[0] if pending else None
 
     def _not_executed_results(
@@ -1972,6 +2302,7 @@ class ExecutionPlanExecutor:
         self,
         *,
         plan: ExecutionPlan,
+        execution_steps: tuple[ExecutionStep, ...],
         validation_result: PlanValidationResult,
         completed_steps: list[str],
         step_results: list[StepExecutionResult],
@@ -1999,11 +2330,11 @@ class ExecutionPlanExecutor:
             completed_steps=completed_steps,
             failed_step=None,
             skipped_steps=[],
-            pending_steps=self._remaining_step_ids(plan.ordered_steps, current_index),
+            pending_steps=self._remaining_step_ids(execution_steps, current_index),
             step_results=step_results
             + [outcome]
             + self._not_executed_results(
-                plan.ordered_steps,
+                execution_steps,
                 current_index + 1,
                 remaining_status,
             ),
@@ -2257,6 +2588,85 @@ class ExecutionPlanExecutor:
                 "execution_id": context.execution_id,
                 "step_id": step.id,
                 "tool_name": step.tool,
+            },
+        )
+
+    def _trace_topology_started(
+        self,
+        trace: ExecutionTrace,
+        plan: ExecutionPlan,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanTopologicalSorter",
+            action="execution_topology_started",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "step_count": len(plan.ordered_steps),
+                "dependency_count": sum(
+                    len(step.depends_on)
+                    for step in plan.ordered_steps
+                ),
+            },
+        )
+
+    def _trace_topology_succeeded(
+        self,
+        trace: ExecutionTrace,
+        topology: TopologicalExecutionOrder,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanTopologicalSorter",
+            action="execution_topology_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "step_count": len(topology.ordered_step_ids),
+                "dependency_count": topology.dependency_count,
+                "root_count": len(topology.root_step_ids),
+                "reordered": topology.reordered,
+                "ordered_step_ids": list(topology.ordered_step_ids),
+            },
+        )
+
+    def _trace_topology_failed(
+        self,
+        trace: ExecutionTrace,
+        plan: ExecutionPlan,
+        error: ExecutionPlanTopologyError,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanTopologicalSorter",
+            action="execution_topology_failed",
+            status=TraceEventStatus.FAILED.value,
+            details={
+                "step_count": len(plan.ordered_steps),
+                "dependency_count": sum(
+                    len(step.depends_on)
+                    for step in plan.ordered_steps
+                ),
+                "error_type": type(error).__name__,
+                "error_code": ExecutionErrorCode.INVALID_PLAN.value,
+                "cycle_node_ids": [
+                    step.id
+                    for step in plan.ordered_steps
+                    if step.id in str(error)
+                ],
+            },
+        )
+
+    def _trace_plan_reordered(
+        self,
+        trace: ExecutionTrace,
+        topology: TopologicalExecutionOrder,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanTopologicalSorter",
+            action="execution_plan_reordered",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "step_count": len(topology.ordered_step_ids),
+                "dependency_count": topology.dependency_count,
+                "reordered": True,
+                "ordered_step_ids": list(topology.ordered_step_ids),
             },
         )
 
@@ -2919,6 +3329,15 @@ class ExecutionPlanExecutor:
         return None
 
 
+def _safe_topological_execution_steps(
+    plan: ExecutionPlan,
+) -> tuple[ExecutionStep, ...]:
+    try:
+        return ExecutionPlanTopologicalSorter().sort(plan).ordered_steps(plan)
+    except Exception:
+        return tuple(plan.ordered_steps)
+
+
 def build_partial_execution_state(
     *,
     objective: str,
@@ -2927,9 +3346,10 @@ def build_partial_execution_state(
     execution: PlanExecutionResult,
 ) -> PartialExecutionState:
     """Build a safe partial execution state from the executor result."""
-    step_by_id = {step.id: step for step in plan.ordered_steps}
+    execution_steps = _safe_topological_execution_steps(plan)
+    step_by_id = {step.id: step for step in execution_steps}
     raw_result_by_id = {result.step_id: result for result in execution.step_results}
-    ordered_step_ids = tuple(step.id for step in plan.ordered_steps)
+    ordered_step_ids = tuple(step.id for step in execution_steps)
     raw_failed_step_ids = tuple(execution.failed_steps)
     if (
         not raw_failed_step_ids
@@ -2968,7 +3388,7 @@ def build_partial_execution_state(
 
     partial_steps: list[PartialStepExecutionState] = []
     retry_attempts: dict[str, int] = {}
-    for step in plan.ordered_steps:
+    for step in execution_steps:
         raw_result = raw_result_by_id.get(step.id)
         if raw_result is None:
             status = _implicit_partial_step_status(step.id, execution)
@@ -3165,7 +3585,9 @@ def _validate_partial_execution_state(
     if state.overall_status not in _PARTIAL_PLAN_STATUSES:
         raise ValueError(f"Invalid partial execution status: {state.overall_status}")
 
-    plan_step_ids = tuple(step.id for step in state.original_plan.ordered_steps)
+    plan_step_ids = tuple(
+        step.id for step in _safe_topological_execution_steps(state.original_plan)
+    )
     plan_step_set = set(plan_step_ids)
     buckets = (
         state.completed_step_ids,

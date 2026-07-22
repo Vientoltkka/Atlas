@@ -21,6 +21,10 @@ from core.execution_condition import (
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
+from core.execution_plan_topology import (
+    ExecutionPlanTopologicalSorter,
+    ExecutionPlanTopologyError,
+)
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
 from core.step_output_reference import StepOutputReference
@@ -717,7 +721,8 @@ def _validate_state_consistency(
     previous_results: dict[str, Any],
     execution_context_snapshot: ExecutionContextSnapshot | None,
 ) -> None:
-    all_step_ids = tuple(step.id for step in plan.ordered_steps)
+    ordered_steps = _execution_ordered_steps(plan)
+    all_step_ids = tuple(step.id for step in ordered_steps)
     all_step_id_set = set(all_step_ids)
     completed = set(completed_step_ids)
     pending = set(pending_step_ids)
@@ -788,7 +793,7 @@ def _validate_state_consistency(
             "Interrupted step is not pending.",
         )
 
-    for step in plan.ordered_steps:
+    for step in ordered_steps:
         if step.id not in completed:
             continue
         for dependency_id in step.depends_on:
@@ -806,7 +811,7 @@ def _validate_state_consistency(
             )
 
     if execution_context_snapshot is not None:
-        for step in plan.ordered_steps:
+        for step in ordered_steps:
             if step.id not in blocked:
                 continue
             if step.id in execution_context_snapshot.results_by_step_id:
@@ -823,6 +828,18 @@ def _validate_state_consistency(
                     "EXECUTION_STATE_INVALID",
                     "A blocked step cannot have an applied output binding.",
                 )
+
+
+def _execution_ordered_steps(
+    plan: ExecutionPlan,
+) -> tuple[ExecutionStep, ...]:
+    try:
+        return ExecutionPlanTopologicalSorter().sort(plan).ordered_steps(plan)
+    except ExecutionPlanTopologyError as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution plan topology is invalid: {error}",
+        ) from error
 
 
 def _safe_metadata(

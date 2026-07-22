@@ -68,6 +68,7 @@ def _step(
     tool: str | None = "safe_tool",
     *,
     depends_on: tuple[str, ...] = (),
+    status: str = "pending",
     arguments: dict[str, object] | None = None,
     condition: object | None = None,
     output_binding: ExecutionVariableBinding | None = None,
@@ -77,6 +78,7 @@ def _step(
         description=f"Execute {step_id}.",
         tool=tool,
         depends_on=depends_on,
+        status=status,
         arguments={} if arguments is None else arguments,
         condition=condition,
         output_binding=output_binding,
@@ -122,7 +124,7 @@ def test_execution_step_accepts_depends_on_and_copies_sequence() -> None:
     assert step.dependencies == ("read",)
 
 
-def test_validator_rejects_invalid_duplicate_self_future_cycles_and_limits() -> None:
+def test_validator_rejects_invalid_duplicate_self_cycles_and_limits() -> None:
     too_many = tuple(f"step_{index}" for index in range(65))
     plan = _plan(
         (
@@ -137,7 +139,6 @@ def test_validator_rejects_invalid_duplicate_self_future_cycles_and_limits() -> 
 
     assert result.is_valid is False
     joined = "\n".join(result.errors)
-    assert "depends on 'step_2' before it is executable" in joined
     assert "duplicate dependency 'step_1'" in joined
     assert "dependency at position 2 cannot be empty" in joined
     assert "dependency at position 3 must be a string" in joined
@@ -281,6 +282,132 @@ def test_executor_blocks_before_condition_resolution_tool_binding_and_retry() ->
     assert result.metrics.blocked_steps == 1
     assert result.metrics.failed_steps == 0
     assert result.metrics.skipped_steps == 0
+
+
+def test_executor_runs_future_physical_dependency_before_consumer() -> None:
+    calls: list[str] = []
+    read_tool = SpyTool("read_tool", calls, output={"content": "alpha"})
+    consume_tool = SpyTool("consume_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "consume",
+                tool="consume_tool",
+                depends_on=("read",),
+                arguments={"content": StepOutputReference("read", ("content",))},
+            ),
+            _step("read", tool="read_tool"),
+        )
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(read_tool, consume_tool)
+    ).execute(plan, _validate(plan))
+
+    assert result.success is True
+    assert calls == ["read_tool", "consume_tool"]
+    assert result.completed_steps == ["read", "consume"]
+    assert result.partial_state is not None
+    assert result.partial_state.completed_step_ids == ("read", "consume")
+    assert plan.ordered_steps[0].id == "consume"
+    assert read_tool._calls == calls
+
+
+def test_executor_observes_topological_reorder_without_mutating_plan() -> None:
+    calls: list[str] = []
+    plan = _plan(
+        (
+            _step("dependent", depends_on=("dependency",)),
+            _step("dependency"),
+        )
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(SpyTool("safe_tool", calls))
+    ).execute(plan, _validate(plan))
+
+    assert result.success is True
+    assert plan.ordered_steps[0].id == "dependent"
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "execution_topology_started" in actions
+    assert "execution_topology_succeeded" in actions
+    assert "execution_plan_reordered" in actions
+    reorder_events = [
+        event
+        for event in result.trace.events
+        if event.action == "execution_plan_reordered"
+    ]
+    assert reorder_events[0].details["ordered_step_ids"] == [
+        "dependency",
+        "dependent",
+    ]
+
+
+def test_executor_reports_running_dependency_state_inconsistency() -> None:
+    calls: list[str] = []
+    plan = _plan(
+        (
+            _step("dependency", status="completed"),
+            _step("dependent", depends_on=("dependency",)),
+        )
+    )
+    context = ExecutionContext("exec-inconsistent")
+    context.mark_step_started("dependency", 1)
+    validation = replace(_validate(plan), is_valid=True, errors=[], status="valid")
+
+    result = ExecutionPlanExecutor(
+        _registry(SpyTool("safe_tool", calls))
+    ).execute(plan, validation, execution_context=context)
+
+    assert result.plan_status == PlanExecutionStatus.REJECTED.value
+    assert result.failed is True
+    assert result.blocked is False
+    assert result.error_code == ExecutionErrorCode.DEPENDENCY_STATE_INCONSISTENCY.value
+    assert result.failed_steps == ["dependent"]
+    assert result.blocked_steps == []
+    assert result.step_results[0].error_code == (
+        ExecutionErrorCode.DEPENDENCY_STATE_INCONSISTENCY.value
+    )
+    assert "dependency:RUNNING" in (result.error or "")
+    assert calls == []
+
+
+def test_failed_dependency_blocks_transitive_dependents() -> None:
+    calls: list[str] = []
+    plan = _plan(
+        (
+            _step("root", tool="root_tool"),
+            _step("child", tool="safe_tool", depends_on=("root",)),
+            _step("grandchild", tool="safe_tool", depends_on=("child",)),
+            _step("independent", tool="safe_tool"),
+        )
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(
+            SpyTool("root_tool", calls, output={"success": False, "error": "boom"}),
+            SpyTool("safe_tool", calls),
+        )
+    ).execute(plan, _validate(plan))
+
+    assert result.failed is True
+    assert result.failed_steps == ["root"]
+    assert result.blocked_steps == ["child", "grandchild"]
+    assert result.skipped_steps == ["independent"]
+    assert [step.step_id for step in result.step_results] == [
+        "root",
+        "child",
+        "grandchild",
+        "independent",
+    ]
+    assert [step.status for step in result.step_results] == [
+        StepExecutionStatus.FAILED.value,
+        StepExecutionStatus.BLOCKED.value,
+        StepExecutionStatus.BLOCKED.value,
+        StepExecutionStatus.SKIPPED.value,
+    ]
+    assert calls == ["root_tool"]
 
 
 def test_blocked_state_is_terminal_and_resume_does_not_repeat_it() -> None:

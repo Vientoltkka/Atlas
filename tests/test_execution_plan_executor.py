@@ -1250,12 +1250,13 @@ def test_failed_result_returned_by_tool_stops_plan() -> None:
     assert result.success is False
     assert result.failed_step == "step_1"
     assert result.failed_steps == ["step_1"]
-    assert result.skipped_steps == ["step_2"]
+    assert result.skipped_steps == []
+    assert result.blocked_steps == ["step_2"]
     assert result.error == "bad result"
     assert result.error_code == ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
     assert result.resumable is False
     assert result.step_results[0].error_code == ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
-    assert result.step_results[1].status == StepExecutionStatus.SKIPPED.value
+    assert result.step_results[1].status == StepExecutionStatus.BLOCKED.value
     assert calls == ["first_tool"]
 
 
@@ -1294,7 +1295,8 @@ def test_fail_fast_stops_on_first_failure() -> None:
 
     assert result.success is False
     assert result.failed_step == "step_1"
-    assert result.skipped_steps == ["step_2", "step_3"]
+    assert result.skipped_steps == []
+    assert result.blocked_steps == ["step_2", "step_3"]
     assert result.plan_status == PlanExecutionStatus.FAILED.value
     assert calls == ["first_tool"]
 
@@ -1319,7 +1321,8 @@ def test_later_steps_are_not_executed_after_failure() -> None:
 
     assert result.success is False
     assert result.failed_step == "step_2"
-    assert result.skipped_steps == ["step_3"]
+    assert result.skipped_steps == []
+    assert result.blocked_steps == ["step_3"]
     assert result.plan_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value
     assert calls == ["first_tool", "second_tool"]
 
@@ -1384,6 +1387,8 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     actions = [event.action for event in result.trace.events]
     assert actions == [
         "execution_context_created",
+        "execution_topology_started",
+        "execution_topology_succeeded",
         "execution_dependency_check_started",
         "execution_dependency_check_succeeded",
         "STEP_STARTED",
@@ -1393,10 +1398,10 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
         "execution_context_snapshot_created",
     ]
     assert result.trace.events[1].status == TraceEventStatus.STARTED.value
-    assert result.trace.events[5].status == TraceEventStatus.FINISHED.value
-    assert result.trace.events[3].component == "ExecutionPlanExecutor"
-    assert result.trace.events[3].details["step_id"] == "step_1"
-    assert result.trace.events[6].duration_ms is not None
+    assert result.trace.events[2].status == TraceEventStatus.FINISHED.value
+    assert result.trace.events[5].component == "ExecutionPlanExecutor"
+    assert result.trace.events[5].details["step_id"] == "step_1"
+    assert result.trace.events[8].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_id == result.trace.execution_id
     assert result.metrics.started_steps == 1
@@ -1417,6 +1422,8 @@ def test_executor_trace_records_failed_step_event() -> None:
     actions = [event.action for event in result.trace.events]
     assert actions == [
         "execution_context_created",
+        "execution_topology_started",
+        "execution_topology_succeeded",
         "execution_dependency_check_started",
         "execution_dependency_check_succeeded",
         "STEP_STARTED",
@@ -1425,11 +1432,11 @@ def test_executor_trace_records_failed_step_event() -> None:
         "STEP_FAILED",
         "execution_context_snapshot_created",
     ]
-    assert result.trace.events[6].status == TraceEventStatus.FAILED.value
-    assert result.trace.events[6].details["error_code"] == (
+    assert result.trace.events[8].status == TraceEventStatus.FAILED.value
+    assert result.trace.events[8].details["error_code"] == (
         ExecutionErrorCode.TOOL_EXCEPTION.value
     )
-    assert result.trace.events[6].duration_ms is not None
+    assert result.trace.events[8].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.FAILED.value
     assert result.metrics.started_steps == 1
@@ -1451,12 +1458,14 @@ def test_executor_trace_marks_cancelled_execution() -> None:
     assert result.trace.status == TraceStatus.CANCELLED.value
     assert [event.action for event in result.trace.events] == [
         "execution_context_created",
+        "execution_topology_started",
+        "execution_topology_succeeded",
         "step_state_changed",
         "step_state_changed",
     ]
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.CANCELLED.value
-    assert result.metrics.total_events == 3
+    assert result.metrics.total_events == 5
     assert calls == []
 
 
@@ -1530,7 +1539,8 @@ def test_partial_state_for_late_failure_is_partially_completed() -> None:
     assert state.overall_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value
     assert state.completed_step_ids == ("step_1",)
     assert state.failed_step_ids == ("step_2",)
-    assert state.skipped_step_ids == ("step_3",)
+    assert state.blocked_step_ids == ("step_3",)
+    assert state.skipped_step_ids == ()
     assert state.resumable is False
 
 
@@ -2116,9 +2126,9 @@ def test_dependency_failure_uses_dependency_error_code() -> None:
     )
 
     assert result.success is False
-    assert result.error_code == ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value
+    assert result.error_code == ExecutionErrorCode.INVALID_PLAN.value
     assert result.failed_steps == []
-    assert result.blocked_steps == ["step_1"]
+    assert result.blocked_steps == []
     assert result.pending_steps == []
     assert calls == []
 
@@ -2207,7 +2217,8 @@ def test_traceability_includes_completed_failed_and_skipped_steps() -> None:
     ]
     assert result.completed_steps == ["step_1"]
     assert result.failed_steps == ["step_2"]
-    assert result.skipped_steps == ["step_3"]
+    assert result.blocked_steps == ["step_3"]
+    assert result.skipped_steps == []
 
 
 def test_executor_does_not_retry_failed_tool() -> None:
