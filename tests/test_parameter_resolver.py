@@ -41,6 +41,20 @@ def test_resolves_reference_to_complete_step_output() -> None:
     assert result.used_step_ids == ["step_1"]
 
 
+def test_reference_to_skipped_step_fails_with_stable_code() -> None:
+    context = ExecutionContext("exec-1")
+    context.mark_step_skipped("step_1")
+
+    result = ParameterResolver().resolve(
+        {"payload": StepOutputReference("step_1")},
+        context,
+    )
+
+    assert result.success is False
+    assert result.error_code == ParameterResolutionErrorCode.REFERENCED_STEP_SKIPPED.value
+    assert result.unresolved_references == ["steps.step_1.output"]
+
+
 def test_resolves_reference_to_dictionary_key() -> None:
     result = _resolve(
         {"path": {"$ref": "steps.step_1.output.path"}},

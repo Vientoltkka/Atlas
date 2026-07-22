@@ -65,6 +65,7 @@ def _result(
         started_steps=actions.count("STEP_STARTED"),
         successful_steps=actions.count("STEP_FINISHED"),
         failed_steps=actions.count("STEP_FAILED"),
+        skipped_steps=actions.count("execution_step_skipped"),
         success_rate=0.0,
         total_step_duration_ms=duration_ms,
         average_step_duration_ms=float(duration_ms),

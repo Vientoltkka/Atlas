@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from core.execution_context import ExecutionContext, ExecutionStepState
+from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_arguments import ExecutionArguments
@@ -34,6 +35,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
 )
 from core.planner import ExecutionPlan, ExecutionStep
+from core.step_output_reference import StepOutputReference
 from tools.base_tool import BaseTool
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
@@ -114,6 +116,24 @@ class SequenceTool(BaseTool):
         return output
 
 
+class CountingConditionEvaluator:
+    def __init__(self) -> None:
+        self.evaluated_steps: list[str] = []
+
+    def evaluate(
+        self,
+        condition: ExecutionCondition,
+        context: ExecutionContext,
+    ):
+        self.evaluated_steps.append(str(condition.left))
+        from core.execution_condition import ExecutionConditionResult
+
+        return ExecutionConditionResult(
+            matched=bool(condition.left),
+            operator=condition.operator.value,
+        )
+
+
 def _step(
     step_id: str,
     tool: str | None,
@@ -121,6 +141,7 @@ def _step(
     status: str = "pending",
     arguments: dict[str, Any] | None = None,
     output_binding: ExecutionVariableBinding | None = None,
+    condition: ExecutionCondition | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -130,6 +151,7 @@ def _step(
         status=status,
         arguments={} if arguments is None else arguments,
         output_binding=output_binding,
+        condition=condition,
     )
 
 
@@ -2402,3 +2424,120 @@ def test_executor_does_not_eval_or_interpret_argument_strings() -> None:
     source = Path("core/execution_plan_executor.py").read_text(encoding="utf-8")
     assert "eval(" not in source
     assert "exec(" not in source
+
+
+def test_executor_skips_step_when_condition_is_false_without_calling_tool() -> None:
+    calls: list[str] = []
+    first = SpyTool("first", calls, output={"ok": True})
+    second = SpyTool("second", calls, output={"ok": True})
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "first",
+                output_binding=ExecutionVariableBinding("skipped_value"),
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step("step_2", "second"),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert result.completed_steps == ["step_2"]
+    assert result.skipped_steps == ["step_1"]
+    assert result.step_results[0].status == StepExecutionStatus.SKIPPED.value
+    assert calls == ["second"]
+    assert result.metrics is not None
+    assert result.metrics.skipped_steps == 1
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "execution_condition_started" in actions
+    assert "execution_condition_succeeded" in actions
+    assert "execution_step_skipped" in actions
+
+
+def test_executor_fails_condition_reference_to_skipped_step_with_clear_code() -> None:
+    calls: list[str] = []
+    second = SpyTool("second", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "first",
+                output_binding=ExecutionVariableBinding("skipped_value"),
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step(
+                "step_2",
+                "second",
+                condition=ExecutionCondition(
+                    StepOutputReference("step_1"),
+                    ExecutionConditionOperator.EXISTS,
+                ),
+            ),
+        ),
+    )
+
+    result = ExecutionPlanExecutor(_registry(second)).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert result.failed_step == "step_2"
+    assert result.error_code == ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value
+    assert result.step_results[0].status == StepExecutionStatus.SKIPPED.value
+    assert result.step_results[1].error_code == ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value
+    assert calls == []
+
+
+def test_resume_does_not_repeat_skipped_steps_and_reevaluates_pending_condition() -> None:
+    calls: list[str] = []
+    second = SpyTool("second", calls)
+    third = SpyTool("third", calls)
+    evaluator = CountingConditionEvaluator()
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "first",
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step(
+                "step_2",
+                "second",
+                condition=ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step("step_3", "third"),
+        ),
+    )
+    validation = _validation(plan)
+    context = ExecutionContext("exec-resume-skipped")
+    context.mark_step_skipped("step_1")
+    state = ResumableExecutionState(
+        objective="resume skipped",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=(),
+        pending_step_ids=("step_2", "step_3"),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={},
+        resumable=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(second, third),
+        condition_evaluator=evaluator,  # type: ignore[arg-type]
+    ).resume(state)
+
+    assert result.success is True
+    assert result.skipped_steps == ["step_1"]
+    assert result.completed_steps == ["step_2", "step_3"]
+    assert result.step_results[0].step_id == "step_2"
+    assert calls == ["second", "third"]
+    assert evaluator.evaluated_steps == ["True"]
+    assert context.state_for_step("step_1") == ExecutionStepState.SKIPPED.value
+    assert context.has_result("step_1") is False
+    assert context.has_variable("skipped_value") is False

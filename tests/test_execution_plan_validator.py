@@ -7,6 +7,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
@@ -27,6 +28,7 @@ def _step(
     status: str = "pending",
     arguments: dict | None = None,
     output_binding: ExecutionVariableBinding | None = None,
+    condition: ExecutionCondition | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -36,6 +38,7 @@ def _step(
         status=status,
         arguments={} if arguments is None else arguments,
         output_binding=output_binding,
+        condition=condition,
     )
 
 
@@ -75,6 +78,35 @@ def test_validator_accepts_valid_execution_variable_reference() -> None:
 
     assert result.is_valid is True
     assert result.errors == []
+
+
+def test_plan_signature_changes_when_step_condition_changes() -> None:
+    base = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    changed = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+        ),
+    )
+
+    assert plan_signature(base) != plan_signature(changed)
 
 
 def test_validator_accepts_valid_output_binding() -> None:

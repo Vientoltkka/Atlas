@@ -19,6 +19,7 @@ class ExecutionMetrics:
     started_steps: int
     successful_steps: int
     failed_steps: int
+    skipped_steps: int
     success_rate: float
     total_step_duration_ms: int
     average_step_duration_ms: float
@@ -42,6 +43,10 @@ class ExecutionMetricsCalculator:
         started_steps = _count_action(events, "STEP_STARTED")
         successful_steps = _count_action(events, "STEP_FINISHED")
         failed_steps = _count_action(events, "STEP_FAILED")
+        skipped_steps = _count_action(events, "STEP_SKIPPED") + _count_action(
+            events,
+            "execution_step_skipped",
+        )
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -58,6 +63,7 @@ class ExecutionMetricsCalculator:
             started_steps=started_steps,
             successful_steps=successful_steps,
             failed_steps=failed_steps,
+            skipped_steps=skipped_steps,
             success_rate=(
                 successful_steps / finished_steps
                 if finished_steps

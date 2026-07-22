@@ -29,6 +29,7 @@ def test_calculates_empty_trace_without_division_by_zero() -> None:
     assert metrics.started_steps == 0
     assert metrics.successful_steps == 0
     assert metrics.failed_steps == 0
+    assert metrics.skipped_steps == 0
     assert metrics.success_rate == 0.0
     assert metrics.total_step_duration_ms == 0
     assert metrics.average_step_duration_ms == 0.0
@@ -59,6 +60,7 @@ def test_calculates_successful_execution_metrics() -> None:
     assert metrics.started_steps == 1
     assert metrics.successful_steps == 1
     assert metrics.failed_steps == 0
+    assert metrics.skipped_steps == 0
     assert metrics.success_rate == 1.0
     assert metrics.total_step_duration_ms == 40
     assert metrics.average_step_duration_ms == 40.0
@@ -100,6 +102,7 @@ def test_calculates_failed_and_mixed_step_metrics() -> None:
     assert metrics.started_steps == 2
     assert metrics.successful_steps == 1
     assert metrics.failed_steps == 1
+    assert metrics.skipped_steps == 0
     assert metrics.success_rate == 0.5
     assert metrics.total_step_duration_ms == 80
     assert metrics.average_step_duration_ms == 40.0
@@ -132,6 +135,7 @@ def test_ignores_missing_step_durations() -> None:
     metrics = ExecutionMetricsCalculator().calculate(trace)
 
     assert metrics.failed_steps == 1
+    assert metrics.skipped_steps == 0
     assert metrics.total_step_duration_ms == 0
     assert metrics.average_step_duration_ms == 0.0
     assert metrics.minimum_step_duration_ms is None
@@ -157,3 +161,19 @@ def test_calculator_does_not_modify_trace_or_event_order() -> None:
 
     assert tuple(trace.events) == before
     assert [event.component for event in trace.events] == ["B", "A"]
+
+
+def test_skipped_steps_are_counted_but_excluded_from_success_rate() -> None:
+    trace = _trace()
+    trace.add_event(
+        component="ExecutionPlanExecutor",
+        action="execution_step_skipped",
+        status=TraceEventStatus.FINISHED.value,
+    )
+
+    metrics = ExecutionMetricsCalculator().calculate(trace)
+
+    assert metrics.skipped_steps == 1
+    assert metrics.successful_steps == 0
+    assert metrics.failed_steps == 0
+    assert metrics.success_rate == 0.0

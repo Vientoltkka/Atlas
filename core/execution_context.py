@@ -26,6 +26,7 @@ class ExecutionStepState(str, Enum):
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
     CANCELLED = "CANCELLED"
 
 
@@ -144,6 +145,14 @@ class ExecutionContext:
             step_id
             for step_id, state in self._step_states.items()
             if state == ExecutionStepState.FAILED.value
+        )
+
+    @property
+    def skipped_step_ids(self) -> tuple[str, ...]:
+        return tuple(
+            step_id
+            for step_id, state in self._step_states.items()
+            if state == ExecutionStepState.SKIPPED.value
         )
 
     @property
@@ -327,6 +336,21 @@ class ExecutionContext:
         self._step_states[step_id] = ExecutionStepState.FAILED.value
         self._clear_current(step_id)
         return previous, ExecutionStepState.FAILED.value
+
+    def mark_step_skipped(
+        self,
+        step_id: str,
+    ) -> tuple[str, str]:
+        _validate_step_id(step_id, "mark_step_skipped")
+        previous = self.state_for_step(step_id)
+        if previous != ExecutionStepState.PENDING.value:
+            raise ExecutionStepStateTransitionError(
+                f"execution_id={self.execution_id} step_id={step_id} "
+                f"operation=mark_step_skipped reason=cannot transition from {previous} to SKIPPED"
+            )
+        self._step_states[step_id] = ExecutionStepState.SKIPPED.value
+        self._clear_current(step_id)
+        return previous, ExecutionStepState.SKIPPED.value
 
     def mark_step_cancelled(
         self,

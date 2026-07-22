@@ -88,6 +88,7 @@ def _metrics_payload() -> dict[str, object]:
         "started_steps": 1,
         "successful_steps": 1,
         "failed_steps": 0,
+        "skipped_steps": 0,
         "success_rate": 1.0,
         "total_step_duration_ms": 25,
         "average_step_duration_ms": 25.0,
@@ -272,6 +273,7 @@ def test_metrics_from_dict_valid_payload() -> None:
     assert metrics.started_steps == 1
     assert metrics.successful_steps == 1
     assert metrics.failed_steps == 0
+    assert metrics.skipped_steps == 0
     assert metrics.success_rate == 1.0
     assert metrics.components == ("ExecutionPlanExecutor",)
     assert metrics.actions == ("STEP_FINISHED", "STEP_STARTED")
@@ -368,6 +370,7 @@ def test_round_trip_trace_event_trace_and_metrics_preserve_unicode_and_timezone(
             started_steps=1,
             successful_steps=1,
             failed_steps=0,
+            skipped_steps=0,
             success_rate=1.0,
             total_step_duration_ms=15,
             average_step_duration_ms=15.0,

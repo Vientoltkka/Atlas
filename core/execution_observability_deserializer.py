@@ -109,6 +109,7 @@ class ExecutionObservabilityDeserializer:
         started_steps = _non_negative_int(payload, "started_steps")
         successful_steps = _non_negative_int(payload, "successful_steps")
         failed_steps = _non_negative_int(payload, "failed_steps")
+        skipped_steps = _optional_non_negative_int(payload, "skipped_steps", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -133,6 +134,7 @@ class ExecutionObservabilityDeserializer:
             started_steps=started_steps,
             successful_steps=successful_steps,
             failed_steps=failed_steps,
+            skipped_steps=skipped_steps,
             success_rate=success_rate,
             total_step_duration_ms=_non_negative_int(payload, "total_step_duration_ms"),
             average_step_duration_ms=_non_negative_float(payload, "average_step_duration_ms"),
@@ -288,6 +290,17 @@ def _non_negative_int(
     if value < 0:
         raise ObservabilityValidationError(f"{field} cannot be negative.")
     return value
+
+
+def _optional_non_negative_int(
+    payload: dict[str, object],
+    field: str,
+    *,
+    default: int,
+) -> int:
+    if field not in payload:
+        return default
+    return _non_negative_int(payload, field)
 
 
 def _non_negative_float(

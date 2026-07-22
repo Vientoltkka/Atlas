@@ -677,6 +677,9 @@ class StructuredExecutionCoordinator:
                             owner_label=f"output binding for step '{step.id}'",
                         ),
                     )
+                continue
+            if result.status == "skipped":
+                execution_context.mark_step_skipped(result.step_id)
         return ResumableExecutionState(
             objective=objective,
             original_plan=plan,

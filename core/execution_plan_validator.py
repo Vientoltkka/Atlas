@@ -15,6 +15,7 @@ from core.execution_arguments import (
     contains_execution_variable_reference,
     contains_step_output_reference,
 )
+from core.execution_condition import ExecutionCondition
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
@@ -214,9 +215,26 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
             self._validate_output_binding(step, errors)
+            self._validate_condition(step, errors)
 
         self._validate_static_references(plan, errors)
         self._validate_structured_references(plan, errors)
+
+    def _validate_condition(
+        self,
+        step: Any,
+        errors: list[str],
+    ) -> None:
+        condition = getattr(step, "condition", None)
+        if condition is None:
+            return
+        if not isinstance(condition, ExecutionCondition):
+            errors.append(f"Step '{step.id}' condition must be ExecutionCondition.")
+            return
+        try:
+            _signature_safe_value(condition)
+        except TypeError as error:
+            errors.append(f"Step '{step.id}' condition is invalid: {error}.")
 
     def _validate_output_binding(
         self,
@@ -296,31 +314,35 @@ class ExecutionPlanValidator:
             first_index_by_id.setdefault(step_id, index)
 
         for index, step in enumerate(plan.ordered_steps):
-            for reference in self._iter_structured_references(step.arguments):
-                if isinstance(reference, StepOutputReference):
-                    referenced = reference.step_id
-                    if referenced not in first_index_by_id:
-                        errors.append(
-                            f"Step '{step.id}' references unknown step '{referenced}'."
-                        )
-                        continue
-                    if referenced == step.id:
-                        errors.append(f"Step '{step.id}' cannot reference itself.")
-                        continue
-                    if first_index_by_id[referenced] >= index:
-                        errors.append(
-                            f"Step '{step.id}' references future step '{referenced}'."
-                        )
-                    path = reference.path
-                else:
-                    path = reference.path
+            reference_sources: list[Any] = [step.arguments]
+            if getattr(step, "condition", None) is not None:
+                reference_sources.append(step.condition.left)
+                reference_sources.append(step.condition.right)
+            for reference_source in reference_sources:
+                for reference in self._iter_structured_references(reference_source):
+                    if isinstance(reference, StepOutputReference):
+                        referenced = reference.step_id
+                        if referenced not in first_index_by_id:
+                            errors.append(
+                                f"Step '{step.id}' references unknown step '{referenced}'."
+                            )
+                            continue
+                        if referenced == step.id:
+                            errors.append(f"Step '{step.id}' cannot reference itself.")
+                            continue
+                        if first_index_by_id[referenced] >= index:
+                            errors.append(
+                                f"Step '{step.id}' references future step '{referenced}'."
+                            )
+                        path = reference.path
+                    else:
+                        path = reference.path
 
-                for segment in path:
-                    if isinstance(segment, str) and segment in BLOCKED_REFERENCE_PARTS:
-                        errors.append(
-                            f"Step '{step.id}' has unsafe reference path segment: {segment}."
-                        )
-
+                    for segment in path:
+                        if isinstance(segment, str) and segment in BLOCKED_REFERENCE_PARTS:
+                            errors.append(
+                                f"Step '{step.id}' has unsafe reference path segment: {segment}."
+                            )
     def _iter_structured_references(
         self,
         value: Any,
@@ -360,101 +382,38 @@ class ExecutionPlanValidator:
                 step.id,
                 dependencies_by_step,
             )
+            reference_sources: list[Any] = [step.arguments]
+            if getattr(step, "condition", None) is not None:
+                reference_sources.append(step.condition.left)
+                reference_sources.append(step.condition.right)
 
-            for reference in self._iter_special_objects(step.arguments, "$ref"):
-                ref_keys = tuple(reference.keys())
-                if ref_keys != ("$ref",):
-                    errors.append(
-                        f"Step '{step.id}' reference objects must contain only '$ref'."
-                    )
-                    continue
+            for reference_source in reference_sources:
+                for reference in self._iter_special_objects(reference_source, "$ref"):
+                    ref_keys = tuple(reference.keys())
+                    if ref_keys != ("$ref",):
+                        errors.append(
+                            f"Step '{step.id}' reference objects must contain only '$ref'."
+                        )
+                        continue
 
-                raw_reference = reference["$ref"]
-                if not isinstance(raw_reference, str) or not raw_reference.strip():
-                    errors.append(
-                        f"Step '{step.id}' reference value must be a non-empty string."
-                    )
-                    continue
+                    raw_reference = reference["$ref"]
+                    if not isinstance(raw_reference, str) or not raw_reference.strip():
+                        errors.append(
+                            f"Step '{step.id}' reference value must be a non-empty string."
+                        )
+                        continue
 
-                ref_value = raw_reference.strip()
-                match = REFERENCE_PATTERN.fullmatch(ref_value)
-                if match is None:
-                    errors.append(
-                        f"Step '{step.id}' has invalid reference syntax: {ref_value}."
-                    )
-                    continue
-
-                referenced_step_id = match.group(1)
-                ref_path = match.group(2)
-
-                self._validate_reference_parts(step.id, ref_path, errors)
-                self._validate_reference_dependency(
-                    step.id,
-                    referenced_step_id,
-                    step_ids,
-                    allowed_references,
-                    errors,
-                )
-
-            for template in self._iter_special_objects(step.arguments, "$template"):
-                template_keys = tuple(template.keys())
-                if template_keys != ("$template",):
-                    errors.append(
-                        f"Step '{step.id}' template objects must contain only '$template'."
-                    )
-                    continue
-
-                raw_template = template["$template"]
-                if not isinstance(raw_template, str):
-                    errors.append(
-                        f"Step '{step.id}' template value must be a string."
-                    )
-                    continue
-
-                if len(raw_template) > MAX_TEMPLATE_LENGTH:
-                    errors.append(
-                        f"Step '{step.id}' template exceeds the maximum supported length."
-                    )
-                    continue
-
-                escaped_template = (
-                    raw_template
-                    .replace("{{{{", "\u0000ATLAS_OPEN_BRACE\u0000")
-                    .replace("}}}}", "\u0000ATLAS_CLOSE_BRACE\u0000")
-                )
-                template_references = list(TEMPLATE_REFERENCE_PATTERN.finditer(escaped_template))
-
-                if len(template_references) > MAX_TEMPLATE_REFERENCES:
-                    errors.append(
-                        f"Step '{step.id}' template exceeds the maximum number of references."
-                    )
-
-                remainder = TEMPLATE_REFERENCE_PATTERN.sub("", escaped_template)
-                if "{{" in remainder or "}}" in remainder:
-                    errors.append(
-                        f"Step '{step.id}' has invalid template brace syntax."
-                    )
-                    continue
-
-                for template_reference in template_references:
-                    expression = template_reference.group(1).strip()
-                    match = REFERENCE_PATTERN.fullmatch(expression)
+                    ref_value = raw_reference.strip()
+                    match = REFERENCE_PATTERN.fullmatch(ref_value)
                     if match is None:
-                        if any(
-                            token in expression
-                            for token in ("(", ")", "+", "-", "*", "/", "[", "]", "|", "=", "<", ">")
-                        ):
-                            errors.append(
-                                f"Step '{step.id}' has unsupported template expression: {expression}."
-                            )
-                        else:
-                            errors.append(
-                                f"Step '{step.id}' has invalid template reference syntax: {expression}."
-                            )
+                        errors.append(
+                            f"Step '{step.id}' has invalid reference syntax: {ref_value}."
+                        )
                         continue
 
                     referenced_step_id = match.group(1)
                     ref_path = match.group(2)
+
                     self._validate_reference_parts(step.id, ref_path, errors)
                     self._validate_reference_dependency(
                         step.id,
@@ -463,6 +422,74 @@ class ExecutionPlanValidator:
                         allowed_references,
                         errors,
                     )
+
+                for template in self._iter_special_objects(reference_source, "$template"):
+                    template_keys = tuple(template.keys())
+                    if template_keys != ("$template",):
+                        errors.append(
+                            f"Step '{step.id}' template objects must contain only '$template'."
+                        )
+                        continue
+
+                    raw_template = template["$template"]
+                    if not isinstance(raw_template, str):
+                        errors.append(
+                            f"Step '{step.id}' template value must be a string."
+                        )
+                        continue
+
+                    if len(raw_template) > MAX_TEMPLATE_LENGTH:
+                        errors.append(
+                            f"Step '{step.id}' template exceeds the maximum supported length."
+                        )
+                        continue
+
+                    escaped_template = (
+                        raw_template
+                        .replace("{{{{", "\u0000ATLAS_OPEN_BRACE\u0000")
+                        .replace("}}}}", "\u0000ATLAS_CLOSE_BRACE\u0000")
+                    )
+                    template_references = list(TEMPLATE_REFERENCE_PATTERN.finditer(escaped_template))
+
+                    if len(template_references) > MAX_TEMPLATE_REFERENCES:
+                        errors.append(
+                            f"Step '{step.id}' template exceeds the maximum number of references."
+                        )
+
+                    remainder = TEMPLATE_REFERENCE_PATTERN.sub("", escaped_template)
+                    if "{{" in remainder or "}}" in remainder:
+                        errors.append(
+                            f"Step '{step.id}' has invalid template brace syntax."
+                        )
+                        continue
+
+                    for template_reference in template_references:
+                        expression = template_reference.group(1).strip()
+                        match = REFERENCE_PATTERN.fullmatch(expression)
+                        if match is None:
+                            if any(
+                                token in expression
+                                for token in ("(", ")", "+", "-", "*", "/", "[", "]", "|", "=", "<", ">")
+                            ):
+                                errors.append(
+                                    f"Step '{step.id}' has unsupported template expression: {expression}."
+                                )
+                            else:
+                                errors.append(
+                                    f"Step '{step.id}' has invalid template reference syntax: {expression}."
+                                )
+                            continue
+
+                        referenced_step_id = match.group(1)
+                        ref_path = match.group(2)
+                        self._validate_reference_parts(step.id, ref_path, errors)
+                        self._validate_reference_dependency(
+                            step.id,
+                            referenced_step_id,
+                            step_ids,
+                            allowed_references,
+                            errors,
+                        )
 
     def _iter_special_objects(
         self,
@@ -682,6 +709,7 @@ def plan_signature(
                     else dict(step.arguments)
                 ),
                 "output_binding": _signature_safe_value(step.output_binding),
+                "condition": _signature_safe_value(step.condition),
             }
             for step in plan.ordered_steps
         ],
@@ -723,6 +751,14 @@ def _signature_safe_value(
             "variable_name": value.variable_name,
             "path": list(value.path),
             "overwrite": value.overwrite,
+        }
+
+    if isinstance(value, ExecutionCondition):
+        return {
+            "$type": "execution_condition",
+            "operator": value.operator.value,
+            "left": _signature_safe_value(value.left),
+            "right": _signature_safe_value(value.right),
         }
 
     if value is None or isinstance(value, (str, int, bool)):

@@ -66,6 +66,7 @@ class ExecutionObservabilitySerializer:
             "started_steps": metrics.started_steps,
             "successful_steps": metrics.successful_steps,
             "failed_steps": metrics.failed_steps,
+            "skipped_steps": metrics.skipped_steps,
             "success_rate": metrics.success_rate,
             "total_step_duration_ms": metrics.total_step_duration_ms,
             "average_step_duration_ms": metrics.average_step_duration_ms,

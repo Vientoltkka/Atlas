@@ -14,6 +14,10 @@ from core.execution_context import (
     ExecutionContextSnapshot,
     ExecutionStepState,
 )
+from core.execution_condition import (
+    ExecutionConditionEvaluationError,
+    ExecutionConditionEvaluator,
+)
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -92,6 +96,7 @@ class ExecutionErrorCode(str, Enum):
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
     TOOL_SCHEMA_VALIDATION_FAILED = "TOOL_SCHEMA_VALIDATION_FAILED"
     EXECUTION_VARIABLE_BINDING_FAILED = "EXECUTION_VARIABLE_BINDING_FAILED"
+    EXECUTION_CONDITION_FAILED = "EXECUTION_CONDITION_FAILED"
     INTERNAL_EXECUTOR_ERROR = "INTERNAL_EXECUTOR_ERROR"
 
 
@@ -256,12 +261,17 @@ class ExecutionPlanExecutor:
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor | None = None,
         parameter_resolver: ParameterResolver | None = None,
+        condition_evaluator: ExecutionConditionEvaluator | None = None,
         retry_policy: RetryPolicy | None = None,
         execution_history: ExecutionHistorySink | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)
         self._parameter_resolver = parameter_resolver or ParameterResolver()
+        self._condition_evaluator = (
+            condition_evaluator
+            or ExecutionConditionEvaluator(self._parameter_resolver)
+        )
         self._retry_policy = retry_policy or RetryPolicy()
         self._execution_history = execution_history
 
@@ -456,6 +466,12 @@ class ExecutionPlanExecutor:
             if step_id not in completed_steps:
                 completed_steps.append(step_id)
         completed: set[str] = set(completed_steps)
+        skipped_steps = [
+            step.id
+            for step in plan.ordered_steps
+            if active_context.state_for_step(step.id) == ExecutionStepState.SKIPPED.value
+        ]
+        skipped: set[str] = set(skipped_steps)
         retry_attempts: dict[str, int] = dict(initial_retry_attempts)
         retry_history: dict[str, list[dict[str, object]]] = {
             step_id: list(history)
@@ -470,16 +486,17 @@ class ExecutionPlanExecutor:
         )
 
         for index, step in enumerate(plan.ordered_steps):
-            if step.id in completed:
+            if step.id in completed or step.id in skipped:
                 continue
 
-            progress_index = len(completed_steps) + 1
+            progress_index = len(completed_steps) + len(skipped_steps) + 1
             control_result = self._control_result(
                 plan=plan,
                 validation_result=validation_result,
                 control=control,
                 execution_context=active_context,
                 completed_steps=completed_steps,
+                skipped_steps=skipped_steps,
                 step_results=step_results,
                 current_index=index,
                 started=started,
@@ -490,6 +507,53 @@ class ExecutionPlanExecutor:
             )
             if control_result is not None:
                 return control_result
+
+            condition_outcome = self._evaluate_step_condition(
+                step=step,
+                execution_context=active_context,
+                trace=trace,
+                started=started,
+                on_progress=on_progress,
+                step_index=progress_index,
+                total_steps=total_steps,
+            )
+            if condition_outcome is not None:
+                step_results.append(condition_outcome)
+                if condition_outcome.status == StepExecutionStatus.SKIPPED.value:
+                    skipped.add(step.id)
+                    skipped_steps.append(step.id)
+                    continue
+
+                self._trace_execution_context_snapshot_created(trace, active_context)
+                return self._finalize_result(
+                    plan,
+                    validation_result,
+                    PlanExecutionResult(
+                    plan_status=self._failure_status(completed_steps),
+                    success=False,
+                    completed_steps=completed_steps,
+                    failed_step=step.id,
+                    failed_steps=[step.id],
+                    skipped_steps=skipped_steps + self._remaining_step_ids(plan.ordered_steps, index + 1),
+                    pending_steps=[],
+                    step_results=step_results
+                    + self._not_executed_results(
+                        plan.ordered_steps,
+                        index + 1,
+                        StepExecutionStatus.SKIPPED.value,
+                    ),
+                    error=condition_outcome.error,
+                    requires_confirmation=validation_result.requires_confirmation,
+                    interrupted=False,
+                    failed=True,
+                    resumable=False,
+                    current_step=step.id,
+                    failure_reason=condition_outcome.error,
+                    error_code=condition_outcome.error_code,
+                    metadata={"plan_signature": validation_result.plan_signature},
+                    ),
+                    trace=trace,
+                )
 
             missing_dependency = self._missing_dependency(step, completed)
             if missing_dependency is not None:
@@ -507,7 +571,7 @@ class ExecutionPlanExecutor:
                     completed_steps=completed_steps,
                     failed_step=step.id,
                     failed_steps=[step.id],
-                    skipped_steps=skipped,
+                    skipped_steps=skipped_steps + skipped,
                     pending_steps=[],
                     step_results=step_results
                     + [
@@ -653,7 +717,7 @@ class ExecutionPlanExecutor:
                 completed_steps=completed_steps,
                 failed_step=step.id,
                 failed_steps=[step.id],
-                skipped_steps=self._remaining_step_ids(plan.ordered_steps, index + 1),
+                skipped_steps=skipped_steps + self._remaining_step_ids(plan.ordered_steps, index + 1),
                 pending_steps=[],
                 step_results=step_results
                 + self._not_executed_results(
@@ -689,7 +753,7 @@ class ExecutionPlanExecutor:
             success=True,
             completed_steps=completed_steps,
             failed_step=None,
-            skipped_steps=[],
+            skipped_steps=skipped_steps,
             step_results=step_results,
             error=None,
             requires_confirmation=validation_result.requires_confirmation,
@@ -793,6 +857,13 @@ class ExecutionPlanExecutor:
         completed = set(state.completed_step_ids)
         pending = set(state.pending_step_ids)
         failed = set(state.failed_step_ids)
+        skipped: set[str] = set()
+        if state.execution_context_snapshot is not None:
+            skipped = {
+                step_id
+                for step_id, step_state in state.execution_context_snapshot.step_states.items()
+                if step_state == ExecutionStepState.SKIPPED.value
+            }
 
         if not completed.issubset(all_step_id_set):
             return "Resumable execution contains unknown completed steps."
@@ -800,16 +871,23 @@ class ExecutionPlanExecutor:
         if not pending.issubset(all_step_id_set):
             return "Resumable execution contains unknown pending steps."
 
+        if not skipped.issubset(all_step_id_set):
+            return "Resumable execution contains unknown skipped steps."
+
         if failed:
             return "Failed executions are not resumable."
 
         if not pending:
             return "Completed executions are not resumable."
 
-        if completed & pending:
-            return "Resumable execution has inconsistent completed and pending steps."
+        if completed & pending or completed & skipped or pending & skipped:
+            return "Resumable execution has inconsistent step states."
 
-        expected_pending = tuple(step_id for step_id in all_step_ids if step_id not in completed)
+        expected_pending = tuple(
+            step_id
+            for step_id in all_step_ids
+            if step_id not in completed and step_id not in skipped
+        )
         if tuple(state.pending_step_ids) != expected_pending:
             return "Resumable execution pending steps are inconsistent."
 
@@ -872,13 +950,20 @@ class ExecutionPlanExecutor:
         for step_id, state in context.step_states.items():
             if state == ExecutionStepState.SUCCESS.value and not context.has_result(step_id):
                 return f"Execution context successful step '{step_id}' has no result."
+            if state == ExecutionStepState.SKIPPED.value and context.has_result(step_id):
+                return f"Execution context skipped step '{step_id}' cannot have a result."
 
         step_by_id = {step.id: step for step in plan.ordered_steps}
         for step_id, state in context.step_states.items():
-            if state != ExecutionStepState.SUCCESS.value:
-                continue
             step = step_by_id.get(step_id)
             if step is None or step.output_binding is None:
+                continue
+            if state == ExecutionStepState.SKIPPED.value and context.has_variable(step.output_binding.variable_name):
+                return (
+                    f"Execution context skipped step '{step_id}' cannot have "
+                    f"bound variable '{step.output_binding.variable_name}'."
+                )
+            if state != ExecutionStepState.SUCCESS.value:
                 continue
             if not context.has_variable(step.output_binding.variable_name):
                 return (
@@ -962,6 +1047,69 @@ class ExecutionPlanExecutor:
         previous, current = context.mark_step_cancelled(step_id)
         self._trace_step_state_changed(trace, context, step_id, previous, current, None)
 
+    def _evaluate_step_condition(
+        self,
+        *,
+        step: ExecutionStep,
+        execution_context: ExecutionContext,
+        trace: ExecutionTrace,
+        started: float,
+        on_progress: Callable[[ExecutionProgress], None] | None,
+        step_index: int,
+        total_steps: int,
+    ) -> StepExecutionResult | None:
+        if step.condition is None:
+            return None
+
+        self._trace_condition_started(trace, execution_context, step)
+        try:
+            result = self._condition_evaluator.evaluate(step.condition, execution_context)
+        except ExecutionConditionEvaluationError as error:
+            self._trace_condition_failed(trace, execution_context, step, type(error).__name__)
+            self._mark_context_started(trace, execution_context, step.id, 1)
+            self._mark_context_failed(trace, execution_context, step.id)
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                tool_name=step.tool,
+                error=str(error),
+                error_code=ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
+                metadata={
+                    "condition_operator": step.condition.operator.value,
+                    "condition_error": type(error).__name__,
+                },
+            )
+
+        self._trace_condition_succeeded(trace, execution_context, step, result.matched)
+        if result.matched:
+            return None
+
+        previous, current = execution_context.mark_step_skipped(step.id)
+        self._trace_step_state_changed(trace, execution_context, step.id, previous, current, None)
+        self._trace_step_skipped(trace, execution_context, step)
+        self._emit_progress(
+            on_progress,
+            "step_skipped",
+            started,
+            step=step,
+            step_index=step_index,
+            total_steps=total_steps,
+        )
+        return StepExecutionResult(
+            step_id=step.id,
+            status=StepExecutionStatus.SKIPPED.value,
+            success=False,
+            tool_name=step.tool,
+            output=None,
+            error=None,
+            error_code=None,
+            metadata={
+                "condition_operator": step.condition.operator.value,
+                "condition_matched": False,
+            },
+        )
+
     def _apply_output_binding(
         self,
         trace: ExecutionTrace,
@@ -1028,6 +1176,7 @@ class ExecutionPlanExecutor:
         control: ExecutionControl | None,
         execution_context: ExecutionContext,
         completed_steps: list[str],
+        skipped_steps: list[str],
         step_results: list[StepExecutionResult],
         current_index: int,
         started: float,
@@ -1059,7 +1208,7 @@ class ExecutionPlanExecutor:
                     skipped_steps=self._remaining_step_ids(
                         plan.ordered_steps,
                         current_index,
-                    ),
+                    ) + skipped_steps,
                     step_results=step_results
                     + self._not_executed_results(
                         plan.ordered_steps,
@@ -1086,6 +1235,7 @@ class ExecutionPlanExecutor:
                 plan=plan,
                 validation_result=validation_result,
                 completed_steps=completed_steps,
+                skipped_steps=skipped_steps,
                 step_results=step_results,
                 current_index=current_index,
                 status=PlanExecutionStatus.CANCELLED.value,
@@ -1109,6 +1259,7 @@ class ExecutionPlanExecutor:
                 plan=plan,
                 validation_result=validation_result,
                 completed_steps=completed_steps,
+                skipped_steps=skipped_steps,
                 step_results=step_results,
                 current_index=current_index,
                 status=PlanExecutionStatus.INTERRUPTED.value,
@@ -1132,6 +1283,7 @@ class ExecutionPlanExecutor:
         plan: ExecutionPlan,
         validation_result: PlanValidationResult,
         completed_steps: list[str],
+        skipped_steps: list[str],
         step_results: list[StepExecutionResult],
         current_index: int,
         status: str,
@@ -1180,7 +1332,7 @@ class ExecutionPlanExecutor:
                 success=False,
                 completed_steps=completed_steps,
                 failed_step=None,
-                skipped_steps=[],
+                skipped_steps=skipped_steps,
                 pending_steps=pending_steps,
                 step_results=step_results
                 + [current_result]
@@ -1786,6 +1938,126 @@ class ExecutionPlanExecutor:
             duration_ms=duration_ms,
             details=event_details,
         )
+
+    def _trace_condition_started(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> None:
+        assert step.condition is not None
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_condition_started",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "operator": step.condition.operator.value,
+                "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_condition_succeeded(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        matched: bool,
+    ) -> None:
+        assert step.condition is not None
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_condition_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "operator": step.condition.operator.value,
+                "matched": matched,
+                "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_condition_failed(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        error_type: str,
+    ) -> None:
+        assert step.condition is not None
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_condition_failed",
+            status=TraceEventStatus.FAILED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "operator": step.condition.operator.value,
+                "error_code": ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
+                "error_type": error_type,
+                "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_step_skipped(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_step_skipped",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "tool_name": step.tool,
+            },
+        )
+
+    def _condition_reference_labels(
+        self,
+        step: ExecutionStep,
+    ) -> list[str]:
+        if step.condition is None:
+            return []
+
+        references: list[str] = []
+
+        def visit(value: object) -> None:
+            type_name = type(value).__name__
+            if type_name == "StepOutputReference":
+                step_id = object.__getattribute__(value, "step_id")
+                references.append(f"steps.{step_id}.output")
+                return
+            if type_name == "ExecutionVariableReference":
+                name = object.__getattribute__(value, "name")
+                references.append(f"variables.{name}")
+                return
+            if isinstance(value, Mapping):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(step.condition.left)
+        if step.condition.operator.value not in {
+            "is_none",
+            "is_not_none",
+            "exists",
+            "not_exists",
+            "truthy",
+            "falsy",
+            "is_empty",
+            "is_not_empty",
+        }:
+            visit(step.condition.right)
+        return sorted(set(references))
 
     def _trace_execution_context_created(
         self,
@@ -2592,7 +2864,7 @@ def _validate_partial_execution_state(
         raise ValueError("Partial step results must preserve the plan order.")
 
     if state.overall_status == PlanExecutionStatus.COMPLETED.value:
-        if state.pending_step_ids or state.failed_step_ids or state.skipped_step_ids:
+        if state.pending_step_ids or state.failed_step_ids:
             raise ValueError("Completed execution cannot contain unfinished steps.")
 
     if state.overall_status == PlanExecutionStatus.PARTIALLY_COMPLETED.value:

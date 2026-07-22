@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.execution_context import ExecutionContextSnapshot
+from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
@@ -281,6 +282,7 @@ class JsonResumableExecutionStore:
             failed_step_ids=failed,
             interrupted_step_id=interrupted,
             previous_results=previous_results,
+            execution_context_snapshot=context_snapshot,
         )
 
         return ResumableExecutionState(
@@ -328,6 +330,7 @@ def _step_to_dict(
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
         "output_binding": _binding_to_json(step.output_binding),
+        "condition": _condition_to_json(step.condition),
     }
 
 
@@ -377,7 +380,69 @@ def _dict_to_step(
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
         output_binding=_binding_from_json(payload.get("output_binding")),
+        condition=_condition_from_json(payload.get("condition")),
     )
+
+
+def _condition_to_json(
+    condition: ExecutionCondition | None,
+) -> dict[str, Any] | None:
+    if condition is None:
+        return None
+    return {
+        "$type": "execution_condition",
+        "operator": condition.operator.value,
+        "left": _argument_to_json(condition.left),
+        "right": _argument_to_json(condition.right),
+    }
+
+
+def _condition_from_json(
+    payload: Any,
+) -> ExecutionCondition | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {
+        "$type",
+        "operator",
+        "left",
+        "right",
+    }:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution condition must be an explicit object.",
+        )
+    if payload.get("$type") != "execution_condition":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution condition type is invalid.",
+        )
+    try:
+        operator = ExecutionConditionOperator(_required_str(payload, "operator"))
+        left = _argument_from_json(payload.get("left"))
+        if operator.value in {
+            "is_none",
+            "is_not_none",
+            "exists",
+            "not_exists",
+            "truthy",
+            "falsy",
+            "is_empty",
+            "is_not_empty",
+        }:
+            if payload.get("right") is not None:
+                raise ValueError("unary condition right operand must be null")
+            return ExecutionCondition(left=left, operator=operator)
+        return ExecutionCondition(
+            left=left,
+            operator=operator,
+            right=_argument_from_json(payload.get("right")),
+        )
+    except (TypeError, ValueError) as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution condition is invalid.",
+        ) from error
 
 
 def _binding_to_json(
@@ -567,11 +632,19 @@ def _validate_state_consistency(
     failed_step_ids: tuple[str, ...],
     interrupted_step_id: str | None,
     previous_results: dict[str, Any],
+    execution_context_snapshot: ExecutionContextSnapshot | None,
 ) -> None:
     all_step_ids = tuple(step.id for step in plan.ordered_steps)
     all_step_id_set = set(all_step_ids)
     completed = set(completed_step_ids)
     pending = set(pending_step_ids)
+    skipped: set[str] = set()
+    if execution_context_snapshot is not None:
+        skipped = {
+            step_id
+            for step_id, state in execution_context_snapshot.step_states.items()
+            if state == "SKIPPED"
+        }
 
     if failed_step_ids:
         raise ResumableExecutionStoreError(
@@ -585,19 +658,27 @@ def _validate_state_consistency(
             "Completed executions cannot be resumed.",
         )
 
-    if not completed.issubset(all_step_id_set) or not pending.issubset(all_step_id_set):
+    if (
+        not completed.issubset(all_step_id_set)
+        or not pending.issubset(all_step_id_set)
+        or not skipped.issubset(all_step_id_set)
+    ):
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             "Execution state contains unknown step IDs.",
         )
 
-    if completed & pending:
+    if completed & pending or completed & skipped or pending & skipped:
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             "Execution state has contradictory step IDs.",
         )
 
-    expected_pending = tuple(step_id for step_id in all_step_ids if step_id not in completed)
+    expected_pending = tuple(
+        step_id
+        for step_id in all_step_ids
+        if step_id not in completed and step_id not in skipped
+    )
     if pending_step_ids != expected_pending:
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",

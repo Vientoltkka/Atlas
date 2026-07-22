@@ -171,6 +171,24 @@ def test_invalid_attempts_and_terminal_transitions_are_rejected() -> None:
         context.mark_step_started("step_2", 2)
 
 
+def test_step_can_be_skipped_only_from_pending_state() -> None:
+    context = ExecutionContext("exec-1")
+
+    assert context.mark_step_skipped("step_1") == (
+        ExecutionStepState.PENDING.value,
+        ExecutionStepState.SKIPPED.value,
+    )
+    assert context.skipped_step_ids == ("step_1",)
+    assert context.state_for_step("step_1") == ExecutionStepState.SKIPPED.value
+
+    with pytest.raises(ExecutionStepStateTransitionError):
+        context.mark_step_started("step_1", 1)
+
+    context.mark_step_started("step_2", 1)
+    with pytest.raises(ExecutionStepStateTransitionError):
+        context.mark_step_skipped("step_2")
+
+
 def test_snapshot_is_immutable_and_restore_preserves_state() -> None:
     context = ExecutionContext("exec-1", metadata={"source": "test"})
     context.mark_step_started("step_1", 1)

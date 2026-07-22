@@ -71,6 +71,7 @@ class ParameterResolutionErrorCode(str, Enum):
     INVALID_REFERENCE_SYNTAX = "INVALID_REFERENCE_SYNTAX"
     REFERENCED_STEP_NOT_FOUND = "REFERENCED_STEP_NOT_FOUND"
     REFERENCED_STEP_NOT_EXECUTED = "REFERENCED_STEP_NOT_EXECUTED"
+    REFERENCED_STEP_SKIPPED = "REFERENCED_STEP_SKIPPED"
     REFERENCED_STEP_FAILED = "REFERENCED_STEP_FAILED"
     REFERENCED_OUTPUT_MISSING = "REFERENCED_OUTPUT_MISSING"
     REFERENCED_FIELD_NOT_FOUND = "REFERENCED_FIELD_NOT_FOUND"
@@ -369,6 +370,12 @@ class ParameterResolver:
         used_references: list[str],
     ) -> object:
         reference_label = self._reference_label(reference)
+        if self._is_step_skipped(previous_results, reference.step_id):
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_SKIPPED.value,
+                f"Referenced step '{reference.step_id}' was skipped and has no result.",
+                reference_label,
+            )
         if not self._has_result(previous_results, reference.step_id):
             self._fail(
                 ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value,
@@ -452,6 +459,13 @@ class ParameterResolver:
 
         step_id = match.group(1)
         path = match.group(2)
+
+        if self._is_step_skipped(previous_results, step_id):
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_SKIPPED.value,
+                f"Referenced step '{step_id}' was skipped and has no result.",
+                reference,
+            )
 
         if not self._has_result(previous_results, step_id):
             self._fail(
@@ -594,6 +608,13 @@ class ParameterResolver:
         assert match is not None
         step_id = match.group(1)
         path = match.group(2)
+
+        if self._is_step_skipped(previous_results, step_id):
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_SKIPPED.value,
+                f"Referenced step '{step_id}' was skipped and has no result.",
+                reference,
+            )
 
         if not self._has_result(previous_results, step_id):
             self._fail(
@@ -818,6 +839,24 @@ class ParameterResolver:
         if isinstance(results, Mapping):
             return step_id in results
         return results.has_result(step_id)
+
+    def _is_step_skipped(
+        self,
+        results: Mapping[str, object] | ExecutionResultProvider,
+        step_id: str,
+    ) -> bool:
+        if isinstance(results, Mapping):
+            return False
+        try:
+            state_for_step = object.__getattribute__(results, "state_for_step")
+        except Exception:
+            return False
+        if not callable(state_for_step):
+            return False
+        try:
+            return state_for_step(step_id) == "SKIPPED"
+        except Exception:
+            return False
 
     def _require_result(
         self,

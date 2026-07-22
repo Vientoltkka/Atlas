@@ -158,6 +158,7 @@ def test_serializes_metrics_with_json_compatible_collections_and_counts() -> Non
     assert payload["started_steps"] == 1
     assert payload["successful_steps"] == 1
     assert payload["failed_steps"] == 0
+    assert payload["skipped_steps"] == 0
     assert payload["success_rate"] == 1.0
     assert payload["components"] == ["ExecutionPlanExecutor"]
     assert payload["actions"] == ["STEP_FINISHED", "STEP_STARTED"]

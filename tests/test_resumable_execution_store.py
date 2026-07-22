@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 
 from core.execution_context import ExecutionContext
+from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
@@ -20,6 +21,7 @@ def _step(
     step_id: str,
     tool: str,
     dependencies: tuple[str, ...] = (),
+    condition: ExecutionCondition | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -27,6 +29,7 @@ def _step(
         tool=tool,
         dependencies=dependencies,
         arguments={},
+        condition=condition,
     )
 
 
@@ -102,6 +105,61 @@ def test_json_store_saves_and_loads_valid_state(tmp_path) -> None:
     }
     assert loaded.execution_context_snapshot.variables == {}  # type: ignore[union-attr]
     assert store.exists() is True
+
+
+def test_json_store_persists_step_conditions(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Resume conditional plan.",
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step("step_2", "write_file", dependencies=("step_1",)),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+        status="planned",
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    context = ExecutionContext("exec-store-condition")
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", {"content": "alpha"})
+    state = replace(
+        _state(),
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        execution_context_snapshot=context.snapshot(),
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    loaded = store.load()
+
+    assert loaded is not None
+    condition = loaded.original_plan.ordered_steps[0].condition
+    assert condition is not None
+    assert condition.operator is ExecutionConditionOperator.TRUTHY
+    assert condition.left is True
+
+
+def test_json_store_loads_legacy_steps_without_condition_as_none(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    store = JsonResumableExecutionStore(path)
+    store.save(_state())
+    payload = _payload(path)
+    for step in payload["original_plan"]["ordered_steps"]:
+        step.pop("condition")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load()
+
+    assert loaded is not None
+    assert all(step.condition is None for step in loaded.original_plan.ordered_steps)
 
 
 def test_json_store_missing_file_returns_none(tmp_path) -> None:
