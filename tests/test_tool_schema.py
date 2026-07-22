@@ -11,6 +11,8 @@ from core.execution_plan_executor import (
     ExecutionPlanExecutor,
     ResumableExecutionState,
 )
+from core.execution_context import ExecutionContext
+from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_retry import RetryPolicy
 from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
@@ -348,6 +350,19 @@ def test_tool_executor_rejects_invalid_arguments_before_tool_call() -> None:
     assert tool.contexts == []
 
 
+def test_tool_executor_rejects_unresolved_execution_variable_reference() -> None:
+    tool = CapturingTool()
+    registry = _registry(tool)
+
+    with pytest.raises(ValueError):
+        ToolExecutor(registry).execute(
+            "demo.tool",
+            arguments={"query": ExecutionVariableReference("workspace_path")},
+        )
+
+    assert tool.contexts == []
+
+
 def test_tool_without_schema_keeps_working_and_steps_without_arguments_work() -> None:
     tool = CapturingTool()
     registry = _registry(tool)
@@ -385,6 +400,39 @@ def test_execution_plan_executor_uses_normalized_arguments_for_retries() -> None
     assert tool.contexts[0].parameters == {"query": "all"}
     assert tool.contexts[1].parameters == {"query": "all"}
     assert dict(plan.ordered_steps[0].arguments) == {}
+
+
+def test_execution_plan_executor_validates_schema_after_variable_resolution() -> None:
+    tool = CapturingTool()
+    registry = _registry(tool, _schema(ToolParameterSchema("query", str, required=True)))
+    plan = _plan({"query": ExecutionVariableReference("search_query")})
+    context = ExecutionContext("exec-schema-1", initial_variables={"search_query": "atlas"})
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert tool.contexts[0].parameters == {"query": "atlas"}
+
+
+def test_execution_plan_executor_fails_schema_after_wrong_variable_type() -> None:
+    tool = CapturingTool()
+    registry = _registry(tool, _schema(ToolParameterSchema("query", str, required=True)))
+    plan = _plan({"query": ExecutionVariableReference("search_query")})
+    context = ExecutionContext("exec-schema-1", initial_variables={"search_query": 10})
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+        execution_context=context,
+    )
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.TOOL_SCHEMA_VALIDATION_FAILED.value
+    assert tool.contexts == []
 
 
 def test_resume_revalidates_current_schema_and_schema_change_can_invalidate_resume() -> None:

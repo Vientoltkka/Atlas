@@ -7,6 +7,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
 from core.planner import ExecutionPlan, ExecutionStep, Planner
 from core.step_output_reference import StepOutputReference
@@ -49,6 +50,90 @@ def test_valid_plan_returns_structured_valid_result() -> None:
     assert result.requires_confirmation is True
     assert result.status == "valid"
     assert result.plan_signature
+
+
+def test_validator_accepts_valid_execution_variable_reference() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validator_rejects_invalid_execution_variable_reference_structure() -> None:
+    try:
+        reference = ExecutionVariableReference("workspace_path", (True,))
+    except ValueError as error:
+        assert "bool segments" in str(error)
+    else:
+        raise AssertionError("invalid variable reference path must be rejected")
+
+
+def test_plan_signature_includes_variable_reference_name_and_path_not_value() -> None:
+    base = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    changed_name = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": ExecutionVariableReference("other_path")},
+            ),
+        ),
+    )
+    changed_path = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={
+                    "path": ExecutionVariableReference("workspace_path", ("root",))
+                },
+            ),
+        ),
+    )
+    equivalent = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": ExecutionVariableReference.from_path("workspace_path")},
+            ),
+        ),
+    )
+
+    assert plan_signature(base) != plan_signature(changed_name)
+    assert plan_signature(base) != plan_signature(changed_path)
+    assert plan_signature(base) == plan_signature(equivalent)
 
 
 def test_empty_goal_invalidates_plan() -> None:

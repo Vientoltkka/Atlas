@@ -9,6 +9,12 @@ from types import MappingProxyType, ModuleType
 from typing import Any, Mapping
 from uuid import uuid4
 
+from core.execution_variable_reference import (
+    ExecutionVariableError,
+    InvalidExecutionVariableNameError,
+    validate_execution_variable_name,
+)
+
 
 _MISSING = object()
 
@@ -39,6 +45,14 @@ class ExecutionResultNotFoundError(ExecutionContextError):
     """Raised when a required result is absent."""
 
 
+class InvalidExecutionVariableValueError(ExecutionVariableError, ExecutionContextError):
+    """Raised when an execution variable value is unsafe."""
+
+
+class ExecutionVariableNotFoundError(ExecutionVariableError, ExecutionContextError):
+    """Raised when a required execution variable is absent."""
+
+
 class ExecutionContextRestoreError(ExecutionContextError):
     """Raised when a context snapshot cannot be restored."""
 
@@ -53,6 +67,7 @@ class ExecutionContextSnapshot:
 
     execution_id: str
     results_by_step_id: Mapping[str, object] = field(default_factory=dict)
+    variables: Mapping[str, object] = field(default_factory=dict)
     step_states: Mapping[str, str] = field(default_factory=dict)
     current_step_id: str | None = None
     current_attempt: int | None = None
@@ -61,6 +76,7 @@ class ExecutionContextSnapshot:
     def __post_init__(self) -> None:
         _validate_execution_id(self.execution_id)
         results = _copy_result_mapping(self.results_by_step_id, "snapshot.results")
+        variables = _copy_variable_mapping(self.variables, "snapshot.variables")
         states = _normalize_step_states(self.step_states)
         if self.current_step_id is not None:
             _validate_step_id(self.current_step_id, "snapshot.current_step_id")
@@ -73,6 +89,7 @@ class ExecutionContextSnapshot:
             _validate_attempt(self.current_attempt, self.execution_id, "snapshot")
         metadata = _copy_result_mapping(self.metadata, "snapshot.metadata")
         object.__setattr__(self, "results_by_step_id", MappingProxyType(results))
+        object.__setattr__(self, "variables", MappingProxyType(variables))
         object.__setattr__(self, "step_states", MappingProxyType(states))
         object.__setattr__(self, "metadata", MappingProxyType(metadata))
 
@@ -84,12 +101,18 @@ class ExecutionContext:
         self,
         execution_id: str | None = None,
         *,
+        initial_variables: Mapping[str, object] | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> None:
         active_id = execution_id or str(uuid4())
         _validate_execution_id(active_id)
         self._execution_id = active_id
         self._results_by_step_id: dict[str, object] = {}
+        self._variables = _copy_variable_mapping(
+            initial_variables or {},
+            "initial_variables",
+        )
+        self._variable_events: list[dict[str, object]] = []
         self._step_states: dict[str, str] = {}
         self._current_step_id: str | None = None
         self._current_attempt: int | None = None
@@ -191,6 +214,77 @@ class ExecutionContext:
             "results_snapshot",
         )
 
+    def set_variable(
+        self,
+        name: str,
+        value: object,
+    ) -> None:
+        """Create or replace one execution-local variable."""
+        _validate_variable_name(name, self.execution_id, "set_variable")
+        normalized_name = name.strip()
+        self._variables[normalized_name] = _copy_variable_value(
+            value,
+            f"variable[{normalized_name}]",
+        )
+        self._record_variable_event("execution_variable_set", normalized_name)
+
+    def get_variable(
+        self,
+        name: str,
+        default: object = None,
+    ) -> object:
+        _validate_variable_name(name, self.execution_id, "get_variable")
+        normalized_name = name.strip()
+        if normalized_name not in self._variables:
+            return default
+        return _copy_variable_value(
+            self._variables[normalized_name],
+            f"variable[{normalized_name}]",
+        )
+
+    def require_variable(
+        self,
+        name: str,
+    ) -> object:
+        _validate_variable_name(name, self.execution_id, "require_variable")
+        normalized_name = name.strip()
+        if normalized_name not in self._variables:
+            raise ExecutionVariableNotFoundError(
+                f"execution_id={self.execution_id} variable={normalized_name} "
+                "operation=require_variable reason=variable not found"
+            )
+        return self.get_variable(normalized_name)
+
+    def has_variable(
+        self,
+        name: str,
+    ) -> bool:
+        _validate_variable_name(name, self.execution_id, "has_variable")
+        return name.strip() in self._variables
+
+    def delete_variable(
+        self,
+        name: str,
+    ) -> bool:
+        _validate_variable_name(name, self.execution_id, "delete_variable")
+        normalized_name = name.strip()
+        if normalized_name not in self._variables:
+            return False
+        del self._variables[normalized_name]
+        self._record_variable_event("execution_variable_deleted", normalized_name)
+        return True
+
+    def clear_variables(self) -> None:
+        """Remove all execution-local variables."""
+        for name in tuple(self._variables):
+            self.delete_variable(name)
+
+    def variables_snapshot(self) -> dict[str, object]:
+        return _copy_variable_mapping(self._variables, "variables_snapshot")
+
+    def variable_events_snapshot(self) -> tuple[Mapping[str, object], ...]:
+        return tuple(MappingProxyType(dict(event)) for event in self._variable_events)
+
     def mark_step_started(
         self,
         step_id: str,
@@ -248,6 +342,7 @@ class ExecutionContext:
         return ExecutionContextSnapshot(
             execution_id=self.execution_id,
             results_by_step_id=self.results_snapshot(),
+            variables=self.variables_snapshot(),
             step_states=dict(self._step_states),
             current_step_id=self.current_step_id,
             current_attempt=self.current_attempt,
@@ -259,7 +354,11 @@ class ExecutionContext:
         cls,
         snapshot: ExecutionContextSnapshot,
     ) -> "ExecutionContext":
-        context = cls(snapshot.execution_id, metadata=snapshot.metadata)
+        context = cls(
+            snapshot.execution_id,
+            initial_variables=snapshot.variables,
+            metadata=snapshot.metadata,
+        )
         context._results_by_step_id = _copy_result_mapping(
             snapshot.results_by_step_id,
             "restore.results",
@@ -268,6 +367,20 @@ class ExecutionContext:
         context._current_step_id = snapshot.current_step_id
         context._current_attempt = snapshot.current_attempt
         return context
+
+    def _record_variable_event(
+        self,
+        action: str,
+        name: str,
+    ) -> None:
+        self._variable_events.append(
+            {
+                "action": action,
+                "execution_id": self.execution_id,
+                "variable_name": name,
+                "variable_count": len(self._variables),
+            }
+        )
 
     def _require_running(
         self,
@@ -309,6 +422,20 @@ def _validate_step_id(
             f"execution_id=<unknown> step_id=<invalid> operation={operation} "
             "reason=step_id must be non-empty"
         )
+
+
+def _validate_variable_name(
+    name: str,
+    execution_id: str,
+    operation: str,
+) -> None:
+    try:
+        validate_execution_variable_name(name)
+    except InvalidExecutionVariableNameError as error:
+        raise InvalidExecutionVariableNameError(
+            f"execution_id={execution_id} variable={name!r} operation={operation} "
+            f"reason={error}"
+        ) from error
 
 
 def _validate_attempt(
@@ -354,6 +481,17 @@ def _copy_result_mapping(
     return copied
 
 
+def _copy_variable_mapping(
+    values: Mapping[str, object],
+    path: str,
+) -> dict[str, object]:
+    copied: dict[str, object] = {}
+    for key, value in values.items():
+        _validate_variable_name(key, "<unknown>", path)
+        copied[key.strip()] = _copy_variable_value(value, f"{path}.{key}")
+    return copied
+
+
 def _copy_result_value(
     value: object,
     path: str,
@@ -395,6 +533,16 @@ def _copy_result_value(
         f"execution_id=<unknown> step_id=<unknown> operation={path} "
         f"reason=unsupported result type {type_name}"
     )
+
+
+def _copy_variable_value(
+    value: object,
+    path: str,
+) -> object:
+    try:
+        return _copy_result_value(value, path)
+    except InvalidExecutionContextValueError as error:
+        raise InvalidExecutionVariableValueError(str(error)) from error
 
 
 def _validate_mapping_key(

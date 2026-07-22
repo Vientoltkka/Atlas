@@ -8,6 +8,10 @@ import math
 from types import MappingProxyType, ModuleType
 from typing import Any
 
+from core.execution_variable_reference import (
+    ExecutionVariableReference,
+    copy_execution_variable_reference,
+)
 from core.step_output_reference import StepOutputReference, copy_step_output_reference
 
 
@@ -154,6 +158,9 @@ def _freeze_value(
     if isinstance(value, StepOutputReference):
         return copy_step_output_reference(value)
 
+    if isinstance(value, ExecutionVariableReference):
+        return copy_execution_variable_reference(value)
+
     if isinstance(value, Mapping):
         return MappingProxyType(_freeze_mapping(value, path))
 
@@ -179,6 +186,9 @@ def _thaw_value(
 ) -> object:
     if isinstance(value, StepOutputReference):
         return copy_step_output_reference(value)
+
+    if isinstance(value, ExecutionVariableReference):
+        return copy_execution_variable_reference(value)
 
     if isinstance(value, Mapping):
         return {
@@ -206,3 +216,26 @@ def contains_step_output_reference(
         return any(contains_step_output_reference(item) for item in value)
 
     return False
+
+
+def contains_execution_variable_reference(
+    value: object,
+) -> bool:
+    """Return whether a structural value contains an unresolved variable reference."""
+    if isinstance(value, ExecutionVariableReference):
+        return True
+
+    if isinstance(value, Mapping):
+        return any(contains_execution_variable_reference(item) for item in value.values())
+
+    if isinstance(value, (list, tuple)):
+        return any(contains_execution_variable_reference(item) for item in value)
+
+    return False
+
+
+def contains_unresolved_execution_reference(
+    value: object,
+) -> bool:
+    """Return whether a value contains any unresolved structured execution reference."""
+    return contains_step_output_reference(value) or contains_execution_variable_reference(value)

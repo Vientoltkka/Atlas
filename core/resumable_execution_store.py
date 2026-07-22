@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.execution_context import ExecutionContextSnapshot
+from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
@@ -386,6 +387,13 @@ def _argument_to_json(
             "path": [_argument_to_json(part) for part in value.path],
         }
 
+    if isinstance(value, ExecutionVariableReference):
+        return {
+            "$type": "execution_variable_reference",
+            "name": value.name,
+            "path": [_argument_to_json(part) for part in value.path],
+        }
+
     if isinstance(value, dict):
         return {
             key: _argument_to_json(item)
@@ -416,6 +424,17 @@ def _argument_from_json(
                 step_id=_required_str(value, "step_id"),
                 path=tuple(raw_path),
             )
+        if set(value) == {"$type", "name", "path"} and value.get("$type") == "execution_variable_reference":
+            raw_path = value.get("path")
+            if not isinstance(raw_path, list):
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    "Execution variable reference path must be a list.",
+                )
+            return ExecutionVariableReference(
+                name=_required_str(value, "name"),
+                path=tuple(raw_path),
+            )
         return {
             key: _argument_from_json(item)
             for key, item in value.items()
@@ -433,6 +452,7 @@ def _context_snapshot_to_dict(
     return {
         "execution_id": snapshot.execution_id,
         "results_by_step_id": _argument_to_json(dict(snapshot.results_by_step_id)),
+        "variables": _argument_to_json(dict(snapshot.variables)),
         "step_states": dict(snapshot.step_states),
         "current_step_id": snapshot.current_step_id,
         "current_attempt": snapshot.current_attempt,
@@ -451,11 +471,13 @@ def _optional_context_snapshot(
             "Execution context snapshot must be an object or null.",
         )
     results = _required_dict(payload, "results_by_step_id")
+    variables = _required_dict(payload, "variables") if "variables" in payload else {}
     states = _required_dict(payload, "step_states")
     metadata = _required_dict(payload, "metadata")
     return ExecutionContextSnapshot(
         execution_id=_required_str(payload, "execution_id"),
         results_by_step_id=_argument_from_json(results),
+        variables=_argument_from_json(variables),
         step_states=states,
         current_step_id=_optional_str(payload, "current_step_id"),
         current_attempt=_optional_int(payload, "current_attempt"),

@@ -9,8 +9,11 @@ from core.execution_arguments import (
     ExecutionArguments,
     InvalidExecutionArgumentError,
     MissingExecutionArgumentError,
+    contains_execution_variable_reference,
     contains_step_output_reference,
+    contains_unresolved_execution_reference,
 )
+from core.execution_variable_reference import ExecutionVariableReference
 from core.step_output_reference import StepOutputReference
 
 
@@ -127,6 +130,18 @@ def test_execution_arguments_accept_step_output_reference_before_resolution() ->
     assert exported == {"value": reference}
     assert exported["value"] is not reference
     assert contains_step_output_reference(arguments) is True
+
+
+def test_execution_arguments_accept_execution_variable_reference_before_resolution() -> None:
+    reference = ExecutionVariableReference("workspace_path")
+    arguments = ExecutionArguments({"path": reference})
+
+    exported = arguments.as_dict()
+
+    assert exported == {"path": reference}
+    assert exported["path"] is not reference
+    assert contains_execution_variable_reference(arguments) is True
+    assert contains_unresolved_execution_reference(arguments) is True
 
 
 def test_step_output_reference_rejects_invalid_construction() -> None:

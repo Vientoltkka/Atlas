@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from core.execution_context import ExecutionContext, ExecutionStepState
+from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_arguments import ExecutionArguments
 from core.execution_plan_executor import (
     ExecutionControl,
@@ -491,6 +492,78 @@ def test_executor_uses_execution_context_id_and_stores_success_results() -> None
     assert result.trace.execution_id == "exec-context-1"
     assert context.state_for_step("step_1") == ExecutionStepState.SUCCESS.value
     assert context.require_result("step_1") == {"content": "alpha"}
+
+
+def test_executor_resolves_variables_from_prepared_context() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        )
+    )
+    context = ExecutionContext(
+        "exec-context-1",
+        initial_variables={"workspace_path": "C:/AI/Atlas"},
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert tool.contexts[0].parameters == {"path": "C:/AI/Atlas"}
+    assert context.require_variable("workspace_path") == "C:/AI/Atlas"
+
+
+def test_executor_creates_empty_context_when_none_is_provided() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan((_step("step_1", "safe_tool"),))
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert result.trace is not None
+    assert result.trace.execution_id
+
+
+def test_variable_resolution_observability_omits_values() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        )
+    )
+    context = ExecutionContext("exec-context-1")
+    context.set_variable("workspace_path", "secret-value")
+    context.delete_variable("workspace_path")
+    context.set_variable("workspace_path", "secret-value")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "execution_variable_set" in actions
+    assert "execution_variable_deleted" in actions
+    assert "variable_resolution_started" in actions
+    assert "variable_resolution_succeeded" in actions
+    assert "secret-value" not in repr(result.trace.events)
 
 
 def test_executor_does_not_store_failed_step_result_in_context() -> None:
@@ -1476,6 +1549,45 @@ def test_resume_restores_execution_context_snapshot_as_result_source() -> None:
     assert result.trace.events[0].action == "execution_context_restored"
 
 
+def test_resume_restores_variables_and_preserves_execution_id() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        )
+    )
+    validation = _validation(plan)
+    context = ExecutionContext(
+        "exec-resume-variables",
+        initial_variables={"workspace_path": "C:/AI/Atlas"},
+    )
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=(),
+        pending_step_ids=("step_1",),
+        failed_step_ids=(),
+        interrupted_step_id="step_1",
+        previous_results={},
+        resumable=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).resume(state)
+
+    assert result.success is True
+    assert result.trace is not None
+    assert result.trace.execution_id == "exec-resume-variables"
+    assert tool.contexts[0].parameters == {"path": "C:/AI/Atlas"}
+
+
 def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:
     calls: list[str] = []
     first = SpyTool("first_tool", calls)
@@ -1847,6 +1959,43 @@ def test_retry_policy_retries_transient_failure_and_then_completes() -> None:
     assert result.step_results[0].metadata["attempt_number"] == 2
     assert result.step_results[0].metadata["completed_after_retry"] is True
     assert len(result.step_results[0].metadata["retry_history"]) == 1
+
+
+def test_retry_preserves_and_resolves_variable_each_attempt() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "temporary unavailable", "error_code": "TEMPORARY_UNAVAILABLE"},
+            "done",
+        ],
+    )
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        )
+    )
+    context = ExecutionContext(
+        "exec-retry-variables",
+        initial_variables={"workspace_path": "C:/AI/Atlas"},
+    )
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, _validation(plan), execution_context=context)
+
+    assert result.success is True
+    assert calls == ["safe_tool", "safe_tool"]
+    assert tool.contexts[0].parameters == tool.contexts[1].parameters == {
+        "path": "C:/AI/Atlas"
+    }
+    assert context.require_variable("workspace_path") == "C:/AI/Atlas"
 
 
 def test_retry_policy_stops_at_max_attempts() -> None:

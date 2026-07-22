@@ -10,6 +10,7 @@ import re
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from core.execution_arguments import ExecutionArguments
+from core.execution_variable_reference import ExecutionVariableReference
 from core.step_output_reference import StepOutputReference
 
 
@@ -47,6 +48,19 @@ class ExecutionResultProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class ExecutionValueProvider(ExecutionResultProvider, Protocol):
+    """Minimal provider needed to resolve execution values."""
+
+    def has_variable(self, name: str) -> bool:
+        """Return whether an execution variable exists."""
+        ...
+
+    def require_variable(self, name: str) -> object:
+        """Return a stored execution variable or raise a contextual error."""
+        ...
+
+
 class ParameterResolutionErrorCode(str, Enum):
     """Stable error codes for parameter resolution failures."""
 
@@ -68,6 +82,7 @@ class ParameterResolutionErrorCode(str, Enum):
     UNSUPPORTED_TEMPLATE_EXPRESSION = "UNSUPPORTED_TEMPLATE_EXPRESSION"
     TEMPLATE_VALUE_NOT_SERIALIZABLE = "TEMPLATE_VALUE_NOT_SERIALIZABLE"
     TEMPLATE_RESOLUTION_FAILED = "TEMPLATE_RESOLUTION_FAILED"
+    REFERENCED_VARIABLE_NOT_FOUND = "REFERENCED_VARIABLE_NOT_FOUND"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +94,7 @@ class ParameterResolutionResult:
     errors: list[str] = field(default_factory=list)
     unresolved_references: list[str] = field(default_factory=list)
     used_step_ids: list[str] = field(default_factory=list)
+    used_variable_names: list[str] = field(default_factory=list)
     used_references: list[str] = field(default_factory=list)
     templates_resolved: int = 0
     error_code: str | None = None
@@ -136,6 +152,7 @@ class ParameterResolver:
     ) -> ParameterResolutionResult:
         """Return a new argument mapping with explicit references resolved."""
         used_step_ids: list[str] = []
+        used_variable_names: list[str] = []
         used_references: list[str] = []
         template_counter = [0]
 
@@ -144,6 +161,7 @@ class ParameterResolver:
                 arguments,
                 previous_results,
                 used_step_ids,
+                used_variable_names,
                 used_references,
                 depth=0,
                 seen=set(),
@@ -160,6 +178,7 @@ class ParameterResolver:
                     else []
                 ),
                 used_step_ids=used_step_ids,
+                used_variable_names=used_variable_names,
                 used_references=used_references,
                 templates_resolved=template_counter[0],
                 error_code=failure.error.code,
@@ -172,6 +191,7 @@ class ParameterResolver:
             errors=[],
             unresolved_references=[],
             used_step_ids=used_step_ids,
+            used_variable_names=used_variable_names,
             used_references=used_references,
             templates_resolved=template_counter[0],
             error_code=None,
@@ -186,6 +206,7 @@ class ParameterResolver:
     ) -> object:
         """Resolve references inside one value and return a defensive copy."""
         used_step_ids: list[str] = []
+        used_variable_names: list[str] = []
         used_references: list[str] = []
         template_counter = [0]
         try:
@@ -193,6 +214,7 @@ class ParameterResolver:
                 value,
                 available_results,
                 used_step_ids,
+                used_variable_names,
                 used_references,
                 depth=0,
                 seen=set(),
@@ -208,6 +230,7 @@ class ParameterResolver:
         value: Mapping[str, object],
         previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
+        used_variable_names: list[str],
         used_references: list[str],
         *,
         depth: int,
@@ -224,6 +247,7 @@ class ParameterResolver:
                     item,
                     previous_results,
                     used_step_ids,
+                    used_variable_names,
                     used_references,
                     depth=depth + 1,
                     seen=seen,
@@ -237,8 +261,9 @@ class ParameterResolver:
     def _resolve_value(
         self,
         value: object,
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
+        used_variable_names: list[str],
         used_references: list[str],
         *,
         depth: int,
@@ -269,6 +294,7 @@ class ParameterResolver:
                 value,
                 previous_results,
                 used_step_ids,
+                used_variable_names,
                 used_references,
                 depth=depth,
                 seen=seen,
@@ -283,6 +309,7 @@ class ParameterResolver:
                         item,
                         previous_results,
                         used_step_ids,
+                        used_variable_names,
                         used_references,
                         depth=depth + 1,
                         seen=seen,
@@ -301,6 +328,7 @@ class ParameterResolver:
                         item,
                         previous_results,
                         used_step_ids,
+                        used_variable_names,
                         used_references,
                         depth=depth + 1,
                         seen=seen,
@@ -319,12 +347,20 @@ class ParameterResolver:
                 used_references,
             )
 
+        if isinstance(value, ExecutionVariableReference):
+            return self._resolve_execution_variable_reference(
+                value,
+                previous_results,
+                used_variable_names,
+                used_references,
+            )
+
         return deepcopy(value)
 
     def _resolve_step_output_reference(
         self,
         reference: StepOutputReference,
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
     ) -> object:
@@ -353,10 +389,38 @@ class ParameterResolver:
         used_references.append(reference_label)
         return deepcopy(value)
 
+    def _resolve_execution_variable_reference(
+        self,
+        reference: ExecutionVariableReference,
+        provider: Mapping[str, object] | ExecutionResultProvider,
+        used_variable_names: list[str],
+        used_references: list[str],
+    ) -> object:
+        reference_label = self._variable_reference_label(reference)
+        if not self._has_variable(provider, reference.name):
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_VARIABLE_NOT_FOUND.value,
+                f"Referenced execution variable '{reference.name}' was not found.",
+                reference_label,
+            )
+
+        value = self._resolve_structured_path(
+            self._require_variable(provider, reference.name, reference_label),
+            reference.name,
+            reference.path,
+            reference_label,
+        )
+
+        if reference.name not in used_variable_names:
+            used_variable_names.append(reference.name)
+
+        used_references.append(reference_label)
+        return deepcopy(value)
+
     def _resolve_reference_object(
         self,
         reference_object: Mapping[str, object],
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
     ) -> object:
@@ -416,7 +480,7 @@ class ParameterResolver:
     def _resolve_template_object(
         self,
         template_object: Mapping[str, object],
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
         template_counter: list[int],
@@ -488,7 +552,7 @@ class ParameterResolver:
     def _resolve_template_reference(
         self,
         reference: str,
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
     ) -> object:
@@ -518,7 +582,7 @@ class ParameterResolver:
     def _resolve_reference(
         self,
         reference: str,
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
     ) -> object:
@@ -809,6 +873,38 @@ class ParameterResolver:
                 reference,
             )
 
+    def _has_variable(
+        self,
+        provider: Mapping[str, object] | ExecutionResultProvider,
+        name: str,
+    ) -> bool:
+        if isinstance(provider, Mapping):
+            return False
+        if not isinstance(provider, ExecutionValueProvider):
+            return False
+        return provider.has_variable(name)
+
+    def _require_variable(
+        self,
+        provider: Mapping[str, object] | ExecutionResultProvider,
+        name: str,
+        reference: str,
+    ) -> object:
+        if isinstance(provider, Mapping) or not isinstance(provider, ExecutionValueProvider):
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_VARIABLE_NOT_FOUND.value,
+                f"Referenced execution variable '{name}' was not found.",
+                reference,
+            )
+        try:
+            return provider.require_variable(name)
+        except Exception as error:
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_VARIABLE_NOT_FOUND.value,
+                f"Referenced execution variable '{name}' was not found.",
+                reference,
+            )
+
     def _reference_label(
         self,
         reference: StepOutputReference,
@@ -817,6 +913,17 @@ class ParameterResolver:
             return f"steps.{reference.step_id}.output"
         return (
             f"steps.{reference.step_id}.output:"
+            + ".".join(str(part) for part in reference.path)
+        )
+
+    def _variable_reference_label(
+        self,
+        reference: ExecutionVariableReference,
+    ) -> str:
+        if not reference.path:
+            return f"variables.{reference.name}"
+        return (
+            f"variables.{reference.name}:"
             + ".".join(str(part) for part in reference.path)
         )
 

@@ -12,8 +12,10 @@ from typing import Any, Mapping
 from core.execution_arguments import (
     ExecutionArguments,
     InvalidExecutionArgumentError,
+    contains_execution_variable_reference,
     contains_step_output_reference,
 )
+from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
     BLOCKED_REFERENCE_PARTS,
     MAX_TEMPLATE_LENGTH,
@@ -211,7 +213,7 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
         self._validate_static_references(plan, errors)
-        self._validate_step_output_references(plan, errors)
+        self._validate_structured_references(plan, errors)
 
     def _validate_tool_argument_schemas(
         self,
@@ -257,12 +259,16 @@ class ExecutionPlanValidator:
         self,
         value: Any,
     ) -> bool:
-        return contains_step_output_reference(value) or any(
+        return (
+            contains_step_output_reference(value)
+            or contains_execution_variable_reference(value)
+            or any(
             self._iter_special_objects(value, key)
             for key in ("$ref", "$template")
         )
+        )
 
-    def _validate_step_output_references(
+    def _validate_structured_references(
         self,
         plan: ExecutionPlan,
         errors: list[str],
@@ -273,34 +279,39 @@ class ExecutionPlanValidator:
             first_index_by_id.setdefault(step_id, index)
 
         for index, step in enumerate(plan.ordered_steps):
-            for reference in self._iter_step_output_references(step.arguments):
-                referenced = reference.step_id
-                if referenced not in first_index_by_id:
-                    errors.append(
-                        f"Step '{step.id}' references unknown step '{referenced}'."
-                    )
-                    continue
-                if referenced == step.id:
-                    errors.append(f"Step '{step.id}' cannot reference itself.")
-                    continue
-                if first_index_by_id[referenced] >= index:
-                    errors.append(
-                        f"Step '{step.id}' references future step '{referenced}'."
-                    )
-                for segment in reference.path:
+            for reference in self._iter_structured_references(step.arguments):
+                if isinstance(reference, StepOutputReference):
+                    referenced = reference.step_id
+                    if referenced not in first_index_by_id:
+                        errors.append(
+                            f"Step '{step.id}' references unknown step '{referenced}'."
+                        )
+                        continue
+                    if referenced == step.id:
+                        errors.append(f"Step '{step.id}' cannot reference itself.")
+                        continue
+                    if first_index_by_id[referenced] >= index:
+                        errors.append(
+                            f"Step '{step.id}' references future step '{referenced}'."
+                        )
+                    path = reference.path
+                else:
+                    path = reference.path
+
+                for segment in path:
                     if isinstance(segment, str) and segment in BLOCKED_REFERENCE_PARTS:
                         errors.append(
                             f"Step '{step.id}' has unsafe reference path segment: {segment}."
                         )
 
-    def _iter_step_output_references(
+    def _iter_structured_references(
         self,
         value: Any,
-    ) -> tuple[StepOutputReference, ...]:
-        references: list[StepOutputReference] = []
+    ) -> tuple[StepOutputReference | ExecutionVariableReference, ...]:
+        references: list[StepOutputReference | ExecutionVariableReference] = []
 
         def visit(item: Any) -> None:
-            if isinstance(item, StepOutputReference):
+            if isinstance(item, (StepOutputReference, ExecutionVariableReference)):
                 references.append(item)
                 return
 
@@ -678,6 +689,13 @@ def _signature_safe_value(
         return {
             "$type": "step_output_reference",
             "step_id": value.step_id,
+            "path": list(value.path),
+        }
+
+    if isinstance(value, ExecutionVariableReference):
+        return {
+            "$type": "execution_variable_reference",
+            "name": value.name,
             "path": list(value.path),
         }
 

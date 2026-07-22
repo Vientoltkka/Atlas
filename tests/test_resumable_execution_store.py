@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 
 from core.execution_context import ExecutionContext
+from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.planner import ExecutionPlan, ExecutionStep
@@ -98,6 +99,7 @@ def test_json_store_saves_and_loads_valid_state(tmp_path) -> None:
     assert loaded.execution_context_snapshot.results_by_step_id == {  # type: ignore[union-attr]
         "step_1": {"content": "alpha"}
     }
+    assert loaded.execution_context_snapshot.variables == {}  # type: ignore[union-attr]
     assert store.exists() is True
 
 
@@ -281,4 +283,65 @@ def test_json_store_preserves_step_output_references_in_plan_arguments(tmp_path)
     assert loaded is not None
     assert loaded.original_plan.ordered_steps[1].arguments.as_dict() == {
         "content": StepOutputReference("step_1", ("content",))
+    }
+
+
+def test_json_store_preserves_execution_variables_and_references(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Resume variable plan.",
+        ordered_steps=(
+            ExecutionStep(
+                id="step_1",
+                description="Execute step_1.",
+                tool="read_file",
+                arguments={"path": ExecutionVariableReference("workspace_path")},
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        detected_risks=(),
+        requires_confirmation=False,
+        status="planned",
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    context = ExecutionContext(
+        "exec-store-variable",
+        initial_variables={"workspace_path": "C:/AI/Atlas"},
+    )
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=(),
+        pending_step_ids=("step_1",),
+        failed_step_ids=(),
+        interrupted_step_id="step_1",
+        previous_results={},
+        resumable=True,
+        confirmation_granted=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    payload = _payload(tmp_path / "state.json")
+    loaded = store.load()
+
+    assert payload["original_plan"]["ordered_steps"][0]["arguments"]["path"] == {
+        "$type": "execution_variable_reference",
+        "name": "workspace_path",
+        "path": [],
+    }
+    assert payload["execution_context_snapshot"]["variables"] == {
+        "workspace_path": "C:/AI/Atlas"
+    }
+    assert loaded is not None
+    assert loaded.original_plan.ordered_steps[0].arguments.as_dict() == {
+        "path": ExecutionVariableReference("workspace_path")
+    }
+    assert loaded.execution_context_snapshot is not None
+    assert loaded.execution_context_snapshot.execution_id == "exec-store-variable"
+    assert loaded.execution_context_snapshot.variables == {
+        "workspace_path": "C:/AI/Atlas"
     }

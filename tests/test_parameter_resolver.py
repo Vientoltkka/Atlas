@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import inspect
 
 from core.execution_context import ExecutionContext
+from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import StepExecutionResult
 from core.parameter_resolver import (
     MAX_RESOLUTION_DEPTH,
@@ -314,6 +315,109 @@ def test_structured_reference_resolves_from_execution_result_provider() -> None:
     assert result.success is True
     assert result.resolved_arguments == {"payload": "README.md"}
     assert result.used_references == ["steps.step_1.output:path"]
+
+
+def test_execution_variable_reference_resolves_complete_value_and_paths() -> None:
+    context = ExecutionContext(
+        "exec-1",
+        initial_variables={
+            "workspace_path": "C:/AI/Atlas",
+            "search_config": {"filters": {"limit": 20}, "items": ["first"]},
+        },
+    )
+
+    direct = ParameterResolver().resolve(
+        {"path": ExecutionVariableReference("workspace_path")},
+        context,
+    )
+    nested = ParameterResolver().resolve(
+        {
+            "limit": ExecutionVariableReference(
+                "search_config",
+                ("filters", "limit"),
+            ),
+            "first": ExecutionVariableReference("search_config", ("items", 0)),
+        },
+        context,
+    )
+
+    assert direct.success is True
+    assert direct.resolved_arguments == {"path": "C:/AI/Atlas"}
+    assert direct.used_variable_names == ["workspace_path"]
+    assert nested.success is True
+    assert nested.resolved_arguments == {"limit": 20, "first": "first"}
+    assert nested.used_references == [
+        "variables.search_config:filters.limit",
+        "variables.search_config:items.0",
+    ]
+
+
+def test_execution_variable_reference_failures_are_clear() -> None:
+    context = ExecutionContext("exec-1", initial_variables={"config": {"items": []}})
+
+    missing_variable = ParameterResolver().resolve(
+        {"value": ExecutionVariableReference("missing")},
+        context,
+    )
+    missing_key = ParameterResolver().resolve(
+        {"value": ExecutionVariableReference("config", ("missing",))},
+        context,
+    )
+    bad_index = ParameterResolver().resolve(
+        {"value": ExecutionVariableReference("config", ("items", 1))},
+        context,
+    )
+    bad_type = ParameterResolver().resolve(
+        {"value": ExecutionVariableReference("config", ("items", "bad"))},
+        context,
+    )
+
+    assert missing_variable.success is False
+    assert missing_variable.error_code == (
+        ParameterResolutionErrorCode.REFERENCED_VARIABLE_NOT_FOUND.value
+    )
+    assert missing_key.success is False
+    assert missing_key.error_code == ParameterResolutionErrorCode.REFERENCED_FIELD_NOT_FOUND.value
+    assert bad_index.success is False
+    assert bad_index.error_code == ParameterResolutionErrorCode.INVALID_LIST_INDEX.value
+    assert bad_type.success is False
+    assert bad_type.error_code == ParameterResolutionErrorCode.INVALID_LIST_INDEX.value
+
+
+def test_execution_variable_references_are_recursive_and_do_not_mutate_sources() -> None:
+    context = ExecutionContext(
+        "exec-1",
+        initial_variables={"config": {"items": [{"name": "alpha"}]}, "name": "beta"},
+    )
+    arguments = {
+        "items": [ExecutionVariableReference("config", ("items", 0))],
+        "nested": {"name": ExecutionVariableReference("name")},
+    }
+
+    result = ParameterResolver().resolve(arguments, context)
+    result.resolved_arguments.as_dict()["items"][0]["name"] = "changed"  # type: ignore[index]
+
+    assert result.success is True
+    assert arguments["items"][0] == ExecutionVariableReference("config", ("items", 0))
+    assert context.require_variable("config") == {"items": [{"name": "alpha"}]}
+
+
+def test_step_and_variable_references_can_be_mixed() -> None:
+    context = ExecutionContext("exec-1", initial_variables={"prefix": "Atlas"})
+    context.set_result("step_1", {"name": "README.md"})
+
+    result = ParameterResolver().resolve(
+        {
+            "prefix": ExecutionVariableReference("prefix"),
+            "name": StepOutputReference("step_1", ("name",)),
+        },
+        context,
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {"prefix": "Atlas", "name": "README.md"}
+    assert result.used_step_ids == ["step_1"]
+    assert result.used_variable_names == ["prefix"]
 
 
 def test_structured_reference_with_path_resolves_dict_list_dict() -> None:

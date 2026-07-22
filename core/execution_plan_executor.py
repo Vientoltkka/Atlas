@@ -352,6 +352,7 @@ class ExecutionPlanExecutor:
             self._trace_execution_context_restored(trace, active_context)
         else:
             self._trace_execution_context_created(trace, active_context)
+        self._trace_context_variable_events(trace, active_context)
         self._hydrate_context_from_legacy_state(
             active_context,
             initial_completed_step_ids=initial_completed_step_ids,
@@ -1221,12 +1222,14 @@ class ExecutionPlanExecutor:
                 attempt_number,
             )
             self._trace_parameter_resolution_started(trace, step)
+            self._trace_variable_resolution_started(trace, step)
             resolution = self._parameter_resolver.resolve(
                 _step_arguments_dict(step),
                 execution_context,
             )
             if not resolution.success:
                 self._trace_parameter_resolution_failed(trace, step, resolution)
+                self._trace_variable_resolution_failed(trace, step, resolution)
                 self._mark_context_failed(trace, execution_context, step.id)
                 error = "; ".join(resolution.errors)
                 return StepExecutionResult(
@@ -1241,11 +1244,13 @@ class ExecutionPlanExecutor:
                         "parameter_resolution_error_code": resolution.error_code,
                         "unresolved_references": resolution.unresolved_references,
                         "used_step_ids": resolution.used_step_ids,
+                        "used_variable_names": resolution.used_variable_names,
                         "used_references": resolution.used_references,
                         "attempt_number": attempt_number,
                     },
                 )
             self._trace_parameter_resolution_succeeded(trace, step, resolution)
+            self._trace_variable_resolution_succeeded(trace, step, resolution)
             outcome = self._execute_resolved_step_once(
                 step,
                 plan_signature=plan_signature,
@@ -1709,6 +1714,26 @@ class ExecutionPlanExecutor:
             },
         )
 
+    def _trace_context_variable_events(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+    ) -> None:
+        for event in context.variable_events_snapshot():
+            action = event.get("action")
+            if action not in {"execution_variable_set", "execution_variable_deleted"}:
+                continue
+            trace.add_event(
+                component="ExecutionPlanExecutor",
+                action=str(action),
+                status=TraceEventStatus.FINISHED.value,
+                details={
+                    "execution_id": context.execution_id,
+                    "variable_name": event.get("variable_name"),
+                    "variable_count": event.get("variable_count"),
+                },
+            )
+
     def _trace_step_state_changed(
         self,
         trace: ExecutionTrace,
@@ -1880,6 +1905,70 @@ class ExecutionPlanExecutor:
             details=details,
         )
 
+    def _trace_variable_resolution_started(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+    ) -> None:
+        variable_references = self._variable_reference_labels(step.arguments)
+        if not variable_references:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="variable_resolution_started",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "variable_reference_count": len(variable_references),
+                "variable_references": variable_references,
+            },
+        )
+
+    def _trace_variable_resolution_succeeded(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        resolution: Any,
+    ) -> None:
+        variable_references = self._variable_reference_labels(step.arguments)
+        if not variable_references:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="variable_resolution_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "variable_names": sorted(set(resolution.used_variable_names)),
+                "variable_reference_count": len(variable_references),
+            },
+        )
+
+    def _trace_variable_resolution_failed(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        resolution: Any,
+    ) -> None:
+        variable_references = self._variable_reference_labels(step.arguments)
+        if not variable_references:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="variable_resolution_failed",
+            status=TraceEventStatus.FAILED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "variable_names": sorted(set(resolution.used_variable_names)),
+                "variable_reference_count": len(variable_references),
+                "error_code": resolution.error_code,
+                "unresolved_references": list(resolution.unresolved_references),
+            },
+        )
+
     def _parameter_resolution_trace_details(
         self,
         step: ExecutionStep,
@@ -1902,11 +1991,16 @@ class ExecutionPlanExecutor:
         self,
         value: object,
     ) -> list[str]:
+        from core.execution_variable_reference import ExecutionVariableReference
         from core.step_output_reference import StepOutputReference
 
         labels: list[str] = []
 
         def visit(item: object) -> None:
+            if isinstance(item, ExecutionVariableReference):
+                labels.append(self._variable_reference_label(item))
+                return
+
             if isinstance(item, StepOutputReference):
                 if item.path:
                     path = ".".join(str(part) for part in item.path)
@@ -1932,6 +2026,40 @@ class ExecutionPlanExecutor:
 
         visit(value)
         return sorted(labels)
+
+    def _variable_reference_labels(
+        self,
+        value: object,
+    ) -> list[str]:
+        from core.execution_variable_reference import ExecutionVariableReference
+
+        labels: list[str] = []
+
+        def visit(item: object) -> None:
+            if isinstance(item, ExecutionVariableReference):
+                labels.append(self._variable_reference_label(item))
+                return
+
+            if isinstance(item, Mapping):
+                for nested in item.values():
+                    visit(nested)
+                return
+
+            if isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        return sorted(labels)
+
+    def _variable_reference_label(
+        self,
+        reference: Any,
+    ) -> str:
+        if reference.path:
+            path = ".".join(str(part) for part in reference.path)
+            return f"variables.{reference.name}:{path}"
+        return f"variables.{reference.name}"
 
     def _emit_progress(
         self,

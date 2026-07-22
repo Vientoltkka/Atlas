@@ -10,10 +10,13 @@ from core.execution_context import (
     ExecutionContext,
     ExecutionContextSnapshot,
     ExecutionResultNotFoundError,
+    ExecutionVariableNotFoundError,
     ExecutionStepState,
     ExecutionStepStateTransitionError,
+    InvalidExecutionVariableValueError,
     InvalidExecutionContextValueError,
 )
+from core.execution_variable_reference import InvalidExecutionVariableNameError
 
 
 def test_context_generates_id_and_starts_empty() -> None:
@@ -23,7 +26,18 @@ def test_context_generates_id_and_starts_empty() -> None:
     assert context.current_step_id is None
     assert context.current_attempt is None
     assert context.results_snapshot() == {}
+    assert context.variables_snapshot() == {}
     assert context.state_for_step("step_1") == ExecutionStepState.PENDING.value
+
+
+def test_context_accepts_initial_variables_and_copies_them_defensively() -> None:
+    initial = {"workspace_path": "C:/AI/Atlas", "config": {"limit": 20}}
+
+    context = ExecutionContext("exec-1", initial_variables=initial)
+    initial["config"]["limit"] = 99  # type: ignore[index]
+
+    assert context.require_variable("workspace_path") == "C:/AI/Atlas"
+    assert context.require_variable("config") == {"limit": 20}
 
 
 def test_results_distinguish_none_from_missing_and_are_defensive_copies() -> None:
@@ -56,6 +70,64 @@ def test_result_values_reject_unsafe_objects_and_non_finite_floats() -> None:
 
     with pytest.raises(InvalidExecutionContextValueError):
         context.set_result("step_1", {"": "bad"})
+
+
+def test_variable_api_replaces_deletes_and_distinguishes_none_from_missing() -> None:
+    context = ExecutionContext("exec-1")
+    payload = {"items": [{"name": "alpha"}]}
+
+    context.set_variable("workspace_path", "C:/AI/Atlas")
+    context.set_variable("workspace_path", "C:/AI/Atlas/work")
+    context.set_variable("_temporary", None)
+    context.set_variable("result_1", payload)
+    payload["items"][0]["name"] = "changed"
+
+    assert context.has_variable("workspace_path") is True
+    assert context.require_variable("workspace_path") == "C:/AI/Atlas/work"
+    assert context.has_variable("_temporary") is True
+    assert context.require_variable("_temporary") is None
+    assert context.get_variable("missing", "fallback") == "fallback"
+    assert context.require_variable("result_1") == {"items": [{"name": "alpha"}]}
+    assert context.delete_variable("workspace_path") is True
+    assert context.delete_variable("workspace_path") is False
+    assert context.has_variable("workspace_path") is False
+
+    with pytest.raises(ExecutionVariableNotFoundError):
+        context.require_variable("missing")
+
+
+def test_variables_are_defensive_copies_and_contexts_are_isolated() -> None:
+    first = ExecutionContext("exec-1")
+    second = ExecutionContext("exec-2")
+    first.set_variable("config", {"items": [{"name": "alpha"}]})
+    second.set_variable("config", {"items": [{"name": "beta"}]})
+
+    returned = first.require_variable("config")
+    returned["items"][0]["name"] = "mutated"  # type: ignore[index]
+    snapshot = first.variables_snapshot()
+    snapshot["config"]["items"][0]["name"] = "snapshot"  # type: ignore[index]
+
+    assert first.require_variable("config") == {"items": [{"name": "alpha"}]}
+    assert second.require_variable("config") == {"items": [{"name": "beta"}]}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "workspace path", "a.b", "1value", "$secret", "__class__"],
+)
+def test_variable_names_reject_unsafe_forms(name: str) -> None:
+    context = ExecutionContext("exec-1")
+
+    with pytest.raises(InvalidExecutionVariableNameError):
+        context.set_variable(name, "value")
+
+
+def test_variable_values_reject_unsafe_objects_and_non_finite_floats() -> None:
+    context = ExecutionContext("exec-1")
+
+    for value in (object(), lambda: None, math.nan, math.inf):
+        with pytest.raises(InvalidExecutionVariableValueError):
+            context.set_variable("config", value)
 
 
 def test_step_state_transitions_are_explicit_and_retryable_after_failure() -> None:
@@ -107,6 +179,7 @@ def test_snapshot_is_immutable_and_restore_preserves_state() -> None:
     snapshot = context.snapshot()
 
     assert isinstance(snapshot.results_by_step_id, MappingProxyType)
+    assert isinstance(snapshot.variables, MappingProxyType)
     assert snapshot.results_by_step_id == {"step_1": {"items": [1, 2]}}
     with pytest.raises(TypeError):
         snapshot.results_by_step_id["step_2"] = "bad"  # type: ignore[index]
@@ -115,6 +188,23 @@ def test_snapshot_is_immutable_and_restore_preserves_state() -> None:
     assert restored.execution_id == "exec-1"
     assert restored.completed_step_ids == ("step_1",)
     assert restored.require_result("step_1") == {"items": [1, 2]}
+
+
+def test_snapshot_includes_variables_and_restore_preserves_them() -> None:
+    context = ExecutionContext(
+        "exec-1",
+        initial_variables={"workspace_path": "C:/AI/Atlas", "unicode": "Víctor"},
+    )
+
+    snapshot = context.snapshot()
+    restored = ExecutionContext.restore(snapshot)
+
+    assert snapshot.variables == {
+        "workspace_path": "C:/AI/Atlas",
+        "unicode": "Víctor",
+    }
+    assert restored.require_variable("workspace_path") == "C:/AI/Atlas"
+    assert restored.require_variable("unicode") == "Víctor"
 
 
 def test_snapshot_rejects_unknown_current_step() -> None:
