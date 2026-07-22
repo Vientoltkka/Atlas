@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 import json
 import re
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import unicodedata
 
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
@@ -37,7 +37,7 @@ class Plan:
     objective: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ExecutionStep:
     """One pending step in an execution plan."""
 
@@ -50,22 +50,46 @@ class ExecutionStep:
     output_binding: ExecutionVariableBinding | None = None
     condition: ExecutionConditionNode | None = None
 
-    def __post_init__(self) -> None:
-        if isinstance(self.arguments, ExecutionArguments):
-            arguments = self.arguments
+    def __init__(
+        self,
+        id: str,
+        description: str,
+        tool: str | None,
+        dependencies: Sequence[str] = (),
+        *,
+        depends_on: Sequence[str] | None = None,
+        status: str = "pending",
+        arguments: ExecutionArguments | Mapping[str, Any] | None = None,
+        output_binding: ExecutionVariableBinding | None = None,
+        condition: ExecutionConditionNode | None = None,
+    ) -> None:
+        dependencies_source = dependencies if depends_on is None else depends_on
+        object.__setattr__(self, "id", id)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "dependencies", tuple(dependencies_source))
+        object.__setattr__(self, "status", status)
+        raw_arguments = ExecutionArguments.empty() if arguments is None else arguments
+        if isinstance(raw_arguments, ExecutionArguments):
+            normalized_arguments = raw_arguments
         else:
-            arguments = ExecutionArguments(self.arguments)
-        object.__setattr__(self, "arguments", arguments)
+            normalized_arguments = ExecutionArguments(raw_arguments)
+        object.__setattr__(self, "arguments", normalized_arguments)
         object.__setattr__(
             self,
             "output_binding",
-            copy_execution_variable_binding(self.output_binding),
+            copy_execution_variable_binding(output_binding),
         )
         object.__setattr__(
             self,
             "condition",
-            copy_execution_condition(self.condition),
+            copy_execution_condition(condition),
         )
+
+    @property
+    def depends_on(self) -> tuple[str, ...]:
+        """Return explicit dependency step ids for this step."""
+        return self.dependencies
 
 
 @dataclass(frozen=True, slots=True)

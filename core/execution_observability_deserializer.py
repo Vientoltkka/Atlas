@@ -110,6 +110,7 @@ class ExecutionObservabilityDeserializer:
         successful_steps = _non_negative_int(payload, "successful_steps")
         failed_steps = _non_negative_int(payload, "failed_steps")
         skipped_steps = _optional_non_negative_int(payload, "skipped_steps", default=0)
+        blocked_steps = _optional_non_negative_int(payload, "blocked_steps", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -135,6 +136,7 @@ class ExecutionObservabilityDeserializer:
             successful_steps=successful_steps,
             failed_steps=failed_steps,
             skipped_steps=skipped_steps,
+            blocked_steps=blocked_steps,
             success_rate=success_rate,
             total_step_duration_ms=_non_negative_int(payload, "total_step_duration_ms"),
             average_step_duration_ms=_non_negative_float(payload, "average_step_duration_ms"),

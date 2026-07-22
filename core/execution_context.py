@@ -28,6 +28,7 @@ class ExecutionStepState(str, Enum):
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
     CANCELLED = "CANCELLED"
+    BLOCKED = "BLOCKED"
 
 
 class ExecutionContextError(ValueError):
@@ -161,6 +162,14 @@ class ExecutionContext:
             step_id
             for step_id, state in self._step_states.items()
             if state == ExecutionStepState.CANCELLED.value
+        )
+
+    @property
+    def blocked_step_ids(self) -> tuple[str, ...]:
+        return tuple(
+            step_id
+            for step_id, state in self._step_states.items()
+            if state == ExecutionStepState.BLOCKED.value
         )
 
     @property
@@ -361,6 +370,21 @@ class ExecutionContext:
         self._step_states[step_id] = ExecutionStepState.CANCELLED.value
         self._clear_current(step_id)
         return previous, ExecutionStepState.CANCELLED.value
+
+    def mark_step_blocked(
+        self,
+        step_id: str,
+    ) -> tuple[str, str]:
+        _validate_step_id(step_id, "mark_step_blocked")
+        previous = self.state_for_step(step_id)
+        if previous != ExecutionStepState.PENDING.value:
+            raise ExecutionStepStateTransitionError(
+                f"execution_id={self.execution_id} step_id={step_id} "
+                f"operation=mark_step_blocked reason=cannot transition from {previous} to BLOCKED"
+            )
+        self._step_states[step_id] = ExecutionStepState.BLOCKED.value
+        self._clear_current(step_id)
+        return previous, ExecutionStepState.BLOCKED.value
 
     def snapshot(self) -> ExecutionContextSnapshot:
         return ExecutionContextSnapshot(

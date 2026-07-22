@@ -1384,6 +1384,8 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     actions = [event.action for event in result.trace.events]
     assert actions == [
         "execution_context_created",
+        "execution_dependency_check_started",
+        "execution_dependency_check_succeeded",
         "STEP_STARTED",
         "step_state_changed",
         "step_state_changed",
@@ -1391,10 +1393,10 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
         "execution_context_snapshot_created",
     ]
     assert result.trace.events[1].status == TraceEventStatus.STARTED.value
-    assert result.trace.events[4].status == TraceEventStatus.FINISHED.value
-    assert result.trace.events[1].component == "ExecutionPlanExecutor"
-    assert result.trace.events[1].details["step_id"] == "step_1"
-    assert result.trace.events[4].duration_ms is not None
+    assert result.trace.events[5].status == TraceEventStatus.FINISHED.value
+    assert result.trace.events[3].component == "ExecutionPlanExecutor"
+    assert result.trace.events[3].details["step_id"] == "step_1"
+    assert result.trace.events[6].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_id == result.trace.execution_id
     assert result.metrics.started_steps == 1
@@ -1415,17 +1417,19 @@ def test_executor_trace_records_failed_step_event() -> None:
     actions = [event.action for event in result.trace.events]
     assert actions == [
         "execution_context_created",
+        "execution_dependency_check_started",
+        "execution_dependency_check_succeeded",
         "STEP_STARTED",
         "step_state_changed",
         "step_state_changed",
         "STEP_FAILED",
         "execution_context_snapshot_created",
     ]
-    assert result.trace.events[4].status == TraceEventStatus.FAILED.value
-    assert result.trace.events[4].details["error_code"] == (
+    assert result.trace.events[6].status == TraceEventStatus.FAILED.value
+    assert result.trace.events[6].details["error_code"] == (
         ExecutionErrorCode.TOOL_EXCEPTION.value
     )
-    assert result.trace.events[4].duration_ms is not None
+    assert result.trace.events[6].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.FAILED.value
     assert result.metrics.started_steps == 1
@@ -2113,7 +2117,8 @@ def test_dependency_failure_uses_dependency_error_code() -> None:
 
     assert result.success is False
     assert result.error_code == ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value
-    assert result.failed_steps == ["step_1"]
+    assert result.failed_steps == []
+    assert result.blocked_steps == ["step_1"]
     assert result.pending_steps == []
     assert calls == []
 
@@ -2568,7 +2573,7 @@ def test_composite_condition_error_in_evaluated_node_marks_failed() -> None:
     assert "composite_condition_failed" in [event.action for event in result.trace.events]
 
 
-def test_executor_fails_condition_reference_to_skipped_step_with_clear_code() -> None:
+def test_executor_blocks_condition_reference_to_skipped_dependency() -> None:
     calls: list[str] = []
     second = SpyTool("second", calls)
     plan = _plan(
@@ -2582,6 +2587,7 @@ def test_executor_fails_condition_reference_to_skipped_step_with_clear_code() ->
             _step(
                 "step_2",
                 "second",
+                dependencies=("step_1",),
                 condition=ExecutionCondition(
                     StepOutputReference("step_1"),
                     ExecutionConditionOperator.EXISTS,
@@ -2593,10 +2599,12 @@ def test_executor_fails_condition_reference_to_skipped_step_with_clear_code() ->
     result = ExecutionPlanExecutor(_registry(second)).execute(plan, _validation(plan))
 
     assert result.success is False
-    assert result.failed_step == "step_2"
-    assert result.error_code == ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value
+    assert result.failed_step is None
+    assert result.blocked_steps == ["step_2"]
+    assert result.error_code == ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value
     assert result.step_results[0].status == StepExecutionStatus.SKIPPED.value
-    assert result.step_results[1].error_code == ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value
+    assert result.step_results[1].status == StepExecutionStatus.BLOCKED.value
+    assert result.step_results[1].error_code == ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value
     assert calls == []
 
 

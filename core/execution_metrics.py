@@ -29,6 +29,7 @@ class ExecutionMetrics:
     actions: tuple[str, ...]
     events_by_component: tuple[tuple[str, int], ...]
     events_by_action: tuple[tuple[str, int], ...]
+    blocked_steps: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -47,6 +48,7 @@ class ExecutionMetricsCalculator:
             events,
             "execution_step_skipped",
         )
+        blocked_steps = _count_action(events, "execution_step_blocked")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -64,6 +66,7 @@ class ExecutionMetricsCalculator:
             successful_steps=successful_steps,
             failed_steps=failed_steps,
             skipped_steps=skipped_steps,
+            blocked_steps=blocked_steps,
             success_rate=(
                 successful_steps / finished_steps
                 if finished_steps

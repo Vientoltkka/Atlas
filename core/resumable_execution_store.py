@@ -333,7 +333,7 @@ def _step_to_dict(
         "id": step.id,
         "description": step.description,
         "tool": step.tool,
-        "dependencies": list(step.dependencies),
+        "depends_on": list(step.depends_on),
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
         "output_binding": _binding_to_json(step.output_binding),
@@ -383,12 +383,22 @@ def _dict_to_step(
         id=_required_str(payload, "id"),
         description=_required_str(payload, "description"),
         tool=tool,
-        dependencies=_str_tuple(payload, "dependencies"),
+        depends_on=_step_dependencies(payload),
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
         output_binding=_binding_from_json(payload.get("output_binding")),
         condition=_condition_from_json(payload.get("condition")),
     )
+
+
+def _step_dependencies(
+    payload: dict[str, Any],
+) -> tuple[str, ...]:
+    if "depends_on" in payload:
+        return _str_tuple(payload, "depends_on")
+    if "dependencies" in payload:
+        return _str_tuple(payload, "dependencies")
+    return ()
 
 
 def _condition_to_json(
@@ -712,11 +722,17 @@ def _validate_state_consistency(
     completed = set(completed_step_ids)
     pending = set(pending_step_ids)
     skipped: set[str] = set()
+    blocked: set[str] = set()
     if execution_context_snapshot is not None:
         skipped = {
             step_id
             for step_id, state in execution_context_snapshot.step_states.items()
             if state == "SKIPPED"
+        }
+        blocked = {
+            step_id
+            for step_id, state in execution_context_snapshot.step_states.items()
+            if state == "BLOCKED"
         }
 
     if failed_step_ids:
@@ -735,13 +751,21 @@ def _validate_state_consistency(
         not completed.issubset(all_step_id_set)
         or not pending.issubset(all_step_id_set)
         or not skipped.issubset(all_step_id_set)
+        or not blocked.issubset(all_step_id_set)
     ):
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             "Execution state contains unknown step IDs.",
         )
 
-    if completed & pending or completed & skipped or pending & skipped:
+    if (
+        completed & pending
+        or completed & skipped
+        or completed & blocked
+        or pending & skipped
+        or pending & blocked
+        or skipped & blocked
+    ):
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             "Execution state has contradictory step IDs.",
@@ -750,7 +774,7 @@ def _validate_state_consistency(
     expected_pending = tuple(
         step_id
         for step_id in all_step_ids
-        if step_id not in completed and step_id not in skipped
+        if step_id not in completed and step_id not in skipped and step_id not in blocked
     )
     if pending_step_ids != expected_pending:
         raise ResumableExecutionStoreError(
@@ -767,6 +791,12 @@ def _validate_state_consistency(
     for step in plan.ordered_steps:
         if step.id not in completed:
             continue
+        for dependency_id in step.depends_on:
+            if dependency_id not in completed:
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    "A completed step has an unsatisfied dependency.",
+                )
         if step.tool in {None, "direct_response"}:
             continue
         if step.id not in previous_results:
@@ -774,6 +804,25 @@ def _validate_state_consistency(
                 "EXECUTION_STATE_INVALID",
                 "A completed step is missing its previous result.",
             )
+
+    if execution_context_snapshot is not None:
+        for step in plan.ordered_steps:
+            if step.id not in blocked:
+                continue
+            if step.id in execution_context_snapshot.results_by_step_id:
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    "A blocked step cannot have a stored result.",
+                )
+            binding = step.output_binding
+            if (
+                binding is not None
+                and binding.variable_name in execution_context_snapshot.variables
+            ):
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    "A blocked step cannot have an applied output binding.",
+                )
 
 
 def _safe_metadata(

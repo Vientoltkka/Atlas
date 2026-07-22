@@ -15,6 +15,10 @@ from core.execution_arguments import (
     contains_execution_variable_reference,
     contains_step_output_reference,
 )
+from core.execution_dependency_checker import (
+    ImplicitStepDependencyError,
+    TooManyStepDependenciesError,
+)
 from core.execution_condition import (
     AllOfCondition,
     AnyOfCondition,
@@ -54,6 +58,7 @@ class PlanValidationResult:
 class ExecutionPlanValidator:
     """Validate execution plans without executing or modifying them."""
 
+    MAX_STEP_DEPENDENCIES = 64
     _VALID_PLAN_STATUSES = {"planned"}
     _VALID_STEP_STATUSES = {"pending"}
     _DANGEROUS_TOOLS = {
@@ -343,6 +348,12 @@ class ExecutionPlanValidator:
                             errors.append(
                                 f"Step '{step.id}' references future step '{referenced}'."
                             )
+                        if referenced not in step.depends_on:
+                            errors.append(
+                                f"{ImplicitStepDependencyError.__name__}: "
+                                f"Step '{step.id}' references step '{referenced}' "
+                                "without declaring it in depends_on."
+                            )
                         path = reference.path
                     else:
                         path = reference.path
@@ -594,9 +605,43 @@ class ExecutionPlanValidator:
         dependency_graph: dict[str, tuple[str, ...]] = {}
 
         for step in plan.ordered_steps:
-            dependency_graph[step.id] = tuple(step.dependencies)
+            dependencies = tuple(step.depends_on)
+            dependency_graph[step.id] = tuple(
+                dependency
+                for dependency in dependencies
+                if isinstance(dependency, str)
+            )
 
-            for dependency in step.dependencies:
+            if len(dependencies) > self.MAX_STEP_DEPENDENCIES:
+                errors.append(
+                    f"{TooManyStepDependenciesError.__name__}: "
+                    f"Step '{step.id}' declares {len(dependencies)} dependencies; "
+                    f"maximum is {self.MAX_STEP_DEPENDENCIES}."
+                )
+
+            seen_dependencies: set[str] = set()
+            for position, dependency in enumerate(dependencies):
+                if not isinstance(dependency, str):
+                    errors.append(
+                        f"Step '{step.id}' dependency at position {position} "
+                        "must be a string."
+                    )
+                    continue
+
+                if not dependency.strip():
+                    errors.append(
+                        f"Step '{step.id}' dependency at position {position} "
+                        "cannot be empty."
+                    )
+                    continue
+
+                if dependency in seen_dependencies:
+                    errors.append(
+                        f"Step '{step.id}' declares duplicate dependency "
+                        f"'{dependency}' at position {position}."
+                    )
+                seen_dependencies.add(dependency)
+
                 if dependency not in unique_ids:
                     errors.append(
                         f"Step '{step.id}' depends on unknown step '{dependency}'."
@@ -709,7 +754,7 @@ def plan_signature(
                 "id": step.id,
                 "description": step.description,
                 "tool": step.tool,
-                "dependencies": list(step.dependencies),
+                "depends_on": list(step.depends_on),
                 "status": step.status,
                 "arguments": _signature_safe_value(
                     step.arguments.as_dict()

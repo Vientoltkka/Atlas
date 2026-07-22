@@ -1319,7 +1319,7 @@ def test_template_escaped_braces_do_not_create_references() -> None:
     assert result.is_valid is True
 
 
-def test_step_output_reference_to_previous_step_is_valid_without_dependency() -> None:
+def test_step_output_reference_to_previous_step_requires_dependency() -> None:
     plan = replace(
         _valid_plan(),
         ordered_steps=(
@@ -1337,7 +1337,8 @@ def test_step_output_reference_to_previous_step_is_valid_without_dependency() ->
 
     result = _validate(plan)
 
-    assert result.is_valid is True
+    assert result.is_valid is False
+    assert any("ImplicitStepDependencyError" in error for error in result.errors)
 
 
 def test_step_output_reference_to_unknown_self_and_future_steps_are_invalid() -> None:
@@ -1368,7 +1369,11 @@ def test_step_output_reference_path_changes_plan_signature() -> None:
         base,
         ordered_steps=(
             _step("read"),
-            _step("use", arguments={"value": StepOutputReference("read", ("a",))}),
+            _step(
+                "use",
+                dependencies=("read",),
+                arguments={"value": StepOutputReference("read", ("a",))},
+            ),
         ),
         estimated_steps=2,
         required_tools=("read_file",),
@@ -1378,14 +1383,22 @@ def test_step_output_reference_path_changes_plan_signature() -> None:
         first,
         ordered_steps=(
             _step("read"),
-            _step("use", arguments={"value": StepOutputReference("read", ("b",))}),
+            _step(
+                "use",
+                dependencies=("read",),
+                arguments={"value": StepOutputReference("read", ("b",))},
+            ),
         ),
     )
     third = replace(
         first,
         ordered_steps=(
             _step("other"),
-            _step("use", arguments={"value": StepOutputReference("other", ("a",))}),
+            _step(
+                "use",
+                dependencies=("other",),
+                arguments={"value": StepOutputReference("other", ("a",))},
+            ),
         ),
     )
 

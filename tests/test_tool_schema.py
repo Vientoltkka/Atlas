@@ -616,12 +616,13 @@ def test_structured_reference_is_validated_against_schema_after_resolution() -> 
         goal="Resolve then validate.",
         ordered_steps=(
             ExecutionStep("read", "Read.", "read.tool"),
-            ExecutionStep(
-                "consume",
-                "Consume.",
-                "consume.tool",
-                arguments={"text": StepOutputReference("read")},
-            ),
+                ExecutionStep(
+                    "consume",
+                    "Consume.",
+                    "consume.tool",
+                    depends_on=("read",),
+                    arguments={"text": StepOutputReference("read")},
+                ),
         ),
         estimated_steps=2,
         required_tools=("read.tool", "consume.tool"),
@@ -648,12 +649,13 @@ def test_structured_reference_wrong_resolved_type_fails_schema_validation() -> N
         goal="Resolve wrong type.",
         ordered_steps=(
             ExecutionStep("read", "Read.", "read.tool"),
-            ExecutionStep(
-                "consume",
-                "Consume.",
-                "consume.tool",
-                arguments={"text": StepOutputReference("read")},
-            ),
+                ExecutionStep(
+                    "consume",
+                    "Consume.",
+                    "consume.tool",
+                    depends_on=("read",),
+                    arguments={"text": StepOutputReference("read")},
+                ),
         ),
         estimated_steps=2,
         required_tools=("read.tool", "consume.tool"),
@@ -687,12 +689,13 @@ def test_schema_default_and_unknown_argument_policy_apply_after_structured_resol
         goal="Resolve with defaults.",
         ordered_steps=(
             ExecutionStep("read", "Read.", "read.tool"),
-            ExecutionStep(
-                "consume",
-                "Consume.",
-                "consume.tool",
-                arguments={"query": StepOutputReference("read")},
-            ),
+                ExecutionStep(
+                    "consume",
+                    "Consume.",
+                    "consume.tool",
+                    depends_on=("read",),
+                    arguments={"query": StepOutputReference("read")},
+                ),
         ),
         estimated_steps=2,
         required_tools=("read.tool", "consume.tool"),
