@@ -7,7 +7,13 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
-from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
+from core.execution_condition import (
+    AllOfCondition,
+    AnyOfCondition,
+    ExecutionCondition,
+    ExecutionConditionOperator,
+    NotCondition,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
@@ -107,6 +113,162 @@ def test_plan_signature_changes_when_step_condition_changes() -> None:
     )
 
     assert plan_signature(base) != plan_signature(changed)
+
+
+def test_validator_accepts_composite_condition() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AllOfCondition(
+                    (
+                        ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+                        NotCondition(ExecutionCondition(False, ExecutionConditionOperator.TRUTHY)),
+                    )
+                ),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validator_walks_short_circuitable_composite_nodes_statically() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1", "read_file"),
+            _step(
+                "step_2",
+                "write_file",
+                dependencies=("step_1",),
+                condition=AllOfCondition(
+                    (
+                        ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+                        ExecutionCondition(
+                            StepOutputReference("step_3"),
+                            ExecutionConditionOperator.EXISTS,
+                        ),
+                    )
+                ),
+            ),
+            _step("step_3", "read_file"),
+        ),
+        required_tools=("read_file", "write_file"),
+        estimated_steps=3,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any("future step 'step_3'" in error for error in result.errors)
+
+
+def test_validator_rejects_self_reference_inside_composite_condition() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AnyOfCondition(
+                    (
+                        ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+                        ExecutionCondition(
+                            StepOutputReference("step_1"),
+                            ExecutionConditionOperator.EXISTS,
+                        ),
+                    )
+                ),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any("cannot reference itself" in error for error in result.errors)
+
+
+def test_plan_signature_changes_for_composite_type_order_and_child() -> None:
+    condition_a = ExecutionCondition("a", ExecutionConditionOperator.EQUALS, "a")
+    condition_b = ExecutionCondition("b", ExecutionConditionOperator.EQUALS, "b")
+    all_plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AllOfCondition((condition_a, condition_b)),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    any_plan = replace(
+        all_plan,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AnyOfCondition((condition_a, condition_b)),
+            ),
+        ),
+    )
+    reordered_plan = replace(
+        all_plan,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AllOfCondition((condition_b, condition_a)),
+            ),
+        ),
+    )
+    changed_child_plan = replace(
+        all_plan,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AllOfCondition(
+                    (condition_a, ExecutionCondition("b", ExecutionConditionOperator.EQUALS, "c"))
+                ),
+            ),
+        ),
+    )
+    same_plan = replace(
+        all_plan,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                condition=AllOfCondition((condition_a, condition_b)),
+            ),
+        ),
+    )
+
+    assert plan_signature(all_plan) != plan_signature(any_plan)
+    assert plan_signature(all_plan) != plan_signature(reordered_plan)
+    assert plan_signature(all_plan) != plan_signature(changed_child_plan)
+    assert plan_signature(all_plan) == plan_signature(same_plan)
 
 
 def test_validator_accepts_valid_output_binding() -> None:

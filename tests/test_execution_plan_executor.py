@@ -8,7 +8,13 @@ from typing import Any
 import pytest
 
 from core.execution_context import ExecutionContext, ExecutionStepState
-from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
+from core.execution_condition import (
+    AllOfCondition,
+    AnyOfCondition,
+    ExecutionCondition,
+    ExecutionConditionOperator,
+    NotCondition,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_arguments import ExecutionArguments
@@ -2456,6 +2462,110 @@ def test_executor_skips_step_when_condition_is_false_without_calling_tool() -> N
     assert "execution_condition_started" in actions
     assert "execution_condition_succeeded" in actions
     assert "execution_step_skipped" in actions
+
+
+def test_composite_condition_true_executes_tool_and_records_observability() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"ok": True})
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                condition=AllOfCondition(
+                    (
+                        ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+                        NotCondition(ExecutionCondition(False, ExecutionConditionOperator.TRUTHY)),
+                    )
+                ),
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert calls == ["safe_tool"]
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "composite_condition_started" in actions
+    assert "composite_condition_succeeded" in actions
+
+
+def test_composite_condition_false_skips_without_resolution_tool_or_binding() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"ok": True})
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                arguments={"payload": ExecutionVariableReference("missing")},
+                output_binding=ExecutionVariableBinding("should_not_exist"),
+                condition=AllOfCondition(
+                    (
+                        ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+                        ExecutionCondition(
+                            ExecutionVariableReference("missing_condition"),
+                            ExecutionConditionOperator.EQUALS,
+                            True,
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+    context = ExecutionContext("exec-composite-false")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert result.skipped_steps == ["step_1"]
+    assert calls == []
+    assert context.state_for_step("step_1") == ExecutionStepState.SKIPPED.value
+    assert context.has_result("step_1") is False
+    assert context.has_variable("should_not_exist") is False
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "condition_short_circuited" in actions
+    assert "parameter_resolution_started" not in actions
+    assert "schema_validation_started" not in actions
+
+
+def test_composite_condition_error_in_evaluated_node_marks_failed() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                condition=AnyOfCondition(
+                    (
+                        ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+                        ExecutionCondition(
+                            ExecutionVariableReference("missing"),
+                            ExecutionConditionOperator.EQUALS,
+                            True,
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert result.failed_step == "step_1"
+    assert result.error_code == ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value
+    assert calls == []
+    assert result.trace is not None
+    assert "composite_condition_failed" in [event.action for event in result.trace.events]
 
 
 def test_executor_fails_condition_reference_to_skipped_step_with_clear_code() -> None:

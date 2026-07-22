@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.execution_context import ExecutionContextSnapshot
-from core.execution_condition import ExecutionCondition, ExecutionConditionOperator
+from core.execution_condition import (
+    AllOfCondition,
+    AnyOfCondition,
+    ExecutionCondition,
+    ExecutionConditionNode,
+    ExecutionConditionOperator,
+    NotCondition,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
@@ -385,10 +392,25 @@ def _dict_to_step(
 
 
 def _condition_to_json(
-    condition: ExecutionCondition | None,
+    condition: ExecutionConditionNode | None,
 ) -> dict[str, Any] | None:
     if condition is None:
         return None
+    if isinstance(condition, AllOfCondition):
+        return {
+            "$type": "all_of_condition",
+            "conditions": [_condition_to_json(item) for item in condition.conditions],
+        }
+    if isinstance(condition, AnyOfCondition):
+        return {
+            "$type": "any_of_condition",
+            "conditions": [_condition_to_json(item) for item in condition.conditions],
+        }
+    if isinstance(condition, NotCondition):
+        return {
+            "$type": "not_condition",
+            "condition": _condition_to_json(condition.condition),
+        }
     return {
         "$type": "execution_condition",
         "operator": condition.operator.value,
@@ -399,9 +421,60 @@ def _condition_to_json(
 
 def _condition_from_json(
     payload: Any,
-) -> ExecutionCondition | None:
+) -> ExecutionConditionNode | None:
     if payload is None:
         return None
+    if isinstance(payload, dict) and payload.get("$type") == "all_of_condition":
+        if set(payload) != {"$type", "conditions"}:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AllOf condition must be an explicit object.",
+            )
+        raw_conditions = payload.get("conditions")
+        if not isinstance(raw_conditions, list):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AllOf condition children must be a list.",
+            )
+        try:
+            return AllOfCondition(tuple(_condition_from_json(item) for item in raw_conditions))
+        except (TypeError, ValueError) as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AllOf condition is invalid.",
+            ) from error
+    if isinstance(payload, dict) and payload.get("$type") == "any_of_condition":
+        if set(payload) != {"$type", "conditions"}:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AnyOf condition must be an explicit object.",
+            )
+        raw_conditions = payload.get("conditions")
+        if not isinstance(raw_conditions, list):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AnyOf condition children must be a list.",
+            )
+        try:
+            return AnyOfCondition(tuple(_condition_from_json(item) for item in raw_conditions))
+        except (TypeError, ValueError) as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "AnyOf condition is invalid.",
+            ) from error
+    if isinstance(payload, dict) and payload.get("$type") == "not_condition":
+        if set(payload) != {"$type", "condition"}:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Not condition must be an explicit object.",
+            )
+        try:
+            return NotCondition(_condition_from_json(payload.get("condition")))
+        except (TypeError, ValueError) as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Not condition is invalid.",
+            ) from error
     if not isinstance(payload, dict) or set(payload) != {
         "$type",
         "operator",

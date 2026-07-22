@@ -15,7 +15,16 @@ from core.execution_arguments import (
     contains_execution_variable_reference,
     contains_step_output_reference,
 )
-from core.execution_condition import ExecutionCondition
+from core.execution_condition import (
+    AllOfCondition,
+    AnyOfCondition,
+    ExecutionCondition,
+    InvalidConditionTreeError,
+    NotCondition,
+    is_execution_condition_node,
+    iter_condition_operands,
+    validate_condition_tree,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
@@ -228,12 +237,13 @@ class ExecutionPlanValidator:
         condition = getattr(step, "condition", None)
         if condition is None:
             return
-        if not isinstance(condition, ExecutionCondition):
-            errors.append(f"Step '{step.id}' condition must be ExecutionCondition.")
+        if not is_execution_condition_node(condition):
+            errors.append(f"Step '{step.id}' condition must be a valid condition node.")
             return
         try:
+            validate_condition_tree(condition, step_id=step.id)
             _signature_safe_value(condition)
-        except TypeError as error:
+        except (InvalidConditionTreeError, TypeError) as error:
             errors.append(f"Step '{step.id}' condition is invalid: {error}.")
 
     def _validate_output_binding(
@@ -316,8 +326,7 @@ class ExecutionPlanValidator:
         for index, step in enumerate(plan.ordered_steps):
             reference_sources: list[Any] = [step.arguments]
             if getattr(step, "condition", None) is not None:
-                reference_sources.append(step.condition.left)
-                reference_sources.append(step.condition.right)
+                reference_sources.extend(iter_condition_operands(step.condition))
             for reference_source in reference_sources:
                 for reference in self._iter_structured_references(reference_source):
                     if isinstance(reference, StepOutputReference):
@@ -384,8 +393,7 @@ class ExecutionPlanValidator:
             )
             reference_sources: list[Any] = [step.arguments]
             if getattr(step, "condition", None) is not None:
-                reference_sources.append(step.condition.left)
-                reference_sources.append(step.condition.right)
+                reference_sources.extend(iter_condition_operands(step.condition))
 
             for reference_source in reference_sources:
                 for reference in self._iter_special_objects(reference_source, "$ref"):
@@ -759,6 +767,24 @@ def _signature_safe_value(
             "operator": value.operator.value,
             "left": _signature_safe_value(value.left),
             "right": _signature_safe_value(value.right),
+        }
+
+    if isinstance(value, AllOfCondition):
+        return {
+            "$type": "all_of_condition",
+            "conditions": [_signature_safe_value(item) for item in value.conditions],
+        }
+
+    if isinstance(value, AnyOfCondition):
+        return {
+            "$type": "any_of_condition",
+            "conditions": [_signature_safe_value(item) for item in value.conditions],
+        }
+
+    if isinstance(value, NotCondition):
+        return {
+            "$type": "not_condition",
+            "condition": _signature_safe_value(value.condition),
         }
 
     if value is None or isinstance(value, (str, int, bool)):

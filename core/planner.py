@@ -10,7 +10,7 @@ from typing import Any, Callable, Mapping
 import unicodedata
 
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
-from core.execution_condition import ExecutionCondition, copy_execution_condition
+from core.execution_condition import ExecutionConditionNode, copy_execution_condition
 from core.execution_variable_binding import (
     ExecutionVariableBinding,
     copy_execution_variable_binding,
@@ -48,7 +48,7 @@ class ExecutionStep:
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
     output_binding: ExecutionVariableBinding | None = None
-    condition: ExecutionCondition | None = None
+    condition: ExecutionConditionNode | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.arguments, ExecutionArguments):

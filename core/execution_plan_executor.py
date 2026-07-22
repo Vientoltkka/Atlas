@@ -15,8 +15,15 @@ from core.execution_context import (
     ExecutionStepState,
 )
 from core.execution_condition import (
+    AllOfCondition,
+    AnyOfCondition,
     ExecutionConditionEvaluationError,
     ExecutionConditionEvaluator,
+    ExecutionConditionResult,
+    NotCondition,
+    condition_kind,
+    condition_tree_stats,
+    iter_condition_operands,
 )
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
@@ -1062,10 +1069,12 @@ class ExecutionPlanExecutor:
             return None
 
         self._trace_condition_started(trace, execution_context, step)
+        self._trace_composite_condition_started(trace, execution_context, step)
         try:
             result = self._condition_evaluator.evaluate(step.condition, execution_context)
         except ExecutionConditionEvaluationError as error:
             self._trace_condition_failed(trace, execution_context, step, type(error).__name__)
+            self._trace_composite_condition_failed(trace, execution_context, step, type(error).__name__)
             self._mark_context_started(trace, execution_context, step.id, 1)
             self._mark_context_failed(trace, execution_context, step.id)
             return StepExecutionResult(
@@ -1076,12 +1085,14 @@ class ExecutionPlanExecutor:
                 error=str(error),
                 error_code=ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
                 metadata={
-                    "condition_operator": step.condition.operator.value,
+                    "condition_operator": self._condition_operator_label(step),
                     "condition_error": type(error).__name__,
                 },
             )
 
         self._trace_condition_succeeded(trace, execution_context, step, result.matched)
+        self._trace_composite_condition_succeeded(trace, execution_context, step, result)
+        self._trace_condition_short_circuited(trace, execution_context, step, result)
         if result.matched:
             return None
 
@@ -1105,7 +1116,7 @@ class ExecutionPlanExecutor:
             error=None,
             error_code=None,
             metadata={
-                "condition_operator": step.condition.operator.value,
+                "condition_operator": self._condition_operator_label(step),
                 "condition_matched": False,
             },
         )
@@ -1953,8 +1964,30 @@ class ExecutionPlanExecutor:
             details={
                 "execution_id": context.execution_id,
                 "step_id": step.id,
-                "operator": step.condition.operator.value,
+                "operator": self._condition_operator_label(step),
                 "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_composite_condition_started(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> None:
+        if not isinstance(step.condition, (AllOfCondition, AnyOfCondition, NotCondition)):
+            return
+        stats = condition_tree_stats(step.condition)
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="composite_condition_started",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "condition_kind": condition_kind(step.condition),
+                "max_depth": stats["max_depth"],
+                "node_count": stats["node_count"],
             },
         )
 
@@ -1973,9 +2006,32 @@ class ExecutionPlanExecutor:
             details={
                 "execution_id": context.execution_id,
                 "step_id": step.id,
-                "operator": step.condition.operator.value,
+                "operator": self._condition_operator_label(step),
                 "matched": matched,
                 "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_composite_condition_succeeded(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        result: ExecutionConditionResult,
+    ) -> None:
+        if not isinstance(step.condition, (AllOfCondition, AnyOfCondition, NotCondition)):
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="composite_condition_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "condition_kind": result.condition_kind,
+                "matched": result.matched,
+                "evaluated_nodes": result.evaluated_nodes,
+                "skipped_nodes_due_to_short_circuit": result.skipped_nodes_due_to_short_circuit,
             },
         )
 
@@ -1994,10 +2050,58 @@ class ExecutionPlanExecutor:
             details={
                 "execution_id": context.execution_id,
                 "step_id": step.id,
-                "operator": step.condition.operator.value,
+                "operator": self._condition_operator_label(step),
                 "error_code": ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
                 "error_type": error_type,
                 "references": self._condition_reference_labels(step),
+            },
+        )
+
+    def _trace_composite_condition_failed(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        error_type: str,
+    ) -> None:
+        if not isinstance(step.condition, (AllOfCondition, AnyOfCondition, NotCondition)):
+            return
+        stats = condition_tree_stats(step.condition)
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="composite_condition_failed",
+            status=TraceEventStatus.FAILED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "condition_kind": condition_kind(step.condition),
+                "max_depth": stats["max_depth"],
+                "node_count": stats["node_count"],
+                "error_code": ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
+                "error_type": error_type,
+            },
+        )
+
+    def _trace_condition_short_circuited(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        result: ExecutionConditionResult,
+    ) -> None:
+        if result.skipped_nodes_due_to_short_circuit <= 0:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="condition_short_circuited",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "step_id": step.id,
+                "condition_kind": result.condition_kind,
+                "evaluated_nodes": result.evaluated_nodes,
+                "skipped_nodes_due_to_short_circuit": result.skipped_nodes_due_to_short_circuit,
+                "matched": result.matched,
             },
         )
 
@@ -2045,19 +2149,19 @@ class ExecutionPlanExecutor:
                 for item in value:
                     visit(item)
 
-        visit(step.condition.left)
-        if step.condition.operator.value not in {
-            "is_none",
-            "is_not_none",
-            "exists",
-            "not_exists",
-            "truthy",
-            "falsy",
-            "is_empty",
-            "is_not_empty",
-        }:
-            visit(step.condition.right)
+        for operand in iter_condition_operands(step.condition):
+            visit(operand)
         return sorted(set(references))
+
+    def _condition_operator_label(
+        self,
+        step: ExecutionStep,
+    ) -> str:
+        if step.condition is None:
+            return "none"
+        if hasattr(step.condition, "operator"):
+            return object.__getattribute__(step.condition, "operator").value
+        return condition_kind(step.condition)
 
     def _trace_execution_context_created(
         self,
