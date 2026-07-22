@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+from core.execution_context import ExecutionContext
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.planner import ExecutionPlan, ExecutionStep
@@ -45,6 +46,9 @@ def _plan() -> ExecutionPlan:
 def _state() -> ResumableExecutionState:
     plan = _plan()
     validation = ExecutionPlanValidator().validate(plan)
+    context = ExecutionContext("exec-store-1")
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", {"content": "alpha"})
     return ResumableExecutionState(
         objective="resume",
         original_plan=plan,
@@ -68,6 +72,7 @@ def _state() -> ResumableExecutionState:
                 },
             )
         },
+        execution_context_snapshot=context.snapshot(),
     )
 
 
@@ -88,6 +93,11 @@ def test_json_store_saves_and_loads_valid_state(tmp_path) -> None:
     assert loaded.previous_results == {"step_1": {"content": "alpha"}}  # type: ignore[union-attr]
     assert loaded.retry_attempts == {"step_2": 1}  # type: ignore[union-attr]
     assert loaded.retry_history["step_2"][0]["error_code"] == "TEMPORARY_UNAVAILABLE"  # type: ignore[union-attr]
+    assert loaded.execution_context_snapshot is not None  # type: ignore[union-attr]
+    assert loaded.execution_context_snapshot.execution_id == "exec-store-1"  # type: ignore[union-attr]
+    assert loaded.execution_context_snapshot.results_by_step_id == {  # type: ignore[union-attr]
+        "step_1": {"content": "alpha"}
+    }
     assert store.exists() is True
 
 

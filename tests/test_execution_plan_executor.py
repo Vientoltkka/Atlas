@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from core.execution_context import ExecutionContext, ExecutionStepState
 from core.execution_arguments import ExecutionArguments
 from core.execution_plan_executor import (
     ExecutionControl,
@@ -473,6 +474,68 @@ def test_previous_results_are_available_to_later_steps_without_resolution() -> N
     }
 
 
+def test_executor_uses_execution_context_id_and_stores_success_results() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"content": "alpha"})
+    plan = _plan((_step("step_1", "safe_tool"),))
+    context = ExecutionContext("exec-context-1")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert result.trace is not None
+    assert result.trace.execution_id == "exec-context-1"
+    assert context.state_for_step("step_1") == ExecutionStepState.SUCCESS.value
+    assert context.require_result("step_1") == {"content": "alpha"}
+
+
+def test_executor_does_not_store_failed_step_result_in_context() -> None:
+    calls: list[str] = []
+    tool = SpyTool("failing_tool", calls, fail=True)
+    plan = _plan((_step("step_1", "failing_tool"),))
+    context = ExecutionContext("exec-context-1")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is False
+    assert context.state_for_step("step_1") == ExecutionStepState.FAILED.value
+    assert context.has_result("step_1") is False
+
+
+def test_tool_context_receives_snapshot_not_execution_context() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "alpha"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+    context = ExecutionContext("exec-context-1")
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert isinstance(second.contexts[0].previous_results, dict)
+    assert second.contexts[0].previous_results == {
+        "step_1": {"content": "alpha"},
+    }
+    assert not isinstance(second.contexts[0].previous_results, ExecutionContext)
+
+
 def test_resolved_arguments_are_delivered_to_tool_context() -> None:
     calls: list[str] = []
     first = SpyTool("first_tool", calls, output={"path": "README.md"})
@@ -833,7 +896,9 @@ def test_trace_records_argument_metadata_without_argument_values() -> None:
     result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
 
     assert result.trace is not None
-    started = result.trace.events[0].details
+    started = next(
+        event.details for event in result.trace.events if event.action == "STEP_STARTED"
+    )
     assert started["argument_count"] == 2
     assert started["argument_keys"] == ["password", "query"]
     assert started["has_arguments"] is True
@@ -1001,17 +1066,20 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     assert result.trace is not None
     assert result.trace.status == TraceStatus.SUCCESS.value
     assert result.trace.finished_at is not None
-    assert [event.action for event in result.trace.events] == [
+    actions = [event.action for event in result.trace.events]
+    assert actions == [
+        "execution_context_created",
         "STEP_STARTED",
+        "step_state_changed",
+        "step_state_changed",
         "STEP_FINISHED",
+        "execution_context_snapshot_created",
     ]
-    assert [event.status for event in result.trace.events] == [
-        TraceEventStatus.STARTED.value,
-        TraceEventStatus.FINISHED.value,
-    ]
-    assert result.trace.events[0].component == "ExecutionPlanExecutor"
-    assert result.trace.events[0].details["step_id"] == "step_1"
-    assert result.trace.events[1].duration_ms is not None
+    assert result.trace.events[1].status == TraceEventStatus.STARTED.value
+    assert result.trace.events[4].status == TraceEventStatus.FINISHED.value
+    assert result.trace.events[1].component == "ExecutionPlanExecutor"
+    assert result.trace.events[1].details["step_id"] == "step_1"
+    assert result.trace.events[4].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_id == result.trace.execution_id
     assert result.metrics.started_steps == 1
@@ -1029,15 +1097,20 @@ def test_executor_trace_records_failed_step_event() -> None:
 
     assert result.trace is not None
     assert result.trace.status == TraceStatus.FAILED.value
-    assert [event.action for event in result.trace.events] == [
+    actions = [event.action for event in result.trace.events]
+    assert actions == [
+        "execution_context_created",
         "STEP_STARTED",
+        "step_state_changed",
+        "step_state_changed",
         "STEP_FAILED",
+        "execution_context_snapshot_created",
     ]
-    assert result.trace.events[1].status == TraceEventStatus.FAILED.value
-    assert result.trace.events[1].details["error_code"] == (
+    assert result.trace.events[4].status == TraceEventStatus.FAILED.value
+    assert result.trace.events[4].details["error_code"] == (
         ExecutionErrorCode.TOOL_EXCEPTION.value
     )
-    assert result.trace.events[1].duration_ms is not None
+    assert result.trace.events[4].duration_ms is not None
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.FAILED.value
     assert result.metrics.started_steps == 1
@@ -1057,10 +1130,14 @@ def test_executor_trace_marks_cancelled_execution() -> None:
 
     assert result.trace is not None
     assert result.trace.status == TraceStatus.CANCELLED.value
-    assert result.trace.events == []
+    assert [event.action for event in result.trace.events] == [
+        "execution_context_created",
+        "step_state_changed",
+        "step_state_changed",
+    ]
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.CANCELLED.value
-    assert result.metrics.total_events == 0
+    assert result.metrics.total_events == 3
     assert calls == []
 
 
@@ -1358,6 +1435,45 @@ def test_resume_continues_from_first_pending_step_without_repeating_completed() 
     assert resumed.metrics.started_steps == 2
     assert resumed.metrics.successful_steps == 2
     assert resumed.metrics.failed_steps == 0
+
+
+def test_resume_restores_execution_context_snapshot_as_result_source() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"content": "legacy"})
+    second = SpyTool("second_tool", calls)
+    plan = _plan(
+        (
+            _step("step_1", "first_tool"),
+            _step("step_2", "second_tool", dependencies=("step_1",)),
+        )
+    )
+    validation = _validation(plan)
+    context = ExecutionContext("exec-resume-1")
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", {"content": "snapshot"})
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": {"content": "legacy"}},
+        resumable=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).resume(state)
+
+    assert result.success is True
+    assert result.trace is not None
+    assert result.trace.execution_id == "exec-resume-1"
+    assert second.contexts[0].previous_results == {
+        "step_1": {"content": "snapshot"},
+    }
+    assert result.trace.events[0].action == "execution_context_restored"
 
 
 def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:

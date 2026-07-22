@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
+from core.execution_context import ExecutionContextSnapshot
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
@@ -71,6 +72,7 @@ class JsonResumableExecutionStore:
         "retry_attempts",
         "retry_history",
         "metadata",
+        "execution_context_snapshot",
     }
 
     def __init__(
@@ -202,6 +204,11 @@ class JsonResumableExecutionStore:
                 for step_id, history in state.retry_history.items()
             },
             "metadata": _safe_metadata(state.metadata, created_at=created_at),
+            "execution_context_snapshot": (
+                _context_snapshot_to_dict(state.execution_context_snapshot)
+                if state.execution_context_snapshot is not None
+                else None
+            ),
         }
 
     def _payload_to_state(
@@ -242,6 +249,9 @@ class JsonResumableExecutionStore:
         retry_attempts = _int_mapping(payload, "retry_attempts", default={})
         retry_history = _retry_history(payload, "retry_history", default={})
         metadata = _required_dict(payload, "metadata")
+        context_snapshot = _optional_context_snapshot(
+            payload.get("execution_context_snapshot"),
+        )
 
         if not resumable:
             raise ResumableExecutionStoreError(
@@ -287,6 +297,7 @@ class JsonResumableExecutionStore:
             retry_attempts=retry_attempts,
             retry_history=retry_history,
             metadata=metadata,
+            execution_context_snapshot=context_snapshot,
         )
 
 
@@ -414,6 +425,42 @@ def _argument_from_json(
         return [_argument_from_json(item) for item in value]
 
     return value
+
+
+def _context_snapshot_to_dict(
+    snapshot: ExecutionContextSnapshot,
+) -> dict[str, Any]:
+    return {
+        "execution_id": snapshot.execution_id,
+        "results_by_step_id": _argument_to_json(dict(snapshot.results_by_step_id)),
+        "step_states": dict(snapshot.step_states),
+        "current_step_id": snapshot.current_step_id,
+        "current_attempt": snapshot.current_attempt,
+        "metadata": dict(snapshot.metadata),
+    }
+
+
+def _optional_context_snapshot(
+    payload: Any,
+) -> ExecutionContextSnapshot | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution context snapshot must be an object or null.",
+        )
+    results = _required_dict(payload, "results_by_step_id")
+    states = _required_dict(payload, "step_states")
+    metadata = _required_dict(payload, "metadata")
+    return ExecutionContextSnapshot(
+        execution_id=_required_str(payload, "execution_id"),
+        results_by_step_id=_argument_from_json(results),
+        step_states=states,
+        current_step_id=_optional_str(payload, "current_step_id"),
+        current_attempt=_optional_int(payload, "current_attempt"),
+        metadata=metadata,
+    )
 
 
 def _validation_to_dict(
@@ -575,6 +622,21 @@ def _required_int(
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             f"Execution state field '{key}' must be an integer.",
+        )
+    return value
+
+
+def _optional_int(
+    payload: dict[str, Any],
+    key: str,
+) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be an integer or null.",
         )
     return value
 

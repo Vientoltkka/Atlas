@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from core.execution_arguments import ExecutionArguments
 from core.step_output_reference import StepOutputReference
@@ -32,6 +32,19 @@ MAX_RESOLUTION_DEPTH = 32
 MAX_TEMPLATE_LENGTH = 8192
 MAX_TEMPLATE_REFERENCES = 32
 MAX_INTERPOLATED_RESULT_LENGTH = 65536
+
+
+@runtime_checkable
+class ExecutionResultProvider(Protocol):
+    """Minimal provider needed to resolve references against prior results."""
+
+    def has_result(self, step_id: str) -> bool:
+        """Return whether a step has a stored result."""
+        ...
+
+    def require_result(self, step_id: str) -> object:
+        """Return a stored step result or raise a contextual error."""
+        ...
 
 
 class ParameterResolutionErrorCode(str, Enum):
@@ -119,7 +132,7 @@ class ParameterResolver:
     def resolve(
         self,
         arguments: Mapping[str, object],
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
     ) -> ParameterResolutionResult:
         """Return a new argument mapping with explicit references resolved."""
         used_step_ids: list[str] = []
@@ -193,7 +206,7 @@ class ParameterResolver:
     def _resolve_mapping(
         self,
         value: Mapping[str, object],
-        previous_results: Mapping[str, object],
+        previous_results: Mapping[str, object] | ExecutionResultProvider,
         used_step_ids: list[str],
         used_references: list[str],
         *,
@@ -316,14 +329,17 @@ class ParameterResolver:
         used_references: list[str],
     ) -> object:
         reference_label = self._reference_label(reference)
-        if reference.step_id not in previous_results:
+        if not self._has_result(previous_results, reference.step_id):
             self._fail(
                 ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value,
                 f"Referenced step '{reference.step_id}' has not produced a result.",
                 reference_label,
             )
 
-        output = self._extract_output(previous_results[reference.step_id], reference_label)
+        output = self._extract_output(
+            self._require_result(previous_results, reference.step_id, reference_label),
+            reference_label,
+        )
         value = self._resolve_structured_path(
             output,
             reference.step_id,
@@ -369,14 +385,17 @@ class ParameterResolver:
         step_id = match.group(1)
         path = match.group(2)
 
-        if step_id not in previous_results:
+        if not self._has_result(previous_results, step_id):
             self._fail(
                 ParameterResolutionErrorCode.REFERENCED_STEP_NOT_FOUND.value,
                 f"Referenced step '{step_id}' was not found in previous results.",
                 reference,
             )
 
-        output = self._extract_output(previous_results[step_id], reference)
+        output = self._extract_output(
+            self._require_result(previous_results, step_id, reference),
+            reference,
+        )
         value = output
 
         if path is not None:
@@ -508,14 +527,17 @@ class ParameterResolver:
         step_id = match.group(1)
         path = match.group(2)
 
-        if step_id not in previous_results:
+        if not self._has_result(previous_results, step_id):
             self._fail(
                 ParameterResolutionErrorCode.REFERENCED_STEP_NOT_FOUND.value,
                 f"Referenced step '{step_id}' was not found in previous results.",
                 reference,
             )
 
-        output = self._extract_output(previous_results[step_id], reference)
+        output = self._extract_output(
+            self._require_result(previous_results, step_id, reference),
+            reference,
+        )
         value = output
 
         if path is not None:
@@ -760,6 +782,32 @@ class ParameterResolver:
                 flags=re.IGNORECASE,
             )
         return reference[:120]
+
+    def _has_result(
+        self,
+        results: Mapping[str, object] | ExecutionResultProvider,
+        step_id: str,
+    ) -> bool:
+        if isinstance(results, Mapping):
+            return step_id in results
+        return results.has_result(step_id)
+
+    def _require_result(
+        self,
+        results: Mapping[str, object] | ExecutionResultProvider,
+        step_id: str,
+        reference: str,
+    ) -> object:
+        if isinstance(results, Mapping):
+            return results[step_id]
+        try:
+            return results.require_result(step_id)
+        except Exception as error:
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value,
+                f"Referenced step '{step_id}' has not produced a result.",
+                reference,
+            )
 
     def _reference_label(
         self,

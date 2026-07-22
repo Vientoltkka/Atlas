@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 
+from core.execution_context import ExecutionContext
 from core.execution_plan_executor import StepExecutionResult
 from core.parameter_resolver import (
     MAX_RESOLUTION_DEPTH,
@@ -299,6 +300,20 @@ def test_structured_reference_without_path_resolves_complete_output() -> None:
     assert result.success is True
     assert result.resolved_arguments == {"payload": {"path": "README.md"}}
     assert result.used_references == ["steps.step_1.output"]
+
+
+def test_structured_reference_resolves_from_execution_result_provider() -> None:
+    context = ExecutionContext("exec-1")
+    context.set_result("step_1", {"path": "README.md"})
+
+    result = ParameterResolver().resolve(
+        {"payload": StepOutputReference("step_1", ("path",))},
+        context,
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {"payload": "README.md"}
+    assert result.used_references == ["steps.step_1.output:path"]
 
 
 def test_structured_reference_with_path_resolves_dict_list_dict() -> None:

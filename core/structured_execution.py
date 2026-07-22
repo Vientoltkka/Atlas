@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+from core.execution_context import ExecutionContext
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionProgress,
@@ -650,6 +651,19 @@ class StructuredExecutionCoordinator:
             for result in execution.step_results
             if result.metadata.get("retry_history")
         }
+        execution_id = (
+            execution.trace.execution_id
+            if execution.trace is not None
+            else None
+        )
+        execution_context = ExecutionContext(execution_id)
+        for result in execution.step_results:
+            if result.success and result.status == "completed":
+                execution_context.mark_step_started(
+                    result.step_id,
+                    int(result.metadata.get("attempt_number", 1)),
+                )
+                execution_context.mark_step_succeeded(result.step_id, result.output)
         return ResumableExecutionState(
             objective=objective,
             original_plan=plan,
@@ -665,6 +679,7 @@ class StructuredExecutionCoordinator:
             confirmation_granted=confirmation_granted,
             retry_attempts=retry_attempts,
             retry_history=retry_history,
+            execution_context_snapshot=execution_context.snapshot(),
         )
 
     def _save_resumable_state(

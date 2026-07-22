@@ -9,6 +9,11 @@ from enum import Enum
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.execution_context import (
+    ExecutionContext,
+    ExecutionContextSnapshot,
+    ExecutionStepState,
+)
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -131,6 +136,7 @@ class ResumableExecutionState:
     retry_attempts: dict[str, int] = field(default_factory=dict)
     retry_history: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
+    execution_context_snapshot: ExecutionContextSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +268,7 @@ class ExecutionPlanExecutor:
         confirmation_granted: bool = False,
         control: ExecutionControl | None = None,
         on_progress: Callable[[ExecutionProgress], None] | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> PlanExecutionResult:
         """Execute a previously validated plan in dependency order."""
         return self._execute_from_checkpoint(
@@ -274,6 +281,8 @@ class ExecutionPlanExecutor:
             initial_previous_results={},
             initial_retry_attempts={},
             initial_retry_history={},
+            execution_context=execution_context,
+            context_restored=False,
         )
 
     def resume(
@@ -316,6 +325,8 @@ class ExecutionPlanExecutor:
             initial_previous_results=state.previous_results,
             initial_retry_attempts=state.retry_attempts,
             initial_retry_history=state.retry_history,
+            execution_context=self._context_from_resumable_state(state),
+            context_restored=True,
         )
 
     def _execute_from_checkpoint(
@@ -330,10 +341,53 @@ class ExecutionPlanExecutor:
         initial_previous_results: dict[str, object],
         initial_retry_attempts: dict[str, int],
         initial_retry_history: dict[str, tuple[dict[str, object], ...]],
+        execution_context: ExecutionContext | None,
+        context_restored: bool,
     ) -> PlanExecutionResult:
         """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
-        trace = ExecutionTrace()
+        active_context = execution_context or ExecutionContext()
+        trace = ExecutionTrace(execution_id=active_context.execution_id)
+        if context_restored:
+            self._trace_execution_context_restored(trace, active_context)
+        else:
+            self._trace_execution_context_created(trace, active_context)
+        self._hydrate_context_from_legacy_state(
+            active_context,
+            initial_completed_step_ids=initial_completed_step_ids,
+            initial_previous_results=initial_previous_results,
+        )
+        context_error = self._execution_context_plan_error(plan, active_context)
+        if context_error is not None:
+            trace.add_event(
+                component="ExecutionPlanExecutor",
+                action="execution_context_validation_failed",
+                status=TraceEventStatus.FAILED.value,
+                details={
+                    "execution_id": active_context.execution_id,
+                    "error": context_error,
+                },
+            )
+            return self._finalize_result(
+                plan,
+                validation_result,
+                PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.REJECTED.value,
+                    success=False,
+                    error=context_error,
+                    requires_confirmation=(
+                        bool(validation_result.requires_confirmation)
+                        if validation_result is not None
+                        else plan.requires_confirmation
+                    ),
+                    failed=True,
+                    error_code=ExecutionErrorCode.INVALID_PLAN.value,
+                    pending_steps=self._pending_step_ids(plan),
+                    failure_reason=context_error,
+                    metadata={"plan_signature": self._safe_plan_signature(plan)},
+                ),
+                trace=trace,
+            )
         precondition_error = self._precondition_error(plan, validation_result)
         if precondition_error is not None:
             return self._finalize_result(
@@ -396,7 +450,6 @@ class ExecutionPlanExecutor:
             if step_id not in completed_steps:
                 completed_steps.append(step_id)
         completed: set[str] = set(completed_steps)
-        previous_results: dict[str, object] = dict(initial_previous_results)
         retry_attempts: dict[str, int] = dict(initial_retry_attempts)
         retry_history: dict[str, list[dict[str, object]]] = {
             step_id: list(history)
@@ -419,6 +472,7 @@ class ExecutionPlanExecutor:
                 plan=plan,
                 validation_result=validation_result,
                 control=control,
+                execution_context=active_context,
                 completed_steps=completed_steps,
                 step_results=step_results,
                 current_index=index,
@@ -498,7 +552,7 @@ class ExecutionPlanExecutor:
             outcome = self._execute_step(
                 step,
                 plan_signature=validation_result.plan_signature,
-                previous_results=previous_results,
+                execution_context=active_context,
                 trace=trace,
                 control=control,
                 on_progress=on_progress,
@@ -552,7 +606,6 @@ class ExecutionPlanExecutor:
                 )
                 completed.add(step.id)
                 completed_steps.append(step.id)
-                previous_results[step.id] = outcome.output
                 self._emit_progress(
                     on_progress,
                     "step_completed",
@@ -584,6 +637,7 @@ class ExecutionPlanExecutor:
                 step_index=progress_index,
                 total_steps=total_steps,
             )
+            self._trace_execution_context_snapshot_created(trace, active_context)
             return self._finalize_result(
                 plan,
                 validation_result,
@@ -620,6 +674,7 @@ class ExecutionPlanExecutor:
             started,
             total_steps=total_steps,
         )
+        self._trace_execution_context_snapshot_created(trace, active_context)
         return self._finalize_result(
             plan,
             validation_result,
@@ -781,12 +836,120 @@ class ExecutionPlanExecutor:
             schema_errors
         )
 
+    def _execution_context_plan_error(
+        self,
+        plan: ExecutionPlan,
+        context: ExecutionContext,
+    ) -> str | None:
+        plan_step_ids = {step.id for step in plan.ordered_steps}
+        result_step_ids = set(context.results_snapshot())
+        state_step_ids = set(context.step_states)
+
+        if unknown_results := sorted(result_step_ids - plan_step_ids):
+            return (
+                "Execution context contains results for unknown steps: "
+                + ", ".join(unknown_results)
+            )
+
+        if unknown_states := sorted(state_step_ids - plan_step_ids):
+            return (
+                "Execution context contains states for unknown steps: "
+                + ", ".join(unknown_states)
+            )
+
+        if (
+            context.current_step_id is not None
+            and context.current_step_id not in plan_step_ids
+        ):
+            return "Execution context current step is not part of the plan."
+
+        for step_id, state in context.step_states.items():
+            if state == ExecutionStepState.SUCCESS.value and not context.has_result(step_id):
+                return f"Execution context successful step '{step_id}' has no result."
+
+        return None
+
+    def _context_from_resumable_state(
+        self,
+        state: ResumableExecutionState,
+    ) -> ExecutionContext:
+        if state.execution_context_snapshot is not None:
+            return ExecutionContext.restore(state.execution_context_snapshot)
+
+        context = ExecutionContext()
+        self._hydrate_context_from_legacy_state(
+            context,
+            initial_completed_step_ids=state.completed_step_ids,
+            initial_previous_results=state.previous_results,
+        )
+        return context
+
+    def _hydrate_context_from_legacy_state(
+        self,
+        context: ExecutionContext,
+        *,
+        initial_completed_step_ids: tuple[str, ...],
+        initial_previous_results: dict[str, object],
+    ) -> None:
+        for step_id, result in initial_previous_results.items():
+            if not context.has_result(step_id):
+                context.mark_step_started(step_id, 1)
+                context.mark_step_succeeded(step_id, result)
+
+        for step_id in initial_completed_step_ids:
+            if context.state_for_step(step_id) == ExecutionStepState.PENDING.value:
+                context.mark_step_started(step_id, 1)
+                context.mark_step_succeeded(step_id, None)
+
+    def _mark_context_started(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step_id: str,
+        attempt: int,
+    ) -> None:
+        previous, current = context.mark_step_started(step_id, attempt)
+        self._trace_step_state_changed(trace, context, step_id, previous, current, attempt)
+
+    def _mark_context_succeeded(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step_id: str,
+        result: object,
+    ) -> None:
+        previous, current = context.mark_step_succeeded(step_id, result)
+        self._trace_step_state_changed(trace, context, step_id, previous, current, None)
+
+    def _mark_context_failed(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step_id: str,
+    ) -> None:
+        if context.state_for_step(step_id) != ExecutionStepState.RUNNING.value:
+            return
+        previous, current = context.mark_step_failed(step_id)
+        self._trace_step_state_changed(trace, context, step_id, previous, current, None)
+
+    def _mark_context_cancelled(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step_id: str,
+    ) -> None:
+        if context.state_for_step(step_id) != ExecutionStepState.RUNNING.value:
+            return
+        previous, current = context.mark_step_cancelled(step_id)
+        self._trace_step_state_changed(trace, context, step_id, previous, current, None)
+
     def _control_result(
         self,
         *,
         plan: ExecutionPlan,
         validation_result: PlanValidationResult,
         control: ExecutionControl | None,
+        execution_context: ExecutionContext,
         completed_steps: list[str],
         step_results: list[StepExecutionResult],
         current_index: int,
@@ -839,6 +1002,9 @@ class ExecutionPlanExecutor:
             )
 
         if should_cancel:
+            current_step_id = plan.ordered_steps[current_index].id
+            self._mark_context_started(trace, execution_context, current_step_id, 1)
+            self._mark_context_cancelled(trace, execution_context, current_step_id)
             return self._controlled_stop_result(
                 plan=plan,
                 validation_result=validation_result,
@@ -859,6 +1025,9 @@ class ExecutionPlanExecutor:
             )
 
         if should_stop:
+            current_step_id = plan.ordered_steps[current_index].id
+            self._mark_context_started(trace, execution_context, current_step_id, 1)
+            self._mark_context_failed(trace, execution_context, current_step_id)
             return self._controlled_stop_result(
                 plan=plan,
                 validation_result=validation_result,
@@ -961,7 +1130,7 @@ class ExecutionPlanExecutor:
         step: ExecutionStep,
         *,
         plan_signature: str | None,
-        previous_results: dict[str, object],
+        execution_context: ExecutionContext,
         trace: ExecutionTrace,
         control: ExecutionControl | None,
         on_progress: Callable[[ExecutionProgress], None] | None,
@@ -972,6 +1141,8 @@ class ExecutionPlanExecutor:
         retry_history: dict[str, list[dict[str, object]]],
     ) -> StepExecutionResult | PlanExecutionResult:
         if step.tool in self._LOGICAL_TOOLS:
+            self._mark_context_started(trace, execution_context, step.id, 1)
+            self._mark_context_succeeded(trace, execution_context, step.id, None)
             return StepExecutionResult(
                 step_id=step.id,
                 status=StepExecutionStatus.COMPLETED.value,
@@ -989,32 +1160,9 @@ class ExecutionPlanExecutor:
 
         assert step.tool is not None
 
-        self._trace_parameter_resolution_started(trace, step)
-        resolution = self._parameter_resolver.resolve(
-            _step_arguments_dict(step),
-            previous_results,
-        )
-        if not resolution.success:
-            self._trace_parameter_resolution_failed(trace, step, resolution)
-            error = "; ".join(resolution.errors)
-            return StepExecutionResult(
-                step_id=step.id,
-                status=StepExecutionStatus.FAILED.value,
-                success=False,
-                tool_name=step.tool,
-                output=None,
-                error=error,
-                error_code=ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value,
-                metadata={
-                    "parameter_resolution_error_code": resolution.error_code,
-                    "unresolved_references": resolution.unresolved_references,
-                    "used_step_ids": resolution.used_step_ids,
-                    "used_references": resolution.used_references,
-                },
-            )
-        self._trace_parameter_resolution_succeeded(trace, step, resolution)
-
         if not self._tool_registry.exists(step.tool):
+            self._mark_context_started(trace, execution_context, step.id, 1)
+            self._mark_context_failed(trace, execution_context, step.id)
             return StepExecutionResult(
                 step_id=step.id,
                 status=StepExecutionStatus.FAILED.value,
@@ -1035,8 +1183,7 @@ class ExecutionPlanExecutor:
         return self._execute_resolved_step_with_retries(
             step,
             plan_signature=plan_signature,
-            previous_results=previous_results,
-            resolved_arguments=resolution.resolved_arguments.as_dict(),
+            execution_context=execution_context,
             trace=trace,
             control=control,
             on_progress=on_progress,
@@ -1052,8 +1199,7 @@ class ExecutionPlanExecutor:
         step: ExecutionStep,
         *,
         plan_signature: str | None,
-        previous_results: dict[str, object],
-        resolved_arguments: dict[str, object],
+        execution_context: ExecutionContext,
         trace: ExecutionTrace,
         control: ExecutionControl | None,
         on_progress: Callable[[ExecutionProgress], None] | None,
@@ -1068,17 +1214,55 @@ class ExecutionPlanExecutor:
 
         while True:
             retry_attempts[step.id] = attempt_number
+            self._mark_context_started(
+                trace,
+                execution_context,
+                step.id,
+                attempt_number,
+            )
+            self._trace_parameter_resolution_started(trace, step)
+            resolution = self._parameter_resolver.resolve(
+                _step_arguments_dict(step),
+                execution_context,
+            )
+            if not resolution.success:
+                self._trace_parameter_resolution_failed(trace, step, resolution)
+                self._mark_context_failed(trace, execution_context, step.id)
+                error = "; ".join(resolution.errors)
+                return StepExecutionResult(
+                    step_id=step.id,
+                    status=StepExecutionStatus.FAILED.value,
+                    success=False,
+                    tool_name=step.tool,
+                    output=None,
+                    error=error,
+                    error_code=ExecutionErrorCode.PARAMETER_RESOLUTION_FAILED.value,
+                    metadata={
+                        "parameter_resolution_error_code": resolution.error_code,
+                        "unresolved_references": resolution.unresolved_references,
+                        "used_step_ids": resolution.used_step_ids,
+                        "used_references": resolution.used_references,
+                        "attempt_number": attempt_number,
+                    },
+                )
+            self._trace_parameter_resolution_succeeded(trace, step, resolution)
             outcome = self._execute_resolved_step_once(
                 step,
                 plan_signature=plan_signature,
-                previous_results=previous_results,
-                resolved_arguments=resolved_arguments,
+                execution_context=execution_context,
+                resolved_arguments=resolution.resolved_arguments.as_dict(),
                 trace=trace,
                 attempt_number=attempt_number,
                 history=history,
             )
 
             if outcome.success:
+                self._mark_context_succeeded(
+                    trace,
+                    execution_context,
+                    step.id,
+                    outcome.output,
+                )
                 metadata = dict(outcome.metadata)
                 metadata["attempt_number"] = attempt_number
                 metadata["max_attempts"] = self._retry_policy.max_attempts
@@ -1109,6 +1293,7 @@ class ExecutionPlanExecutor:
                     metadata=metadata,
                 )
 
+            self._mark_context_failed(trace, execution_context, step.id)
             history.append(
                 {
                     "attempt_number": attempt_number,
@@ -1174,6 +1359,17 @@ class ExecutionPlanExecutor:
                 delay_ms=decision.delay_ms,
             )
             if stop_result is not None:
+                if execution_context.state_for_step(step.id) == ExecutionStepState.FAILED.value:
+                    self._mark_context_started(
+                        trace,
+                        execution_context,
+                        step.id,
+                        decision.attempt_number,
+                    )
+                if stop_result == StepExecutionStatus.CANCELLED.value:
+                    self._mark_context_cancelled(trace, execution_context, step.id)
+                else:
+                    self._mark_context_failed(trace, execution_context, step.id)
                 return StepExecutionResult(
                     step_id=step.id,
                     status=stop_result,
@@ -1202,7 +1398,7 @@ class ExecutionPlanExecutor:
         step: ExecutionStep,
         *,
         plan_signature: str | None,
-        previous_results: dict[str, object],
+        execution_context: ExecutionContext,
         resolved_arguments: dict[str, object],
         trace: ExecutionTrace,
         attempt_number: int,
@@ -1218,7 +1414,7 @@ class ExecutionPlanExecutor:
                     parameters=deepcopy(resolved_arguments),
                     step_id=step.id,
                     plan_signature=plan_signature,
-                    previous_results=dict(previous_results),
+                    previous_results=execution_context.results_snapshot(),
                     metadata={"executor": "ExecutionPlanExecutor"},
                 ),
             )
@@ -1480,6 +1676,78 @@ class ExecutionPlanExecutor:
             status=status,
             duration_ms=duration_ms,
             details=event_details,
+        )
+
+    def _trace_execution_context_created(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_context_created",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "result_count": len(context.results_snapshot()),
+            },
+        )
+
+    def _trace_execution_context_restored(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_context_restored",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "result_count": len(context.results_snapshot()),
+                "completed_count": len(context.completed_step_ids),
+            },
+        )
+
+    def _trace_step_state_changed(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step_id: str,
+        previous: str,
+        current: str,
+        attempt: int | None,
+    ) -> None:
+        details: dict[str, object] = {
+            "execution_id": context.execution_id,
+            "step_id": step_id,
+            "previous_state": previous,
+            "new_state": current,
+            "result_count": len(context.results_snapshot()),
+        }
+        if attempt is not None:
+            details["attempt"] = attempt
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="step_state_changed",
+            status=TraceEventStatus.FINISHED.value,
+            details=details,
+        )
+
+    def _trace_execution_context_snapshot_created(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_context_snapshot_created",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "execution_id": context.execution_id,
+                "result_count": len(context.results_snapshot()),
+                "completed_count": len(context.completed_step_ids),
+            },
         )
 
     def _trace_schema_validation_started(
