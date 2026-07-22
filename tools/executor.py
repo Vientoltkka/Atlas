@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
+from tools.tool_schema import ToolSchemaValidationException
 
 
 class ToolExecutor:
@@ -28,8 +29,29 @@ class ToolExecutor:
         """Execute a registered tool."""
 
         tool = self._registry.get(tool_name)
-        active_context = context or ToolContext(
-            parameters=dict(arguments or {}),
+        source_arguments = (
+            context.parameters
+            if context is not None
+            else dict(arguments or {})
         )
+        schema = self._registry.arguments_schema(tool_name)
+        if schema is None:
+            normalized_arguments = dict(source_arguments)
+        else:
+            validation = schema.validate(tool_name, source_arguments)
+            if not validation.is_valid:
+                raise ToolSchemaValidationException(validation)
+            normalized_arguments = dict(validation.normalized_arguments)
+
+        if context is None:
+            active_context = ToolContext(parameters=normalized_arguments)
+        else:
+            active_context = ToolContext(
+                parameters=normalized_arguments,
+                step_id=context.step_id,
+                plan_signature=context.plan_signature,
+                previous_results=context.previous_results,
+                metadata=context.metadata,
+            )
 
         return tool.execute(active_context)

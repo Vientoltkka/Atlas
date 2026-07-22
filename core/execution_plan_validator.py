@@ -21,6 +21,7 @@ from core.parameter_resolver import (
     TEMPLATE_REFERENCE_PATTERN,
 )
 from core.planner import ExecutionPlan
+from tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +48,12 @@ class ExecutionPlanValidator:
     }
     _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
+    def __init__(
+        self,
+        tool_registry: ToolRegistry | None = None,
+    ) -> None:
+        self._tool_registry = tool_registry
+
     def validate(
         self,
         plan: ExecutionPlan,
@@ -62,6 +69,7 @@ class ExecutionPlanValidator:
         self._validate_step_ids(plan, errors)
         self._validate_tools(plan, errors)
         self._validate_arguments(plan, errors)
+        self._validate_tool_argument_schemas(plan, errors)
         self._validate_dependencies(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
@@ -201,6 +209,55 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
         self._validate_static_references(plan, errors)
+
+    def _validate_tool_argument_schemas(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        if self._tool_registry is None:
+            return
+
+        for step in plan.ordered_steps:
+            if step.tool in {None, "direct_response"}:
+                continue
+
+            assert step.tool is not None
+            if not self._tool_registry.exists(step.tool):
+                continue
+
+            schema = self._tool_registry.arguments_schema(step.tool)
+            if schema is None:
+                continue
+
+            arguments = (
+                step.arguments.as_dict()
+                if isinstance(step.arguments, ExecutionArguments)
+                else dict(step.arguments)
+            )
+            validation = schema.validate(step.tool, arguments)
+            if validation.is_valid:
+                continue
+
+            for error in validation.errors:
+                if (
+                    error.parameter_name is not None
+                    and error.parameter_name in arguments
+                    and self._is_deferred_argument(arguments[error.parameter_name])
+                ):
+                    continue
+                errors.append(
+                    f"Step '{step.id}' schema validation failed: {error.message}."
+                )
+
+    def _is_deferred_argument(
+        self,
+        value: Any,
+    ) -> bool:
+        return any(
+            self._iter_special_objects(value, key)
+            for key in ("$ref", "$template")
+        )
 
     def _validate_static_references(
         self,

@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from tools.base_tool import BaseTool
+from tools.tool_schema import ToolArgumentsSchema
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class ToolDescriptor:
     optional_arguments: tuple[str, ...] = ()
     dangerous: bool = False
     output_description: str | None = None
+    arguments_schema: ToolArgumentsSchema | None = None
 
 
 class ToolAlreadyRegisteredError(ValueError):
@@ -37,8 +39,14 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._argument_schemas: dict[str, ToolArgumentsSchema] = {}
 
-    def register(self, tool: BaseTool) -> None:
+    def register(
+        self,
+        tool: BaseTool,
+        *,
+        arguments_schema: ToolArgumentsSchema | None = None,
+    ) -> None:
         """Register a tool."""
         name = tool.name
 
@@ -50,7 +58,15 @@ class ToolRegistry:
                 f"Tool '{name}' is already registered."
             )
 
+        schema = arguments_schema
+        if schema is None:
+            candidate = getattr(tool, "arguments_schema", None)
+            if isinstance(candidate, ToolArgumentsSchema):
+                schema = candidate
+
         self._tools[name] = tool
+        if schema is not None:
+            self._argument_schemas[name] = schema
 
     def get(self, name: str) -> BaseTool:
         """Return a registered tool by name."""
@@ -71,7 +87,16 @@ class ToolRegistry:
             tool=tool,
             requires_confirmation=tool.requires_confirmation,
             dangerous=tool.requires_confirmation,
+            arguments_schema=self.arguments_schema(name),
         )
+
+    def arguments_schema(
+        self,
+        name: str,
+    ) -> ToolArgumentsSchema | None:
+        """Return the registered argument schema for one tool, if any."""
+        self.get(name)
+        return self._argument_schemas.get(name)
 
     def exists(self, name: str) -> bool:
         """Check if a tool exists."""

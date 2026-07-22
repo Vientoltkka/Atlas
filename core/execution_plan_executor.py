@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
 from core.execution_plan_validator import PlanValidationResult, plan_signature
+from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_retry import RetryPolicy
 from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
 from core.parameter_resolver import ParameterResolver
@@ -18,6 +19,7 @@ from core.planner import ExecutionPlan, ExecutionStep
 from tools.executor import ToolExecutor
 from tools.registry import ToolNotRegisteredError, ToolRegistry
 from tools.tool_context import ToolContext
+from tools.tool_schema import ToolSchemaValidationException
 
 if TYPE_CHECKING:
     from core.execution_history import ExecutionHistorySink
@@ -78,6 +80,7 @@ class ExecutionErrorCode(str, Enum):
     EXECUTION_INTERRUPTED = "EXECUTION_INTERRUPTED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
+    TOOL_SCHEMA_VALIDATION_FAILED = "TOOL_SCHEMA_VALIDATION_FAILED"
     INTERNAL_EXECUTOR_ERROR = "INTERNAL_EXECUTOR_ERROR"
 
 
@@ -495,6 +498,7 @@ class ExecutionPlanExecutor:
                 step,
                 plan_signature=validation_result.plan_signature,
                 previous_results=previous_results,
+                trace=trace,
                 control=control,
                 on_progress=on_progress,
                 started=started,
@@ -662,6 +666,10 @@ class ExecutionPlanExecutor:
         if plan.status not in self._EXECUTABLE_PLAN_STATUSES:
             return f"Plan status '{plan.status}' is not executable."
 
+        schema_error = self._current_schema_validation_error(plan)
+        if schema_error is not None:
+            return schema_error
+
         return None
 
     def _safe_plan_signature(
@@ -685,6 +693,9 @@ class ExecutionPlanExecutor:
 
         if "serializable" in message:
             return ExecutionErrorCode.INVALID_PLAN.value
+
+        if "schema" in message:
+            return ExecutionErrorCode.TOOL_SCHEMA_VALIDATION_FAILED.value
 
         if "status" in message:
             return ExecutionErrorCode.INVALID_PLAN.value
@@ -710,6 +721,10 @@ class ExecutionPlanExecutor:
 
         if not state.validation_result.is_valid:
             return "Cannot resume an invalid execution plan."
+
+        schema_error = self._current_schema_validation_error(state.original_plan)
+        if schema_error is not None:
+            return schema_error
 
         all_step_ids = tuple(step.id for step in state.original_plan.ordered_steps)
         all_step_id_set = set(all_step_ids)
@@ -748,6 +763,22 @@ class ExecutionPlanExecutor:
                 return "Completed step result is missing."
 
         return None
+
+    def _current_schema_validation_error(
+        self,
+        plan: ExecutionPlan,
+    ) -> str | None:
+        validation = ExecutionPlanValidator(self._tool_registry).validate(plan)
+        schema_errors = [
+            error
+            for error in validation.errors
+            if "schema validation failed" in error
+        ]
+        if not schema_errors:
+            return None
+        return "Current tool schema is incompatible with the execution plan: " + "; ".join(
+            schema_errors
+        )
 
     def _control_result(
         self,
@@ -930,6 +961,7 @@ class ExecutionPlanExecutor:
         *,
         plan_signature: str | None,
         previous_results: dict[str, object],
+        trace: ExecutionTrace,
         control: ExecutionControl | None,
         on_progress: Callable[[ExecutionProgress], None] | None,
         started: float,
@@ -1000,6 +1032,7 @@ class ExecutionPlanExecutor:
             plan_signature=plan_signature,
             previous_results=previous_results,
             resolved_arguments=resolution.resolved_arguments,
+            trace=trace,
             control=control,
             on_progress=on_progress,
             started=started,
@@ -1016,6 +1049,7 @@ class ExecutionPlanExecutor:
         plan_signature: str | None,
         previous_results: dict[str, object],
         resolved_arguments: dict[str, object],
+        trace: ExecutionTrace,
         control: ExecutionControl | None,
         on_progress: Callable[[ExecutionProgress], None] | None,
         started: float,
@@ -1034,6 +1068,7 @@ class ExecutionPlanExecutor:
                 plan_signature=plan_signature,
                 previous_results=previous_results,
                 resolved_arguments=resolved_arguments,
+                trace=trace,
                 attempt_number=attempt_number,
                 history=history,
             )
@@ -1164,12 +1199,14 @@ class ExecutionPlanExecutor:
         plan_signature: str | None,
         previous_results: dict[str, object],
         resolved_arguments: dict[str, object],
+        trace: ExecutionTrace,
         attempt_number: int,
         history: list[dict[str, object]],
     ) -> StepExecutionResult:
         assert step.tool is not None
 
         try:
+            self._trace_schema_validation_started(trace, step, resolved_arguments)
             output = self._tool_executor.execute(
                 step.tool,
                 ToolContext(
@@ -1180,6 +1217,7 @@ class ExecutionPlanExecutor:
                     metadata={"executor": "ExecutionPlanExecutor"},
                 ),
             )
+            self._trace_schema_validation_succeeded(trace, step, resolved_arguments)
         except ToolNotRegisteredError as error:
             return StepExecutionResult(
                 step_id=step.id,
@@ -1190,6 +1228,29 @@ class ExecutionPlanExecutor:
                 error=str(error),
                 error_code=ExecutionErrorCode.TOOL_NOT_FOUND.value,
                 metadata={"attempt_number": attempt_number},
+            )
+        except ToolSchemaValidationException as error:
+            self._trace_schema_validation_failed(trace, step, error)
+            invalid_parameters = tuple(
+                item.parameter_name
+                for item in error.result.errors
+                if item.parameter_name is not None
+            )
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                tool_name=step.tool,
+                output=None,
+                error=str(error),
+                error_code=ExecutionErrorCode.TOOL_SCHEMA_VALIDATION_FAILED.value,
+                metadata={
+                    "attempt_number": attempt_number,
+                    "schema_error_count": len(error.result.errors),
+                    "schema_invalid_parameters": invalid_parameters,
+                    "retry_scheduled": False,
+                    "retry_reason": "non_retryable_error",
+                },
             )
         except Exception as error:
             return StepExecutionResult(
@@ -1415,6 +1476,76 @@ class ExecutionPlanExecutor:
             duration_ms=duration_ms,
             details=event_details,
         )
+
+    def _trace_schema_validation_started(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        arguments: dict[str, object],
+    ) -> None:
+        if step.tool is None or self._tool_registry.arguments_schema(step.tool) is None:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="schema_validation_started",
+            status=TraceEventStatus.STARTED.value,
+            details=self._schema_validation_trace_details(step, arguments),
+        )
+
+    def _trace_schema_validation_succeeded(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        arguments: dict[str, object],
+    ) -> None:
+        if step.tool is None or self._tool_registry.arguments_schema(step.tool) is None:
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="schema_validation_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details=self._schema_validation_trace_details(step, arguments),
+        )
+
+    def _trace_schema_validation_failed(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        error: ToolSchemaValidationException,
+    ) -> None:
+        if step.tool is None or self._tool_registry.arguments_schema(step.tool) is None:
+            return
+        invalid_parameters = sorted(
+            {
+                item.parameter_name
+                for item in error.result.errors
+                if item.parameter_name is not None
+            }
+        )
+        details = {
+            "step_id": step.id,
+            "tool_name": step.tool,
+            "error_count": len(error.result.errors),
+            "invalid_parameters": invalid_parameters,
+        }
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="schema_validation_failed",
+            status=TraceEventStatus.FAILED.value,
+            details=details,
+        )
+
+    def _schema_validation_trace_details(
+        self,
+        step: ExecutionStep,
+        arguments: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "step_id": step.id,
+            "tool_name": step.tool,
+            "argument_count": len(arguments),
+            "argument_keys": sorted(arguments.keys()),
+        }
 
     def _emit_progress(
         self,

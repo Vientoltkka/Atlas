@@ -46,6 +46,7 @@ from tools.tool_chain_proposal_builder import ToolChainProposalBuilder
 from tools.tool_proposal_builder import ToolProposalBuilder
 from tools.single_tool_runner import SingleToolRunner
 from tools.semantic_catalog import SemanticToolCatalog
+from tools.tool_schema import ToolArgumentsSchema, ToolParameterSchema
 
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
@@ -138,10 +139,39 @@ class Bootstrap:
         """Build the central registry with the tools available in Atlas."""
         tool_registry = ToolRegistry()
 
-        tool_registry.register(ReadFileTool())
-        tool_registry.register(WriteFileTool())
-        tool_registry.register(ListDirectoryTool())
-        tool_registry.register(TreeTool())
+        tool_registry.register(
+            ReadFileTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("path", str, required=True),
+                ),
+            ),
+        )
+        tool_registry.register(
+            WriteFileTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("path", str, required=True),
+                    ToolParameterSchema("content", str, required=True),
+                ),
+            ),
+        )
+        tool_registry.register(
+            ListDirectoryTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("path", str, default="."),
+                ),
+            ),
+        )
+        tool_registry.register(
+            TreeTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("path", str, default="."),
+                ),
+            ),
+        )
         tool_registry.register(OpenApplicationTool())
         tool_registry.register(ListProcessesTool())
         tool_registry.register(IsProcessRunningTool())
@@ -648,7 +678,7 @@ class Bootstrap:
 
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
-            validator=ExecutionPlanValidator(),
+            validator=ExecutionPlanValidator(tool_registry),
             executor=ExecutionPlanExecutor(
                 tool_registry,
                 tool_executor,
