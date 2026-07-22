@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from core.execution_context import ExecutionContext, ExecutionStepState
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_arguments import ExecutionArguments
 from core.execution_plan_executor import (
@@ -26,7 +27,7 @@ from core.execution_plan_executor import (
     partial_execution_state_from_dict,
     partial_execution_state_to_dict,
 )
-from core.execution_retry import RetryPolicy
+from core.execution_retry import RetryPolicy, RetryableErrorClassifier
 from core.execution_trace import TraceEventStatus, TraceStatus
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
@@ -119,6 +120,7 @@ def _step(
     dependencies: tuple[str, ...] = (),
     status: str = "pending",
     arguments: dict[str, Any] | None = None,
+    output_binding: ExecutionVariableBinding | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -127,6 +129,7 @@ def _step(
         dependencies=dependencies,
         status=status,
         arguments={} if arguments is None else arguments,
+        output_binding=output_binding,
     )
 
 
@@ -520,6 +523,217 @@ def test_executor_resolves_variables_from_prepared_context() -> None:
     assert result.success is True
     assert tool.contexts[0].parameters == {"path": "C:/AI/Atlas"}
     assert context.require_variable("workspace_path") == "C:/AI/Atlas"
+
+
+def test_output_binding_stores_complete_output_and_path_values() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output={"items": [{"path": "core/router.py"}]})
+    second = SpyTool("second_tool", calls, output=None)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "first_tool",
+                output_binding=ExecutionVariableBinding(
+                    "selected_file",
+                    ("items", 0, "path"),
+                ),
+            ),
+            _step(
+                "step_2",
+                "second_tool",
+                dependencies=("step_1",),
+                arguments={"path": ExecutionVariableReference("selected_file")},
+                output_binding=ExecutionVariableBinding("second_output"),
+            ),
+        )
+    )
+    context = ExecutionContext("exec-binding-1")
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert context.require_result("step_1") == {"items": [{"path": "core/router.py"}]}
+    assert context.require_variable("selected_file") == "core/router.py"
+    assert "output_binding" not in first.contexts[0].parameters
+    assert second.contexts[0].parameters == {"path": "core/router.py"}
+    assert "output_binding" not in second.contexts[0].parameters
+    assert context.has_variable("second_output") is True
+    assert context.require_variable("second_output") is None
+
+
+def test_output_binding_overwrite_policy_is_explicit() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output="new")
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                output_binding=ExecutionVariableBinding(
+                    "workspace_path",
+                    overwrite=False,
+                ),
+            ),
+        )
+    )
+    context = ExecutionContext(
+        "exec-binding-1",
+        initial_variables={"workspace_path": "old"},
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is False
+    assert result.failed_step == "step_1"
+    assert result.error_code == ExecutionErrorCode.EXECUTION_VARIABLE_BINDING_FAILED.value
+    assert context.require_variable("workspace_path") == "old"
+    assert context.state_for_step("step_1") == ExecutionStepState.FAILED.value
+
+
+def test_output_binding_path_failures_do_not_write_variables() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"items": []})
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                output_binding=ExecutionVariableBinding(
+                    "selected_file",
+                    ("items", 0, "path"),
+                ),
+            ),
+        )
+    )
+    context = ExecutionContext("exec-binding-1")
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(
+        plan,
+        _validation(plan),
+        execution_context=context,
+    )
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.EXECUTION_VARIABLE_BINDING_FAILED.value
+    assert context.has_variable("selected_file") is False
+    assert context.has_result("step_1") is True
+
+
+def test_failed_or_cancelled_step_does_not_apply_output_binding() -> None:
+    calls: list[str] = []
+    failing = SpyTool("failing_tool", calls, output="value", fail=True)
+    cancelled = SpyTool("cancelled_tool", calls, output="value")
+    failed_plan = _plan(
+        (
+            _step(
+                "step_1",
+                "failing_tool",
+                output_binding=ExecutionVariableBinding("failed_value"),
+            ),
+        )
+    )
+    cancelled_plan = _plan(
+        (
+            _step(
+                "step_1",
+                "cancelled_tool",
+                output_binding=ExecutionVariableBinding("cancelled_value"),
+            ),
+        )
+    )
+    failed_context = ExecutionContext("exec-failed")
+    cancelled_context = ExecutionContext("exec-cancelled")
+
+    failed = ExecutionPlanExecutor(_registry(failing)).execute(
+        failed_plan,
+        _validation(failed_plan),
+        execution_context=failed_context,
+    )
+    cancelled_result = ExecutionPlanExecutor(_registry(cancelled)).execute(
+        cancelled_plan,
+        _validation(cancelled_plan),
+        execution_context=cancelled_context,
+        control=ExecutionControl(should_cancel=lambda: True),
+    )
+
+    assert failed.success is False
+    assert failed_context.has_variable("failed_value") is False
+    assert cancelled_result.cancelled is True
+    assert cancelled_context.has_variable("cancelled_value") is False
+
+
+def test_output_binding_retry_recomputes_and_stores_final_value() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"items": []},
+            {"items": [{"path": "core/router.py"}]},
+        ],
+    )
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                output_binding=ExecutionVariableBinding(
+                    "selected_file",
+                    ("items", 0, "path"),
+                ),
+            ),
+        )
+    )
+    context = ExecutionContext("exec-binding-retry")
+
+    result = ExecutionPlanExecutor(
+        _registry(tool),
+        retry_policy=RetryPolicy(
+            max_attempts=2,
+            classifier=RetryableErrorClassifier(
+                retryable_error_codes=frozenset(
+                    {
+                        ExecutionErrorCode.EXECUTION_VARIABLE_BINDING_FAILED.value,
+                    }
+                )
+            ),
+        ),
+    ).execute(plan, _validation(plan), execution_context=context)
+
+    assert result.success is True
+    assert calls == ["safe_tool", "safe_tool"]
+    assert context.require_variable("selected_file") == "core/router.py"
+
+
+def test_output_binding_observability_does_not_record_values() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"path": "secret-value"})
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                output_binding=ExecutionVariableBinding("selected_file", ("path",)),
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "execution_variable_binding_started" in actions
+    assert "execution_variable_binding_succeeded" in actions
+    assert "secret-value" not in repr(result.trace.events)
 
 
 def test_executor_creates_empty_context_when_none_is_provided() -> None:
@@ -1586,6 +1800,45 @@ def test_resume_restores_variables_and_preserves_execution_id() -> None:
     assert result.trace is not None
     assert result.trace.execution_id == "exec-resume-variables"
     assert tool.contexts[0].parameters == {"path": "C:/AI/Atlas"}
+
+
+def test_resume_rejects_completed_bound_step_missing_variable() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls)
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                output_binding=ExecutionVariableBinding("selected_file"),
+            ),
+            _step("step_2", "safe_tool", dependencies=("step_1",)),
+        )
+    )
+    validation = _validation(plan)
+    context = ExecutionContext("exec-inconsistent")
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", "core/router.py")
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": "core/router.py"},
+        resumable=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).resume(state)
+
+    assert result.success is False
+    assert result.plan_status == PlanExecutionStatus.REJECTED.value
+    assert "missing bound variable" in str(result.error)
+    assert calls == []
 
 
 def test_resume_rejects_modified_plan_signature_without_tool_calls() -> None:

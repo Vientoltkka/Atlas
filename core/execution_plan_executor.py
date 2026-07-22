@@ -22,6 +22,10 @@ from core.execution_retry import RetryPolicy
 from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
 from core.parameter_resolver import ParameterResolver
 from core.planner import ExecutionPlan, ExecutionStep
+from core.structured_reference_path import (
+    StructuredReferencePathError,
+    navigate_structured_path,
+)
 from tools.executor import ToolExecutor
 from tools.registry import ToolNotRegisteredError, ToolRegistry
 from tools.tool_context import ToolContext
@@ -87,6 +91,7 @@ class ExecutionErrorCode(str, Enum):
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
     TOOL_SCHEMA_VALIDATION_FAILED = "TOOL_SCHEMA_VALIDATION_FAILED"
+    EXECUTION_VARIABLE_BINDING_FAILED = "EXECUTION_VARIABLE_BINDING_FAILED"
     INTERNAL_EXECUTOR_ERROR = "INTERNAL_EXECUTOR_ERROR"
 
 
@@ -868,6 +873,19 @@ class ExecutionPlanExecutor:
             if state == ExecutionStepState.SUCCESS.value and not context.has_result(step_id):
                 return f"Execution context successful step '{step_id}' has no result."
 
+        step_by_id = {step.id: step for step in plan.ordered_steps}
+        for step_id, state in context.step_states.items():
+            if state != ExecutionStepState.SUCCESS.value:
+                continue
+            step = step_by_id.get(step_id)
+            if step is None or step.output_binding is None:
+                continue
+            if not context.has_variable(step.output_binding.variable_name):
+                return (
+                    f"Execution context completed step '{step_id}' is missing "
+                    f"bound variable '{step.output_binding.variable_name}'."
+                )
+
         return None
 
     def _context_from_resumable_state(
@@ -943,6 +961,64 @@ class ExecutionPlanExecutor:
             return
         previous, current = context.mark_step_cancelled(step_id)
         self._trace_step_state_changed(trace, context, step_id, previous, current, None)
+
+    def _apply_output_binding(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        output: object,
+    ) -> str | None:
+        binding = step.output_binding
+        if binding is None:
+            return None
+
+        self._trace_output_binding_started(trace, context, step)
+        try:
+            selected_value = navigate_structured_path(
+                output,
+                binding.path,
+                owner_label=f"output binding for step '{step.id}'",
+            )
+            if not binding.overwrite and context.has_variable(binding.variable_name):
+                raise ValueError("variable already exists and overwrite is disabled")
+            context.set_variable(binding.variable_name, selected_value)
+        except StructuredReferencePathError as error:
+            message = self._binding_error_message(step, error.message)
+            self._trace_output_binding_failed(
+                trace,
+                context,
+                step,
+                error_code=error.error_code,
+            )
+            return message
+        except Exception as error:
+            message = self._binding_error_message(step, str(error))
+            self._trace_output_binding_failed(
+                trace,
+                context,
+                step,
+                error_code=(
+                    ExecutionErrorCode.EXECUTION_VARIABLE_BINDING_FAILED.value
+                ),
+            )
+            return message
+
+        self._trace_output_binding_succeeded(trace, context, step)
+        return None
+
+    def _binding_error_message(
+        self,
+        step: ExecutionStep,
+        reason: str,
+    ) -> str:
+        binding = step.output_binding
+        variable_name = binding.variable_name if binding is not None else "<missing>"
+        path = list(binding.path) if binding is not None else []
+        return (
+            f"step_id={step.id} variable={variable_name} path={path} "
+            f"operation=output_binding reason={reason}"
+        )
 
     def _control_result(
         self,
@@ -1262,41 +1338,69 @@ class ExecutionPlanExecutor:
             )
 
             if outcome.success:
-                self._mark_context_succeeded(
+                execution_context.set_result(step.id, outcome.output)
+                binding_error = self._apply_output_binding(
                     trace,
                     execution_context,
-                    step.id,
+                    step,
                     outcome.output,
                 )
-                metadata = dict(outcome.metadata)
-                metadata["attempt_number"] = attempt_number
-                metadata["max_attempts"] = self._retry_policy.max_attempts
-                metadata["retry_history"] = list(history)
-                metadata["completed_after_retry"] = attempt_number > 1
-                if attempt_number > 1:
-                    self._emit_progress(
-                        on_progress,
-                        "step_completed_after_retry",
-                        started,
-                        step=step,
-                        step_index=step_index,
-                        total_steps=total_steps,
-                        attempt_number=attempt_number,
-                        max_attempts=self._retry_policy.max_attempts,
+                if binding_error is not None:
+                    self._mark_context_failed(trace, execution_context, step.id)
+                    outcome = StepExecutionResult(
+                        step_id=step.id,
+                        status=StepExecutionStatus.FAILED.value,
+                        success=False,
+                        tool_name=step.tool,
+                        output=outcome.output,
+                        error=binding_error,
+                        error_code=(
+                            ExecutionErrorCode.EXECUTION_VARIABLE_BINDING_FAILED.value
+                        ),
+                        started_at=outcome.started_at,
+                        finished_at=outcome.finished_at,
+                        metadata={
+                            **dict(outcome.metadata),
+                            "binding_failed": True,
+                            "retry_scheduled": False,
+                        },
                     )
-                return StepExecutionResult(
-                    step_id=outcome.step_id,
-                    status=outcome.status,
-                    success=outcome.success,
-                    tool_name=outcome.tool_name,
-                    output=outcome.output,
-                    error=outcome.error,
-                    error_code=outcome.error_code,
-                    interruption_reason=outcome.interruption_reason,
-                    started_at=outcome.started_at,
-                    finished_at=outcome.finished_at,
-                    metadata=metadata,
-                )
+                else:
+                    self._mark_context_succeeded(
+                        trace,
+                        execution_context,
+                        step.id,
+                        outcome.output,
+                    )
+                    metadata = dict(outcome.metadata)
+                    metadata["attempt_number"] = attempt_number
+                    metadata["max_attempts"] = self._retry_policy.max_attempts
+                    metadata["retry_history"] = list(history)
+                    metadata["completed_after_retry"] = attempt_number > 1
+                    if attempt_number > 1:
+                        self._emit_progress(
+                            on_progress,
+                            "step_completed_after_retry",
+                            started,
+                            step=step,
+                            step_index=step_index,
+                            total_steps=total_steps,
+                            attempt_number=attempt_number,
+                            max_attempts=self._retry_policy.max_attempts,
+                        )
+                    return StepExecutionResult(
+                        step_id=outcome.step_id,
+                        status=outcome.status,
+                        success=outcome.success,
+                        tool_name=outcome.tool_name,
+                        output=outcome.output,
+                        error=outcome.error,
+                        error_code=outcome.error_code,
+                        interruption_reason=outcome.interruption_reason,
+                        started_at=outcome.started_at,
+                        finished_at=outcome.finished_at,
+                        metadata=metadata,
+                    )
 
             self._mark_context_failed(trace, execution_context, step.id)
             history.append(
@@ -1968,6 +2072,65 @@ class ExecutionPlanExecutor:
                 "unresolved_references": list(resolution.unresolved_references),
             },
         )
+
+    def _trace_output_binding_started(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_variable_binding_started",
+            status=TraceEventStatus.STARTED.value,
+            details=self._output_binding_trace_details(context, step),
+        )
+
+    def _trace_output_binding_succeeded(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_variable_binding_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details=self._output_binding_trace_details(context, step),
+        )
+
+    def _trace_output_binding_failed(
+        self,
+        trace: ExecutionTrace,
+        context: ExecutionContext,
+        step: ExecutionStep,
+        *,
+        error_code: str,
+    ) -> None:
+        details = self._output_binding_trace_details(context, step)
+        details["error_code"] = error_code
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_variable_binding_failed",
+            status=TraceEventStatus.FAILED.value,
+            details=details,
+        )
+
+    def _output_binding_trace_details(
+        self,
+        context: ExecutionContext,
+        step: ExecutionStep,
+    ) -> dict[str, object]:
+        binding = step.output_binding
+        assert binding is not None
+        return {
+            "execution_id": context.execution_id,
+            "step_id": step.id,
+            "variable_name": binding.variable_name,
+            "path": list(binding.path),
+            "overwrite": binding.overwrite,
+            "variable_count": len(context.variables_snapshot()),
+        }
 
     def _parameter_resolution_trace_details(
         self,

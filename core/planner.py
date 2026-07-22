@@ -10,6 +10,10 @@ from typing import Any, Callable, Mapping
 import unicodedata
 
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
+from core.execution_variable_binding import (
+    ExecutionVariableBinding,
+    copy_execution_variable_binding,
+)
 from tools.argument_schema import (
     ArgumentSchemaRegistry,
     ArgumentValidator,
@@ -42,6 +46,7 @@ class ExecutionStep:
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
+    output_binding: ExecutionVariableBinding | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.arguments, ExecutionArguments):
@@ -49,6 +54,11 @@ class ExecutionStep:
         else:
             arguments = ExecutionArguments(self.arguments)
         object.__setattr__(self, "arguments", arguments)
+        object.__setattr__(
+            self,
+            "output_binding",
+            copy_execution_variable_binding(self.output_binding),
+        )
 
 
 @dataclass(frozen=True, slots=True)

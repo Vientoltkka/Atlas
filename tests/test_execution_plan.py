@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.planner import ExecutionPlan, ExecutionStep, Planner
 
 
@@ -94,6 +95,20 @@ def test_execution_step_arguments_default_is_independent() -> None:
     assert first.arguments == {}
     assert second.arguments == {}
     assert first.arguments is not second.arguments
+
+
+def test_execution_step_accepts_optional_output_binding() -> None:
+    binding = ExecutionVariableBinding("workspace_path", ("path",))
+    step = ExecutionStep(
+        id="step_1",
+        description="Create workspace.",
+        tool="create_directory",
+        arguments={"path": "work"},
+        output_binding=binding,
+    )
+
+    assert step.output_binding == binding
+    assert step.output_binding is not binding
 
 
 def test_execution_step_arguments_are_top_level_read_only() -> None:

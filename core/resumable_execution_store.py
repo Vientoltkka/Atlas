@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.execution_context import ExecutionContextSnapshot
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -326,6 +327,7 @@ def _step_to_dict(
         "dependencies": list(step.dependencies),
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
+        "output_binding": _binding_to_json(step.output_binding),
     }
 
 
@@ -374,6 +376,59 @@ def _dict_to_step(
         dependencies=_str_tuple(payload, "dependencies"),
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
+        output_binding=_binding_from_json(payload.get("output_binding")),
+    )
+
+
+def _binding_to_json(
+    binding: ExecutionVariableBinding | None,
+) -> dict[str, Any] | None:
+    if binding is None:
+        return None
+    return {
+        "$type": "execution_variable_binding",
+        "variable_name": binding.variable_name,
+        "path": [_argument_to_json(part) for part in binding.path],
+        "overwrite": binding.overwrite,
+    }
+
+
+def _binding_from_json(
+    payload: Any,
+) -> ExecutionVariableBinding | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {
+        "$type",
+        "variable_name",
+        "path",
+        "overwrite",
+    }:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution variable binding must be an explicit object.",
+        )
+    if payload.get("$type") != "execution_variable_binding":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution variable binding type is invalid.",
+        )
+    raw_path = payload.get("path")
+    if not isinstance(raw_path, list):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution variable binding path must be a list.",
+        )
+    overwrite = payload.get("overwrite")
+    if type(overwrite) is not bool:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution variable binding overwrite must be a boolean.",
+        )
+    return ExecutionVariableBinding(
+        variable_name=_required_str(payload, "variable_name"),
+        path=tuple(raw_path),
+        overwrite=overwrite,
     )
 
 

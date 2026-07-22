@@ -7,6 +7,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
 from core.planner import ExecutionPlan, ExecutionStep, Planner
@@ -25,6 +26,7 @@ def _step(
     dependencies: tuple[str, ...] = (),
     status: str = "pending",
     arguments: dict | None = None,
+    output_binding: ExecutionVariableBinding | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -33,6 +35,7 @@ def _step(
         dependencies=dependencies,
         status=status,
         arguments={} if arguments is None else arguments,
+        output_binding=output_binding,
     )
 
 
@@ -72,6 +75,38 @@ def test_validator_accepts_valid_execution_variable_reference() -> None:
 
     assert result.is_valid is True
     assert result.errors == []
+
+
+def test_validator_accepts_valid_output_binding() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding("workspace_path", ("path",)),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validator_rejects_invalid_output_binding_structure() -> None:
+    try:
+        ExecutionVariableBinding("workspace_path", (True,))
+    except ValueError as error:
+        assert "bool segments" in str(error)
+    else:
+        raise AssertionError("invalid output binding path must be rejected")
 
 
 def test_validator_rejects_invalid_execution_variable_reference_structure() -> None:
@@ -133,6 +168,76 @@ def test_plan_signature_includes_variable_reference_name_and_path_not_value() ->
 
     assert plan_signature(base) != plan_signature(changed_name)
     assert plan_signature(base) != plan_signature(changed_path)
+    assert plan_signature(base) == plan_signature(equivalent)
+
+
+def test_plan_signature_includes_output_binding_fields() -> None:
+    base = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding("selected_file"),
+            ),
+        ),
+        required_tools=("read_file",),
+        estimated_steps=1,
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    changed_name = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding("other_file"),
+            ),
+        ),
+    )
+    changed_path = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding("selected_file", ("path",)),
+            ),
+        ),
+    )
+    changed_overwrite = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding(
+                    "selected_file",
+                    overwrite=False,
+                ),
+            ),
+        ),
+    )
+    equivalent = replace(
+        base,
+        ordered_steps=(
+            _step(
+                "step_1",
+                "read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding.from_path("selected_file"),
+            ),
+        ),
+    )
+
+    assert plan_signature(base) != plan_signature(changed_name)
+    assert plan_signature(base) != plan_signature(changed_path)
+    assert plan_signature(base) != plan_signature(changed_overwrite)
     assert plan_signature(base) == plan_signature(equivalent)
 
 

@@ -25,6 +25,7 @@ from core.resumable_execution_store import (
     ResumableExecutionStore,
     ResumableExecutionStoreError,
 )
+from core.structured_reference_path import navigate_structured_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,6 +658,7 @@ class StructuredExecutionCoordinator:
             else None
         )
         execution_context = ExecutionContext(execution_id)
+        step_by_id = {step.id: step for step in plan.ordered_steps}
         for result in execution.step_results:
             if result.success and result.status == "completed":
                 execution_context.mark_step_started(
@@ -664,6 +666,17 @@ class StructuredExecutionCoordinator:
                     int(result.metadata.get("attempt_number", 1)),
                 )
                 execution_context.mark_step_succeeded(result.step_id, result.output)
+                step = step_by_id.get(result.step_id)
+                if step is not None and step.output_binding is not None:
+                    binding = step.output_binding
+                    execution_context.set_variable(
+                        binding.variable_name,
+                        navigate_structured_path(
+                            result.output,
+                            binding.path,
+                            owner_label=f"output binding for step '{step.id}'",
+                        ),
+                    )
         return ResumableExecutionState(
             objective=objective,
             original_plan=plan,

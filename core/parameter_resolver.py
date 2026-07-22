@@ -12,6 +12,10 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from core.execution_arguments import ExecutionArguments
 from core.execution_variable_reference import ExecutionVariableReference
 from core.step_output_reference import StepOutputReference
+from core.structured_reference_path import (
+    StructuredReferencePathError,
+    navigate_structured_path,
+)
 
 
 REFERENCE_PATTERN = re.compile(
@@ -723,55 +727,14 @@ class ParameterResolver:
         path: tuple[str | int, ...],
         reference: str,
     ) -> object:
-        for part in path:
-            if isinstance(value, Mapping):
-                if not isinstance(part, str):
-                    self._fail(
-                        ParameterResolutionErrorCode.REFERENCE_TYPE_ERROR.value,
-                        (
-                            f"Reference to step '{step_id}' expected a string key "
-                            f"at segment '{part}'."
-                        ),
-                        reference,
-                    )
-                if part in value:
-                    value = value[part]
-                    continue
-
-                self._fail(
-                    ParameterResolutionErrorCode.REFERENCED_FIELD_NOT_FOUND.value,
-                    f"Referenced field '{part}' was not found in step '{step_id}'.",
-                    reference,
-                )
-
-            if isinstance(value, (list, tuple)):
-                if isinstance(part, bool) or not isinstance(part, int):
-                    self._fail(
-                        ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
-                        f"Invalid list index '{part}' in reference to step '{step_id}'.",
-                        reference,
-                    )
-
-                if part < 0 or part >= len(value):
-                    self._fail(
-                        ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
-                        f"List index '{part}' is out of range for step '{step_id}'.",
-                        reference,
-                    )
-
-                value = value[part]
-                continue
-
-            self._fail(
-                ParameterResolutionErrorCode.REFERENCE_TYPE_ERROR.value,
-                (
-                    f"Cannot navigate segment '{part}' in step '{step_id}' "
-                    f"through value type '{type(value).__name__}'."
-                ),
-                reference,
+        try:
+            return navigate_structured_path(
+                value,
+                path,
+                owner_label=f"step '{step_id}'",
             )
-
-        return value
+        except StructuredReferencePathError as error:
+            self._fail(error.error_code, error.message, reference)
 
     def _validate_path_part(
         self,

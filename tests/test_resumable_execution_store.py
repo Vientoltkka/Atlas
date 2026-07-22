@@ -4,9 +4,10 @@ import json
 from dataclasses import replace
 
 from core.execution_context import ExecutionContext
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_executor import ResumableExecutionState
-from core.execution_plan_validator import ExecutionPlanValidator
+from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
 from core.resumable_execution_store import (
     JsonResumableExecutionStore,
@@ -345,3 +346,83 @@ def test_json_store_preserves_execution_variables_and_references(tmp_path) -> No
     assert loaded.execution_context_snapshot.variables == {
         "workspace_path": "C:/AI/Atlas"
     }
+
+
+def test_json_store_preserves_output_binding_and_loads_old_checkpoints(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Resume bound plan.",
+        ordered_steps=(
+            ExecutionStep(
+                id="step_1",
+                description="Execute step_1.",
+                tool="read_file",
+                arguments={"path": "README.md"},
+                output_binding=ExecutionVariableBinding(
+                    "selected_file",
+                    ("path",),
+                    overwrite=False,
+                ),
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        detected_risks=(),
+        requires_confirmation=False,
+        status="planned",
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=(),
+        pending_step_ids=("step_1",),
+        failed_step_ids=(),
+        interrupted_step_id="step_1",
+        previous_results={},
+        resumable=True,
+        confirmation_granted=True,
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    payload = _payload(tmp_path / "state.json")
+    loaded = store.load()
+
+    assert payload["original_plan"]["ordered_steps"][0]["output_binding"] == {
+        "$type": "execution_variable_binding",
+        "variable_name": "selected_file",
+        "path": ["path"],
+        "overwrite": False,
+    }
+    assert loaded is not None
+    assert loaded.original_plan.ordered_steps[0].output_binding == (
+        ExecutionVariableBinding("selected_file", ("path",), overwrite=False)
+    )
+
+    payload["original_plan"]["ordered_steps"][0].pop("output_binding")
+    old_plan = ExecutionPlan(
+        goal=plan.goal,
+        ordered_steps=(
+            ExecutionStep(
+                id="step_1",
+                description="Execute step_1.",
+                tool="read_file",
+                arguments={"path": "README.md"},
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        detected_risks=(),
+        requires_confirmation=False,
+        status="planned",
+    )
+    old_signature = plan_signature(old_plan)
+    payload["validated_plan_signature"] = old_signature
+    payload["validation_result"]["plan_signature"] = old_signature
+    (tmp_path / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+    old_loaded = store.load()
+
+    assert old_loaded is not None
+    assert old_loaded.original_plan.ordered_steps[0].output_binding is None

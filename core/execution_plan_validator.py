@@ -15,6 +15,7 @@ from core.execution_arguments import (
     contains_execution_variable_reference,
     contains_step_output_reference,
 )
+from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
     BLOCKED_REFERENCE_PARTS,
@@ -212,8 +213,24 @@ class ExecutionPlanValidator:
             except (InvalidExecutionArgumentError, TypeError) as error:
                 errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
+            self._validate_output_binding(step, errors)
+
         self._validate_static_references(plan, errors)
         self._validate_structured_references(plan, errors)
+
+    def _validate_output_binding(
+        self,
+        step: Any,
+        errors: list[str],
+    ) -> None:
+        binding = getattr(step, "output_binding", None)
+        if binding is None:
+            return
+        if not isinstance(binding, ExecutionVariableBinding):
+            errors.append(f"Step '{step.id}' output_binding must be ExecutionVariableBinding.")
+            return
+        if type(binding.overwrite) is not bool:
+            errors.append(f"Step '{step.id}' output_binding overwrite must be boolean.")
 
     def _validate_tool_argument_schemas(
         self,
@@ -664,6 +681,7 @@ def plan_signature(
                     if isinstance(step.arguments, ExecutionArguments)
                     else dict(step.arguments)
                 ),
+                "output_binding": _signature_safe_value(step.output_binding),
             }
             for step in plan.ordered_steps
         ],
@@ -697,6 +715,14 @@ def _signature_safe_value(
             "$type": "execution_variable_reference",
             "name": value.name,
             "path": list(value.path),
+        }
+
+    if isinstance(value, ExecutionVariableBinding):
+        return {
+            "$type": "execution_variable_binding",
+            "variable_name": value.variable_name,
+            "path": list(value.path),
+            "overwrite": value.overwrite,
         }
 
     if value is None or isinstance(value, (str, int, bool)):
