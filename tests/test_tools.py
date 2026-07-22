@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from bootstrap.bootstrap import Bootstrap
+from core.step_output_reference import StepOutputReference
 from tools.base_tool import BaseTool
 from tools.executor import ToolExecutor
 from tools.filesystem.read_file_tool import ReadFileTool
@@ -164,6 +165,20 @@ def test_tool_executor_accepts_arguments_without_explicit_context() -> None:
     assert result == {"query": "is:unread"}
     assert tool.context is not None
     assert tool.context.parameters == {"query": "is:unread"}
+
+
+def test_tool_executor_rejects_unresolved_step_output_reference() -> None:
+    registry = ToolRegistry()
+    tool = CapturingTool()
+    registry.register(tool)
+
+    with pytest.raises(ValueError, match="unresolved StepOutputReference"):
+        ToolExecutor(registry).execute(
+            "capture.tool",
+            arguments={"query": StepOutputReference("read")},
+        )
+
+    assert tool.context is None
 
 
 def test_bootstrap_tool_registry_lists_real_registered_tools() -> None:

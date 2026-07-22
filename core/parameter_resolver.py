@@ -9,6 +9,9 @@ import json
 import re
 from typing import Any, Mapping
 
+from core.execution_arguments import ExecutionArguments
+from core.step_output_reference import StepOutputReference
+
 
 REFERENCE_PATTERN = re.compile(
     r"^steps\.([A-Za-z0-9_-]+)\.output(?:\.([A-Za-z0-9_.-]+))?$"
@@ -36,8 +39,12 @@ class ParameterResolutionErrorCode(str, Enum):
 
     INVALID_REFERENCE_SYNTAX = "INVALID_REFERENCE_SYNTAX"
     REFERENCED_STEP_NOT_FOUND = "REFERENCED_STEP_NOT_FOUND"
+    REFERENCED_STEP_NOT_EXECUTED = "REFERENCED_STEP_NOT_EXECUTED"
+    REFERENCED_STEP_FAILED = "REFERENCED_STEP_FAILED"
     REFERENCED_OUTPUT_MISSING = "REFERENCED_OUTPUT_MISSING"
     REFERENCED_FIELD_NOT_FOUND = "REFERENCED_FIELD_NOT_FOUND"
+    REFERENCE_PATH_ERROR = "REFERENCE_PATH_ERROR"
+    REFERENCE_TYPE_ERROR = "REFERENCE_TYPE_ERROR"
     INVALID_LIST_INDEX = "INVALID_LIST_INDEX"
     REFERENCE_TO_INCOMPLETE_STEP = "REFERENCE_TO_INCOMPLETE_STEP"
     PARAMETER_RESOLUTION_FAILED = "PARAMETER_RESOLUTION_FAILED"
@@ -55,7 +62,7 @@ class ParameterResolutionResult:
     """Structured result for argument reference resolution."""
 
     success: bool
-    resolved_arguments: dict[str, object] = field(default_factory=dict)
+    resolved_arguments: ExecutionArguments = field(default_factory=ExecutionArguments.empty)
     errors: list[str] = field(default_factory=list)
     unresolved_references: list[str] = field(default_factory=list)
     used_step_ids: list[str] = field(default_factory=list)
@@ -63,6 +70,34 @@ class ParameterResolutionResult:
     templates_resolved: int = 0
     error_code: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+
+
+class ParameterResolutionError(ValueError):
+    """Base error for step output reference resolution failures."""
+
+
+class InvalidStepOutputReferenceError(ParameterResolutionError):
+    """Raised when a step output reference is structurally invalid."""
+
+
+class ReferencedStepNotFoundError(ParameterResolutionError):
+    """Raised when a reference points to an unknown step."""
+
+
+class ReferencedStepNotExecutedError(ParameterResolutionError):
+    """Raised when a reference points to a step without an available result."""
+
+
+class ReferencedStepFailedError(ParameterResolutionError):
+    """Raised when a reference points to a failed step result."""
+
+
+class ReferencePathError(ParameterResolutionError):
+    """Raised when a reference path cannot be navigated."""
+
+
+class ReferenceTypeError(ParameterResolutionError):
+    """Raised when a reference path hits an incompatible value type."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +139,7 @@ class ParameterResolver:
         except _ResolutionFailure as failure:
             return ParameterResolutionResult(
                 success=False,
-                resolved_arguments={},
+                resolved_arguments=ExecutionArguments.empty(),
                 errors=[failure.error.message],
                 unresolved_references=(
                     [failure.error.reference]
@@ -120,7 +155,7 @@ class ParameterResolver:
 
         return ParameterResolutionResult(
             success=True,
-            resolved_arguments=resolved,
+            resolved_arguments=ExecutionArguments(resolved),
             errors=[],
             unresolved_references=[],
             used_step_ids=used_step_ids,
@@ -129,6 +164,31 @@ class ParameterResolver:
             error_code=None,
             metadata={"resolver": "ParameterResolver"},
         )
+
+    def resolve_value(
+        self,
+        value: object,
+        available_results: Mapping[str, object],
+        path: str = "arguments",
+    ) -> object:
+        """Resolve references inside one value and return a defensive copy."""
+        used_step_ids: list[str] = []
+        used_references: list[str] = []
+        template_counter = [0]
+        try:
+            return self._resolve_value(
+                value,
+                available_results,
+                used_step_ids,
+                used_references,
+                depth=0,
+                seen=set(),
+                template_counter=template_counter,
+            )
+        except _ResolutionFailure as failure:
+            raise ParameterResolutionError(
+                f"{path}: {failure.error.message}"
+            ) from failure
 
     def _resolve_mapping(
         self,
@@ -238,6 +298,43 @@ class ParameterResolver:
             finally:
                 seen.remove(id(value))
 
+        if isinstance(value, StepOutputReference):
+            return self._resolve_step_output_reference(
+                value,
+                previous_results,
+                used_step_ids,
+                used_references,
+            )
+
+        return deepcopy(value)
+
+    def _resolve_step_output_reference(
+        self,
+        reference: StepOutputReference,
+        previous_results: Mapping[str, object],
+        used_step_ids: list[str],
+        used_references: list[str],
+    ) -> object:
+        reference_label = self._reference_label(reference)
+        if reference.step_id not in previous_results:
+            self._fail(
+                ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value,
+                f"Referenced step '{reference.step_id}' has not produced a result.",
+                reference_label,
+            )
+
+        output = self._extract_output(previous_results[reference.step_id], reference_label)
+        value = self._resolve_structured_path(
+            output,
+            reference.step_id,
+            reference.path,
+            reference_label,
+        )
+
+        if reference.step_id not in used_step_ids:
+            used_step_ids.append(reference.step_id)
+
+        used_references.append(reference_label)
         return deepcopy(value)
 
     def _resolve_reference_object(
@@ -283,7 +380,12 @@ class ParameterResolver:
         value = output
 
         if path is not None:
-            value = self._resolve_path(value, step_id, path, reference)
+            value = self._resolve_structured_path(
+                value,
+                step_id,
+                self._legacy_path_parts(path, reference),
+                reference,
+            )
 
         if step_id not in used_step_ids:
             used_step_ids.append(step_id)
@@ -417,7 +519,12 @@ class ParameterResolver:
         value = output
 
         if path is not None:
-            value = self._resolve_path(value, step_id, path, reference)
+            value = self._resolve_structured_path(
+                value,
+                step_id,
+                self._legacy_path_parts(path, reference),
+                reference,
+            )
 
         if step_id not in used_step_ids:
             used_step_ids.append(step_id)
@@ -485,15 +592,22 @@ class ParameterResolver:
         reference: str,
     ) -> object:
         if self._looks_like_step_execution_result(result):
-            step_id = str(getattr(result, "step_id"))
-            if not getattr(result, "success") or getattr(result, "status") != "completed":
+            step_id = str(object.__getattribute__(result, "step_id"))
+            if not object.__getattribute__(result, "success"):
                 self._fail(
-                    ParameterResolutionErrorCode.REFERENCE_TO_INCOMPLETE_STEP.value,
+                    ParameterResolutionErrorCode.REFERENCED_STEP_FAILED.value,
+                    f"Referenced step '{step_id}' failed and cannot be used.",
+                    reference,
+                )
+
+            if object.__getattribute__(result, "status") != "completed":
+                self._fail(
+                    ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value,
                     f"Referenced step '{step_id}' is not completed.",
                     reference,
                 )
 
-            output = getattr(result, "output")
+            output = object.__getattribute__(result, "output")
             if output is None:
                 self._fail(
                     ParameterResolutionErrorCode.REFERENCED_OUTPUT_MISSING.value,
@@ -505,17 +619,35 @@ class ParameterResolver:
 
         return result
 
-    def _resolve_path(
+    def _legacy_path_parts(
+        self,
+        path: str,
+        reference: str,
+    ) -> tuple[str | int, ...]:
+        parts: list[str | int] = []
+        for part in path.split("."):
+            self._validate_path_part(part, reference)
+            parts.append(int(part) if part.isdigit() else part)
+        return tuple(parts)
+
+    def _resolve_structured_path(
         self,
         value: object,
         step_id: str,
-        path: str,
+        path: tuple[str | int, ...],
         reference: str,
     ) -> object:
-        for part in path.split("."):
-            self._validate_path_part(part, reference)
-
+        for part in path:
             if isinstance(value, Mapping):
+                if not isinstance(part, str):
+                    self._fail(
+                        ParameterResolutionErrorCode.REFERENCE_TYPE_ERROR.value,
+                        (
+                            f"Reference to step '{step_id}' expected a string key "
+                            f"at segment '{part}'."
+                        ),
+                        reference,
+                    )
                 if part in value:
                     value = value[part]
                     continue
@@ -526,51 +658,30 @@ class ParameterResolver:
                     reference,
                 )
 
-            if isinstance(value, list):
-                if not part.isdigit():
+            if isinstance(value, (list, tuple)):
+                if isinstance(part, bool) or not isinstance(part, int):
                     self._fail(
                         ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
                         f"Invalid list index '{part}' in reference to step '{step_id}'.",
                         reference,
                     )
 
-                index = int(part)
-                if index >= len(value):
+                if part < 0 or part >= len(value):
                     self._fail(
                         ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
-                        f"List index '{part}' is out of range in reference to step '{step_id}'.",
+                        f"List index '{part}' is out of range for step '{step_id}'.",
                         reference,
                     )
 
-                value = value[index]
-                continue
-
-            if isinstance(value, tuple):
-                if not part.isdigit():
-                    self._fail(
-                        ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
-                        f"Invalid tuple index '{part}' in reference to step '{step_id}'.",
-                        reference,
-                    )
-
-                index = int(part)
-                if index >= len(value):
-                    self._fail(
-                        ParameterResolutionErrorCode.INVALID_LIST_INDEX.value,
-                        f"Tuple index '{part}' is out of range in reference to step '{step_id}'.",
-                        reference,
-                    )
-
-                value = value[index]
-                continue
-
-            if hasattr(value, part):
-                value = getattr(value, part)
+                value = value[part]
                 continue
 
             self._fail(
-                ParameterResolutionErrorCode.REFERENCED_FIELD_NOT_FOUND.value,
-                f"Referenced field '{part}' was not found in step '{step_id}'.",
+                ParameterResolutionErrorCode.REFERENCE_TYPE_ERROR.value,
+                (
+                    f"Cannot navigate segment '{part}' in step '{step_id}' "
+                    f"through value type '{type(value).__name__}'."
+                ),
                 reference,
             )
 
@@ -635,12 +746,7 @@ class ParameterResolver:
         self,
         result: object,
     ) -> bool:
-        return (
-            hasattr(result, "step_id")
-            and hasattr(result, "status")
-            and hasattr(result, "success")
-            and hasattr(result, "output")
-        )
+        return type(result).__name__ == "StepExecutionResult"
 
     def _safe_reference_label(
         self,
@@ -654,6 +760,17 @@ class ParameterResolver:
                 flags=re.IGNORECASE,
             )
         return reference[:120]
+
+    def _reference_label(
+        self,
+        reference: StepOutputReference,
+    ) -> str:
+        if not reference.path:
+            return f"steps.{reference.step_id}.output"
+        return (
+            f"steps.{reference.step_id}.output:"
+            + ".".join(str(part) for part in reference.path)
+        )
 
 
 class _ResolutionFailure(Exception):

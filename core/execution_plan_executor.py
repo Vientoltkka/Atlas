@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -988,11 +989,13 @@ class ExecutionPlanExecutor:
 
         assert step.tool is not None
 
+        self._trace_parameter_resolution_started(trace, step)
         resolution = self._parameter_resolver.resolve(
             _step_arguments_dict(step),
             previous_results,
         )
         if not resolution.success:
+            self._trace_parameter_resolution_failed(trace, step, resolution)
             error = "; ".join(resolution.errors)
             return StepExecutionResult(
                 step_id=step.id,
@@ -1006,8 +1009,10 @@ class ExecutionPlanExecutor:
                     "parameter_resolution_error_code": resolution.error_code,
                     "unresolved_references": resolution.unresolved_references,
                     "used_step_ids": resolution.used_step_ids,
+                    "used_references": resolution.used_references,
                 },
             )
+        self._trace_parameter_resolution_succeeded(trace, step, resolution)
 
         if not self._tool_registry.exists(step.tool):
             return StepExecutionResult(
@@ -1031,7 +1036,7 @@ class ExecutionPlanExecutor:
             step,
             plan_signature=plan_signature,
             previous_results=previous_results,
-            resolved_arguments=resolution.resolved_arguments,
+            resolved_arguments=resolution.resolved_arguments.as_dict(),
             trace=trace,
             control=control,
             on_progress=on_progress,
@@ -1546,6 +1551,119 @@ class ExecutionPlanExecutor:
             "argument_count": len(arguments),
             "argument_keys": sorted(arguments.keys()),
         }
+
+    def _trace_parameter_resolution_started(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+    ) -> None:
+        if not self._has_resolvable_reference(step.arguments):
+            return
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="parameter_resolution_started",
+            status=TraceEventStatus.STARTED.value,
+            details=self._parameter_resolution_trace_details(step),
+        )
+
+    def _trace_parameter_resolution_succeeded(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        resolution: Any,
+    ) -> None:
+        if not self._has_resolvable_reference(step.arguments):
+            return
+        details = self._parameter_resolution_trace_details(step)
+        details.update(
+            {
+                "referenced_step_ids": sorted(set(resolution.used_step_ids)),
+                "reference_count": len(resolution.used_references),
+            }
+        )
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="parameter_resolution_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details=details,
+        )
+
+    def _trace_parameter_resolution_failed(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        resolution: Any,
+    ) -> None:
+        if not self._has_resolvable_reference(step.arguments):
+            return
+        details = self._parameter_resolution_trace_details(step)
+        details.update(
+            {
+                "referenced_step_ids": sorted(set(resolution.used_step_ids)),
+                "reference_count": len(resolution.used_references),
+                "error_code": resolution.error_code,
+                "unresolved_references": list(resolution.unresolved_references),
+            }
+        )
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="parameter_resolution_failed",
+            status=TraceEventStatus.FAILED.value,
+            details=details,
+        )
+
+    def _parameter_resolution_trace_details(
+        self,
+        step: ExecutionStep,
+    ) -> dict[str, object]:
+        references = self._reference_labels(step.arguments)
+        return {
+            "step_id": step.id,
+            "tool_name": step.tool,
+            "reference_count": len(references),
+            "references": references,
+        }
+
+    def _has_resolvable_reference(
+        self,
+        value: object,
+    ) -> bool:
+        return bool(self._reference_labels(value))
+
+    def _reference_labels(
+        self,
+        value: object,
+    ) -> list[str]:
+        from core.step_output_reference import StepOutputReference
+
+        labels: list[str] = []
+
+        def visit(item: object) -> None:
+            if isinstance(item, StepOutputReference):
+                if item.path:
+                    path = ".".join(str(part) for part in item.path)
+                    labels.append(f"steps.{item.step_id}.output:{path}")
+                else:
+                    labels.append(f"steps.{item.step_id}.output")
+                return
+
+            if isinstance(item, Mapping):
+                if tuple(item.keys()) == ("$ref",) and isinstance(item.get("$ref"), str):
+                    labels.append(str(item["$ref"]))
+                    return
+                if "$template" in item:
+                    labels.append("<template>")
+                    return
+                for nested in item.values():
+                    visit(nested)
+                return
+
+            if isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        return sorted(labels)
 
     def _emit_progress(
         self,

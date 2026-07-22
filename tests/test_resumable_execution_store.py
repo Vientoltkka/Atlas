@@ -10,6 +10,7 @@ from core.resumable_execution_store import (
     JsonResumableExecutionStore,
     ResumableExecutionStoreError,
 )
+from core.step_output_reference import StepOutputReference
 
 
 def _step(
@@ -221,3 +222,53 @@ def test_json_store_delete_removes_state(tmp_path) -> None:
     store.delete()
 
     assert store.exists() is False
+
+
+def test_json_store_preserves_step_output_references_in_plan_arguments(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Resume referenced plan.",
+        ordered_steps=(
+            _step("step_1", "read_file"),
+            ExecutionStep(
+                id="step_2",
+                description="Execute step_2.",
+                tool="write_file",
+                dependencies=("step_1",),
+                arguments={"content": StepOutputReference("step_1", ("content",))},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+        status="planned",
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    state = ResumableExecutionState(
+        objective="resume",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": {"content": "alpha"}},
+        resumable=True,
+        confirmation_granted=True,
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    payload = _payload(tmp_path / "state.json")
+    loaded = store.load()
+
+    assert payload["original_plan"]["ordered_steps"][1]["arguments"]["content"] == {
+        "$type": "step_output_reference",
+        "path": ["content"],
+        "step_id": "step_1",
+    }
+    assert loaded is not None
+    assert loaded.original_plan.ordered_steps[1].arguments.as_dict() == {
+        "content": StepOutputReference("step_1", ("content",))
+    }

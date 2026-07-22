@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
+from core.step_output_reference import StepOutputReference
 
 
 SCHEMA_VERSION = 1
@@ -312,7 +313,7 @@ def _step_to_dict(
         "tool": step.tool,
         "dependencies": list(step.dependencies),
         "status": step.status,
-        "arguments": dict(step.arguments),
+        "arguments": _argument_to_json(step.arguments.as_dict()),
     }
 
 
@@ -360,8 +361,59 @@ def _dict_to_step(
         tool=tool,
         dependencies=_str_tuple(payload, "dependencies"),
         status=_required_str(payload, "status"),
-        arguments=_required_dict(payload, "arguments"),
+        arguments=_argument_from_json(_required_dict(payload, "arguments")),
     )
+
+
+def _argument_to_json(
+    value: Any,
+) -> Any:
+    if isinstance(value, StepOutputReference):
+        return {
+            "$type": "step_output_reference",
+            "step_id": value.step_id,
+            "path": [_argument_to_json(part) for part in value.path],
+        }
+
+    if isinstance(value, dict):
+        return {
+            key: _argument_to_json(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_argument_to_json(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_argument_to_json(item) for item in value]
+
+    return value
+
+
+def _argument_from_json(
+    value: Any,
+) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"$type", "step_id", "path"} and value.get("$type") == "step_output_reference":
+            raw_path = value.get("path")
+            if not isinstance(raw_path, list):
+                raise ResumableExecutionStoreError(
+                    "EXECUTION_STATE_INVALID",
+                    "Step output reference path must be a list.",
+                )
+            return StepOutputReference(
+                step_id=_required_str(value, "step_id"),
+                path=tuple(raw_path),
+            )
+        return {
+            key: _argument_from_json(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_argument_from_json(item) for item in value]
+
+    return value
 
 
 def _validation_to_dict(

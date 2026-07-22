@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from core.execution_arguments import contains_step_output_reference
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 from tools.tool_schema import ToolSchemaValidationException
@@ -34,6 +35,9 @@ class ToolExecutor:
             if context is not None
             else dict(arguments or {})
         )
+        if contains_step_output_reference(source_arguments):
+            raise ValueError("ToolExecutor received unresolved StepOutputReference arguments.")
+
         schema = self._registry.arguments_schema(tool_name)
         if schema is None:
             normalized_arguments = dict(source_arguments)

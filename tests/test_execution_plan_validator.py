@@ -5,9 +5,11 @@ from dataclasses import replace
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
+    plan_signature,
 )
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
 from core.planner import ExecutionPlan, ExecutionStep, Planner
+from core.step_output_reference import StepOutputReference
 
 
 def _valid_plan() -> ExecutionPlan:
@@ -931,3 +933,78 @@ def test_template_escaped_braces_do_not_create_references() -> None:
     result = _validate(plan)
 
     assert result.is_valid is True
+
+
+def test_step_output_reference_to_previous_step_is_valid_without_dependency() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("read", arguments={"path": "README.md"}),
+            _step(
+                "write",
+                tool="write_file",
+                arguments={"content": StepOutputReference("read")},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+
+
+def test_step_output_reference_to_unknown_self_and_future_steps_are_invalid() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("step_1", arguments={"a": StepOutputReference("missing")}),
+            _step("step_2", arguments={"b": StepOutputReference("step_2")}),
+            _step("step_3", arguments={"c": StepOutputReference("step_4")}),
+            _step("step_4"),
+        ),
+        estimated_steps=4,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "Step 'step_1' references unknown step 'missing'." in result.errors
+    assert "Step 'step_2' cannot reference itself." in result.errors
+    assert "Step 'step_3' references future step 'step_4'." in result.errors
+
+
+def test_step_output_reference_path_changes_plan_signature() -> None:
+    base = _valid_plan()
+    first = replace(
+        base,
+        ordered_steps=(
+            _step("read"),
+            _step("use", arguments={"value": StepOutputReference("read", ("a",))}),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+    second = replace(
+        first,
+        ordered_steps=(
+            _step("read"),
+            _step("use", arguments={"value": StepOutputReference("read", ("b",))}),
+        ),
+    )
+    third = replace(
+        first,
+        ordered_steps=(
+            _step("other"),
+            _step("use", arguments={"value": StepOutputReference("other", ("a",))}),
+        ),
+    )
+
+    assert plan_signature(first) != plan_signature(second)
+    assert plan_signature(first) != plan_signature(third)
+    assert _validate(first).plan_signature == plan_signature(first)

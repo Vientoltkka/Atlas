@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from core.execution_arguments import (
     ExecutionArguments,
     InvalidExecutionArgumentError,
+    contains_step_output_reference,
 )
 from core.parameter_resolver import (
     BLOCKED_REFERENCE_PARTS,
@@ -21,6 +22,7 @@ from core.parameter_resolver import (
     TEMPLATE_REFERENCE_PATTERN,
 )
 from core.planner import ExecutionPlan
+from core.step_output_reference import StepOutputReference
 from tools.registry import ToolRegistry
 
 
@@ -209,6 +211,7 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments are invalid: {error}.")
 
         self._validate_static_references(plan, errors)
+        self._validate_step_output_references(plan, errors)
 
     def _validate_tool_argument_schemas(
         self,
@@ -254,10 +257,64 @@ class ExecutionPlanValidator:
         self,
         value: Any,
     ) -> bool:
-        return any(
+        return contains_step_output_reference(value) or any(
             self._iter_special_objects(value, key)
             for key in ("$ref", "$template")
         )
+
+    def _validate_step_output_references(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        ordered_ids = [step.id for step in plan.ordered_steps]
+        first_index_by_id: dict[str, int] = {}
+        for index, step_id in enumerate(ordered_ids):
+            first_index_by_id.setdefault(step_id, index)
+
+        for index, step in enumerate(plan.ordered_steps):
+            for reference in self._iter_step_output_references(step.arguments):
+                referenced = reference.step_id
+                if referenced not in first_index_by_id:
+                    errors.append(
+                        f"Step '{step.id}' references unknown step '{referenced}'."
+                    )
+                    continue
+                if referenced == step.id:
+                    errors.append(f"Step '{step.id}' cannot reference itself.")
+                    continue
+                if first_index_by_id[referenced] >= index:
+                    errors.append(
+                        f"Step '{step.id}' references future step '{referenced}'."
+                    )
+                for segment in reference.path:
+                    if isinstance(segment, str) and segment in BLOCKED_REFERENCE_PARTS:
+                        errors.append(
+                            f"Step '{step.id}' has unsafe reference path segment: {segment}."
+                        )
+
+    def _iter_step_output_references(
+        self,
+        value: Any,
+    ) -> tuple[StepOutputReference, ...]:
+        references: list[StepOutputReference] = []
+
+        def visit(item: Any) -> None:
+            if isinstance(item, StepOutputReference):
+                references.append(item)
+                return
+
+            if isinstance(item, Mapping):
+                for nested in item.values():
+                    visit(nested)
+                return
+
+            if isinstance(item, (list, tuple)):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        return tuple(references)
 
     def _validate_static_references(
         self,
@@ -617,6 +674,13 @@ def plan_signature(
 def _signature_safe_value(
     value: Any,
 ) -> Any:
+    if isinstance(value, StepOutputReference):
+        return {
+            "$type": "step_output_reference",
+            "step_id": value.step_id,
+            "path": list(value.path),
+        }
+
     if value is None or isinstance(value, (str, int, bool)):
         return value
 

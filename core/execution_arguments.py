@@ -8,6 +8,8 @@ import math
 from types import MappingProxyType, ModuleType
 from typing import Any
 
+from core.step_output_reference import StepOutputReference, copy_step_output_reference
+
 
 class ExecutionArgumentsError(ValueError):
     """Base error for execution argument failures."""
@@ -149,6 +151,9 @@ def _freeze_value(
             raise InvalidExecutionArgumentError(f"{path}: non-finite float is not supported.")
         return value
 
+    if isinstance(value, StepOutputReference):
+        return copy_step_output_reference(value)
+
     if isinstance(value, Mapping):
         return MappingProxyType(_freeze_mapping(value, path))
 
@@ -172,6 +177,9 @@ def _freeze_value(
 def _thaw_value(
     value: object,
 ) -> object:
+    if isinstance(value, StepOutputReference):
+        return copy_step_output_reference(value)
+
     if isinstance(value, Mapping):
         return {
             key: _thaw_value(item)
@@ -182,3 +190,19 @@ def _thaw_value(
         return [_thaw_value(item) for item in value]
 
     return value
+
+
+def contains_step_output_reference(
+    value: object,
+) -> bool:
+    """Return whether a structural value contains an unresolved step reference."""
+    if isinstance(value, StepOutputReference):
+        return True
+
+    if isinstance(value, Mapping):
+        return any(contains_step_output_reference(item) for item in value.values())
+
+    if isinstance(value, (list, tuple)):
+        return any(contains_step_output_reference(item) for item in value)
+
+    return False

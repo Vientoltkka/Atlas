@@ -9,7 +9,9 @@ from core.execution_arguments import (
     ExecutionArguments,
     InvalidExecutionArgumentError,
     MissingExecutionArgumentError,
+    contains_step_output_reference,
 )
+from core.step_output_reference import StepOutputReference
 
 
 def test_empty_arguments_api() -> None:
@@ -114,3 +116,25 @@ def test_as_dict_returns_a_new_copy_each_time() -> None:
     assert first == second
     assert first is not second
     assert first["nested"] is not second["nested"]
+
+
+def test_execution_arguments_accept_step_output_reference_before_resolution() -> None:
+    reference = StepOutputReference("read", ("items", 0, "id"))
+    arguments = ExecutionArguments({"value": reference})
+
+    exported = arguments.as_dict()
+
+    assert exported == {"value": reference}
+    assert exported["value"] is not reference
+    assert contains_step_output_reference(arguments) is True
+
+
+def test_step_output_reference_rejects_invalid_construction() -> None:
+    with pytest.raises(ValueError, match="step_id"):
+        StepOutputReference("")
+    with pytest.raises(ValueError, match="bool"):
+        StepOutputReference("read", (True,))
+    with pytest.raises(ValueError, match="negative"):
+        StepOutputReference("read", (-1,))
+    with pytest.raises(ValueError, match="segments"):
+        StepOutputReference("read", (object(),))  # type: ignore[arg-type]

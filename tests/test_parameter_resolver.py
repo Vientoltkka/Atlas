@@ -12,6 +12,7 @@ from core.parameter_resolver import (
     ParameterResolutionResult,
     ParameterResolver,
 )
+from core.step_output_reference import StepOutputReference
 
 
 @dataclass
@@ -221,10 +222,10 @@ def test_reference_to_incomplete_step_result_fails() -> None:
     )
 
     assert result.success is False
-    assert result.error_code == ParameterResolutionErrorCode.REFERENCE_TO_INCOMPLETE_STEP.value
+    assert result.error_code == ParameterResolutionErrorCode.REFERENCED_STEP_FAILED.value
 
 
-def test_object_attribute_access_is_supported_for_public_attributes() -> None:
+def test_object_attribute_access_is_not_supported_for_public_attributes() -> None:
     result = _resolve(
         {"name": {"$ref": "steps.step_1.output.items.0.name"}},
         {
@@ -235,8 +236,8 @@ def test_object_attribute_access_is_supported_for_public_attributes() -> None:
         },
     )
 
-    assert result.success is True
-    assert result.resolved_arguments == {"name": "first"}
+    assert result.success is False
+    assert result.error_code == ParameterResolutionErrorCode.REFERENCE_TYPE_ERROR.value
 
 
 def test_private_attributes_are_blocked() -> None:
@@ -286,6 +287,111 @@ def test_resolver_source_does_not_use_eval_or_exec() -> None:
 
     assert "eval(" not in source
     assert "exec(" not in source
+    assert "getattr(" not in source
+
+
+def test_structured_reference_without_path_resolves_complete_output() -> None:
+    result = _resolve(
+        {"payload": StepOutputReference("step_1")},
+        {"step_1": {"path": "README.md"}},
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {"payload": {"path": "README.md"}}
+    assert result.used_references == ["steps.step_1.output"]
+
+
+def test_structured_reference_with_path_resolves_dict_list_dict() -> None:
+    result = _resolve(
+        {"id": StepOutputReference("search", ("items", 0, "id"))},
+        {"search": {"items": [{"id": 42}]}},
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {"id": 42}
+
+
+def test_structured_reference_missing_step_means_not_executed() -> None:
+    result = _resolve(
+        {"payload": StepOutputReference("missing")},
+        {},
+    )
+
+    assert result.success is False
+    assert result.error_code == ParameterResolutionErrorCode.REFERENCED_STEP_NOT_EXECUTED.value
+    assert result.unresolved_references == ["steps.missing.output"]
+
+
+def test_structured_reference_distinguishes_none_result_from_missing_result() -> None:
+    result = _resolve(
+        {"payload": StepOutputReference("step_1")},
+        {"step_1": None},
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {"payload": None}
+
+
+def test_structured_reference_rejects_missing_key_and_bad_index() -> None:
+    missing_key = _resolve(
+        {"value": StepOutputReference("step_1", ("missing",))},
+        {"step_1": {"present": "x"}},
+    )
+    bad_index = _resolve(
+        {"value": StepOutputReference("step_1", ("items", 2))},
+        {"step_1": {"items": ["a"]}},
+    )
+
+    assert missing_key.success is False
+    assert missing_key.error_code == ParameterResolutionErrorCode.REFERENCED_FIELD_NOT_FOUND.value
+    assert bad_index.success is False
+    assert bad_index.error_code == ParameterResolutionErrorCode.INVALID_LIST_INDEX.value
+
+
+def test_structured_reference_type_mismatch_is_clear() -> None:
+    result = _resolve(
+        {"value": StepOutputReference("step_1", ("items", "bad"))},
+        {"step_1": {"items": ["a"]}},
+    )
+
+    assert result.success is False
+    assert result.error_code == ParameterResolutionErrorCode.INVALID_LIST_INDEX.value
+
+
+def test_structured_references_inside_list_and_dict_are_recursive() -> None:
+    result = _resolve(
+        {
+            "message": {
+                "recipients": [StepOutputReference("contact", ("email",))],
+                "body": StepOutputReference("summary"),
+            }
+        },
+        {
+            "contact": {"email": "example@example.com"},
+            "summary": "hello",
+        },
+    )
+
+    assert result.success is True
+    assert result.resolved_arguments == {
+        "message": {
+            "recipients": ["example@example.com"],
+            "body": "hello",
+        }
+    }
+    assert result.used_step_ids == ["contact", "summary"]
+
+
+def test_structured_reference_does_not_share_previous_result() -> None:
+    previous = {"step_1": {"items": [{"name": "alpha"}]}}
+    result = _resolve(
+        {"item": StepOutputReference("step_1", ("items", 0))},
+        previous,
+    )
+
+    assert result.success is True
+    result.resolved_arguments.as_dict()["item"]["name"] = "changed"  # type: ignore[index]
+    assert previous == {"step_1": {"items": [{"name": "alpha"}]}}
 
 
 def test_template_with_one_reference_resolves_to_text() -> None:

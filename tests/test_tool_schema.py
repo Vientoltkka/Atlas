@@ -14,6 +14,7 @@ from core.execution_plan_executor import (
 from core.execution_retry import RetryPolicy
 from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
+from core.step_output_reference import StepOutputReference
 from tools.base_tool import BaseTool
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
@@ -555,3 +556,186 @@ def test_execution_can_be_interrupted_and_resumed_after_schema_validation() -> N
     assert resumed.success is True
     assert first.contexts[0].parameters == {"query": "all"}
     assert second.contexts[0].parameters == {"content": "alpha"}
+
+
+def test_structured_reference_is_validated_against_schema_after_resolution() -> None:
+    first = CapturingTool("read.tool", "content")
+    second = CapturingTool("consume.tool")
+    registry = ToolRegistry()
+    registry.register(first)
+    registry.register(second, arguments_schema=_schema(ToolParameterSchema("text", str, required=True)))
+    plan = ExecutionPlan(
+        goal="Resolve then validate.",
+        ordered_steps=(
+            ExecutionStep("read", "Read.", "read.tool"),
+            ExecutionStep(
+                "consume",
+                "Consume.",
+                "consume.tool",
+                arguments={"text": StepOutputReference("read")},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read.tool", "consume.tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"text": "content"}
+
+
+def test_structured_reference_wrong_resolved_type_fails_schema_validation() -> None:
+    first = CapturingTool("read.tool", {"content": "not text"})
+    second = CapturingTool("consume.tool")
+    registry = ToolRegistry()
+    registry.register(first)
+    registry.register(second, arguments_schema=_schema(ToolParameterSchema("text", str, required=True)))
+    plan = ExecutionPlan(
+        goal="Resolve wrong type.",
+        ordered_steps=(
+            ExecutionStep("read", "Read.", "read.tool"),
+            ExecutionStep(
+                "consume",
+                "Consume.",
+                "consume.tool",
+                arguments={"text": StepOutputReference("read")},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read.tool", "consume.tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+    )
+
+    assert result.success is False
+    assert result.error_code == ExecutionErrorCode.TOOL_SCHEMA_VALIDATION_FAILED.value
+    assert second.contexts == []
+
+
+def test_schema_default_and_unknown_argument_policy_apply_after_structured_resolution() -> None:
+    first = CapturingTool("read.tool", "query")
+    second = CapturingTool("consume.tool")
+    registry = ToolRegistry()
+    registry.register(first)
+    registry.register(
+        second,
+        arguments_schema=_schema(
+            ToolParameterSchema("query", str, required=True),
+            ToolParameterSchema("limit", int, default=5),
+        ),
+    )
+    plan = ExecutionPlan(
+        goal="Resolve with defaults.",
+        ordered_steps=(
+            ExecutionStep("read", "Read.", "read.tool"),
+            ExecutionStep(
+                "consume",
+                "Consume.",
+                "consume.tool",
+                arguments={"query": StepOutputReference("read")},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read.tool", "consume.tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+    )
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"query": "query", "limit": 5}
+
+
+def test_retry_resolves_structured_reference_from_original_arguments_each_attempt() -> None:
+    first = CapturingTool("read.tool", {"content": "alpha"})
+    second = SequenceTool(
+        [
+            {"success": False, "error_code": "TRANSIENT_ERROR", "error": "again"},
+            "done",
+        ],
+        name="consume.tool",
+    )
+    registry = ToolRegistry()
+    registry.register(first)
+    registry.register(second, arguments_schema=_schema(ToolParameterSchema("content", str, required=True)))
+    reference = StepOutputReference("read", ("content",))
+    plan = ExecutionPlan(
+        goal="Retry structured reference.",
+        ordered_steps=(
+            ExecutionStep("read", "Read.", "read.tool"),
+            ExecutionStep(
+                "consume",
+                "Consume.",
+                "consume.tool",
+                dependencies=("read",),
+                arguments={"content": reference},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read.tool", "consume.tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = ExecutionPlanExecutor(
+        registry,
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(plan, ExecutionPlanValidator(registry).validate(plan))
+
+    assert result.success is True
+    assert second.contexts[0].parameters == {"content": "alpha"}
+    assert second.contexts[1].parameters == {"content": "alpha"}
+    assert plan.ordered_steps[1].arguments.as_dict() == {"content": reference}
+
+
+def test_parameter_resolution_observability_does_not_record_values() -> None:
+    secret = "secret-value"
+    first = CapturingTool("read.tool", {"content": secret})
+    second = CapturingTool("consume.tool")
+    registry = ToolRegistry()
+    registry.register(first)
+    registry.register(second, arguments_schema=_schema(ToolParameterSchema("content", str, required=True)))
+    plan = ExecutionPlan(
+        goal="Observe parameter resolution.",
+        ordered_steps=(
+            ExecutionStep("read", "Read.", "read.tool"),
+            ExecutionStep(
+                "consume",
+                "Consume.",
+                "consume.tool",
+                dependencies=("read",),
+                arguments={"content": StepOutputReference("read", ("content",))},
+            ),
+        ),
+        estimated_steps=2,
+        required_tools=("read.tool", "consume.tool"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = ExecutionPlanExecutor(registry).execute(
+        plan,
+        ExecutionPlanValidator(registry).validate(plan),
+    )
+
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    details = [event.details for event in result.trace.events]
+    assert "parameter_resolution_started" in actions
+    assert "parameter_resolution_succeeded" in actions
+    assert secret not in repr(details)
