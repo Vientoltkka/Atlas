@@ -47,6 +47,13 @@ from core.structured_reference_path import (
     StructuredReferencePathError,
     navigate_structured_path,
 )
+from core.subplan_executor import (
+    RecursiveSubplanError,
+    SubplanDepthExceededError,
+    SubplanExecutionError,
+    SubplanExecutor,
+    SubplanValidationError,
+)
 from tools.executor import ToolExecutor
 from tools.registry import ToolNotRegisteredError, ToolRegistry
 from tools.tool_context import ToolContext
@@ -118,6 +125,11 @@ class ExecutionErrorCode(str, Enum):
     EXECUTION_VARIABLE_BINDING_FAILED = "EXECUTION_VARIABLE_BINDING_FAILED"
     EXECUTION_CONDITION_FAILED = "EXECUTION_CONDITION_FAILED"
     INTERNAL_EXECUTOR_ERROR = "INTERNAL_EXECUTOR_ERROR"
+    SUBPLAN_VALIDATION_FAILED = "SUBPLAN_VALIDATION_FAILED"
+    SUBPLAN_DEPTH_EXCEEDED = "SUBPLAN_DEPTH_EXCEEDED"
+    SUBPLAN_RECURSIVE = "SUBPLAN_RECURSIVE"
+    SUBPLAN_FAILED = "SUBPLAN_FAILED"
+    SUBPLAN_CANCELLED = "SUBPLAN_CANCELLED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +336,8 @@ class ExecutionPlanExecutor:
         control: ExecutionControl | None = None,
         on_progress: Callable[[ExecutionProgress], None] | None = None,
         execution_context: ExecutionContext | None = None,
+        subplan_depth: int = 0,
+        plan_stack: tuple[int, ...] = (),
     ) -> PlanExecutionResult:
         """Execute a previously validated plan in dependency order."""
         return self._execute_from_checkpoint(
@@ -338,6 +352,8 @@ class ExecutionPlanExecutor:
             initial_retry_history={},
             execution_context=execution_context,
             context_restored=False,
+            subplan_depth=subplan_depth,
+            plan_stack=plan_stack,
         )
 
     def resume(
@@ -382,6 +398,8 @@ class ExecutionPlanExecutor:
             initial_retry_history=state.retry_history,
             execution_context=self._context_from_resumable_state(state),
             context_restored=True,
+            subplan_depth=0,
+            plan_stack=(),
         )
 
     def _execute_from_checkpoint(
@@ -398,10 +416,13 @@ class ExecutionPlanExecutor:
         initial_retry_history: dict[str, tuple[dict[str, object], ...]],
         execution_context: ExecutionContext | None,
         context_restored: bool,
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
     ) -> PlanExecutionResult:
         """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
         active_context = execution_context or ExecutionContext()
+        active_plan_stack = plan_stack + (id(plan),)
         trace = ExecutionTrace(execution_id=active_context.execution_id)
         if context_restored:
             self._trace_execution_context_restored(trace, active_context)
@@ -672,12 +693,15 @@ class ExecutionPlanExecutor:
                 total_steps=total_steps,
                 retry_attempts=retry_attempts,
                 retry_history=retry_history,
+                subplan_depth=subplan_depth,
+                plan_stack=active_plan_stack,
             )
             if isinstance(outcome, PlanExecutionResult):
                 return outcome
             if outcome.error_code in {
                 ExecutionErrorCode.EXECUTION_CANCELLED.value,
                 ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
+                ExecutionErrorCode.SUBPLAN_CANCELLED.value,
             }:
                 self._trace_step_event(
                     trace,
@@ -1838,7 +1862,26 @@ class ExecutionPlanExecutor:
         total_steps: int,
         retry_attempts: dict[str, int],
         retry_history: dict[str, list[dict[str, object]]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
+        if step.subplan is not None:
+            return self._execute_resolved_step_with_retries(
+                step,
+                plan_signature=plan_signature,
+                execution_context=execution_context,
+                trace=trace,
+                control=control,
+                on_progress=on_progress,
+                started=started,
+                step_index=step_index,
+                total_steps=total_steps,
+                retry_attempts=retry_attempts,
+                retry_history=retry_history,
+                subplan_depth=subplan_depth,
+                plan_stack=plan_stack,
+            )
+
         if step.tool in self._LOGICAL_TOOLS:
             self._mark_context_started(trace, execution_context, step.id, 1)
             self._mark_context_succeeded(trace, execution_context, step.id, None)
@@ -1891,6 +1934,8 @@ class ExecutionPlanExecutor:
             total_steps=total_steps,
             retry_attempts=retry_attempts,
             retry_history=retry_history,
+            subplan_depth=subplan_depth,
+            plan_stack=plan_stack,
         )
 
     def _execute_resolved_step_with_retries(
@@ -1907,6 +1952,8 @@ class ExecutionPlanExecutor:
         total_steps: int,
         retry_attempts: dict[str, int],
         retry_history: dict[str, list[dict[str, object]]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
         attempt_number = retry_attempts.get(step.id, 0) + 1
         history = retry_history.setdefault(step.id, [])
@@ -1957,6 +2004,8 @@ class ExecutionPlanExecutor:
                 trace=trace,
                 attempt_number=attempt_number,
                 history=history,
+                subplan_depth=subplan_depth,
+                plan_stack=plan_stack,
             )
 
             if outcome.success:
@@ -2023,6 +2072,10 @@ class ExecutionPlanExecutor:
                         finished_at=outcome.finished_at,
                         metadata=metadata,
                     )
+
+            if outcome.status == StepExecutionStatus.CANCELLED.value:
+                self._mark_context_cancelled(trace, execution_context, step.id)
+                return outcome
 
             self._mark_context_failed(trace, execution_context, step.id)
             history.append(
@@ -2134,7 +2187,21 @@ class ExecutionPlanExecutor:
         trace: ExecutionTrace,
         attempt_number: int,
         history: list[dict[str, object]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
     ) -> StepExecutionResult:
+        if step.subplan is not None:
+            return self._execute_subplan_step_once(
+                step,
+                execution_context=execution_context,
+                resolved_arguments=resolved_arguments,
+                trace=trace,
+                attempt_number=attempt_number,
+                history=history,
+                subplan_depth=subplan_depth,
+                plan_stack=plan_stack,
+            )
+
         assert step.tool is not None
 
         try:
@@ -2226,6 +2293,194 @@ class ExecutionPlanExecutor:
             },
         )
 
+    def _execute_subplan_step_once(
+        self,
+        step: ExecutionStep,
+        *,
+        execution_context: ExecutionContext,
+        resolved_arguments: dict[str, object],
+        trace: ExecutionTrace,
+        attempt_number: int,
+        history: list[dict[str, object]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
+    ) -> StepExecutionResult:
+        assert step.subplan is not None
+        depth = subplan_depth + 1
+        self._trace_subplan_event(
+            trace,
+            "subplan_execution_started",
+            TraceEventStatus.STARTED.value,
+            parent_execution_id=execution_context.execution_id,
+            parent_step_id=step.id,
+            child_execution_id=None,
+            depth=depth,
+            attempt_number=attempt_number,
+            child_status=None,
+            child_step_count=len(step.subplan.ordered_steps),
+        )
+        executor = SubplanExecutor(
+            validator=ExecutionPlanValidator(self._tool_registry, self._topological_sorter),
+            executor_factory=self._child_executor,
+        )
+        try:
+            result = executor.execute(
+                parent_execution_id=execution_context.execution_id,
+                parent_step_id=step.id,
+                subplan=step.subplan,
+                parent_context=execution_context,
+                resolved_inputs=resolved_arguments,
+                depth=depth,
+                plan_stack=plan_stack,
+            )
+        except SubplanDepthExceededError as error:
+            return self._failed_subplan_step_result(
+                step,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_DEPTH_EXCEEDED.value,
+                attempt_number=attempt_number,
+            )
+        except RecursiveSubplanError as error:
+            return self._failed_subplan_step_result(
+                step,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_RECURSIVE.value,
+                attempt_number=attempt_number,
+            )
+        except SubplanValidationError as error:
+            return self._failed_subplan_step_result(
+                step,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                attempt_number=attempt_number,
+            )
+        except SubplanExecutionError as error:
+            return self._failed_subplan_step_result(
+                step,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_FAILED.value,
+                attempt_number=attempt_number,
+            )
+
+        self._trace_subplan_event(
+            trace,
+            "child_execution_created",
+            TraceEventStatus.FINISHED.value,
+            parent_execution_id=result.parent_execution_id,
+            parent_step_id=result.parent_step_id,
+            child_execution_id=result.child_execution_id,
+            depth=result.depth,
+            attempt_number=attempt_number,
+            child_status=result.status,
+            child_step_count=len(step.subplan.ordered_steps),
+        )
+
+        if result.child_result.success:
+            self._trace_subplan_event(
+                trace,
+                "subplan_execution_succeeded",
+                TraceEventStatus.FINISHED.value,
+                parent_execution_id=result.parent_execution_id,
+                parent_step_id=result.parent_step_id,
+                child_execution_id=result.child_execution_id,
+                depth=result.depth,
+                attempt_number=attempt_number,
+                child_status=result.status,
+                child_step_count=len(step.subplan.ordered_steps),
+            )
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.COMPLETED.value,
+                success=True,
+                tool_name=None,
+                output=result.output,
+                error=None,
+                metadata={
+                    "attempt_number": attempt_number,
+                    "retry_history": list(history),
+                    "subplan": True,
+                    "child_execution_id": result.child_execution_id,
+                    "child_status": result.status,
+                    "depth": result.depth,
+                },
+            )
+
+        cancelled = result.child_result.plan_status == PlanExecutionStatus.CANCELLED.value
+        action = "subplan_execution_cancelled" if cancelled else "subplan_execution_failed"
+        self._trace_subplan_event(
+            trace,
+            action,
+            TraceEventStatus.FAILED.value,
+            parent_execution_id=result.parent_execution_id,
+            parent_step_id=result.parent_step_id,
+            child_execution_id=result.child_execution_id,
+            depth=result.depth,
+            attempt_number=attempt_number,
+            child_status=result.status,
+            child_step_count=len(step.subplan.ordered_steps),
+        )
+        return StepExecutionResult(
+            step_id=step.id,
+            status=(
+                StepExecutionStatus.CANCELLED.value
+                if cancelled
+                else StepExecutionStatus.FAILED.value
+            ),
+            success=False,
+            tool_name=None,
+            output=None,
+            error=result.child_result.error or result.child_result.failure_reason,
+            error_code=(
+                ExecutionErrorCode.SUBPLAN_CANCELLED.value
+                if cancelled
+                else ExecutionErrorCode.SUBPLAN_FAILED.value
+            ),
+            metadata={
+                "attempt_number": attempt_number,
+                "retry_history": list(history),
+                "subplan": True,
+                "child_execution_id": result.child_execution_id,
+                "child_status": result.status,
+                "child_error_code": result.child_result.error_code,
+                "depth": result.depth,
+            },
+        )
+
+    def _failed_subplan_step_result(
+        self,
+        step: ExecutionStep,
+        *,
+        error: str,
+        error_code: str,
+        attempt_number: int,
+    ) -> StepExecutionResult:
+        return StepExecutionResult(
+            step_id=step.id,
+            status=StepExecutionStatus.FAILED.value,
+            success=False,
+            tool_name=None,
+            output=None,
+            error=error,
+            error_code=error_code,
+            metadata={
+                "attempt_number": attempt_number,
+                "subplan": True,
+                "retry_scheduled": False,
+            },
+        )
+
+    def _child_executor(self) -> "ExecutionPlanExecutor":
+        return ExecutionPlanExecutor(
+            self._tool_registry,
+            tool_executor=self._tool_executor,
+            parameter_resolver=self._parameter_resolver,
+            condition_evaluator=self._condition_evaluator,
+            dependency_checker=self._dependency_checker,
+            topological_sorter=self._topological_sorter,
+            retry_policy=RetryPolicy(max_attempts=1),
+            execution_history=self._execution_history,
+        )
+
     def _missing_dependency(
         self,
         step: ExecutionStep,
@@ -2310,7 +2565,11 @@ class ExecutionPlanExecutor:
         current_index: int,
         trace: ExecutionTrace,
     ) -> PlanExecutionResult:
-        cancelled = outcome.error_code == ExecutionErrorCode.EXECUTION_CANCELLED.value
+        cancelled = (
+            outcome.error_code == ExecutionErrorCode.EXECUTION_CANCELLED.value
+            or outcome.error_code == ExecutionErrorCode.SUBPLAN_CANCELLED.value
+            or outcome.status == StepExecutionStatus.CANCELLED.value
+        )
         status = (
             PlanExecutionStatus.CANCELLED.value
             if cancelled
@@ -2417,6 +2676,38 @@ class ExecutionPlanExecutor:
             status=status,
             duration_ms=duration_ms,
             details=event_details,
+        )
+
+    def _trace_subplan_event(
+        self,
+        trace: ExecutionTrace,
+        action: str,
+        status: str,
+        *,
+        parent_execution_id: str,
+        parent_step_id: str,
+        child_execution_id: str | None,
+        depth: int,
+        attempt_number: int,
+        child_status: str | None,
+        child_step_count: int,
+    ) -> None:
+        details: dict[str, object] = {
+            "parent_execution_id": parent_execution_id,
+            "parent_step_id": parent_step_id,
+            "depth": depth,
+            "attempt_number": attempt_number,
+            "child_step_count": child_step_count,
+        }
+        if child_execution_id is not None:
+            details["child_execution_id"] = child_execution_id
+        if child_status is not None:
+            details["child_status"] = child_status
+        trace.add_event(
+            component="SubplanExecutor",
+            action=action,
+            status=status,
+            details=details,
         )
 
     def _trace_condition_started(

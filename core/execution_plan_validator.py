@@ -64,6 +64,7 @@ class ExecutionPlanValidator:
     """Validate execution plans without executing or modifying them."""
 
     MAX_STEP_DEPENDENCIES = 64
+    MAX_SUBPLAN_DEPTH = 8
     _VALID_PLAN_STATUSES = {"planned"}
     _VALID_STEP_STATUSES = {"pending"}
     _DANGEROUS_TOOLS = {
@@ -84,23 +85,20 @@ class ExecutionPlanValidator:
     def validate(
         self,
         plan: ExecutionPlan,
+        *,
+        depth: int = 0,
+        plan_stack: tuple[int, ...] = (),
     ) -> PlanValidationResult:
         """Return a structured validation result for an execution plan."""
         errors: list[str] = []
         warnings: list[str] = []
-
-        self._validate_goal(plan, errors)
-        self._validate_steps_presence(plan, errors)
-        self._validate_statuses(plan, errors)
-        self._validate_estimated_steps(plan, errors)
-        self._validate_step_ids(plan, errors)
-        self._validate_tools(plan, errors)
-        self._validate_arguments(plan, errors)
-        self._validate_tool_argument_schemas(plan, errors)
-        self._validate_dependencies(plan, errors)
-        self._validate_topology(plan, errors)
-        self._validate_confirmation(plan, errors, warnings)
-        self._validate_warnings(plan, warnings)
+        self._validate_plan(
+            plan,
+            errors,
+            warnings,
+            depth=depth,
+            plan_stack=plan_stack,
+        )
 
         is_valid = not errors
 
@@ -111,6 +109,50 @@ class ExecutionPlanValidator:
             requires_confirmation=plan.requires_confirmation,
             status="valid" if is_valid else "invalid",
             plan_signature=plan_signature(plan) if is_valid else None,
+        )
+
+    def _validate_plan(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+        warnings: list[str],
+        *,
+        depth: int,
+        plan_stack: tuple[int, ...],
+    ) -> None:
+        if not isinstance(plan, ExecutionPlan):
+            errors.append("Subplan must be an ExecutionPlan.")
+            return
+        if depth > self.MAX_SUBPLAN_DEPTH:
+            errors.append(
+                f"SubplanDepthExceededError: subplan depth {depth} exceeds "
+                f"maximum {self.MAX_SUBPLAN_DEPTH}."
+            )
+            return
+        plan_identity = id(plan)
+        if plan_identity in plan_stack:
+            errors.append("RecursiveSubplanError: recursive subplan reference detected.")
+            return
+        active_stack = plan_stack + (plan_identity,)
+        self._validate_goal(plan, errors)
+        self._validate_steps_presence(plan, errors)
+        self._validate_statuses(plan, errors)
+        self._validate_estimated_steps(plan, errors)
+        self._validate_step_ids(plan, errors)
+        self._validate_step_actions(plan, errors)
+        self._validate_tools(plan, errors)
+        self._validate_arguments(plan, errors)
+        self._validate_tool_argument_schemas(plan, errors)
+        self._validate_dependencies(plan, errors)
+        self._validate_topology(plan, errors)
+        self._validate_confirmation(plan, errors, warnings)
+        self._validate_warnings(plan, warnings)
+        self._validate_subplans(
+            plan,
+            errors,
+            warnings,
+            depth=depth,
+            plan_stack=active_stack,
         )
 
     def _validate_goal(
@@ -186,6 +228,8 @@ class ExecutionPlanValidator:
                 errors.append(f"Malformed required tool: {required_tool}.")
 
         for step in plan.ordered_steps:
+            if step.subplan is not None:
+                continue
             if step.tool is None:
                 continue
 
@@ -208,7 +252,7 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments must be a mapping.")
                 continue
 
-            if step.tool is None and step.arguments:
+            if step.tool is None and step.subplan is None and step.arguments:
                 errors.append(
                     f"Logical step '{step.id}' cannot declare arguments."
                 )
@@ -282,6 +326,8 @@ class ExecutionPlanValidator:
             return
 
         for step in plan.ordered_steps:
+            if step.subplan is not None:
+                continue
             if step.tool in {None, "direct_response"}:
                 continue
 
@@ -679,7 +725,9 @@ class ExecutionPlanValidator:
         dangerous_tools = tuple(
             step.tool
             for step in plan.ordered_steps
-            if step.tool is not None and step.tool in self._DANGEROUS_TOOLS
+            if step.subplan is None
+            and step.tool is not None
+            and step.tool in self._DANGEROUS_TOOLS
         )
 
         if dangerous_tools and not plan.requires_confirmation:
@@ -703,7 +751,9 @@ class ExecutionPlanValidator:
         used_tools = {
             step.tool
             for step in plan.ordered_steps
-            if step.tool is not None and step.tool != "direct_response"
+            if step.subplan is None
+            and step.tool is not None
+            and step.tool != "direct_response"
         }
 
         for required_tool in plan.required_tools:
@@ -717,6 +767,47 @@ class ExecutionPlanValidator:
         tool: str,
     ) -> bool:
         return bool(tool.strip()) and self._TOOL_NAME_PATTERN.fullmatch(tool) is not None
+
+    def _validate_step_actions(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        for step in plan.ordered_steps:
+            has_tool = step.tool is not None
+            has_subplan = step.subplan is not None
+            if has_tool == has_subplan:
+                errors.append(
+                    f"InvalidSubplanStepError: Step '{step.id}' must define "
+                    "exactly one of tool or subplan."
+                )
+            if step.subplan is not None and not isinstance(step.subplan, ExecutionPlan):
+                errors.append(
+                    f"InvalidSubplanStepError: Step '{step.id}' subplan must be "
+                    "an ExecutionPlan."
+                )
+
+    def _validate_subplans(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+        warnings: list[str],
+        *,
+        depth: int,
+        plan_stack: tuple[int, ...],
+    ) -> None:
+        for step in plan.ordered_steps:
+            if step.subplan is None:
+                continue
+            if not isinstance(step.subplan, ExecutionPlan):
+                continue
+            self._validate_plan(
+                step.subplan,
+                errors,
+                warnings,
+                depth=depth + 1,
+                plan_stack=plan_stack,
+            )
 
     def _find_cycles(
         self,
@@ -764,6 +855,7 @@ def plan_signature(
                 "id": step.id,
                 "description": step.description,
                 "tool": step.tool,
+                "subplan": _signature_safe_value(step.subplan),
                 "depends_on": list(step.depends_on),
                 "status": step.status,
                 "arguments": _signature_safe_value(
@@ -794,6 +886,35 @@ def plan_signature(
 def _signature_safe_value(
     value: Any,
 ) -> Any:
+    if isinstance(value, ExecutionPlan):
+        return {
+            "$type": "execution_plan",
+            "goal": value.goal,
+            "ordered_steps": [
+                {
+                    "id": step.id,
+                    "description": step.description,
+                    "tool": step.tool,
+                    "subplan": _signature_safe_value(step.subplan),
+                    "depends_on": list(step.depends_on),
+                    "status": step.status,
+                    "arguments": _signature_safe_value(
+                        step.arguments.as_dict()
+                        if isinstance(step.arguments, ExecutionArguments)
+                        else dict(step.arguments)
+                    ),
+                    "output_binding": _signature_safe_value(step.output_binding),
+                    "condition": _signature_safe_value(step.condition),
+                }
+                for step in value.ordered_steps
+            ],
+            "estimated_steps": value.estimated_steps,
+            "required_tools": list(value.required_tools),
+            "detected_risks": list(value.detected_risks),
+            "requires_confirmation": value.requires_confirmation,
+            "status": value.status,
+        }
+
     if isinstance(value, StepOutputReference):
         return {
             "$type": "step_output_reference",

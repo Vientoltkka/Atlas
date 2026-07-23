@@ -148,11 +148,13 @@ def _step(
     arguments: dict[str, Any] | None = None,
     output_binding: ExecutionVariableBinding | None = None,
     condition: ExecutionCondition | None = None,
+    subplan: ExecutionPlan | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
         description=f"Execute {step_id}.",
         tool=tool,
+        subplan=subplan,
         dependencies=dependencies,
         status=status,
         arguments={} if arguments is None else arguments,
@@ -358,15 +360,15 @@ def test_dependencies_are_respected() -> None:
     assert calls == ["second_tool"]
 
 
-def test_logical_step_with_none_tool_completes_without_tool_call() -> None:
+def test_direct_response_step_completes_without_tool_call() -> None:
     calls: list[str] = []
-    plan = _plan((_step("step_1", None),), required_tools=())
+    plan = _plan((_step("step_1", "direct_response"),), required_tools=())
 
     result = ExecutionPlanExecutor(_registry()).execute(plan, _validation(plan))
 
     assert result.success is True
     assert result.completed_steps == ["step_1"]
-    assert result.step_results[0].tool_name is None
+    assert result.step_results[0].tool_name == "direct_response"
     assert calls == []
 
 
@@ -2293,6 +2295,173 @@ def test_retry_preserves_and_resolves_variable_each_attempt() -> None:
         "path": "C:/AI/Atlas"
     }
     assert context.require_variable("workspace_path") == "C:/AI/Atlas"
+
+
+def test_subplan_step_executes_child_context_and_exposes_functional_output() -> None:
+    calls: list[str] = []
+    child_tool = SpyTool("child_tool", calls, output={"result": "analysis"})
+    report_tool = SpyTool("report_tool", calls, output="reported")
+    child_plan = _plan(
+        (
+            _step(
+                "child_read",
+                "child_tool",
+                arguments={"path": ExecutionVariableReference("project_path")},
+                output_binding=ExecutionVariableBinding("child_only"),
+            ),
+        ),
+        required_tools=("child_tool",),
+    )
+    parent_plan = _plan(
+        (
+            _step(
+                "analyze_project",
+                None,
+                arguments={"project_path": ExecutionVariableReference("workspace")},
+                subplan=child_plan,
+                output_binding=ExecutionVariableBinding("analysis_output"),
+            ),
+            _step(
+                "report",
+                "report_tool",
+                dependencies=("analyze_project",),
+                arguments={"content": StepOutputReference("analyze_project")},
+            ),
+        ),
+        required_tools=("report_tool",),
+    )
+    parent_context = ExecutionContext(
+        "parent-exec-1",
+        initial_variables={"workspace": "C:/AI/Atlas"},
+    )
+
+    result = ExecutionPlanExecutor(_registry(child_tool, report_tool)).execute(
+        parent_plan,
+        _validation(parent_plan),
+        execution_context=parent_context,
+    )
+
+    assert result.success is True
+    assert calls == ["child_tool", "report_tool"]
+    assert child_tool.contexts[0].parameters == {"path": "C:/AI/Atlas"}
+    assert report_tool.contexts[0].parameters == {"content": {"result": "analysis"}}
+    assert parent_context.require_result("analyze_project") == {"result": "analysis"}
+    assert parent_context.require_variable("analysis_output") == {"result": "analysis"}
+    assert parent_context.has_variable("child_only") is False
+    assert result.step_results[0].metadata["subplan"] is True
+    assert result.step_results[0].metadata["child_execution_id"] != "parent-exec-1"
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "child_execution_created" in actions
+    assert "subplan_execution_started" in actions
+    assert "subplan_execution_succeeded" in actions
+    assert "execute_subplan" not in calls
+
+
+def test_subplan_condition_false_skips_without_child_execution() -> None:
+    calls: list[str] = []
+    child_tool = SpyTool("child_tool", calls, output="child")
+    child_plan = _plan((_step("child", "child_tool"),), required_tools=("child_tool",))
+    parent_plan = _plan(
+        (
+            _step(
+                "maybe_child",
+                None,
+                subplan=child_plan,
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+        ),
+        required_tools=(),
+    )
+
+    result = ExecutionPlanExecutor(_registry(child_tool)).execute(
+        parent_plan,
+        _validation(parent_plan),
+    )
+
+    assert result.success is True
+    assert result.skipped_steps == ["maybe_child"]
+    assert calls == []
+    assert result.trace is not None
+    assert "child_execution_created" not in [event.action for event in result.trace.events]
+
+
+def test_failed_subplan_fails_parent_step_and_does_not_apply_binding() -> None:
+    calls: list[str] = []
+    child_tool = SpyTool("child_tool", calls, fail=True)
+    child_plan = _plan((_step("child", "child_tool"),), required_tools=("child_tool",))
+    parent_plan = _plan(
+        (
+            _step(
+                "run_child",
+                None,
+                subplan=child_plan,
+                output_binding=ExecutionVariableBinding("must_not_exist"),
+            ),
+        ),
+        required_tools=(),
+    )
+    context = ExecutionContext("parent-failed-subplan")
+
+    result = ExecutionPlanExecutor(_registry(child_tool)).execute(
+        parent_plan,
+        _validation(parent_plan),
+        execution_context=context,
+    )
+
+    assert result.success is False
+    assert result.failed_step == "run_child"
+    assert result.error_code == ExecutionErrorCode.SUBPLAN_FAILED.value
+    assert context.has_variable("must_not_exist") is False
+    assert context.state_for_step("run_child") == ExecutionStepState.FAILED.value
+
+
+def test_subplan_retry_creates_new_child_execution_id_and_context() -> None:
+    calls: list[str] = []
+    child_tool = SequenceTool(
+        "child_tool",
+        calls,
+        [
+            {"success": False, "error": "temporary unavailable", "error_code": "TEMPORARY_UNAVAILABLE"},
+            "done",
+        ],
+    )
+    child_plan = _plan((_step("child", "child_tool"),), required_tools=("child_tool",))
+    parent_plan = _plan((_step("run_child", None, subplan=child_plan),), required_tools=())
+
+    result = ExecutionPlanExecutor(
+        _registry(child_tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(parent_plan, _validation(parent_plan))
+
+    assert result.success is True
+    assert calls == ["child_tool", "child_tool"]
+    assert result.step_results[0].metadata["attempt_number"] == 2
+    assert result.trace is not None
+    child_ids = [
+        event.details["child_execution_id"]
+        for event in result.trace.events
+        if event.action == "child_execution_created"
+    ]
+    assert len(child_ids) == 2
+    assert child_ids[0] != child_ids[1]
+
+
+def test_subplan_without_successful_child_results_returns_none() -> None:
+    child_plan = _plan((_step("child", "direct_response"),), required_tools=())
+    parent_plan = _plan((_step("run_child", None, subplan=child_plan),), required_tools=())
+    context = ExecutionContext("parent-empty-subplan")
+
+    result = ExecutionPlanExecutor(_registry()).execute(
+        parent_plan,
+        _validation(parent_plan),
+        execution_context=context,
+    )
+
+    assert result.success is True
+    assert result.step_results[0].output is None
+    assert context.has_result("run_child") is True
+    assert context.require_result("run_child") is None
 
 
 def test_retry_policy_stops_at_max_attempts() -> None:

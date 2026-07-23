@@ -44,6 +44,7 @@ class ExecutionStep:
     id: str
     description: str
     tool: str | None
+    subplan: ExecutionPlan | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
@@ -57,6 +58,7 @@ class ExecutionStep:
         tool: str | None,
         dependencies: Sequence[str] = (),
         *,
+        subplan: ExecutionPlan | None = None,
         depends_on: Sequence[str] | None = None,
         status: str = "pending",
         arguments: ExecutionArguments | Mapping[str, Any] | None = None,
@@ -67,6 +69,7 @@ class ExecutionStep:
         object.__setattr__(self, "id", id)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "subplan", subplan)
         object.__setattr__(self, "dependencies", tuple(dependencies_source))
         object.__setattr__(self, "status", status)
         raw_arguments = ExecutionArguments.empty() if arguments is None else arguments

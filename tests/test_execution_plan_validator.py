@@ -35,11 +35,13 @@ def _step(
     arguments: dict | None = None,
     output_binding: ExecutionVariableBinding | None = None,
     condition: ExecutionCondition | None = None,
+    subplan: ExecutionPlan | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
         description=f"Step {step_id}.",
         tool=tool,
+        subplan=subplan,
         dependencies=dependencies,
         status=status,
         arguments={} if arguments is None else arguments,
@@ -658,10 +660,10 @@ def test_step_arguments_with_supported_values_are_valid() -> None:
     assert result.plan_signature
 
 
-def test_logical_step_allows_empty_arguments() -> None:
+def test_direct_response_step_allows_empty_arguments() -> None:
     plan = replace(
         _valid_plan(),
-        ordered_steps=(_step("step_1", tool=None),),
+        ordered_steps=(_step("step_1", tool="direct_response"),),
         estimated_steps=1,
         required_tools=(),
         requires_confirmation=False,
@@ -684,7 +686,7 @@ def test_logical_step_rejects_arguments() -> None:
     result = _validate(plan)
 
     assert result.is_valid is False
-    assert "Logical step 'step_1' cannot declare arguments." in result.errors
+    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
 
 
 def test_argument_keys_must_be_non_empty_strings() -> None:
@@ -1411,3 +1413,187 @@ def test_step_output_reference_path_changes_plan_signature() -> None:
     assert plan_signature(first) != plan_signature(second)
     assert plan_signature(first) != plan_signature(third)
     assert _validate(first).plan_signature == plan_signature(first)
+
+
+def test_validator_accepts_valid_subplan_step() -> None:
+    child = replace(
+        _valid_plan(),
+        goal="Child.",
+        ordered_steps=(_step("child_1", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    parent = replace(
+        _valid_plan(),
+        ordered_steps=(_step("parent_1", tool=None, subplan=child),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(parent)
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validator_rejects_tool_and_subplan_together() -> None:
+    child = replace(
+        _valid_plan(),
+        ordered_steps=(_step("child_1", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    parent = replace(
+        _valid_plan(),
+        ordered_steps=(_step("parent_1", "read_file", subplan=child),),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+    )
+
+    result = _validate(parent)
+
+    assert result.is_valid is False
+    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
+
+
+def test_validator_rejects_missing_tool_and_subplan() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(_step("parent_1", tool=None),),
+        estimated_steps=1,
+        required_tools=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
+
+
+def test_validator_rejects_non_execution_plan_subplan() -> None:
+    step = _step("parent_1", tool=None)
+    object.__setattr__(step, "subplan", {"steps": []})
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(step,),
+        estimated_steps=1,
+        required_tools=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any("subplan must be an ExecutionPlan" in error for error in result.errors)
+
+
+def test_validator_detects_direct_recursive_subplan() -> None:
+    child = replace(
+        _valid_plan(),
+        goal="Recursive.",
+        ordered_steps=(_step("child_1", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    recursive_step = _step("child_1", tool=None)
+    recursive_plan = replace(child, ordered_steps=(recursive_step,))
+    object.__setattr__(recursive_step, "subplan", recursive_plan)
+
+    result = _validate(recursive_plan)
+
+    assert result.is_valid is False
+    assert any("RecursiveSubplanError" in error for error in result.errors)
+
+
+def test_validator_detects_indirect_recursive_subplan() -> None:
+    step_a = _step("a", tool=None)
+    step_b = _step("b", tool=None)
+    plan_a = replace(
+        _valid_plan(),
+        goal="A.",
+        ordered_steps=(step_a,),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    plan_b = replace(
+        _valid_plan(),
+        goal="B.",
+        ordered_steps=(step_b,),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    object.__setattr__(step_a, "subplan", plan_b)
+    object.__setattr__(step_b, "subplan", plan_a)
+
+    result = _validate(plan_a)
+
+    assert result.is_valid is False
+    assert any("RecursiveSubplanError" in error for error in result.errors)
+
+
+def test_validator_rejects_excessive_subplan_depth() -> None:
+    plan = replace(
+        _valid_plan(),
+        goal="Leaf.",
+        ordered_steps=(_step("leaf", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    for depth in range(ExecutionPlanValidator.MAX_SUBPLAN_DEPTH + 1):
+        plan = replace(
+            _valid_plan(),
+            goal=f"Depth {depth}.",
+            ordered_steps=(_step(f"sub_{depth}", tool=None, subplan=plan),),
+            estimated_steps=1,
+            required_tools=(),
+            detected_risks=(),
+            requires_confirmation=False,
+        )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert any("SubplanDepthExceededError" in error for error in result.errors)
+
+
+def test_plan_signature_includes_subplan_structure() -> None:
+    child_a = replace(
+        _valid_plan(),
+        goal="Child.",
+        ordered_steps=(_step("child_1", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    child_b = replace(
+        child_a,
+        ordered_steps=(_step("child_renamed", "direct_response"),),
+    )
+    parent_a = replace(
+        _valid_plan(),
+        ordered_steps=(_step("parent", tool=None, subplan=child_a),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    parent_b = replace(parent_a, ordered_steps=(_step("parent", tool=None, subplan=child_b),))
+
+    assert plan_signature(parent_a) != plan_signature(parent_b)

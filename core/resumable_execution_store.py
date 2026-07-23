@@ -337,6 +337,7 @@ def _step_to_dict(
         "id": step.id,
         "description": step.description,
         "tool": step.tool,
+        "subplan": _plan_to_dict(step.subplan) if step.subplan is not None else None,
         "depends_on": list(step.depends_on),
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
@@ -382,11 +383,18 @@ def _dict_to_step(
             "EXECUTION_STATE_INVALID",
             "Execution step tool must be a string or null.",
         )
+    raw_subplan = payload.get("subplan")
+    if raw_subplan is not None and not isinstance(raw_subplan, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution step subplan must be an execution plan object or null.",
+        )
 
     return ExecutionStep(
         id=_required_str(payload, "id"),
         description=_required_str(payload, "description"),
         tool=tool,
+        subplan=_dict_to_plan(raw_subplan) if raw_subplan is not None else None,
         depends_on=_step_dependencies(payload),
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
@@ -802,7 +810,7 @@ def _validate_state_consistency(
                     "EXECUTION_STATE_INVALID",
                     "A completed step has an unsatisfied dependency.",
                 )
-        if step.tool in {None, "direct_response"}:
+        if step.subplan is None and step.tool in {None, "direct_response"}:
             continue
         if step.id not in previous_results:
             raise ResumableExecutionStoreError(

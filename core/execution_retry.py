@@ -54,6 +54,9 @@ class RetryableErrorClassifier:
         normalized_code = (error_code or "").upper()
         if normalized_code in self.retryable_error_codes:
             return RetryReason.ALLOWLISTED_ERROR_CODE.value
+        child_error_code = str(metadata.get("child_error_code") or "").upper()
+        if child_error_code in self.retryable_error_codes:
+            return RetryReason.ALLOWLISTED_ERROR_CODE.value
 
         exception_type = str(metadata.get("exception_type") or "")
         if exception_type == "TimeoutError":

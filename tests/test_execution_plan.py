@@ -125,3 +125,31 @@ def test_execution_step_arguments_are_top_level_read_only() -> None:
         pass
     else:
         raise AssertionError("step arguments must be read-only")
+
+
+def test_execution_step_accepts_subplan_without_tool() -> None:
+    child_step = ExecutionStep(
+        id="child",
+        description="Respond.",
+        tool="direct_response",
+    )
+    child_plan = ExecutionPlan(
+        goal="Child.",
+        ordered_steps=(child_step,),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    parent_step = ExecutionStep(
+        id="run_child",
+        description="Run child.",
+        tool=None,
+        subplan=child_plan,
+        arguments={"input": "value"},
+    )
+
+    assert parent_step.tool is None
+    assert parent_step.subplan is child_plan
+    assert parent_step.arguments.as_dict() == {"input": "value"}
