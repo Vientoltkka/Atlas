@@ -687,7 +687,7 @@ def test_logical_step_rejects_arguments() -> None:
     result = _validate(plan)
 
     assert result.is_valid is False
-    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
+    assert any("must define exactly one of tool, subplan, or subplan_ref" in error for error in result.errors)
 
 
 def test_argument_keys_must_be_non_empty_strings() -> None:
@@ -1461,7 +1461,7 @@ def test_validator_rejects_tool_and_subplan_together() -> None:
     result = _validate(parent)
 
     assert result.is_valid is False
-    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
+    assert any("must define exactly one of tool, subplan, or subplan_ref" in error for error in result.errors)
 
 
 def test_validator_rejects_missing_tool_and_subplan() -> None:
@@ -1476,7 +1476,7 @@ def test_validator_rejects_missing_tool_and_subplan() -> None:
     result = _validate(plan)
 
     assert result.is_valid is False
-    assert any("must define exactly one of tool or subplan" in error for error in result.errors)
+    assert any("must define exactly one of tool, subplan, or subplan_ref" in error for error in result.errors)
 
 
 def test_validator_rejects_non_execution_plan_subplan() -> None:

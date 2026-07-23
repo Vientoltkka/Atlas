@@ -300,6 +300,21 @@ class ExecutionContext:
     def variables_snapshot(self) -> dict[str, object]:
         return _copy_variable_mapping(self._variables, "variables_snapshot")
 
+    def set_metadata(
+        self,
+        key: str,
+        value: object,
+    ) -> None:
+        _validate_mapping_key(key, "metadata")
+        normalized_key = key.strip()
+        self._metadata[normalized_key] = _copy_result_value(
+            value,
+            f"metadata[{normalized_key}]",
+        )
+
+    def metadata_snapshot(self) -> dict[str, object]:
+        return _copy_result_mapping(self._metadata, "metadata_snapshot")
+
     def variable_events_snapshot(self) -> tuple[Mapping[str, object], ...]:
         return tuple(MappingProxyType(dict(event)) for event in self._variable_events)
 
@@ -394,7 +409,7 @@ class ExecutionContext:
             step_states=dict(self._step_states),
             current_step_id=self.current_step_id,
             current_attempt=self.current_attempt,
-            metadata=dict(self._metadata),
+            metadata=self.metadata_snapshot(),
         )
 
     @classmethod

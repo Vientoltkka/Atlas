@@ -38,6 +38,11 @@ from core.execution_plan_output import (
     ExecutionPlanOutput,
     InvalidExecutionPlanOutputError,
 )
+from core.execution_plan_registry import (
+    ExecutionPlanReference,
+    ExecutionPlanRegistry,
+    ExecutionPlanRegistryError,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
@@ -82,9 +87,11 @@ class ExecutionPlanValidator:
         self,
         tool_registry: ToolRegistry | None = None,
         topological_sorter: ExecutionPlanTopologicalSorter | None = None,
+        plan_registry: ExecutionPlanRegistry | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._topological_sorter = topological_sorter or ExecutionPlanTopologicalSorter()
+        self._plan_registry = plan_registry
 
     def validate(
         self,
@@ -92,6 +99,7 @@ class ExecutionPlanValidator:
         *,
         depth: int = 0,
         plan_stack: tuple[int, ...] = (),
+        reference_stack: tuple[ExecutionPlanReference, ...] = (),
     ) -> PlanValidationResult:
         """Return a structured validation result for an execution plan."""
         errors: list[str] = []
@@ -102,6 +110,7 @@ class ExecutionPlanValidator:
             warnings,
             depth=depth,
             plan_stack=plan_stack,
+            reference_stack=reference_stack,
         )
 
         is_valid = not errors
@@ -123,6 +132,7 @@ class ExecutionPlanValidator:
         *,
         depth: int,
         plan_stack: tuple[int, ...],
+        reference_stack: tuple[ExecutionPlanReference, ...],
     ) -> None:
         if not isinstance(plan, ExecutionPlan):
             errors.append("Subplan must be an ExecutionPlan.")
@@ -158,6 +168,7 @@ class ExecutionPlanValidator:
             warnings,
             depth=depth,
             plan_stack=active_stack,
+            reference_stack=reference_stack,
         )
 
     def _validate_goal(
@@ -233,7 +244,7 @@ class ExecutionPlanValidator:
                 errors.append(f"Malformed required tool: {required_tool}.")
 
         for step in plan.ordered_steps:
-            if step.subplan is not None:
+            if step.subplan is not None or getattr(step, "subplan_ref", None) is not None:
                 continue
             if step.tool is None:
                 continue
@@ -257,7 +268,12 @@ class ExecutionPlanValidator:
                 errors.append(f"Step '{step.id}' arguments must be a mapping.")
                 continue
 
-            if step.tool is None and step.subplan is None and step.arguments:
+            if (
+                step.tool is None
+                and step.subplan is None
+                and getattr(step, "subplan_ref", None) is None
+                and step.arguments
+            ):
                 errors.append(
                     f"Logical step '{step.id}' cannot declare arguments."
                 )
@@ -331,7 +347,7 @@ class ExecutionPlanValidator:
             return
 
         for step in plan.ordered_steps:
-            if step.subplan is not None:
+            if step.subplan is not None or getattr(step, "subplan_ref", None) is not None:
                 continue
             if step.tool in {None, "direct_response"}:
                 continue
@@ -731,6 +747,7 @@ class ExecutionPlanValidator:
             step.tool
             for step in plan.ordered_steps
             if step.subplan is None
+            and getattr(step, "subplan_ref", None) is None
             and step.tool is not None
             and step.tool in self._DANGEROUS_TOOLS
         )
@@ -757,6 +774,7 @@ class ExecutionPlanValidator:
             step.tool
             for step in plan.ordered_steps
             if step.subplan is None
+            and getattr(step, "subplan_ref", None) is None
             and step.tool is not None
             and step.tool != "direct_response"
         }
@@ -781,15 +799,24 @@ class ExecutionPlanValidator:
         for step in plan.ordered_steps:
             has_tool = step.tool is not None
             has_subplan = step.subplan is not None
-            if has_tool == has_subplan:
+            has_subplan_ref = getattr(step, "subplan_ref", None) is not None
+            if sum((has_tool, has_subplan, has_subplan_ref)) != 1:
                 errors.append(
                     f"InvalidSubplanStepError: Step '{step.id}' must define "
-                    "exactly one of tool or subplan."
+                    "exactly one of tool, subplan, or subplan_ref."
                 )
             if step.subplan is not None and not isinstance(step.subplan, ExecutionPlan):
                 errors.append(
                     f"InvalidSubplanStepError: Step '{step.id}' subplan must be "
                     "an ExecutionPlan."
+                )
+            if (
+                getattr(step, "subplan_ref", None) is not None
+                and not isinstance(step.subplan_ref, ExecutionPlanReference)
+            ):
+                errors.append(
+                    f"InvalidExecutionPlanReferenceError: Step '{step.id}' "
+                    "subplan_ref must be ExecutionPlanReference."
                 )
 
     def _validate_subplans(
@@ -800,18 +827,60 @@ class ExecutionPlanValidator:
         *,
         depth: int,
         plan_stack: tuple[int, ...],
+        reference_stack: tuple[ExecutionPlanReference, ...],
     ) -> None:
         for step in plan.ordered_steps:
-            if step.subplan is None:
+            if step.subplan is not None:
+                if not isinstance(step.subplan, ExecutionPlan):
+                    continue
+                self._validate_plan(
+                    step.subplan,
+                    errors,
+                    warnings,
+                    depth=depth + 1,
+                    plan_stack=plan_stack,
+                    reference_stack=reference_stack,
+                )
                 continue
-            if not isinstance(step.subplan, ExecutionPlan):
+
+            reference = getattr(step, "subplan_ref", None)
+            if reference is None:
+                continue
+            if not isinstance(reference, ExecutionPlanReference):
+                continue
+            if reference in reference_stack:
+                errors.append(
+                    "RecursiveRegisteredExecutionPlanError: recursive registered "
+                    f"plan reference detected for '{reference.plan_id}'."
+                )
+                continue
+            if self._plan_registry is None:
+                errors.append(
+                    f"ExecutionPlanRegistryUnavailableError: Step '{step.id}' "
+                    "uses subplan_ref but no ExecutionPlanRegistry was injected."
+                )
+                continue
+            try:
+                resolved_plan = self._plan_registry.resolve(reference)
+            except ExecutionPlanRegistryError as error:
+                errors.append(
+                    f"{type(error).__name__}: Step '{step.id}' cannot resolve "
+                    f"registered plan '{reference.plan_id}'."
+                )
+                continue
+            if not isinstance(resolved_plan, ExecutionPlan):
+                errors.append(
+                    f"RegisteredExecutionPlanValidationError: Step '{step.id}' "
+                    "resolved plan is not an ExecutionPlan."
+                )
                 continue
             self._validate_plan(
-                step.subplan,
+                resolved_plan,
                 errors,
                 warnings,
                 depth=depth + 1,
                 plan_stack=plan_stack,
+                reference_stack=reference_stack + (reference,),
             )
 
     def _validate_plan_output(
@@ -895,6 +964,7 @@ def plan_signature(
                 "description": step.description,
                 "tool": step.tool,
                 "subplan": _signature_safe_value(step.subplan),
+                "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
                 "depends_on": list(step.depends_on),
                 "status": step.status,
                 "arguments": _signature_safe_value(
@@ -940,6 +1010,7 @@ def _signature_safe_value(
                     "description": step.description,
                     "tool": step.tool,
                     "subplan": _signature_safe_value(step.subplan),
+                    "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
                     "depends_on": list(step.depends_on),
                     "status": step.status,
                     "arguments": _signature_safe_value(
@@ -968,6 +1039,13 @@ def _signature_safe_value(
         return {
             "$type": "execution_plan_output",
             "value": _signature_safe_value(value.as_definition()),
+        }
+
+    if isinstance(value, ExecutionPlanReference):
+        return {
+            "$type": "execution_plan_reference",
+            "plan_id": value.plan_id,
+            "version": value.version,
         }
 
     if isinstance(value, StepOutputReference):

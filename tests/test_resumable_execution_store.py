@@ -14,8 +14,9 @@ from core.execution_condition import (
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_output import ExecutionPlanOutput
+from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_executor import ResumableExecutionState
-from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
+from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
 from core.resumable_execution_store import (
     JsonResumableExecutionStore,
@@ -30,12 +31,14 @@ def _step(
     dependencies: tuple[str, ...] = (),
     condition: ExecutionCondition | None = None,
     subplan: ExecutionPlan | None = None,
+    subplan_ref: ExecutionPlanReference | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
         description=f"Execute {step_id}.",
         tool=tool,
         subplan=subplan,
+        subplan_ref=subplan_ref,
         dependencies=dependencies,
         arguments={},
         condition=condition,
@@ -571,7 +574,14 @@ def test_json_store_persists_subplan_steps_and_loads_legacy_without_subplan(tmp_
         requires_confirmation=True,
         status="planned",
     )
-    validation = ExecutionPlanValidator().validate(parent_plan)
+    validation = PlanValidationResult(
+        is_valid=True,
+        errors=[],
+        warnings=[],
+        requires_confirmation=True,
+        status="valid",
+        plan_signature=plan_signature(parent_plan),
+    )
     context = ExecutionContext("exec-store-subplan")
     context.mark_step_started("run_child", 1)
     context.mark_step_succeeded("run_child", {"child": "output"})
@@ -623,6 +633,89 @@ def test_json_store_persists_subplan_steps_and_loads_legacy_without_subplan(tmp_
 
     assert legacy_loaded is not None
     assert legacy_loaded.original_plan.ordered_steps[1].subplan is None
+
+
+def test_json_store_persists_subplan_ref_and_loads_legacy_without_reference(tmp_path) -> None:
+    parent_plan = ExecutionPlan(
+        goal="Parent registered plan.",
+        ordered_steps=(
+            _step(
+                "run_child",
+                None,
+                subplan_ref=ExecutionPlanReference("project.analysis", "1.0"),
+            ),
+            _step("write", "write_file", dependencies=("run_child",)),
+        ),
+        estimated_steps=2,
+        required_tools=("write_file",),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+        status="planned",
+    )
+    validation = PlanValidationResult(
+        is_valid=True,
+        errors=[],
+        warnings=[],
+        requires_confirmation=True,
+        status="valid",
+        plan_signature=plan_signature(parent_plan),
+    )
+    context = ExecutionContext("exec-store-subplan-ref")
+    context.mark_step_started("run_child", 1)
+    context.mark_step_succeeded("run_child", {"child": "output"})
+    state = ResumableExecutionState(
+        objective="resume registered subplan",
+        original_plan=parent_plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("run_child",),
+        pending_step_ids=("write",),
+        failed_step_ids=(),
+        interrupted_step_id="write",
+        previous_results={"run_child": {"child": "output"}},
+        resumable=True,
+        confirmation_granted=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    payload = _payload(tmp_path / "state.json")
+    loaded = store.load()
+
+    reference_payload = payload["original_plan"]["ordered_steps"][0]["subplan_ref"]
+    assert reference_payload == {
+        "$type": "execution_plan_reference",
+        "plan_id": "project.analysis",
+        "version": "1.0",
+    }
+    assert loaded is not None
+    assert loaded.original_plan.ordered_steps[0].subplan_ref == ExecutionPlanReference(
+        "project.analysis",
+        "1.0",
+    )
+
+    payload["original_plan"]["ordered_steps"][0].pop("subplan_ref")
+    legacy_plan = ExecutionPlan(
+        goal=parent_plan.goal,
+        ordered_steps=(
+            _step("run_child", None),
+            _step("write", "write_file", dependencies=("run_child",)),
+        ),
+        estimated_steps=2,
+        required_tools=("write_file",),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+        status="planned",
+    )
+    signature = plan_signature(legacy_plan)
+    payload["validated_plan_signature"] = signature
+    payload["validation_result"]["plan_signature"] = signature
+    (tmp_path / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+    legacy_loaded = store.load()
+
+    assert legacy_loaded is not None
+    assert legacy_loaded.original_plan.ordered_steps[0].subplan_ref is None
 
 
 def test_json_store_persists_execution_plan_output_definitions(tmp_path) -> None:

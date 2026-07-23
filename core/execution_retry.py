@@ -40,6 +40,7 @@ class RetryableErrorClassifier:
                 "TEMPORARY_UNAVAILABLE",
                 "TRANSIENT_ERROR",
                 "EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED",
+                "EXECUTION_PLAN_REFERENCE_NOT_FOUND",
             }
         )
     )

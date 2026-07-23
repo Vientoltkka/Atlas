@@ -15,6 +15,7 @@ from core.execution_plan_output import (
     ExecutionPlanOutput,
     copy_execution_plan_output,
 )
+from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_variable_binding import (
     ExecutionVariableBinding,
     copy_execution_variable_binding,
@@ -49,6 +50,7 @@ class ExecutionStep:
     description: str
     tool: str | None
     subplan: ExecutionPlan | None
+    subplan_ref: ExecutionPlanReference | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
@@ -63,6 +65,7 @@ class ExecutionStep:
         dependencies: Sequence[str] = (),
         *,
         subplan: ExecutionPlan | None = None,
+        subplan_ref: ExecutionPlanReference | None = None,
         depends_on: Sequence[str] | None = None,
         status: str = "pending",
         arguments: ExecutionArguments | Mapping[str, Any] | None = None,
@@ -74,6 +77,7 @@ class ExecutionStep:
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "tool", tool)
         object.__setattr__(self, "subplan", subplan)
+        object.__setattr__(self, "subplan_ref", _copy_execution_plan_reference(subplan_ref))
         object.__setattr__(self, "dependencies", tuple(dependencies_source))
         object.__setattr__(self, "status", status)
         raw_arguments = ExecutionArguments.empty() if arguments is None else arguments
@@ -97,6 +101,16 @@ class ExecutionStep:
     def depends_on(self) -> tuple[str, ...]:
         """Return explicit dependency step ids for this step."""
         return self.dependencies
+
+
+def _copy_execution_plan_reference(
+    reference: ExecutionPlanReference | None,
+) -> ExecutionPlanReference | None:
+    if reference is None:
+        return None
+    if not isinstance(reference, ExecutionPlanReference):
+        raise TypeError("subplan_ref must be ExecutionPlanReference or None.")
+    return ExecutionPlanReference(reference.plan_id, reference.version)
 
 
 @dataclass(frozen=True, slots=True)

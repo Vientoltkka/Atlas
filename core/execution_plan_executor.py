@@ -36,6 +36,11 @@ from core.execution_plan_output import (
     ExecutionPlanOutputError,
     ExecutionPlanOutputResolutionError,
 )
+from core.execution_plan_registry import (
+    ExecutionPlanReference,
+    ExecutionPlanRegistry,
+    ExecutionPlanRegistryError,
+)
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_plan_topology import (
@@ -136,6 +141,9 @@ class ExecutionErrorCode(str, Enum):
     SUBPLAN_FAILED = "SUBPLAN_FAILED"
     SUBPLAN_CANCELLED = "SUBPLAN_CANCELLED"
     EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED = "EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED"
+    EXECUTION_PLAN_REGISTRY_UNAVAILABLE = "EXECUTION_PLAN_REGISTRY_UNAVAILABLE"
+    EXECUTION_PLAN_REFERENCE_NOT_FOUND = "EXECUTION_PLAN_REFERENCE_NOT_FOUND"
+    REGISTERED_EXECUTION_PLAN_SIGNATURE_MISMATCH = "REGISTERED_EXECUTION_PLAN_SIGNATURE_MISMATCH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +329,7 @@ class ExecutionPlanExecutor:
         topological_sorter: ExecutionPlanTopologicalSorter | None = None,
         retry_policy: RetryPolicy | None = None,
         execution_history: ExecutionHistorySink | None = None,
+        plan_registry: ExecutionPlanRegistry | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor or ToolExecutor(tool_registry)
@@ -333,6 +342,7 @@ class ExecutionPlanExecutor:
         self._topological_sorter = topological_sorter or ExecutionPlanTopologicalSorter()
         self._retry_policy = retry_policy or RetryPolicy()
         self._execution_history = execution_history
+        self._plan_registry = plan_registry
 
     def execute(
         self,
@@ -974,6 +984,9 @@ class ExecutionPlanExecutor:
         schema_error = self._current_schema_validation_error(state.original_plan)
         if schema_error is not None:
             return schema_error
+        registered_signature_error = self._registered_signature_resume_error(state)
+        if registered_signature_error is not None:
+            return registered_signature_error
 
         all_step_ids = tuple(step.id for step in state.original_plan.ordered_steps)
         all_step_id_set = set(all_step_ids)
@@ -1047,7 +1060,10 @@ class ExecutionPlanExecutor:
         self,
         plan: ExecutionPlan,
     ) -> str | None:
-        validation = ExecutionPlanValidator(self._tool_registry).validate(plan)
+        validation = ExecutionPlanValidator(
+            self._tool_registry,
+            plan_registry=self._plan_registry,
+        ).validate(plan)
         schema_errors = [
             error
             for error in validation.errors
@@ -1058,6 +1074,47 @@ class ExecutionPlanExecutor:
         return "Current tool schema is incompatible with the execution plan: " + "; ".join(
             schema_errors
         )
+
+    def _registered_signature_resume_error(
+        self,
+        state: ResumableExecutionState,
+    ) -> str | None:
+        if state.execution_context_snapshot is None:
+            return None
+        signatures = state.execution_context_snapshot.metadata.get(
+            "registered_plan_signatures",
+        )
+        if not isinstance(signatures, Mapping):
+            return None
+        if self._plan_registry is None and signatures:
+            return "Cannot verify registered execution plans without ExecutionPlanRegistry."
+        for step_id, payload in signatures.items():
+            if not isinstance(step_id, str) or not isinstance(payload, Mapping):
+                continue
+            plan_id = payload.get("plan_id")
+            version = payload.get("version")
+            expected_signature = payload.get("resolved_plan_signature")
+            if not isinstance(plan_id, str) or not isinstance(expected_signature, str):
+                continue
+            if version is not None and not isinstance(version, str):
+                continue
+            assert self._plan_registry is not None
+            try:
+                current_plan = self._plan_registry.resolve(
+                    ExecutionPlanReference(plan_id, version),
+                )
+                current_signature = plan_signature(current_plan)
+            except (ExecutionPlanRegistryError, TypeError):
+                return (
+                    "Registered execution plan cannot be resolved during resume: "
+                    f"{plan_id}."
+                )
+            if current_signature != expected_signature:
+                return (
+                    "Registered execution plan signature mismatch during resume: "
+                    f"{plan_id}."
+                )
+        return None
 
     def _execution_context_plan_error(
         self,
@@ -1875,7 +1932,7 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
-        if step.subplan is not None:
+        if step.subplan is not None or step.subplan_ref is not None:
             return self._execute_resolved_step_with_retries(
                 step,
                 plan_signature=plan_signature,
@@ -2200,7 +2257,7 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult:
-        if step.subplan is not None:
+        if step.subplan is not None or step.subplan_ref is not None:
             return self._execute_subplan_step_once(
                 step,
                 execution_context=execution_context,
@@ -2315,8 +2372,17 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult:
-        assert step.subplan is not None
         depth = subplan_depth + 1
+        resolution = self._resolve_subplan_for_attempt(
+            step,
+            execution_context=execution_context,
+            trace=trace,
+            depth=depth,
+            attempt_number=attempt_number,
+        )
+        if isinstance(resolution, StepExecutionResult):
+            return resolution
+        subplan, resolved_plan_signature = resolution
         self._trace_subplan_event(
             trace,
             "subplan_execution_started",
@@ -2327,21 +2393,30 @@ class ExecutionPlanExecutor:
             depth=depth,
             attempt_number=attempt_number,
             child_status=None,
-            child_step_count=len(step.subplan.ordered_steps),
+            child_step_count=len(subplan.ordered_steps),
+            plan_reference=step.subplan_ref,
+            resolved_plan_signature=resolved_plan_signature,
         )
         executor = SubplanExecutor(
-            validator=ExecutionPlanValidator(self._tool_registry, self._topological_sorter),
+            validator=ExecutionPlanValidator(
+                self._tool_registry,
+                self._topological_sorter,
+                plan_registry=self._plan_registry,
+            ),
             executor_factory=self._child_executor,
+            plan_registry=self._plan_registry,
         )
         try:
             result = executor.execute(
                 parent_execution_id=execution_context.execution_id,
                 parent_step_id=step.id,
-                subplan=step.subplan,
+                subplan=subplan,
                 parent_context=execution_context,
                 resolved_inputs=resolved_arguments,
                 depth=depth,
                 plan_stack=plan_stack,
+                subplan_ref=step.subplan_ref,
+                resolved_plan_signature=resolved_plan_signature,
             )
         except SubplanDepthExceededError as error:
             return self._failed_subplan_step_result(
@@ -2382,7 +2457,9 @@ class ExecutionPlanExecutor:
             depth=result.depth,
             attempt_number=attempt_number,
             child_status=result.status,
-            child_step_count=len(step.subplan.ordered_steps),
+            child_step_count=len(subplan.ordered_steps),
+            plan_reference=result.plan_reference,
+            resolved_plan_signature=result.resolved_plan_signature,
         )
 
         if result.child_result.success:
@@ -2396,7 +2473,15 @@ class ExecutionPlanExecutor:
                 depth=result.depth,
                 attempt_number=attempt_number,
                 child_status=result.status,
-                child_step_count=len(step.subplan.ordered_steps),
+                child_step_count=len(subplan.ordered_steps),
+                plan_reference=result.plan_reference,
+                resolved_plan_signature=result.resolved_plan_signature,
+            )
+            self._remember_registered_plan_signature(
+                execution_context,
+                step,
+                result.plan_reference,
+                result.resolved_plan_signature,
             )
             return StepExecutionResult(
                 step_id=step.id,
@@ -2412,6 +2497,17 @@ class ExecutionPlanExecutor:
                     "child_execution_id": result.child_execution_id,
                     "child_status": result.status,
                     "depth": result.depth,
+                    "plan_id": (
+                        result.plan_reference.plan_id
+                        if result.plan_reference is not None
+                        else None
+                    ),
+                    "version": (
+                        result.plan_reference.version
+                        if result.plan_reference is not None
+                        else None
+                    ),
+                    "resolved_plan_signature": result.resolved_plan_signature,
                 },
             )
 
@@ -2427,7 +2523,9 @@ class ExecutionPlanExecutor:
             depth=result.depth,
             attempt_number=attempt_number,
             child_status=result.status,
-            child_step_count=len(step.subplan.ordered_steps),
+            child_step_count=len(subplan.ordered_steps),
+            plan_reference=result.plan_reference,
+            resolved_plan_signature=result.resolved_plan_signature,
         )
         return StepExecutionResult(
             step_id=step.id,
@@ -2453,6 +2551,17 @@ class ExecutionPlanExecutor:
                 "child_status": result.status,
                 "child_error_code": result.child_result.error_code,
                 "depth": result.depth,
+                "plan_id": (
+                    result.plan_reference.plan_id
+                    if result.plan_reference is not None
+                    else None
+                ),
+                "version": (
+                    result.plan_reference.version
+                    if result.plan_reference is not None
+                    else None
+                ),
+                "resolved_plan_signature": result.resolved_plan_signature,
             },
         )
 
@@ -2479,6 +2588,124 @@ class ExecutionPlanExecutor:
             },
         )
 
+    def _resolve_subplan_for_attempt(
+        self,
+        step: ExecutionStep,
+        *,
+        execution_context: ExecutionContext,
+        trace: ExecutionTrace,
+        depth: int,
+        attempt_number: int,
+    ) -> tuple[ExecutionPlan, str] | StepExecutionResult:
+        if step.subplan is not None:
+            signature = self._safe_plan_signature(step.subplan)
+            if signature is None:
+                return self._failed_subplan_step_result(
+                    step,
+                    error="Embedded subplan is not deterministically serializable.",
+                    error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                    attempt_number=attempt_number,
+                )
+            return step.subplan, signature
+
+        reference = step.subplan_ref
+        if reference is None:
+            return self._failed_subplan_step_result(
+                step,
+                error="Subplan step has neither subplan nor subplan_ref.",
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                attempt_number=attempt_number,
+            )
+        if self._plan_registry is None:
+            self._trace_plan_reference_resolution_failed(
+                trace,
+                reference,
+                parent_execution_id=execution_context.execution_id,
+                parent_step_id=step.id,
+                depth=depth,
+                attempt_number=attempt_number,
+                error_code=ExecutionErrorCode.EXECUTION_PLAN_REGISTRY_UNAVAILABLE.value,
+            )
+            return self._failed_subplan_step_result(
+                step,
+                error="ExecutionPlanRegistry is required to resolve subplan_ref.",
+                error_code=ExecutionErrorCode.EXECUTION_PLAN_REGISTRY_UNAVAILABLE.value,
+                attempt_number=attempt_number,
+            )
+
+        self._trace_plan_reference_resolution_started(
+            trace,
+            reference,
+            parent_execution_id=execution_context.execution_id,
+            parent_step_id=step.id,
+            depth=depth,
+            attempt_number=attempt_number,
+        )
+        try:
+            subplan = self._plan_registry.resolve(reference)
+            resolved_signature = plan_signature(subplan)
+        except ExecutionPlanRegistryError as error:
+            self._trace_plan_reference_resolution_failed(
+                trace,
+                reference,
+                parent_execution_id=execution_context.execution_id,
+                parent_step_id=step.id,
+                depth=depth,
+                attempt_number=attempt_number,
+                error_code=error.code,
+            )
+            return self._failed_subplan_step_result(
+                step,
+                error=str(error),
+                error_code=ExecutionErrorCode.EXECUTION_PLAN_REFERENCE_NOT_FOUND.value,
+                attempt_number=attempt_number,
+            )
+        except TypeError:
+            self._trace_plan_reference_resolution_failed(
+                trace,
+                reference,
+                parent_execution_id=execution_context.execution_id,
+                parent_step_id=step.id,
+                depth=depth,
+                attempt_number=attempt_number,
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+            )
+            return self._failed_subplan_step_result(
+                step,
+                error="Registered subplan is not deterministically serializable.",
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                attempt_number=attempt_number,
+            )
+        self._trace_plan_reference_resolution_succeeded(
+            trace,
+            reference,
+            parent_execution_id=execution_context.execution_id,
+            parent_step_id=step.id,
+            depth=depth,
+            attempt_number=attempt_number,
+            resolved_plan_signature=resolved_signature,
+        )
+        return subplan, resolved_signature
+
+    def _remember_registered_plan_signature(
+        self,
+        execution_context: ExecutionContext,
+        step: ExecutionStep,
+        reference: ExecutionPlanReference | None,
+        resolved_plan_signature: str | None,
+    ) -> None:
+        if reference is None or resolved_plan_signature is None:
+            return
+        snapshot = execution_context.metadata_snapshot()
+        raw_signatures = snapshot.get("registered_plan_signatures")
+        signatures = dict(raw_signatures) if isinstance(raw_signatures, Mapping) else {}
+        signatures[step.id] = {
+            "plan_id": reference.plan_id,
+            "version": reference.version,
+            "resolved_plan_signature": resolved_plan_signature,
+        }
+        execution_context.set_metadata("registered_plan_signatures", signatures)
+
     def _child_executor(self) -> "ExecutionPlanExecutor":
         return ExecutionPlanExecutor(
             self._tool_registry,
@@ -2489,6 +2716,7 @@ class ExecutionPlanExecutor:
             topological_sorter=self._topological_sorter,
             retry_policy=RetryPolicy(max_attempts=1),
             execution_history=self._execution_history,
+            plan_registry=self._plan_registry,
         )
 
     def _missing_dependency(
@@ -2823,6 +3051,8 @@ class ExecutionPlanExecutor:
         attempt_number: int,
         child_status: str | None,
         child_step_count: int,
+        plan_reference: ExecutionPlanReference | None = None,
+        resolved_plan_signature: str | None = None,
     ) -> None:
         details: dict[str, object] = {
             "parent_execution_id": parent_execution_id,
@@ -2835,8 +3065,113 @@ class ExecutionPlanExecutor:
             details["child_execution_id"] = child_execution_id
         if child_status is not None:
             details["child_status"] = child_status
+        if plan_reference is not None:
+            details["plan_id"] = plan_reference.plan_id
+            details["version"] = plan_reference.version
+        if resolved_plan_signature is not None:
+            details["resolved_plan_signature"] = resolved_plan_signature
         trace.add_event(
             component="SubplanExecutor",
+            action=action,
+            status=status,
+            details=details,
+        )
+
+    def _trace_plan_reference_resolution_started(
+        self,
+        trace: ExecutionTrace,
+        reference: ExecutionPlanReference,
+        *,
+        parent_execution_id: str,
+        parent_step_id: str,
+        depth: int,
+        attempt_number: int,
+    ) -> None:
+        self._trace_plan_reference_resolution_event(
+            trace,
+            "execution_plan_reference_resolution_started",
+            TraceEventStatus.STARTED.value,
+            reference,
+            parent_execution_id=parent_execution_id,
+            parent_step_id=parent_step_id,
+            depth=depth,
+            attempt_number=attempt_number,
+        )
+
+    def _trace_plan_reference_resolution_succeeded(
+        self,
+        trace: ExecutionTrace,
+        reference: ExecutionPlanReference,
+        *,
+        parent_execution_id: str,
+        parent_step_id: str,
+        depth: int,
+        attempt_number: int,
+        resolved_plan_signature: str,
+    ) -> None:
+        self._trace_plan_reference_resolution_event(
+            trace,
+            "execution_plan_reference_resolution_succeeded",
+            TraceEventStatus.FINISHED.value,
+            reference,
+            parent_execution_id=parent_execution_id,
+            parent_step_id=parent_step_id,
+            depth=depth,
+            attempt_number=attempt_number,
+            resolved_plan_signature=resolved_plan_signature,
+        )
+
+    def _trace_plan_reference_resolution_failed(
+        self,
+        trace: ExecutionTrace,
+        reference: ExecutionPlanReference,
+        *,
+        parent_execution_id: str,
+        parent_step_id: str,
+        depth: int,
+        attempt_number: int,
+        error_code: str,
+    ) -> None:
+        self._trace_plan_reference_resolution_event(
+            trace,
+            "execution_plan_reference_resolution_failed",
+            TraceEventStatus.FAILED.value,
+            reference,
+            parent_execution_id=parent_execution_id,
+            parent_step_id=parent_step_id,
+            depth=depth,
+            attempt_number=attempt_number,
+            error_code=error_code,
+        )
+
+    def _trace_plan_reference_resolution_event(
+        self,
+        trace: ExecutionTrace,
+        action: str,
+        status: str,
+        reference: ExecutionPlanReference,
+        *,
+        parent_execution_id: str,
+        parent_step_id: str,
+        depth: int,
+        attempt_number: int,
+        resolved_plan_signature: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        details: dict[str, object] = {
+            "parent_execution_id": parent_execution_id,
+            "parent_step_id": parent_step_id,
+            "plan_id": reference.plan_id,
+            "version": reference.version,
+            "depth": depth,
+            "attempt_number": attempt_number,
+        }
+        if resolved_plan_signature is not None:
+            details["resolved_plan_signature"] = resolved_plan_signature
+        if error_code is not None:
+            details["error_code"] = error_code
+        trace.add_event(
+            component="ExecutionPlanExecutor",
             action=action,
             status=status,
             details=details,

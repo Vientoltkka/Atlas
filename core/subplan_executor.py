@@ -8,7 +8,8 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
 from core.execution_context import ExecutionContext
-from core.execution_plan_validator import ExecutionPlanValidator
+from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRegistry
+from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
 from core.planner import ExecutionPlan
 
 if TYPE_CHECKING:
@@ -61,6 +62,8 @@ class SubplanExecutionResult:
     output: object | None
     child_result: "PlanExecutionResult"
     depth: int
+    plan_reference: ExecutionPlanReference | None = None
+    resolved_plan_signature: str | None = None
 
 
 class SubplanExecutor:
@@ -71,9 +74,11 @@ class SubplanExecutor:
         *,
         validator: ExecutionPlanValidator | None = None,
         executor_factory: Callable[[], Any],
+        plan_registry: ExecutionPlanRegistry | None = None,
     ) -> None:
-        self._validator = validator or ExecutionPlanValidator()
+        self._validator = validator or ExecutionPlanValidator(plan_registry=plan_registry)
         self._executor_factory = executor_factory
+        self._plan_registry = plan_registry
 
     def execute(
         self,
@@ -85,8 +90,11 @@ class SubplanExecutor:
         resolved_inputs: dict[str, object],
         depth: int,
         plan_stack: tuple[int, ...],
+        subplan_ref: ExecutionPlanReference | None = None,
+        resolved_plan_signature: str | None = None,
     ) -> SubplanExecutionResult:
         """Validate and execute a child plan with an isolated context."""
+        signature = resolved_plan_signature or plan_signature(subplan)
         if depth > MAX_SUBPLAN_DEPTH:
             raise SubplanDepthExceededError(
                 self._error_context(
@@ -169,6 +177,8 @@ class SubplanExecutor:
             output=deepcopy(child_result.output),
             child_result=child_result,
             depth=depth,
+            plan_reference=subplan_ref,
+            resolved_plan_signature=signature,
         )
 
     def _error_context(

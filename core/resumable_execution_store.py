@@ -21,6 +21,7 @@ from core.execution_condition import (
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_output import ExecutionPlanOutput
+from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRegistryError
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_topology import (
     ExecutionPlanTopologicalSorter,
@@ -340,6 +341,7 @@ def _step_to_dict(
         "description": step.description,
         "tool": step.tool,
         "subplan": _plan_to_dict(step.subplan) if step.subplan is not None else None,
+        "subplan_ref": _plan_reference_to_json(step.subplan_ref),
         "depends_on": list(step.depends_on),
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
@@ -392,12 +394,14 @@ def _dict_to_step(
             "EXECUTION_STATE_INVALID",
             "Execution step subplan must be an execution plan object or null.",
         )
+    raw_subplan_ref = payload.get("subplan_ref")
 
     return ExecutionStep(
         id=_required_str(payload, "id"),
         description=_required_str(payload, "description"),
         tool=tool,
         subplan=_dict_to_plan(raw_subplan) if raw_subplan is not None else None,
+        subplan_ref=_plan_reference_from_json(raw_subplan_ref),
         depends_on=_step_dependencies(payload),
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
@@ -659,6 +663,51 @@ def _output_from_json(
             "Execution plan output type is invalid.",
         )
     return ExecutionPlanOutput(_argument_from_json(payload.get("value")))
+
+
+def _plan_reference_to_json(
+    reference: ExecutionPlanReference | None,
+) -> dict[str, Any] | None:
+    if reference is None:
+        return None
+    return {
+        "$type": "execution_plan_reference",
+        "plan_id": reference.plan_id,
+        "version": reference.version,
+    }
+
+
+def _plan_reference_from_json(
+    payload: Any,
+) -> ExecutionPlanReference | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"$type", "plan_id", "version"}:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan reference must be an explicit object or null.",
+        )
+    if payload.get("$type") != "execution_plan_reference":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan reference type is invalid.",
+        )
+    version = payload.get("version")
+    if version is not None and not isinstance(version, str):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan reference version must be a string or null.",
+        )
+    try:
+        return ExecutionPlanReference(
+            plan_id=_required_str(payload, "plan_id"),
+            version=version,
+        )
+    except ExecutionPlanRegistryError as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan reference is invalid.",
+        ) from error
 
 
 def _argument_from_json(
