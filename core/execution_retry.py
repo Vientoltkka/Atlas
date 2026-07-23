@@ -39,6 +39,7 @@ class RetryableErrorClassifier:
                 "TIMEOUT",
                 "TEMPORARY_UNAVAILABLE",
                 "TRANSIENT_ERROR",
+                "EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED",
             }
         )
     )

@@ -13,6 +13,7 @@ from core.execution_condition import (
 )
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
+from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import ExecutionPlanValidator, plan_signature
 from core.planner import ExecutionPlan, ExecutionStep
@@ -622,3 +623,86 @@ def test_json_store_persists_subplan_steps_and_loads_legacy_without_subplan(tmp_
 
     assert legacy_loaded is not None
     assert legacy_loaded.original_plan.ordered_steps[1].subplan is None
+
+
+def test_json_store_persists_execution_plan_output_definitions(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Resume output plan.",
+        ordered_steps=(
+            _step("step_1", "read_file"),
+            _step("step_2", "write_file", dependencies=("step_1",)),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+        status="planned",
+        output={
+            "static": True,
+            "content": StepOutputReference("step_1", ("content",)),
+            "quality": ExecutionVariableReference("quality"),
+            "nested": [StepOutputReference("step_1")],
+        },
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    context = ExecutionContext(
+        "exec-store-output",
+        initial_variables={"quality": "ok"},
+    )
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", {"content": "alpha"})
+    state = ResumableExecutionState(
+        objective="resume output",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": {"content": "alpha"}},
+        resumable=True,
+        confirmation_granted=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+
+    store.save(state)
+    payload = _payload(tmp_path / "state.json")
+    loaded = store.load()
+
+    assert payload["original_plan"]["output"]["$type"] == "execution_plan_output"
+    assert payload["original_plan"]["output"]["value"]["content"] == {
+        "$type": "step_output_reference",
+        "path": ["content"],
+        "step_id": "step_1",
+    }
+    assert payload["original_plan"]["output"]["value"]["quality"] == {
+        "$type": "execution_variable_reference",
+        "name": "quality",
+        "path": [],
+    }
+    assert loaded is not None
+    assert isinstance(loaded.original_plan.output, ExecutionPlanOutput)
+    assert loaded.original_plan.output.as_definition()["content"] == (
+        StepOutputReference("step_1", ("content",))
+    )
+
+    payload["original_plan"].pop("output")
+    legacy_plan = ExecutionPlan(
+        goal=plan.goal,
+        ordered_steps=plan.ordered_steps,
+        estimated_steps=plan.estimated_steps,
+        required_tools=plan.required_tools,
+        detected_risks=plan.detected_risks,
+        requires_confirmation=plan.requires_confirmation,
+        status=plan.status,
+    )
+    signature = plan_signature(legacy_plan)
+    payload["validated_plan_signature"] = signature
+    payload["validation_result"]["plan_signature"] = signature
+    (tmp_path / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+    legacy_loaded = store.load()
+
+    assert legacy_loaded is not None
+    assert legacy_loaded.original_plan.output is None

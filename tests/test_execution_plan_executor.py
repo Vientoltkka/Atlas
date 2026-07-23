@@ -34,6 +34,7 @@ from core.execution_plan_executor import (
     partial_execution_state_from_dict,
     partial_execution_state_to_dict,
 )
+from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_retry import RetryPolicy, RetryableErrorClassifier
 from core.execution_trace import TraceEventStatus, TraceStatus
 from core.execution_plan_validator import (
@@ -169,6 +170,7 @@ def _plan(
     required_tools: tuple[str, ...] | None = None,
     requires_confirmation: bool = False,
     status: str = "planned",
+    output: object | None = None,
 ) -> ExecutionPlan:
     tools = required_tools
     if tools is None:
@@ -190,6 +192,7 @@ def _plan(
         ),
         requires_confirmation=requires_confirmation,
         status=status,
+        output=output,
     )
 
 
@@ -2462,6 +2465,252 @@ def test_subplan_without_successful_child_results_returns_none() -> None:
     assert result.step_results[0].output is None
     assert context.has_result("run_child") is True
     assert context.require_result("run_child") is None
+
+
+def test_plan_execution_result_uses_legacy_output_fallback_without_declaration() -> None:
+    calls: list[str] = []
+    first = SpyTool("first_tool", calls, output="first")
+    second = SpyTool("second_tool", calls, output={"final": True})
+    plan = _plan(
+        (
+            _step("first", "first_tool"),
+            _step("second", "second_tool", dependencies=("first",)),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert result.output == {"final": True}
+
+
+def test_plan_execution_result_uses_declarative_output() -> None:
+    calls: list[str] = []
+    first = SpyTool("scan_tool", calls, output={"tree": ["a.py"]})
+    second = SpyTool("analyze_tool", calls, output={"summary": "ok"})
+    plan = _plan(
+        (
+            _step("scan", "scan_tool"),
+            _step(
+                "analyze",
+                "analyze_tool",
+                dependencies=("scan",),
+                output_binding=ExecutionVariableBinding("analysis"),
+            ),
+        ),
+        output={
+            "tree": StepOutputReference("scan", ("tree",)),
+            "summary": ExecutionVariableReference("analysis", ("summary",)),
+            "status": "completed",
+        },
+    )
+
+    result = ExecutionPlanExecutor(_registry(first, second)).execute(
+        plan,
+        _validation(plan),
+    )
+
+    assert result.success is True
+    assert result.output == {
+        "tree": ["a.py"],
+        "summary": "ok",
+        "status": "completed",
+    }
+    assert result.trace is not None
+    actions = [event.action for event in result.trace.events]
+    assert "execution_plan_output_resolution_started" in actions
+    assert "execution_plan_output_resolution_succeeded" in actions
+    assert "ok" not in repr(
+        [
+            event.details
+            for event in result.trace.events
+            if event.action.startswith("execution_plan_output_resolution")
+        ]
+    )
+
+
+def test_explicit_static_none_output_overrides_fallback() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output="done")
+    plan = _plan(
+        (_step("step_1", "safe_tool"),),
+        output=ExecutionPlanOutput(None),
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert result.output is None
+    assert result.step_results[0].output == "done"
+
+
+def test_plan_output_resolution_failure_converts_successful_steps_to_failed_plan() -> None:
+    calls: list[str] = []
+    tool = SpyTool("safe_tool", calls, output={"items": []})
+    plan = _plan(
+        (_step("step_1", "safe_tool"),),
+        output=StepOutputReference("step_1", ("items", 0)),
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert result.plan_status == PlanExecutionStatus.FAILED.value
+    assert result.error_code == ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+    assert result.output is None
+    assert result.trace is not None
+    assert "execution_plan_output_resolution_failed" in [
+        event.action for event in result.trace.events
+    ]
+
+
+def test_failed_cancelled_and_blocked_plans_do_not_resolve_declarative_output() -> None:
+    calls: list[str] = []
+    failing = SpyTool("failing_tool", calls, fail=True)
+    failed_plan = _plan(
+        (_step("step_1", "failing_tool"),),
+        output=ExecutionVariableReference("missing"),
+    )
+    failed = ExecutionPlanExecutor(_registry(failing)).execute(
+        failed_plan,
+        _validation(failed_plan),
+    )
+
+    blocked_plan = _plan(
+        (
+            _step(
+                "step_1",
+                "direct_response",
+                condition=ExecutionCondition(False, ExecutionConditionOperator.TRUTHY),
+            ),
+            _step("step_2", "safe_tool", dependencies=("step_1",)),
+        ),
+        output=ExecutionVariableReference("missing"),
+    )
+    blocked = ExecutionPlanExecutor(_registry()).execute(
+        blocked_plan,
+        _manual_valid_result(),
+    )
+
+    cancelled = ExecutionPlanExecutor(_registry(failing)).execute(
+        failed_plan,
+        _validation(failed_plan),
+        control=ExecutionControl(should_cancel=lambda: True),
+    )
+
+    assert failed.error_code != ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+    assert blocked.plan_status == PlanExecutionStatus.BLOCKED.value
+    assert blocked.error_code != ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+    assert cancelled.plan_status == PlanExecutionStatus.CANCELLED.value
+    assert cancelled.error_code != ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+
+
+def test_subplan_step_uses_child_result_output_as_single_source_of_truth() -> None:
+    calls: list[str] = []
+    child_tool = SpyTool("child_tool", calls, output={"raw": "internal", "public": "declared"})
+    consumer = SpyTool("consumer_tool", calls, output="consumed")
+    child_plan = _plan(
+        (_step("child", "child_tool"),),
+        required_tools=("child_tool",),
+        output={"value": StepOutputReference("child", ("public",))},
+    )
+    parent_plan = _plan(
+        (
+            _step(
+                "run_child",
+                None,
+                subplan=child_plan,
+                output_binding=ExecutionVariableBinding("child_value"),
+            ),
+            _step(
+                "consume",
+                "consumer_tool",
+                dependencies=("run_child",),
+                arguments={"payload": StepOutputReference("run_child")},
+            ),
+        ),
+        required_tools=("consumer_tool",),
+    )
+
+    result = ExecutionPlanExecutor(_registry(child_tool, consumer)).execute(
+        parent_plan,
+        _validation(parent_plan),
+    )
+
+    assert result.success is True
+    assert result.step_results[0].output == {"value": "declared"}
+    assert consumer.contexts[0].parameters == {"payload": {"value": "declared"}}
+    assert result.step_results[0].metadata["child_status"] == PlanExecutionStatus.COMPLETED.value
+
+
+def test_subplan_output_resolution_failure_can_retry_parent_step() -> None:
+    calls: list[str] = []
+    child_tool = SequenceTool(
+        "child_tool",
+        calls,
+        [
+            {"items": []},
+            {"items": ["declared"]},
+        ],
+    )
+    child_plan = _plan(
+        (_step("child", "child_tool"),),
+        required_tools=("child_tool",),
+        output=StepOutputReference("child", ("items", 0)),
+    )
+    parent_plan = _plan((_step("run_child", None, subplan=child_plan),), required_tools=())
+
+    result = ExecutionPlanExecutor(
+        _registry(child_tool),
+        retry_policy=RetryPolicy(max_attempts=2),
+    ).execute(parent_plan, _validation(parent_plan))
+
+    assert result.success is True
+    assert result.output == "declared"
+    assert result.step_results[0].output == "declared"
+    assert calls == ["child_tool", "child_tool"]
+    assert result.step_results[0].metadata["attempt_number"] == 2
+
+
+def test_resume_resolves_declarative_output_from_restored_context() -> None:
+    calls: list[str] = []
+    second = SpyTool("second_tool", calls, output={"second": "beta"})
+    plan = _plan(
+        (
+            _step("first", "first_tool"),
+            _step("second", "second_tool", dependencies=("first",)),
+        ),
+        output={
+            "first": StepOutputReference("first", ("first",)),
+            "second": StepOutputReference("second", ("second",)),
+        },
+    )
+    validation = _validation(plan)
+    context = ExecutionContext("exec-resume-output")
+    context.mark_step_started("first", 1)
+    context.mark_step_succeeded("first", {"first": "alpha"})
+    state = ResumableExecutionState(
+        objective="resume output",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("first",),
+        pending_step_ids=("second",),
+        failed_step_ids=(),
+        interrupted_step_id="second",
+        previous_results={"first": {"first": "alpha"}},
+        resumable=True,
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    result = ExecutionPlanExecutor(_registry(second)).resume(state)
+
+    assert result.success is True
+    assert result.output == {"first": "alpha", "second": "beta"}
+    assert calls == ["second_tool"]
 
 
 def test_retry_policy_stops_at_max_attempts() -> None:

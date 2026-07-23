@@ -7,6 +7,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_condition import (
     AllOfCondition,
     AnyOfCondition,
@@ -1597,3 +1598,127 @@ def test_plan_signature_includes_subplan_structure() -> None:
     parent_b = replace(parent_a, ordered_steps=(_step("parent", tool=None, subplan=child_b),))
 
     assert plan_signature(parent_a) != plan_signature(parent_b)
+
+
+def test_validator_accepts_plan_output_references_same_plan() -> None:
+    plan = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("scan", "read_file"),
+            _step("analyze", "read_file"),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file",),
+        requires_confirmation=False,
+        output={
+            "scan": StepOutputReference("scan"),
+            "analysis": StepOutputReference("analyze", ("summary",)),
+            "static": "completed",
+        },
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_validator_rejects_plan_output_unknown_step() -> None:
+    plan = replace(
+        _valid_plan(),
+        output=StepOutputReference("missing"),
+        requires_confirmation=True,
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "ExecutionPlan output references unknown step 'missing'." in result.errors
+
+
+def test_validator_rejects_parent_output_reference_to_subplan_internal_step() -> None:
+    child = replace(
+        _valid_plan(),
+        goal="Child.",
+        ordered_steps=(_step("child_internal", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    parent = replace(
+        _valid_plan(),
+        ordered_steps=(_step("run_child", tool=None, subplan=child),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+        output=StepOutputReference("child_internal"),
+    )
+
+    result = _validate(parent)
+
+    assert result.is_valid is False
+    assert "ExecutionPlan output references unknown step 'child_internal'." in result.errors
+
+
+def test_validator_rejects_child_output_reference_to_parent_step() -> None:
+    child = replace(
+        _valid_plan(),
+        goal="Child.",
+        ordered_steps=(_step("child_internal", "direct_response"),),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+        output=StepOutputReference("prepare"),
+    )
+    parent = replace(
+        _valid_plan(),
+        ordered_steps=(
+            _step("prepare", "direct_response"),
+            _step("run_child", tool=None, dependencies=("prepare",), subplan=child),
+        ),
+        estimated_steps=2,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(parent)
+
+    assert result.is_valid is False
+    assert "ExecutionPlan output references unknown step 'prepare'." in result.errors
+
+
+def test_validator_rejects_unsafe_plan_output_path_segment() -> None:
+    try:
+        StepOutputReference("step_1", ("__class__",))
+    except ValueError as error:
+        assert "private segments" in str(error)
+    else:
+        raise AssertionError("unsafe output reference path must be rejected")
+
+
+def test_plan_signature_changes_when_output_changes() -> None:
+    base = replace(
+        _valid_plan(),
+        output={"value": StepOutputReference("step_1", ("a",))},
+    )
+    changed_reference = replace(
+        _valid_plan(),
+        output={"value": StepOutputReference("step_2", ("a",))},
+    )
+    changed_path = replace(
+        _valid_plan(),
+        output={"value": StepOutputReference("step_1", ("b",))},
+    )
+    changed_order = replace(
+        _valid_plan(),
+        output={"b": StepOutputReference("step_1"), "a": StepOutputReference("step_2")},
+    )
+
+    assert plan_signature(base) != plan_signature(changed_reference)
+    assert plan_signature(base) != plan_signature(changed_path)
+    assert plan_signature(base) != plan_signature(changed_order)
+    assert plan_signature(base) == plan_signature(replace(base, output=ExecutionPlanOutput(base.output.as_definition())))

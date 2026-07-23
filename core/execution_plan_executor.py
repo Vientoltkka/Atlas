@@ -31,6 +31,11 @@ from core.execution_condition import (
 )
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
+from core.execution_plan_output import (
+    ExecutionPlanOutput,
+    ExecutionPlanOutputError,
+    ExecutionPlanOutputResolutionError,
+)
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_plan_topology import (
@@ -130,6 +135,7 @@ class ExecutionErrorCode(str, Enum):
     SUBPLAN_RECURSIVE = "SUBPLAN_RECURSIVE"
     SUBPLAN_FAILED = "SUBPLAN_FAILED"
     SUBPLAN_CANCELLED = "SUBPLAN_CANCELLED"
+    EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED = "EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +282,7 @@ class PlanExecutionResult:
     partial_state: PartialExecutionState | None = None
     trace: ExecutionTrace | None = None
     metrics: ExecutionMetrics | None = None
+    output: object | None = None
 
     @property
     def status(self) -> str:
@@ -835,7 +842,10 @@ class ExecutionPlanExecutor:
             blocked=False,
             resumable=False,
             pending_steps=[],
-            metadata={"plan_signature": validation_result.plan_signature},
+            metadata={
+                "plan_signature": validation_result.plan_signature,
+                "execution_context_snapshot": active_context.snapshot(),
+            },
             ),
             trace=trace,
         )
@@ -2620,13 +2630,24 @@ class ExecutionPlanExecutor:
         objective: str | None = None,
         trace: ExecutionTrace | None = None,
     ) -> PlanExecutionResult:
+        active_trace = trace or result.trace or ExecutionTrace()
+        result = replace(result, trace=active_trace)
+        result = self._resolve_terminal_plan_output(plan, result, active_trace)
+        if "execution_context_snapshot" in result.metadata:
+            result = replace(
+                result,
+                metadata={
+                    key: value
+                    for key, value in result.metadata.items()
+                    if key != "execution_context_snapshot"
+                },
+            )
         partial_state = build_partial_execution_state(
             objective=objective or plan.goal,
             plan=plan,
             validation_result=validation_result,
             execution=result,
         )
-        active_trace = trace or result.trace or ExecutionTrace()
         if active_trace.finished_at is None:
             active_trace.finish(_trace_status_for_result(result))
         metrics = ExecutionMetricsCalculator().calculate(active_trace)
@@ -2639,6 +2660,117 @@ class ExecutionPlanExecutor:
         if self._execution_history is not None:
             self._execution_history.add(final_result)
         return final_result
+
+    def _resolve_terminal_plan_output(
+        self,
+        plan: ExecutionPlan,
+        result: PlanExecutionResult,
+        trace: ExecutionTrace,
+    ) -> PlanExecutionResult:
+        if not result.success or result.plan_status != PlanExecutionStatus.COMPLETED.value:
+            return result
+        started = time.perf_counter()
+        if isinstance(plan.output, ExecutionPlanOutput):
+            stats = plan.output.stats()
+            self._trace_plan_output_resolution_started(trace, result, stats)
+            context = self._context_from_success_result(plan, result)
+            try:
+                output = plan.output.resolve(context)
+            except ExecutionPlanOutputResolutionError as error:
+                self._trace_plan_output_resolution_failed(
+                    trace,
+                    result,
+                    stats,
+                    error_code=error.error_code,
+                    duration_ms=_elapsed_ms(started),
+                )
+                return replace(
+                    result,
+                    plan_status=PlanExecutionStatus.FAILED.value,
+                    success=False,
+                    completed=False,
+                    failed=True,
+                    output=None,
+                    error=str(error),
+                    failure_reason=str(error),
+                    error_code=(
+                        ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+                    ),
+                )
+            except ExecutionPlanOutputError as error:
+                self._trace_plan_output_resolution_failed(
+                    trace,
+                    result,
+                    stats,
+                    error_code=error.error_code,
+                    duration_ms=_elapsed_ms(started),
+                )
+                return replace(
+                    result,
+                    plan_status=PlanExecutionStatus.FAILED.value,
+                    success=False,
+                    completed=False,
+                    failed=True,
+                    output=None,
+                    error=str(error),
+                    failure_reason=str(error),
+                    error_code=(
+                        ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+                    ),
+                )
+            self._trace_plan_output_resolution_succeeded(
+                trace,
+                result,
+                stats,
+                duration_ms=_elapsed_ms(started),
+            )
+            return replace(result, output=output)
+
+        return replace(result, output=self._fallback_plan_output(result))
+
+    def _context_from_success_result(
+        self,
+        plan: ExecutionPlan,
+        result: PlanExecutionResult,
+    ) -> ExecutionContext:
+        execution_id = result.trace.execution_id if result.trace is not None else None
+        snapshot = result.metadata.get("execution_context_snapshot")
+        if isinstance(snapshot, ExecutionContextSnapshot):
+            return ExecutionContext.restore(snapshot)
+        context = ExecutionContext(execution_id)
+        step_by_id = {step.id: step for step in plan.ordered_steps}
+        for step_result in result.step_results:
+            if not step_result.success or step_result.status != StepExecutionStatus.COMPLETED.value:
+                if step_result.status == StepExecutionStatus.SKIPPED.value:
+                    context.mark_step_skipped(step_result.step_id)
+                continue
+            context.mark_step_started(
+                step_result.step_id,
+                int(step_result.metadata.get("attempt_number", 1)),
+            )
+            context.mark_step_succeeded(step_result.step_id, step_result.output)
+            step = step_by_id.get(step_result.step_id)
+            if step is None or step.output_binding is None:
+                continue
+            binding = step.output_binding
+            context.set_variable(
+                binding.variable_name,
+                navigate_structured_path(
+                    step_result.output,
+                    binding.path,
+                    owner_label=f"output binding for step '{step.id}'",
+                ),
+            )
+        return context
+
+    def _fallback_plan_output(
+        self,
+        result: PlanExecutionResult,
+    ) -> object | None:
+        for step_result in reversed(result.step_results):
+            if step_result.success and step_result.status == StepExecutionStatus.COMPLETED.value:
+                return deepcopy(step_result.output)
+        return None
 
     def _trace_step_event(
         self,
@@ -2709,6 +2841,71 @@ class ExecutionPlanExecutor:
             status=status,
             details=details,
         )
+
+    def _trace_plan_output_resolution_started(
+        self,
+        trace: ExecutionTrace,
+        result: PlanExecutionResult,
+        stats: Any,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_plan_output_resolution_started",
+            status=TraceEventStatus.STARTED.value,
+            details=self._plan_output_trace_details(result, stats),
+        )
+
+    def _trace_plan_output_resolution_succeeded(
+        self,
+        trace: ExecutionTrace,
+        result: PlanExecutionResult,
+        stats: Any,
+        *,
+        duration_ms: int,
+    ) -> None:
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_plan_output_resolution_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            duration_ms=duration_ms,
+            details=self._plan_output_trace_details(result, stats),
+        )
+
+    def _trace_plan_output_resolution_failed(
+        self,
+        trace: ExecutionTrace,
+        result: PlanExecutionResult,
+        stats: Any,
+        *,
+        error_code: str,
+        duration_ms: int,
+    ) -> None:
+        details = self._plan_output_trace_details(result, stats)
+        details["error_code"] = error_code
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action="execution_plan_output_resolution_failed",
+            status=TraceEventStatus.FAILED.value,
+            duration_ms=duration_ms,
+            details=details,
+        )
+
+    def _plan_output_trace_details(
+        self,
+        result: PlanExecutionResult,
+        stats: Any,
+    ) -> dict[str, object]:
+        execution_id = result.trace.execution_id if result.trace is not None else None
+        details: dict[str, object] = {
+            "output_kind": stats.output_kind,
+            "node_count": stats.node_count,
+            "reference_count": stats.reference_count,
+            "step_reference_count": stats.step_reference_count,
+            "variable_reference_count": stats.variable_reference_count,
+        }
+        if execution_id is not None:
+            details["execution_id"] = execution_id
+        return details
 
     def _trace_condition_started(
         self,
@@ -3931,7 +4128,11 @@ def _validate_partial_execution_state(
             raise ValueError("Interrupted execution requires a step or reason.")
 
     if state.overall_status == PlanExecutionStatus.FAILED.value:
-        if not state.failed_step_ids:
+        if (
+            not state.failed_step_ids
+            and state.metadata.get("error_code")
+            != ExecutionErrorCode.EXECUTION_PLAN_OUTPUT_RESOLUTION_FAILED.value
+        ):
             raise ValueError("Failed execution requires at least one failed step.")
 
     if state.overall_status == PlanExecutionStatus.BLOCKED.value:

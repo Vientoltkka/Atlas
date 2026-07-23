@@ -34,6 +34,10 @@ from core.execution_condition import (
     iter_condition_operands,
     validate_condition_tree,
 )
+from core.execution_plan_output import (
+    ExecutionPlanOutput,
+    InvalidExecutionPlanOutputError,
+)
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
@@ -145,6 +149,7 @@ class ExecutionPlanValidator:
         self._validate_tool_argument_schemas(plan, errors)
         self._validate_dependencies(plan, errors)
         self._validate_topology(plan, errors)
+        self._validate_plan_output(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
         self._validate_subplans(
@@ -809,6 +814,40 @@ class ExecutionPlanValidator:
                 plan_stack=plan_stack,
             )
 
+    def _validate_plan_output(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        if plan.output is None:
+            return
+        if not isinstance(plan.output, ExecutionPlanOutput):
+            errors.append("ExecutionPlan output must be ExecutionPlanOutput.")
+            return
+        try:
+            definition = plan.output.as_definition()
+            _signature_safe_value(definition)
+        except (InvalidExecutionPlanOutputError, TypeError) as error:
+            errors.append(f"ExecutionPlan output is invalid: {error}.")
+            return
+
+        step_ids = {step.id for step in plan.ordered_steps}
+        for reference in self._iter_structured_references(definition):
+            if isinstance(reference, StepOutputReference):
+                if reference.step_id not in step_ids:
+                    errors.append(
+                        f"ExecutionPlan output references unknown step '{reference.step_id}'."
+                    )
+                path = reference.path
+            else:
+                path = reference.path
+            for segment in path:
+                if isinstance(segment, str) and segment in BLOCKED_REFERENCE_PARTS:
+                    errors.append(
+                        "ExecutionPlan output has unsafe reference path segment: "
+                        f"{segment}."
+                    )
+
     def _find_cycles(
         self,
         dependency_graph: dict[str, tuple[str, ...]],
@@ -873,6 +912,11 @@ def plan_signature(
         "detected_risks": list(plan.detected_risks),
         "requires_confirmation": plan.requires_confirmation,
         "status": plan.status,
+        "output": _signature_safe_value(
+            plan.output.as_definition()
+            if isinstance(plan.output, ExecutionPlanOutput)
+            else None
+        ),
     }
     encoded = json.dumps(
         payload,
@@ -913,6 +957,17 @@ def _signature_safe_value(
             "detected_risks": list(value.detected_risks),
             "requires_confirmation": value.requires_confirmation,
             "status": value.status,
+            "output": _signature_safe_value(
+                value.output.as_definition()
+                if isinstance(value.output, ExecutionPlanOutput)
+                else None
+            ),
+        }
+
+    if isinstance(value, ExecutionPlanOutput):
+        return {
+            "$type": "execution_plan_output",
+            "value": _signature_safe_value(value.as_definition()),
         }
 
     if isinstance(value, StepOutputReference):

@@ -20,6 +20,7 @@ from core.execution_condition import (
 )
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
+from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_topology import (
     ExecutionPlanTopologicalSorter,
@@ -327,6 +328,7 @@ def _plan_to_dict(
         "detected_risks": list(plan.detected_risks),
         "requires_confirmation": plan.requires_confirmation,
         "status": plan.status,
+        "output": _output_to_json(plan.output),
     }
 
 
@@ -365,6 +367,7 @@ def _dict_to_plan(
         detected_risks=_str_tuple(payload, "detected_risks"),
         requires_confirmation=_required_bool(payload, "requires_confirmation"),
         status=_required_str(payload, "status"),
+        output=_output_from_json(payload.get("output")),
     )
 
 
@@ -622,6 +625,40 @@ def _argument_to_json(
         return [_argument_to_json(item) for item in value]
 
     return value
+
+
+def _output_to_json(
+    output: object,
+) -> dict[str, Any] | None:
+    if output is None:
+        return None
+    if not isinstance(output, ExecutionPlanOutput):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_SERIALIZATION_FAILED",
+            "Execution plan output must be normalized.",
+        )
+    return {
+        "$type": "execution_plan_output",
+        "value": _argument_to_json(output.as_definition()),
+    }
+
+
+def _output_from_json(
+    payload: Any,
+) -> ExecutionPlanOutput | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"$type", "value"}:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan output must be an explicit object or null.",
+        )
+    if payload.get("$type") != "execution_plan_output":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan output type is invalid.",
+        )
+    return ExecutionPlanOutput(_argument_from_json(payload.get("value")))
 
 
 def _argument_from_json(

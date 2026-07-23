@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.planner import ExecutionPlan, ExecutionStep, Planner
+from core.step_output_reference import StepOutputReference
 
 
 def test_simple_goal_generates_single_execution_plan_step() -> None:
@@ -153,3 +157,22 @@ def test_execution_step_accepts_subplan_without_tool() -> None:
     assert parent_step.tool is None
     assert parent_step.subplan is child_plan
     assert parent_step.arguments.as_dict() == {"input": "value"}
+
+
+def test_execution_plan_output_defaults_to_none_for_compatibility() -> None:
+    plan = Planner().create_execution_plan("Lee README.md")
+
+    assert plan.output is None
+
+
+def test_execution_plan_accepts_and_copies_declarative_output() -> None:
+    source = {"summary": StepOutputReference("step_1"), "items": ["a"]}
+    plan = replace(Planner().create_execution_plan("Lee README.md"), output=source)
+
+    source["items"].append("b")
+
+    assert isinstance(plan.output, ExecutionPlanOutput)
+    assert plan.output.as_definition() == {
+        "summary": StepOutputReference("step_1"),
+        "items": ["a"],
+    }

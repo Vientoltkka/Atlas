@@ -161,26 +161,15 @@ class SubplanExecutor:
             subplan_depth=depth,
             plan_stack=plan_stack,
         )
-        output = self._functional_output(child_result)
-
         return SubplanExecutionResult(
             parent_execution_id=parent_execution_id,
             parent_step_id=parent_step_id,
             child_execution_id=child_execution_id,
             status=child_result.plan_status,
-            output=deepcopy(output),
+            output=deepcopy(child_result.output),
             child_result=child_result,
             depth=depth,
         )
-
-    def _functional_output(
-        self,
-        child_result: "PlanExecutionResult",
-    ) -> object | None:
-        for step_result in reversed(child_result.step_results):
-            if step_result.success and step_result.status == "completed":
-                return deepcopy(step_result.output)
-        return None
 
     def _error_context(
         self,

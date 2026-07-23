@@ -11,6 +11,10 @@ import unicodedata
 
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
 from core.execution_condition import ExecutionConditionNode, copy_execution_condition
+from core.execution_plan_output import (
+    ExecutionPlanOutput,
+    copy_execution_plan_output,
+)
 from core.execution_variable_binding import (
     ExecutionVariableBinding,
     copy_execution_variable_binding,
@@ -106,6 +110,14 @@ class ExecutionPlan:
     detected_risks: tuple[str, ...]
     requires_confirmation: bool
     status: str = "planned"
+    output: ExecutionPlanOutput | object | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "output",
+            copy_execution_plan_output(self.output),
+        )
 
 
 class PlannerErrorCode(str, Enum):
