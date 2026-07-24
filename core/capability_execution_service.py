@@ -18,6 +18,11 @@ from core.capability_planner import CapabilityPlanningRequest
 from core.capability_resolver import CapabilityType, WorkflowCapabilitySource
 from core.execution_plan_executor import ExecutionControl
 from core.execution_plan_registry import ExecutionPlanReference
+from core.multi_capability_planner import (
+    MultiCapabilityPlanner,
+    MultiCapabilityPlanningRequest,
+    MultiCapabilityPlanningStatus,
+)
 
 
 MAX_CAPABILITY_EXECUTION_ITEMS = 64
@@ -169,10 +174,18 @@ class CapabilityExecutionService:
     def __init__(
         self,
         capability_orchestrator: CapabilityOrchestrator,
+        *,
+        multi_capability_planner: MultiCapabilityPlanner | None = None,
     ) -> None:
         if not isinstance(capability_orchestrator, CapabilityOrchestrator):
             raise CapabilityExecutionError("CapabilityExecutionService requires CapabilityOrchestrator.")
+        if multi_capability_planner is not None and not isinstance(
+            multi_capability_planner,
+            MultiCapabilityPlanner,
+        ):
+            raise CapabilityExecutionError("multi_capability_planner must be MultiCapabilityPlanner or None.")
         self._capability_orchestrator = capability_orchestrator
+        self._multi_capability_planner = multi_capability_planner
 
     def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         """Execute one explicit workflow-backed capability request."""
@@ -185,6 +198,9 @@ class CapabilityExecutionService:
             )
 
         try:
+            multi_result = self._execute_multi_capability_request(request)
+            if multi_result is not None:
+                return multi_result
             orchestration_request = CapabilityOrchestrationRequest(
                 planning_request=_build_planning_request(request),
                 policy=CapabilityOrchestrationPolicy(
@@ -202,6 +218,42 @@ class CapabilityExecutionService:
                 message="Capability execution failed before orchestration completed.",
             )
 
+        return _result_from_orchestration(orchestration_result)
+
+    def _execute_multi_capability_request(
+        self,
+        request: CapabilityExecutionRequest,
+    ) -> CapabilityExecutionResult | None:
+        if self._multi_capability_planner is None:
+            return None
+        if request.capability_id is not None or request.preferred_workflow_reference is not None:
+            return None
+        if not request.required_outputs or not request.inputs:
+            return None
+
+        planning = self._multi_capability_planner.plan(
+            MultiCapabilityPlanningRequest(
+                initial_inputs=tuple(request.inputs.keys()),
+                required_outputs=request.required_outputs,
+            )
+        )
+        if planning.status is not MultiCapabilityPlanningStatus.PLANNED or planning.plan is None:
+            return None
+        if len(planning.plan.ordered_steps) <= 1:
+            return None
+
+        orchestration_result = self._capability_orchestrator.orchestrate_plan(
+            planning.plan,
+            policy=CapabilityOrchestrationPolicy(
+                confirmation_granted=request.confirmation_granted,
+                control=request.control,
+            ),
+            inputs=request.inputs,
+            metadata={
+                "multi_capability": True,
+                "selected_capability_count": len(planning.selected_capability_ids),
+            },
+        )
         return _result_from_orchestration(orchestration_result)
 
 

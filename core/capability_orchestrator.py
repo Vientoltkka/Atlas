@@ -230,7 +230,79 @@ class CapabilityOrchestrator:
                 selected_plan=None,
             )
 
-        plan = decision.plan
+        return self._execute_selected_plan(
+            decision.plan,
+            request.policy,
+            request.inputs,
+            events,
+            planning_decision=decision,
+        )
+
+    def orchestrate_plan(
+        self,
+        plan: ExecutionPlan,
+        *,
+        policy: CapabilityOrchestrationPolicy | None = None,
+        inputs: Mapping[str, object] | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> CapabilityOrchestrationResult:
+        """Validate and execute an already-planned composed capability plan."""
+
+        events: list[CapabilityOrchestrationEvent] = []
+        _record(events, self._observer, "capability_orchestration_started", "started")
+        if not isinstance(plan, ExecutionPlan):
+            _record(events, self._observer, "capability_planning_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.INVALID_REQUEST,
+                events,
+                error_code="INVALID_PLAN",
+                error_message="plan must be ExecutionPlan.",
+            )
+        if policy is None:
+            active_policy = CapabilityOrchestrationPolicy()
+        elif isinstance(policy, CapabilityOrchestrationPolicy):
+            active_policy = policy
+        else:
+            _record(events, self._observer, "capability_planning_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.INVALID_REQUEST,
+                events,
+                error_code="INVALID_POLICY",
+                error_message="policy must be CapabilityOrchestrationPolicy or None.",
+            )
+        try:
+            safe_inputs = MappingProxyType(_safe_metadata({} if inputs is None else inputs))
+            safe_metadata = MappingProxyType(_safe_metadata({} if metadata is None else metadata))
+        except InvalidCapabilityOrchestrationRequestError as error:
+            _record(events, self._observer, "capability_planning_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.INVALID_REQUEST,
+                events,
+                error_code=type(error).__name__,
+                error_message=str(error),
+            )
+        _record(
+            events,
+            self._observer,
+            "capability_planning_succeeded",
+            "finished",
+            {
+                "planning_status": "multi_capability_planned",
+                "has_plan": True,
+                "metadata_items": len(safe_metadata),
+            },
+        )
+        return self._execute_selected_plan(plan, active_policy, safe_inputs, events)
+
+    def _execute_selected_plan(
+        self,
+        plan: ExecutionPlan,
+        policy: CapabilityOrchestrationPolicy,
+        inputs: Mapping[str, object],
+        events: list[CapabilityOrchestrationEvent],
+        *,
+        planning_decision: CapabilityPlanningDecision | None = None,
+    ) -> CapabilityOrchestrationResult:
         _record(
             events,
             self._observer,
@@ -245,7 +317,7 @@ class CapabilityOrchestrator:
             return self._complete(
                 CapabilityOrchestrationStatus.PLAN_VALIDATION_FAILED,
                 events,
-                planning_decision=decision,
+                planning_decision=planning_decision,
                 selected_plan=plan,
                 error_code=type(error).__name__,
                 error_message=str(error),
@@ -262,7 +334,7 @@ class CapabilityOrchestrator:
             return self._complete(
                 CapabilityOrchestrationStatus.PLAN_VALIDATION_FAILED,
                 events,
-                planning_decision=decision,
+                planning_decision=planning_decision,
                 selected_plan=plan,
                 validation_result=validation,
                 error_code="PLAN_VALIDATION_FAILED",
@@ -287,16 +359,16 @@ class CapabilityOrchestrator:
             execution = self._execution_plan_executor.execute(
                 plan,
                 validation,
-                confirmation_granted=request.policy.confirmation_granted,
-                control=request.policy.control,
-                execution_context=ExecutionContext(initial_variables=request.inputs),
+                confirmation_granted=policy.confirmation_granted,
+                control=policy.control,
+                execution_context=ExecutionContext(initial_variables=inputs),
             )
         except (TypeError, ValueError, RuntimeError) as error:
             _record(events, self._observer, "capability_execution_failed", "failed")
             return self._complete(
                 CapabilityOrchestrationStatus.EXECUTION_FAILED,
                 events,
-                planning_decision=decision,
+                planning_decision=planning_decision,
                 selected_plan=plan,
                 validation_result=validation,
                 error_code=type(error).__name__,
@@ -308,7 +380,7 @@ class CapabilityOrchestrator:
             return self._complete(
                 CapabilityOrchestrationStatus.CANCELLED,
                 events,
-                planning_decision=decision,
+                planning_decision=planning_decision,
                 selected_plan=plan,
                 validation_result=validation,
                 execution_result=execution,
@@ -326,7 +398,7 @@ class CapabilityOrchestrator:
             return self._complete(
                 CapabilityOrchestrationStatus.EXECUTION_FAILED,
                 events,
-                planning_decision=decision,
+                planning_decision=planning_decision,
                 selected_plan=plan,
                 validation_result=validation,
                 execution_result=execution,
@@ -344,7 +416,7 @@ class CapabilityOrchestrator:
         return self._complete(
             CapabilityOrchestrationStatus.COMPLETED,
             events,
-            planning_decision=decision,
+            planning_decision=planning_decision,
             selected_plan=plan,
             validation_result=validation,
             execution_result=execution,

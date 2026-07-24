@@ -21,6 +21,7 @@ from bootstrap.execution_plan_library import build_core_execution_plan_library
 from bootstrap.workflow_selector import build_core_workflow_selector
 from core.capability_execution_service import CapabilityExecutionService
 from core.model_manager import ModelManager
+from core.multi_capability_planner import MultiCapabilityPlanner
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
 from core.router import Router
@@ -610,30 +611,40 @@ class Bootstrap:
         tool_registry: ToolRegistry,
         execution_plan_validator: ExecutionPlanValidator,
         execution_plan_executor: ExecutionPlanExecutor,
+        execution_plan_libraries=None,
+        execution_plan_registry: ExecutionPlanRegistry | None = None,
     ) -> CapabilityExecutionService:
         """Build capability execution from explicitly shared runtime objects."""
-        core_library = build_core_execution_plan_library()
-        execution_plan_libraries = () if core_library is None else (core_library,)
-        execution_plan_registry = ExecutionPlanRegistry()
-        if core_library is not None:
-            core_library.install(execution_plan_registry)
+        if execution_plan_libraries is None:
+            core_library = build_core_execution_plan_library()
+            active_libraries = () if core_library is None else (core_library,)
+        else:
+            active_libraries = tuple(execution_plan_libraries)
+        active_registry = execution_plan_registry or ExecutionPlanRegistry()
+        if execution_plan_registry is None:
+            for library in active_libraries:
+                library.install(active_registry)
         capability_resolver = build_core_capability_resolver(
             tool_registry=tool_registry,
-            execution_plan_libraries=execution_plan_libraries,
+            execution_plan_libraries=active_libraries,
         )
         workflow_selector, _policy = build_core_workflow_selector()
         capability_planner = build_core_capability_planner(
             capability_resolver=capability_resolver,
             workflow_selector=workflow_selector,
-            execution_plan_libraries=execution_plan_libraries,
-            execution_plan_registry=execution_plan_registry,
+            execution_plan_libraries=active_libraries,
+            execution_plan_registry=active_registry,
         )
+        multi_capability_planner = MultiCapabilityPlanner(execution_plan_libraries=active_libraries)
         capability_orchestrator = build_core_capability_orchestrator(
             capability_planner,
             execution_plan_validator,
             execution_plan_executor,
         )
-        return build_capability_execution_service(capability_orchestrator)
+        return build_capability_execution_service(
+            capability_orchestrator,
+            multi_capability_planner=multi_capability_planner,
+        )
 
     @staticmethod
     def build() -> AtlasOrchestrator:
@@ -731,16 +742,24 @@ class Bootstrap:
         # Tools
         # -----------------------
 
-        execution_plan_validator = ExecutionPlanValidator(tool_registry)
+        core_execution_plan_library = build_core_execution_plan_library()
+        execution_plan_libraries = () if core_execution_plan_library is None else (core_execution_plan_library,)
+        execution_plan_registry = ExecutionPlanRegistry()
+        for library in execution_plan_libraries:
+            library.install(execution_plan_registry)
+        execution_plan_validator = ExecutionPlanValidator(tool_registry, plan_registry=execution_plan_registry)
         execution_plan_executor = ExecutionPlanExecutor(
             tool_registry,
             tool_executor,
             retry_policy=execution_retry_policy,
+            plan_registry=execution_plan_registry,
         )
         capability_execution_service = Bootstrap.build_capability_execution_service(
             tool_registry=tool_registry,
             execution_plan_validator=execution_plan_validator,
             execution_plan_executor=execution_plan_executor,
+            execution_plan_libraries=execution_plan_libraries,
+            execution_plan_registry=execution_plan_registry,
         )
         atlas_router = build_core_atlas_router(
             capability_execution_service=capability_execution_service,
