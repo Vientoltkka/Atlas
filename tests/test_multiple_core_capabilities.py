@@ -62,7 +62,7 @@ def test_workflow_provider_discovers_both_core_capabilities() -> None:
 
     assert tuple(by_id) == (PROJECT_TREE_CAPABILITY_ID, DIRECTORY_LIST_CAPABILITY_ID)
     assert by_id[PROJECT_TREE_CAPABILITY_ID].input_names == ("path",)
-    assert by_id[PROJECT_TREE_CAPABILITY_ID].output_names == ("path", "tree")
+    assert by_id[PROJECT_TREE_CAPABILITY_ID].output_names == ("path", "directory_path", "tree")
     assert by_id[DIRECTORY_LIST_CAPABILITY_ID].input_names == ("directory_path",)
     assert by_id[DIRECTORY_LIST_CAPABILITY_ID].output_names == ("directory_path", "entries")
 
@@ -137,6 +137,7 @@ def test_project_tree_e2e_still_executes_with_multiple_capabilities(
     assert result.capability_result is not None
     assert result.capability_result.output == {
         "path": str(project),
+        "directory_path": str(project),
         "tree": ("pkg\\alpha.py", "zeta.py"),
     }
 

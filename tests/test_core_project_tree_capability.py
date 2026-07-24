@@ -126,6 +126,7 @@ def test_project_tree_e2e_from_structured_input_uses_real_bootstrap(
     assert result.capability_result.selected_capability.capability_id == PROJECT_TREE_CAPABILITY_ID
     assert result.capability_result.output == {
         "path": str(tmp_path),
+        "directory_path": str(tmp_path),
         "tree": ("pkg\\alpha.py", "tests\\test_alpha.py"),
     }
     execution = result.capability_result.orchestration_result.execution_result

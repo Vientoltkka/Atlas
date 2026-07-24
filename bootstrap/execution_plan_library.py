@@ -48,6 +48,7 @@ def _project_tree_workflow() -> WorkflowDefinition:
         output=ExecutionPlanOutput(
             {
                 "path": ExecutionVariableReference("path"),
+                "directory_path": ExecutionVariableReference("path"),
                 "tree": StepOutputReference("project_tree"),
             }
         ),
