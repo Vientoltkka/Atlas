@@ -261,8 +261,48 @@ def _capability_execution_request_from_payload(
         require_unique_top_score=_bool_value(data.get("require_unique_top_score"), "require_unique_top_score", True),
         enabled_only=_bool_value(data.get("enabled_only"), "enabled_only", True),
         confirmation_granted=_bool_value(data.get("confirmation_granted"), "confirmation_granted", False),
+        inputs=_execution_inputs_from_payload(data),
         metadata=_metadata_from_payload(data.get("metadata")),
     )
+
+
+_CAPABILITY_REQUEST_FIELDS = frozenset(
+    {
+        "objective",
+        "capability_id",
+        "capability_type",
+        "categories",
+        "excluded_categories",
+        "required_tags",
+        "preferred_tags",
+        "required_inputs",
+        "required_outputs",
+        "preferred_workflow_reference",
+        "minimum_score",
+        "minimum_workflow_score",
+        "require_unique_top_score",
+        "enabled_only",
+        "confirmation_granted",
+        "metadata",
+        "inputs",
+    }
+)
+
+
+def _execution_inputs_from_payload(data: Mapping[str, object]) -> Mapping[str, object]:
+    explicit = data.get("inputs")
+    inputs: dict[str, object] = {}
+    if explicit is not None:
+        if not isinstance(explicit, Mapping):
+            raise InvalidStructuredAtlasRequestError("inputs must be a mapping.")
+        inputs.update(dict(explicit))
+    for key, value in data.items():
+        if key in _CAPABILITY_REQUEST_FIELDS:
+            continue
+        if key in inputs:
+            raise InvalidStructuredAtlasRequestError("inputs cannot duplicate direct payload fields.")
+        inputs[key] = value
+    return inputs
 
 
 def _normalize_route_type(value: AtlasRouteType | str) -> AtlasRouteType | None:

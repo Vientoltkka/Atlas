@@ -22,6 +22,8 @@ from core.execution_plan_registry import ExecutionPlanReference
 
 MAX_CAPABILITY_EXECUTION_ITEMS = 64
 MAX_CAPABILITY_EXECUTION_METADATA_ITEMS = 32
+MAX_CAPABILITY_EXECUTION_INPUT_ITEMS = 32
+MAX_CAPABILITY_EXECUTION_INPUT_DEPTH = 4
 MAX_CAPABILITY_EXECUTION_OUTPUT_DEPTH = 8
 MAX_CAPABILITY_EXECUTION_OUTPUT_NODES = 128
 SENSITIVE_KEY_PARTS = ("secret", "token", "password", "api_key", "apikey", "authorization")
@@ -84,6 +86,7 @@ class CapabilityExecutionRequest:
     enabled_only: bool = True
     confirmation_granted: bool = False
     control: ExecutionControl | None = None
+    inputs: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -105,6 +108,7 @@ class CapabilityExecutionRequest:
             raise InvalidCapabilityExecutionRequestError("confirmation_granted must be a bool.")
         if self.control is not None and not isinstance(self.control, ExecutionControl):
             raise InvalidCapabilityExecutionRequestError("control must be ExecutionControl or None.")
+        object.__setattr__(self, "inputs", MappingProxyType(_safe_inputs(self.inputs)))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
         _build_planning_request(self)
 
@@ -187,6 +191,7 @@ class CapabilityExecutionService:
                     confirmation_granted=request.confirmation_granted,
                     control=request.control,
                 ),
+                inputs=request.inputs,
                 metadata=request.metadata,
             )
             orchestration_result = self._capability_orchestrator.orchestrate(orchestration_request)
@@ -344,6 +349,57 @@ def _safe_metadata(metadata: Mapping[str, object]) -> dict[str, object]:
             raise InvalidCapabilityExecutionRequestError("metadata values must be primitive safe values.")
         safe[key] = value
     return safe
+
+
+def _safe_inputs(inputs: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(inputs, Mapping):
+        raise InvalidCapabilityExecutionRequestError("inputs must be a mapping.")
+    if len(inputs) > MAX_CAPABILITY_EXECUTION_INPUT_ITEMS:
+        raise InvalidCapabilityExecutionRequestError("inputs has too many items.")
+    return _copy_safe_input_value(inputs, field_name="inputs", depth=0, counter={"nodes": 0})
+
+
+def _copy_safe_input_value(
+    value: object,
+    *,
+    field_name: str,
+    depth: int,
+    counter: dict[str, int],
+) -> object:
+    if depth > MAX_CAPABILITY_EXECUTION_INPUT_DEPTH:
+        raise InvalidCapabilityExecutionRequestError(f"{field_name} is too deep.")
+    counter["nodes"] += 1
+    if counter["nodes"] > MAX_CAPABILITY_EXECUTION_ITEMS:
+        raise InvalidCapabilityExecutionRequestError(f"{field_name} has too many nodes.")
+    if _is_safe_primitive(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise InvalidCapabilityExecutionRequestError(f"{field_name} floats must be finite.")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > MAX_CAPABILITY_EXECUTION_INPUT_ITEMS:
+            raise InvalidCapabilityExecutionRequestError(f"{field_name} has too many items.")
+        copied: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise InvalidCapabilityExecutionRequestError(f"{field_name} keys must be non-empty strings.")
+            key = raw_key.strip()
+            if _is_sensitive_key(key):
+                raise InvalidCapabilityExecutionRequestError(f"{field_name} cannot contain sensitive keys.")
+            copied[key] = _copy_safe_input_value(
+                raw_value,
+                field_name=field_name,
+                depth=depth + 1,
+                counter=counter,
+            )
+        return copied
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_CAPABILITY_EXECUTION_INPUT_ITEMS:
+            raise InvalidCapabilityExecutionRequestError(f"{field_name} has too many items.")
+        return tuple(
+            _copy_safe_input_value(item, field_name=field_name, depth=depth + 1, counter=counter)
+            for item in value
+        )
+    raise InvalidCapabilityExecutionRequestError(f"{field_name} contains unsupported value.")
 
 
 def _safe_output(value: object) -> object:

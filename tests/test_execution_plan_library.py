@@ -459,7 +459,9 @@ def test_registry_subplans_outputs_validator_executor_and_bootstrap_remain_compa
     assert ExecutionPlanValidator(plan_registry=registry).validate(parent).is_valid is True
     assert plan_signature(parent)
     assert registry.resolve(ExecutionPlanReference("project.child")) is child
-    assert build_core_execution_plan_library() is None
+    library = build_core_execution_plan_library()
+    assert library is not None
+    assert library.contains(ExecutionPlanReference("project.tree.show", "1.0"))
 
 
 def test_library_module_does_not_use_forbidden_runtime_features() -> None:

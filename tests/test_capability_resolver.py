@@ -268,7 +268,7 @@ def test_workflow_capability_provider_reads_real_workflows_without_installing() 
     assert capability.capability_type is CapabilityType.WORKFLOW
     assert capability.categories == ("workflow", "project.analysis")
     assert capability.tags == ("inspection", "filesystem")
-    assert capability.input_names == ("read_file",)
+    assert capability.input_names == ()
     assert capability.source_reference == WorkflowCapabilitySource(
         WorkflowLibraryReference("atlas.core", "1.0"),
         workflow.reference,

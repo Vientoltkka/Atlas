@@ -20,6 +20,7 @@ from core.execution_plan_executor import (
     ExecutionPlanExecutor,
     PlanExecutionResult,
 )
+from core.execution_context import ExecutionContext
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.planner import ExecutionPlan
 
@@ -101,6 +102,7 @@ class CapabilityOrchestrationRequest:
 
     planning_request: CapabilityPlanningRequest
     policy: CapabilityOrchestrationPolicy = field(default_factory=CapabilityOrchestrationPolicy)
+    inputs: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -110,6 +112,7 @@ class CapabilityOrchestrationRequest:
             )
         if not isinstance(self.policy, CapabilityOrchestrationPolicy):
             raise InvalidCapabilityOrchestrationRequestError("policy must be CapabilityOrchestrationPolicy.")
+        object.__setattr__(self, "inputs", MappingProxyType(_safe_metadata(self.inputs)))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
 
 
@@ -286,6 +289,7 @@ class CapabilityOrchestrator:
                 validation,
                 confirmation_granted=request.policy.confirmation_granted,
                 control=request.policy.control,
+                execution_context=ExecutionContext(initial_variables=request.inputs),
             )
         except (TypeError, ValueError, RuntimeError) as error:
             _record(events, self._observer, "capability_execution_failed", "failed")

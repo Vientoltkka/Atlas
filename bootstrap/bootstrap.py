@@ -26,6 +26,7 @@ from core.planner import Planner
 from core.router import Router
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
 from core.execution_plan_executor import ExecutionPlanExecutor
+from core.execution_plan_registry import ExecutionPlanRegistry
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_retry import RetryPolicy
 from core.hybrid_execution_planner import (
@@ -613,6 +614,9 @@ class Bootstrap:
         """Build capability execution from explicitly shared runtime objects."""
         core_library = build_core_execution_plan_library()
         execution_plan_libraries = () if core_library is None else (core_library,)
+        execution_plan_registry = ExecutionPlanRegistry()
+        if core_library is not None:
+            core_library.install(execution_plan_registry)
         capability_resolver = build_core_capability_resolver(
             tool_registry=tool_registry,
             execution_plan_libraries=execution_plan_libraries,
@@ -622,6 +626,7 @@ class Bootstrap:
             capability_resolver=capability_resolver,
             workflow_selector=workflow_selector,
             execution_plan_libraries=execution_plan_libraries,
+            execution_plan_registry=execution_plan_registry,
         )
         capability_orchestrator = build_core_capability_orchestrator(
             capability_planner,

@@ -14,6 +14,7 @@ from typing import Protocol
 
 from core.execution_plan_library import ExecutionPlanLibrary
 from core.execution_plan_registry import ExecutionPlanReference
+from core.execution_variable_reference import ExecutionVariableReference
 from core.workflow_discovery import WorkflowLibraryReference
 from tools.registry import ToolRegistry
 
@@ -383,7 +384,7 @@ class WorkflowCapabilityProvider:
                         description=workflow.description,
                         categories=("workflow", workflow.category),
                         tags=workflow.tags,
-                        input_names=tuple(workflow.plan.required_tools),
+                        input_names=_workflow_input_names(workflow),
                         output_names=("result",),
                         enabled=workflow.enabled,
                         source_reference=WorkflowCapabilitySource(
@@ -394,6 +395,29 @@ class WorkflowCapabilityProvider:
                     )
                 )
         return tuple(capabilities)
+
+
+def _workflow_input_names(workflow) -> tuple[str, ...]:
+    names: list[str] = []
+    for step in workflow.plan.ordered_steps:
+        _collect_variable_reference_names(step.arguments.as_dict(), names)
+    if workflow.plan.output is not None:
+        _collect_variable_reference_names(workflow.plan.output.as_definition(), names)
+    return tuple(dict.fromkeys(names))
+
+
+def _collect_variable_reference_names(value: object, names: list[str]) -> None:
+    if isinstance(value, ExecutionVariableReference):
+        if value.name not in names:
+            names.append(value.name)
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _collect_variable_reference_names(item, names)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_variable_reference_names(item, names)
 
 
 class CapabilityResolver:
