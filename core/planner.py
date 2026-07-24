@@ -214,6 +214,7 @@ class Planner:
         multi_tool_planner: Any | None = None,
         hybrid_execution_planner: Any | None = None,
         structured_plan_provider: Any | None = None,
+        capability_planner: Any | None = None,
         plan_response_provider: Callable[[str, tuple[ToolDescriptor, ...]], str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -228,6 +229,7 @@ class Planner:
         self._multi_tool_planner = multi_tool_planner
         self._hybrid_execution_planner = hybrid_execution_planner
         self._structured_plan_provider = structured_plan_provider
+        self._capability_planner = capability_planner
         self._plan_response_provider = plan_response_provider
 
     def create_plan(self, prompt: str) -> Plan:
@@ -293,6 +295,15 @@ class Planner:
             return result.plan
 
         return self._direct_response_plan(prompt.strip(), result.error_code or "Planning failed.")
+
+    def plan_with_capabilities(
+        self,
+        request: Any,
+    ) -> Any:
+        """Ask the optional capability planner for a workflow decision."""
+        if self._capability_planner is None:
+            raise RuntimeError("Capability planner is not configured.")
+        return self._capability_planner.plan(request)
 
     def generate_execution_plan(
         self,
