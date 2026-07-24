@@ -9,7 +9,9 @@ from agents.coding_agent import CodingAgent
 from agents.project_agent import ProjectAgent
 from agents.registry import AgentRegistry
 
+from bootstrap.atlas_request_classifier import build_core_atlas_request_classifier
 from bootstrap.atlas_request_adapter import build_core_atlas_request_adapter
+from bootstrap.atlas_request_normalizer import build_core_atlas_request_normalizer
 from bootstrap.atlas_router import build_core_atlas_router
 from bootstrap.capability_execution_service import build_capability_execution_service
 from bootstrap.capability_orchestrator import build_core_capability_orchestrator
@@ -739,6 +741,8 @@ class Bootstrap:
             capability_execution_service=capability_execution_service,
         )
         atlas_request_adapter = build_core_atlas_request_adapter()
+        atlas_request_classifier = build_core_atlas_request_classifier()
+        atlas_request_normalizer = build_core_atlas_request_normalizer()
 
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
@@ -933,6 +937,8 @@ class Bootstrap:
             capability_execution_service=capability_execution_service,
             atlas_router=atlas_router,
             atlas_request_adapter=atlas_request_adapter,
+            atlas_request_classifier=atlas_request_classifier,
+            atlas_request_normalizer=atlas_request_normalizer,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

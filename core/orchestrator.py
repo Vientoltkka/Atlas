@@ -23,6 +23,17 @@ from core.atlas_request_adapter import (
     adaptation_failure_to_routing_result,
     unavailable_atlas_request_adapter_result,
 )
+from core.atlas_request_classifier import (
+    AtlasRequestClassifier,
+    StructuredInput,
+    classification_failure_to_routing_result,
+    unavailable_atlas_request_classifier_result,
+)
+from core.atlas_request_normalizer import (
+    AtlasRequestNormalizer,
+    normalization_failure_to_routing_result,
+    unavailable_atlas_request_normalizer_result,
+)
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
@@ -74,6 +85,8 @@ class AtlasOrchestrator:
         capability_execution_service: CapabilityExecutionService | None = None,
         atlas_router: AtlasRouter | None = None,
         atlas_request_adapter: AtlasRequestAdapter | None = None,
+        atlas_request_classifier: AtlasRequestClassifier | None = None,
+        atlas_request_normalizer: AtlasRequestNormalizer | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -100,6 +113,8 @@ class AtlasOrchestrator:
         self._capability_execution_service = capability_execution_service
         self._atlas_router = atlas_router
         self._atlas_request_adapter = atlas_request_adapter
+        self._atlas_request_classifier = atlas_request_classifier
+        self._atlas_request_normalizer = atlas_request_normalizer
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -298,6 +313,27 @@ class AtlasOrchestrator:
             return adaptation_failure_to_routing_result(adaptation)
 
         return self.route_request(adaptation.routing_request)
+
+    def route_structured_input(
+        self,
+        structured_input: StructuredInput,
+    ) -> AtlasRoutingResult:
+        """Normalize, classify, adapt, and route one already-structured input."""
+        if self._atlas_request_normalizer is None:
+            return unavailable_atlas_request_normalizer_result(structured_input)
+
+        normalization = self._atlas_request_normalizer.normalize(structured_input)
+        if not normalization.normalized or normalization.structured_input is None:
+            return normalization_failure_to_routing_result(normalization)
+
+        if self._atlas_request_classifier is None:
+            return unavailable_atlas_request_classifier_result(normalization.structured_input)
+
+        classification = self._atlas_request_classifier.classify(normalization.structured_input)
+        if not classification.classified or classification.structured_request is None:
+            return classification_failure_to_routing_result(classification)
+
+        return self.route_structured_request(classification.structured_request)
 
     def confirm_structured_execution(
         self,
