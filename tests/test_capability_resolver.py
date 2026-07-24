@@ -421,7 +421,8 @@ def test_absence_of_execution_io_llm_and_real_registry_library_compatibility() -
 
     result = resolver.resolve(CapabilityResolutionRequest(enabled_only=False))
 
-    assert result.matched_capabilities == 2
+    assert result.matched_capabilities == 1
+    assert result.candidates[0].capability.capability_type is CapabilityType.WORKFLOW
     assert tool.calls == 0
     assert Bootstrap.build_tool_registry().list()
     assert ToolCapabilityProvider(Bootstrap.build_tool_registry()).list_capabilities()

@@ -12,7 +12,7 @@ import re
 from types import MappingProxyType, ModuleType
 from typing import Protocol
 
-from core.execution_plan_library import ExecutionPlanLibrary
+from core.execution_plan_library import ExecutionPlanLibrary, WorkflowDefinition
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_variable_reference import ExecutionVariableReference
 from core.workflow_discovery import WorkflowLibraryReference
@@ -375,7 +375,12 @@ class WorkflowCapabilityProvider:
     def list_capabilities(self) -> tuple[CapabilityDefinition, ...]:
         capabilities: list[CapabilityDefinition] = []
         for library in sorted(self._libraries, key=lambda item: (item.library_id, item.version or "")):
-            for workflow in library.workflows():
+            workflows = library.workflows()
+            if not isinstance(workflows, tuple):
+                raise CapabilityProviderError("ExecutionPlanLibrary.workflows must return a tuple.")
+            for workflow in workflows:
+                if not isinstance(workflow, WorkflowDefinition):
+                    raise CapabilityProviderError("ExecutionPlanLibrary returned an invalid workflow.")
                 capabilities.append(
                     CapabilityDefinition(
                         capability_id=_workflow_capability_id(library.library_id, workflow.reference),
@@ -567,7 +572,12 @@ def _first_rejection(
 
 def _deduplicate_candidates(candidates: list[CapabilityCandidate]) -> tuple[CapabilityCandidate, ...]:
     grouped: dict[tuple[object, ...], CapabilityCandidate] = {}
+    capability_ids: dict[str, CapabilityCandidate] = {}
     for candidate in candidates:
+        previous_id = capability_ids.get(candidate.capability.capability_id)
+        if previous_id is not None and _identity_key(previous_id.capability) != _identity_key(candidate.capability):
+            raise ConflictingCapabilityDefinitionError("duplicate capability id has conflicting sources.")
+        capability_ids[candidate.capability.capability_id] = candidate
         key = _identity_key(candidate.capability)
         previous = grouped.get(key)
         if previous is None:

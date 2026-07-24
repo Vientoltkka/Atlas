@@ -22,9 +22,9 @@ def build_core_capability_resolver(
 ) -> CapabilityResolver:
     """Build a pure resolver from explicitly provided capability sources."""
     capability_providers: list[CapabilityProvider] = list(providers)
-    if tool_registry is not None:
-        capability_providers.append(ToolCapabilityProvider(tool_registry))
     libraries = tuple(execution_plan_libraries)
     if libraries:
         capability_providers.append(WorkflowCapabilityProvider(libraries))
+    elif tool_registry is not None:
+        capability_providers.append(ToolCapabilityProvider(tool_registry))
     return CapabilityResolver(tuple(capability_providers))
