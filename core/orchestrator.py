@@ -17,6 +17,12 @@ from core.atlas_router import (
     AtlasRoutingStatus,
     AtlasRouteType,
 )
+from core.atlas_request_adapter import (
+    AtlasRequestAdapter,
+    StructuredAtlasRequest,
+    adaptation_failure_to_routing_result,
+    unavailable_atlas_request_adapter_result,
+)
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
@@ -67,6 +73,7 @@ class AtlasOrchestrator:
         structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
         capability_execution_service: CapabilityExecutionService | None = None,
         atlas_router: AtlasRouter | None = None,
+        atlas_request_adapter: AtlasRequestAdapter | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -92,6 +99,7 @@ class AtlasOrchestrator:
         self._structured_execution_coordinator = structured_execution_coordinator
         self._capability_execution_service = capability_execution_service
         self._atlas_router = atlas_router
+        self._atlas_request_adapter = atlas_request_adapter
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -276,6 +284,20 @@ class AtlasOrchestrator:
             )
 
         return self._atlas_router.route(request)
+
+    def route_structured_request(
+        self,
+        request: StructuredAtlasRequest,
+    ) -> AtlasRoutingResult:
+        """Adapt and route one already-classified structured request."""
+        if self._atlas_request_adapter is None:
+            return unavailable_atlas_request_adapter_result(request)
+
+        adaptation = self._atlas_request_adapter.adapt(request)
+        if not adaptation.adapted or adaptation.routing_request is None:
+            return adaptation_failure_to_routing_result(adaptation)
+
+        return self.route_request(adaptation.routing_request)
 
     def confirm_structured_execution(
         self,
