@@ -390,7 +390,7 @@ class WorkflowCapabilityProvider:
                         categories=("workflow", workflow.category),
                         tags=workflow.tags,
                         input_names=_workflow_input_names(workflow),
-                        output_names=("result",),
+                        output_names=_workflow_output_names(workflow),
                         enabled=workflow.enabled,
                         source_reference=WorkflowCapabilitySource(
                             WorkflowLibraryReference(library.library_id, library.version),
@@ -423,6 +423,19 @@ def _collect_variable_reference_names(value: object, names: list[str]) -> None:
     if isinstance(value, (list, tuple)):
         for item in value:
             _collect_variable_reference_names(item, names)
+
+
+def _workflow_output_names(workflow: WorkflowDefinition) -> tuple[str, ...]:
+    if workflow.plan.output is None:
+        return ()
+    definition = workflow.plan.output.as_definition()
+    if not isinstance(definition, Mapping):
+        return ("result",)
+    return tuple(
+        key
+        for key in definition
+        if isinstance(key, str) and _IDENTIFIER_PATTERN.fullmatch(key) is not None
+    )
 
 
 class CapabilityResolver:

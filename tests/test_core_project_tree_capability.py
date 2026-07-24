@@ -21,6 +21,7 @@ from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRe
 
 PROJECT_TREE_CAPABILITY_ID = "workflow.atlas.core.project.tree.show.1.0"
 PROJECT_TREE_REFERENCE = ExecutionPlanReference("project.tree.show", "1.0")
+DIRECTORY_LIST_REFERENCE = ExecutionPlanReference("directory.list", "1.0")
 
 
 @pytest.fixture(scope="module")
@@ -47,7 +48,7 @@ def test_core_project_tree_workflow_installs_in_registry() -> None:
     assert library is not None
     install = library.install(registry)
 
-    assert install.installed == (PROJECT_TREE_REFERENCE,)
+    assert install.installed == (PROJECT_TREE_REFERENCE, DIRECTORY_LIST_REFERENCE)
     assert registry.contains(PROJECT_TREE_REFERENCE.plan_id, version=PROJECT_TREE_REFERENCE.version)
 
 
@@ -67,7 +68,7 @@ def test_workflow_provider_resolver_and_planner_select_project_tree(bootstrapped
             capability_types=(CapabilityType.WORKFLOW,),
             required_capability_ids=(PROJECT_TREE_CAPABILITY_ID,),
             required_inputs=("path",),
-            desired_outputs=("result",),
+            desired_outputs=("tree",),
         )
     )
     decision = planner.plan(
@@ -111,7 +112,7 @@ def test_project_tree_e2e_from_structured_input_uses_real_bootstrap(
                     "version": PROJECT_TREE_REFERENCE.version,
                 },
                 "required_inputs": ["path"],
-                "required_outputs": ["result"],
+                "required_outputs": ["tree"],
                 "path": str(tmp_path),
             },
             request_id="project-tree-e2e",
