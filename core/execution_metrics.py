@@ -30,6 +30,11 @@ class ExecutionMetrics:
     events_by_component: tuple[tuple[str, int], ...]
     events_by_action: tuple[tuple[str, int], ...]
     blocked_steps: int = 0
+    branches_evaluated: int = 0
+    then_branches_selected: int = 0
+    else_branches_selected: int = 0
+    branches_skipped: int = 0
+    branches_failed: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -49,6 +54,11 @@ class ExecutionMetricsCalculator:
             "execution_step_skipped",
         )
         blocked_steps = _count_action(events, "execution_step_blocked")
+        branches_evaluated = _count_action(events, "execution_branch_evaluation_started")
+        then_branches_selected = _count_action(events, "execution_branch_then_selected")
+        else_branches_selected = _count_action(events, "execution_branch_else_selected")
+        branches_skipped = _count_action(events, "execution_branch_skipped")
+        branches_failed = _count_action(events, "execution_branch_failed")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -92,6 +102,11 @@ class ExecutionMetricsCalculator:
             actions=tuple(sorted({event.action for event in events})),
             events_by_component=_count_by(event.component for event in events),
             events_by_action=_count_by(event.action for event in events),
+            branches_evaluated=branches_evaluated,
+            then_branches_selected=then_branches_selected,
+            else_branches_selected=else_branches_selected,
+            branches_skipped=branches_skipped,
+            branches_failed=branches_failed,
         )
 
 

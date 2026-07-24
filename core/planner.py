@@ -51,6 +51,7 @@ class ExecutionStep:
     tool: str | None
     subplan: ExecutionPlan | None
     subplan_ref: ExecutionPlanReference | None
+    branch: ExecutionBranch | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
@@ -66,6 +67,7 @@ class ExecutionStep:
         *,
         subplan: ExecutionPlan | None = None,
         subplan_ref: ExecutionPlanReference | None = None,
+        branch: ExecutionBranch | None = None,
         depends_on: Sequence[str] | None = None,
         status: str = "pending",
         arguments: ExecutionArguments | Mapping[str, Any] | None = None,
@@ -78,6 +80,7 @@ class ExecutionStep:
         object.__setattr__(self, "tool", tool)
         object.__setattr__(self, "subplan", subplan)
         object.__setattr__(self, "subplan_ref", _copy_execution_plan_reference(subplan_ref))
+        object.__setattr__(self, "branch", copy_execution_branch(branch))
         object.__setattr__(self, "dependencies", tuple(dependencies_source))
         object.__setattr__(self, "status", status)
         raw_arguments = ExecutionArguments.empty() if arguments is None else arguments
@@ -132,6 +135,36 @@ class ExecutionPlan:
             "output",
             copy_execution_plan_output(self.output),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionBranch:
+    """Explicit IF/ELSE branch embedded in an execution step."""
+
+    condition: ExecutionConditionNode
+    then_plan: ExecutionPlan
+    else_plan: ExecutionPlan | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "condition", copy_execution_condition(self.condition))
+        if not isinstance(self.then_plan, ExecutionPlan):
+            raise TypeError("then_plan must be ExecutionPlan.")
+        if self.else_plan is not None and not isinstance(self.else_plan, ExecutionPlan):
+            raise TypeError("else_plan must be ExecutionPlan or None.")
+
+
+def copy_execution_branch(
+    branch: ExecutionBranch | None,
+) -> ExecutionBranch | None:
+    if branch is None:
+        return None
+    if not isinstance(branch, ExecutionBranch):
+        raise TypeError("branch must be ExecutionBranch or None.")
+    return ExecutionBranch(
+        condition=branch.condition,
+        then_plan=branch.then_plan,
+        else_plan=branch.else_plan,
+    )
 
 
 class PlannerErrorCode(str, Enum):

@@ -111,6 +111,11 @@ class ExecutionObservabilityDeserializer:
         failed_steps = _non_negative_int(payload, "failed_steps")
         skipped_steps = _optional_non_negative_int(payload, "skipped_steps", default=0)
         blocked_steps = _optional_non_negative_int(payload, "blocked_steps", default=0)
+        branches_evaluated = _optional_non_negative_int(payload, "branches_evaluated", default=0)
+        then_branches_selected = _optional_non_negative_int(payload, "then_branches_selected", default=0)
+        else_branches_selected = _optional_non_negative_int(payload, "else_branches_selected", default=0)
+        branches_skipped = _optional_non_negative_int(payload, "branches_skipped", default=0)
+        branches_failed = _optional_non_negative_int(payload, "branches_failed", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -146,6 +151,11 @@ class ExecutionObservabilityDeserializer:
             actions=_str_tuple(payload, "actions"),
             events_by_component=_count_pairs(payload, "events_by_component", "component"),
             events_by_action=_count_pairs(payload, "events_by_action", "action"),
+            branches_evaluated=branches_evaluated,
+            then_branches_selected=then_branches_selected,
+            else_branches_selected=else_branches_selected,
+            branches_skipped=branches_skipped,
+            branches_failed=branches_failed,
         )
 
     def trace_from_json(

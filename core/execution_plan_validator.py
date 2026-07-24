@@ -52,7 +52,7 @@ from core.parameter_resolver import (
     REFERENCE_PATTERN,
     TEMPLATE_REFERENCE_PATTERN,
 )
-from core.planner import ExecutionPlan
+from core.planner import ExecutionBranch, ExecutionPlan
 from core.step_output_reference import StepOutputReference
 from tools.registry import ToolRegistry
 
@@ -244,7 +244,11 @@ class ExecutionPlanValidator:
                 errors.append(f"Malformed required tool: {required_tool}.")
 
         for step in plan.ordered_steps:
-            if step.subplan is not None or getattr(step, "subplan_ref", None) is not None:
+            if (
+                step.subplan is not None
+                or getattr(step, "subplan_ref", None) is not None
+                or getattr(step, "branch", None) is not None
+            ):
                 continue
             if step.tool is None:
                 continue
@@ -272,6 +276,7 @@ class ExecutionPlanValidator:
                 step.tool is None
                 and step.subplan is None
                 and getattr(step, "subplan_ref", None) is None
+                and getattr(step, "branch", None) is None
                 and step.arguments
             ):
                 errors.append(
@@ -303,9 +308,30 @@ class ExecutionPlanValidator:
 
             self._validate_output_binding(step, errors)
             self._validate_condition(step, errors)
+            self._validate_branch_condition(step, errors)
 
         self._validate_static_references(plan, errors)
         self._validate_structured_references(plan, errors)
+
+    def _validate_branch_condition(
+        self,
+        step: Any,
+        errors: list[str],
+    ) -> None:
+        branch = getattr(step, "branch", None)
+        if branch is None:
+            return
+        if not isinstance(branch, ExecutionBranch):
+            errors.append(f"Step '{step.id}' branch must be ExecutionBranch.")
+            return
+        if not is_execution_condition_node(branch.condition):
+            errors.append(f"Step '{step.id}' branch condition must be a valid condition node.")
+            return
+        try:
+            validate_condition_tree(branch.condition, step_id=step.id)
+            _signature_safe_value(branch.condition)
+        except (InvalidConditionTreeError, TypeError) as error:
+            errors.append(f"Step '{step.id}' branch condition is invalid: {error}.")
 
     def _validate_condition(
         self,
@@ -347,7 +373,11 @@ class ExecutionPlanValidator:
             return
 
         for step in plan.ordered_steps:
-            if step.subplan is not None or getattr(step, "subplan_ref", None) is not None:
+            if (
+                step.subplan is not None
+                or getattr(step, "subplan_ref", None) is not None
+                or getattr(step, "branch", None) is not None
+            ):
                 continue
             if step.tool in {None, "direct_response"}:
                 continue
@@ -407,6 +437,9 @@ class ExecutionPlanValidator:
             reference_sources: list[Any] = [step.arguments]
             if getattr(step, "condition", None) is not None:
                 reference_sources.extend(iter_condition_operands(step.condition))
+            branch = getattr(step, "branch", None)
+            if isinstance(branch, ExecutionBranch):
+                reference_sources.extend(iter_condition_operands(branch.condition))
             for reference_source in reference_sources:
                 for reference in self._iter_structured_references(reference_source):
                     if isinstance(reference, StepOutputReference):
@@ -476,6 +509,9 @@ class ExecutionPlanValidator:
             reference_sources: list[Any] = [step.arguments]
             if getattr(step, "condition", None) is not None:
                 reference_sources.extend(iter_condition_operands(step.condition))
+            branch = getattr(step, "branch", None)
+            if isinstance(branch, ExecutionBranch):
+                reference_sources.extend(iter_condition_operands(branch.condition))
 
             for reference_source in reference_sources:
                 for reference in self._iter_special_objects(reference_source, "$ref"):
@@ -748,6 +784,7 @@ class ExecutionPlanValidator:
             for step in plan.ordered_steps
             if step.subplan is None
             and getattr(step, "subplan_ref", None) is None
+            and getattr(step, "branch", None) is None
             and step.tool is not None
             and step.tool in self._DANGEROUS_TOOLS
         )
@@ -775,6 +812,7 @@ class ExecutionPlanValidator:
             for step in plan.ordered_steps
             if step.subplan is None
             and getattr(step, "subplan_ref", None) is None
+            and getattr(step, "branch", None) is None
             and step.tool is not None
             and step.tool != "direct_response"
         }
@@ -800,10 +838,11 @@ class ExecutionPlanValidator:
             has_tool = step.tool is not None
             has_subplan = step.subplan is not None
             has_subplan_ref = getattr(step, "subplan_ref", None) is not None
-            if sum((has_tool, has_subplan, has_subplan_ref)) != 1:
+            has_branch = getattr(step, "branch", None) is not None
+            if sum((has_tool, has_subplan, has_subplan_ref, has_branch)) != 1:
                 errors.append(
                     f"InvalidSubplanStepError: Step '{step.id}' must define "
-                    "exactly one of tool, subplan, or subplan_ref."
+                    "exactly one of tool, subplan, or subplan_ref, or branch."
                 )
             if step.subplan is not None and not isinstance(step.subplan, ExecutionPlan):
                 errors.append(
@@ -817,6 +856,10 @@ class ExecutionPlanValidator:
                 errors.append(
                     f"InvalidExecutionPlanReferenceError: Step '{step.id}' "
                     "subplan_ref must be ExecutionPlanReference."
+                )
+            if has_branch and not isinstance(step.branch, ExecutionBranch):
+                errors.append(
+                    f"InvalidBranchStepError: Step '{step.id}' branch must be ExecutionBranch."
                 )
 
     def _validate_subplans(
@@ -841,6 +884,27 @@ class ExecutionPlanValidator:
                     plan_stack=plan_stack,
                     reference_stack=reference_stack,
                 )
+                continue
+
+            branch = getattr(step, "branch", None)
+            if isinstance(branch, ExecutionBranch):
+                self._validate_plan(
+                    branch.then_plan,
+                    errors,
+                    warnings,
+                    depth=depth + 1,
+                    plan_stack=plan_stack,
+                    reference_stack=reference_stack,
+                )
+                if branch.else_plan is not None:
+                    self._validate_plan(
+                        branch.else_plan,
+                        errors,
+                        warnings,
+                        depth=depth + 1,
+                        plan_stack=plan_stack,
+                        reference_stack=reference_stack,
+                    )
                 continue
 
             reference = getattr(step, "subplan_ref", None)
@@ -965,6 +1029,7 @@ def plan_signature(
                 "tool": step.tool,
                 "subplan": _signature_safe_value(step.subplan),
                 "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
+                "branch": _signature_safe_value(getattr(step, "branch", None)),
                 "depends_on": list(step.depends_on),
                 "status": step.status,
                 "arguments": _signature_safe_value(
@@ -1011,6 +1076,7 @@ def _signature_safe_value(
                     "tool": step.tool,
                     "subplan": _signature_safe_value(step.subplan),
                     "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
+                    "branch": _signature_safe_value(getattr(step, "branch", None)),
                     "depends_on": list(step.depends_on),
                     "status": step.status,
                     "arguments": _signature_safe_value(
@@ -1039,6 +1105,14 @@ def _signature_safe_value(
         return {
             "$type": "execution_plan_output",
             "value": _signature_safe_value(value.as_definition()),
+        }
+
+    if isinstance(value, ExecutionBranch):
+        return {
+            "$type": "execution_branch",
+            "condition": _signature_safe_value(value.condition),
+            "then_plan": _signature_safe_value(value.then_plan),
+            "else_plan": _signature_safe_value(value.else_plan),
         }
 
     if isinstance(value, ExecutionPlanReference):

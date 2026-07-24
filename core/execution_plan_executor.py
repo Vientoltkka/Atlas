@@ -715,6 +715,28 @@ class ExecutionPlanExecutor:
             )
             if isinstance(outcome, PlanExecutionResult):
                 return outcome
+            if outcome.status == StepExecutionStatus.SKIPPED.value:
+                step_results.append(outcome)
+                self._trace_step_event(
+                    trace,
+                    action="STEP_SKIPPED",
+                    status=TraceEventStatus.FINISHED.value,
+                    step=step,
+                    step_index=progress_index,
+                    total_steps=total_steps,
+                    duration_ms=_elapsed_ms(step_started),
+                )
+                skipped.add(step.id)
+                skipped_steps.append(step.id)
+                self._emit_progress(
+                    on_progress,
+                    "step_skipped",
+                    started,
+                    step=step,
+                    step_index=progress_index,
+                    total_steps=total_steps,
+                )
+                continue
             if outcome.error_code in {
                 ExecutionErrorCode.EXECUTION_CANCELLED.value,
                 ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
@@ -1932,7 +1954,7 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
-        if step.subplan is not None or step.subplan_ref is not None:
+        if step.subplan is not None or step.subplan_ref is not None or step.branch is not None:
             return self._execute_resolved_step_with_retries(
                 step,
                 plan_signature=plan_signature,
@@ -2027,12 +2049,14 @@ class ExecutionPlanExecutor:
 
         while True:
             retry_attempts[step.id] = attempt_number
-            self._mark_context_started(
-                trace,
-                execution_context,
-                step.id,
-                attempt_number,
-            )
+            starts_before_resolution = step.branch is None
+            if starts_before_resolution:
+                self._mark_context_started(
+                    trace,
+                    execution_context,
+                    step.id,
+                    attempt_number,
+                )
             self._trace_parameter_resolution_started(trace, step)
             self._trace_variable_resolution_started(trace, step)
             resolution = self._parameter_resolver.resolve(
@@ -2042,6 +2066,8 @@ class ExecutionPlanExecutor:
             if not resolution.success:
                 self._trace_parameter_resolution_failed(trace, step, resolution)
                 self._trace_variable_resolution_failed(trace, step, resolution)
+                if not starts_before_resolution:
+                    self._mark_context_started(trace, execution_context, step.id, attempt_number)
                 self._mark_context_failed(trace, execution_context, step.id)
                 error = "; ".join(resolution.errors)
                 return StepExecutionResult(
@@ -2074,6 +2100,9 @@ class ExecutionPlanExecutor:
                 subplan_depth=subplan_depth,
                 plan_stack=plan_stack,
             )
+
+            if outcome.status == StepExecutionStatus.SKIPPED.value:
+                return outcome
 
             if outcome.success:
                 execution_context.set_result(step.id, outcome.output)
@@ -2257,6 +2286,18 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult:
+        if step.branch is not None:
+            return self._execute_branch_step_once(
+                step,
+                execution_context=execution_context,
+                resolved_arguments=resolved_arguments,
+                trace=trace,
+                attempt_number=attempt_number,
+                history=history,
+                subplan_depth=subplan_depth,
+                plan_stack=plan_stack,
+            )
+
         if step.subplan is not None or step.subplan_ref is not None:
             return self._execute_subplan_step_once(
                 step,
@@ -2357,6 +2398,298 @@ class ExecutionPlanExecutor:
             metadata={
                 "attempt_number": attempt_number,
                 "retry_history": list(history),
+            },
+        )
+
+    def _execute_branch_step_once(
+        self,
+        step: ExecutionStep,
+        *,
+        execution_context: ExecutionContext,
+        resolved_arguments: dict[str, object],
+        trace: ExecutionTrace,
+        attempt_number: int,
+        history: list[dict[str, object]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
+    ) -> StepExecutionResult:
+        branch = step.branch
+        assert branch is not None
+        depth = subplan_depth + 1
+        self._trace_branch_event(
+            trace,
+            "execution_branch_evaluation_started",
+            TraceEventStatus.STARTED.value,
+            execution_id=execution_context.execution_id,
+            step_id=step.id,
+            selected_branch=None,
+            depth=depth,
+            attempt_number=attempt_number,
+            child_execution_id=None,
+            child_status=None,
+            child_step_count=None,
+        )
+        try:
+            condition_result = self._condition_evaluator.evaluate(branch.condition, execution_context)
+        except ExecutionConditionEvaluationError as error:
+            self._mark_context_started(trace, execution_context, step.id, attempt_number)
+            self._mark_context_failed(trace, execution_context, step.id)
+            self._trace_branch_event(
+                trace,
+                "execution_branch_failed",
+                TraceEventStatus.FAILED.value,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                selected_branch=None,
+                depth=depth,
+                attempt_number=attempt_number,
+                child_execution_id=None,
+                child_status=None,
+                child_step_count=None,
+                error_code=ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
+            )
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                tool_name=None,
+                output=None,
+                error=str(error),
+                error_code=ExecutionErrorCode.EXECUTION_CONDITION_FAILED.value,
+                metadata={
+                    "branch": True,
+                    "attempt_number": attempt_number,
+                    "branch_condition_error": type(error).__name__,
+                },
+            )
+
+        selected_name = "then" if condition_result.matched else "else"
+        selected_plan = branch.then_plan if condition_result.matched else branch.else_plan
+        self._trace_branch_event(
+            trace,
+            (
+                "execution_branch_then_selected"
+                if condition_result.matched
+                else "execution_branch_else_selected"
+            ),
+            TraceEventStatus.FINISHED.value,
+            execution_id=execution_context.execution_id,
+            step_id=step.id,
+            selected_branch=selected_name,
+            depth=depth,
+            attempt_number=attempt_number,
+            child_execution_id=None,
+            child_status=None,
+            child_step_count=len(selected_plan.ordered_steps) if selected_plan is not None else 0,
+        )
+        if selected_plan is None:
+            previous, current = execution_context.mark_step_skipped(step.id)
+            self._trace_step_state_changed(trace, execution_context, step.id, previous, current, None)
+            self._trace_step_skipped(trace, execution_context, step)
+            self._trace_branch_event(
+                trace,
+                "execution_branch_skipped",
+                TraceEventStatus.FINISHED.value,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                selected_branch=selected_name,
+                depth=depth,
+                attempt_number=attempt_number,
+                child_execution_id=None,
+                child_status=StepExecutionStatus.SKIPPED.value,
+                child_step_count=0,
+            )
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.SKIPPED.value,
+                success=False,
+                tool_name=None,
+                output=None,
+                error=None,
+                error_code=None,
+                metadata={
+                    "branch": True,
+                    "selected_branch": selected_name,
+                    "attempt_number": attempt_number,
+                    "branch_skipped": True,
+                },
+            )
+
+        self._mark_context_started(trace, execution_context, step.id, attempt_number)
+        resolved_plan_signature = self._safe_plan_signature(selected_plan)
+        if resolved_plan_signature is None:
+            self._mark_context_failed(trace, execution_context, step.id)
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                tool_name=None,
+                output=None,
+                error="Selected branch plan is not deterministically serializable.",
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                metadata={"branch": True, "selected_branch": selected_name, "attempt_number": attempt_number},
+            )
+        executor = SubplanExecutor(
+            validator=ExecutionPlanValidator(
+                self._tool_registry,
+                self._topological_sorter,
+                plan_registry=self._plan_registry,
+            ),
+            executor_factory=self._child_executor,
+            plan_registry=self._plan_registry,
+        )
+        try:
+            result = executor.execute(
+                parent_execution_id=execution_context.execution_id,
+                parent_step_id=step.id,
+                subplan=selected_plan,
+                parent_context=execution_context,
+                resolved_inputs=resolved_arguments,
+                depth=depth,
+                plan_stack=plan_stack,
+                subplan_ref=None,
+                resolved_plan_signature=resolved_plan_signature,
+            )
+        except SubplanDepthExceededError as error:
+            self._mark_context_failed(trace, execution_context, step.id)
+            return self._failed_branch_step_result(
+                step,
+                selected_branch=selected_name,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_DEPTH_EXCEEDED.value,
+                attempt_number=attempt_number,
+            )
+        except RecursiveSubplanError as error:
+            self._mark_context_failed(trace, execution_context, step.id)
+            return self._failed_branch_step_result(
+                step,
+                selected_branch=selected_name,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_RECURSIVE.value,
+                attempt_number=attempt_number,
+            )
+        except SubplanValidationError as error:
+            self._mark_context_failed(trace, execution_context, step.id)
+            return self._failed_branch_step_result(
+                step,
+                selected_branch=selected_name,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                attempt_number=attempt_number,
+            )
+        except SubplanExecutionError as error:
+            self._mark_context_failed(trace, execution_context, step.id)
+            return self._failed_branch_step_result(
+                step,
+                selected_branch=selected_name,
+                error=str(error),
+                error_code=ExecutionErrorCode.SUBPLAN_FAILED.value,
+                attempt_number=attempt_number,
+            )
+
+        if result.child_result.success:
+            self._trace_branch_event(
+                trace,
+                "execution_branch_succeeded",
+                TraceEventStatus.FINISHED.value,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                selected_branch=selected_name,
+                depth=result.depth,
+                attempt_number=attempt_number,
+                child_execution_id=result.child_execution_id,
+                child_status=result.status,
+                child_step_count=len(selected_plan.ordered_steps),
+            )
+            return StepExecutionResult(
+                step_id=step.id,
+                status=StepExecutionStatus.COMPLETED.value,
+                success=True,
+                tool_name=None,
+                output=result.output,
+                error=None,
+                metadata={
+                    "branch": True,
+                    "selected_branch": selected_name,
+                    "attempt_number": attempt_number,
+                    "retry_history": list(history),
+                    "child_execution_id": result.child_execution_id,
+                    "child_status": result.status,
+                    "depth": result.depth,
+                    "resolved_plan_signature": result.resolved_plan_signature,
+                },
+            )
+
+        cancelled = result.child_result.plan_status == PlanExecutionStatus.CANCELLED.value
+        self._trace_branch_event(
+            trace,
+            "execution_branch_cancelled" if cancelled else "execution_branch_failed",
+            TraceEventStatus.FAILED.value,
+            execution_id=execution_context.execution_id,
+            step_id=step.id,
+            selected_branch=selected_name,
+            depth=result.depth,
+            attempt_number=attempt_number,
+            child_execution_id=result.child_execution_id,
+            child_status=result.status,
+            child_step_count=len(selected_plan.ordered_steps),
+            error_code=(
+                ExecutionErrorCode.SUBPLAN_CANCELLED.value
+                if cancelled
+                else ExecutionErrorCode.SUBPLAN_FAILED.value
+            ),
+        )
+        return StepExecutionResult(
+            step_id=step.id,
+            status=(
+                StepExecutionStatus.CANCELLED.value
+                if cancelled
+                else StepExecutionStatus.FAILED.value
+            ),
+            success=False,
+            tool_name=None,
+            output=None,
+            error=result.child_result.error or result.child_result.failure_reason,
+            error_code=(
+                ExecutionErrorCode.SUBPLAN_CANCELLED.value
+                if cancelled
+                else ExecutionErrorCode.SUBPLAN_FAILED.value
+            ),
+            metadata={
+                "branch": True,
+                "selected_branch": selected_name,
+                "attempt_number": attempt_number,
+                "retry_history": list(history),
+                "child_execution_id": result.child_execution_id,
+                "child_status": result.status,
+                "child_error_code": result.child_result.error_code,
+                "depth": result.depth,
+                "resolved_plan_signature": result.resolved_plan_signature,
+            },
+        )
+
+    def _failed_branch_step_result(
+        self,
+        step: ExecutionStep,
+        *,
+        selected_branch: str,
+        error: str,
+        error_code: str,
+        attempt_number: int,
+    ) -> StepExecutionResult:
+        return StepExecutionResult(
+            step_id=step.id,
+            status=StepExecutionStatus.FAILED.value,
+            success=False,
+            tool_name=None,
+            output=None,
+            error=error,
+            error_code=error_code,
+            metadata={
+                "branch": True,
+                "selected_branch": selected_branch,
+                "attempt_number": attempt_number,
+                "retry_scheduled": False,
             },
         )
 
@@ -3072,6 +3405,45 @@ class ExecutionPlanExecutor:
             details["resolved_plan_signature"] = resolved_plan_signature
         trace.add_event(
             component="SubplanExecutor",
+            action=action,
+            status=status,
+            details=details,
+        )
+
+    def _trace_branch_event(
+        self,
+        trace: ExecutionTrace,
+        action: str,
+        status: str,
+        *,
+        execution_id: str,
+        step_id: str,
+        selected_branch: str | None,
+        depth: int,
+        attempt_number: int,
+        child_execution_id: str | None,
+        child_status: str | None,
+        child_step_count: int | None,
+        error_code: str | None = None,
+    ) -> None:
+        details: dict[str, object] = {
+            "execution_id": execution_id,
+            "step_id": step_id,
+            "depth": depth,
+            "attempt_number": attempt_number,
+        }
+        if selected_branch is not None:
+            details["selected_branch"] = selected_branch
+        if child_execution_id is not None:
+            details["child_execution_id"] = child_execution_id
+        if child_status is not None:
+            details["child_status"] = child_status
+        if child_step_count is not None:
+            details["child_step_count"] = child_step_count
+        if error_code is not None:
+            details["error_code"] = error_code
+        trace.add_event(
+            component="ExecutionPlanExecutor",
             action=action,
             status=status,
             details=details,
