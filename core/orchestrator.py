@@ -10,6 +10,13 @@ import unicodedata
 
 from agents.registry import AgentRegistry
 
+from core.atlas_router import (
+    AtlasRouter,
+    AtlasRoutingRequest,
+    AtlasRoutingResult,
+    AtlasRoutingStatus,
+    AtlasRouteType,
+)
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
@@ -59,6 +66,7 @@ class AtlasOrchestrator:
         permanent_assistant: PermanentAssistantUseCase | None = None,
         structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
         capability_execution_service: CapabilityExecutionService | None = None,
+        atlas_router: AtlasRouter | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -83,6 +91,7 @@ class AtlasOrchestrator:
         self._permanent_assistant = permanent_assistant
         self._structured_execution_coordinator = structured_execution_coordinator
         self._capability_execution_service = capability_execution_service
+        self._atlas_router = atlas_router
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -243,6 +252,30 @@ class AtlasOrchestrator:
             return unavailable_capability_execution_result()
 
         return self._capability_execution_service.execute(request)
+
+    def route_request(
+        self,
+        request: AtlasRoutingRequest,
+    ) -> AtlasRoutingResult:
+        """Route one explicit structured Atlas request."""
+        if self._atlas_router is None:
+            return AtlasRoutingResult(
+                status=AtlasRoutingStatus.SERVICE_UNAVAILABLE,
+                route_type=(
+                    request.route_type
+                    if isinstance(request, AtlasRoutingRequest)
+                    else AtlasRouteType.UNKNOWN
+                ),
+                request_id=(
+                    request.request_id
+                    if isinstance(request, AtlasRoutingRequest)
+                    else None
+                ),
+                error_code="ATLAS_ROUTER_UNAVAILABLE",
+                message="Atlas router is not configured.",
+            )
+
+        return self._atlas_router.route(request)
 
     def confirm_structured_execution(
         self,

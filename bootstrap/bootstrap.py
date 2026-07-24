@@ -9,6 +9,7 @@ from agents.coding_agent import CodingAgent
 from agents.project_agent import ProjectAgent
 from agents.registry import AgentRegistry
 
+from bootstrap.atlas_router import build_core_atlas_router
 from bootstrap.capability_execution_service import build_capability_execution_service
 from bootstrap.capability_orchestrator import build_core_capability_orchestrator
 from bootstrap.capability_planner import build_core_capability_planner
@@ -733,6 +734,9 @@ class Bootstrap:
             execution_plan_validator=execution_plan_validator,
             execution_plan_executor=execution_plan_executor,
         )
+        atlas_router = build_core_atlas_router(
+            capability_execution_service=capability_execution_service,
+        )
 
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
@@ -925,6 +929,7 @@ class Bootstrap:
             permanent_assistant=permanent_assistant,
             structured_execution_coordinator=structured_execution,
             capability_execution_service=capability_execution_service,
+            atlas_router=atlas_router,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
