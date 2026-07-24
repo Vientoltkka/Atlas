@@ -13,6 +13,12 @@ from agents.registry import AgentRegistry
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
+from core.capability_execution_service import (
+    CapabilityExecutionRequest,
+    CapabilityExecutionResult,
+    CapabilityExecutionService,
+    unavailable_capability_execution_result,
+)
 from core.execution_plan_executor import ExecutionControl, ExecutionProgress
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
@@ -52,6 +58,7 @@ class AtlasOrchestrator:
         voice_conversation: VoiceConversationUseCase | None = None,
         permanent_assistant: PermanentAssistantUseCase | None = None,
         structured_execution_coordinator: StructuredExecutionCoordinator | None = None,
+        capability_execution_service: CapabilityExecutionService | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -75,6 +82,7 @@ class AtlasOrchestrator:
         self._voice_conversation = voice_conversation
         self._permanent_assistant = permanent_assistant
         self._structured_execution_coordinator = structured_execution_coordinator
+        self._capability_execution_service = capability_execution_service
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -225,6 +233,16 @@ class AtlasOrchestrator:
             prompt,
             confirm,
         )
+
+    def execute_capability(
+        self,
+        request: CapabilityExecutionRequest,
+    ) -> CapabilityExecutionResult:
+        """Execute one explicit structured capability request."""
+        if self._capability_execution_service is None:
+            return unavailable_capability_execution_result()
+
+        return self._capability_execution_service.execute(request)
 
     def confirm_structured_execution(
         self,

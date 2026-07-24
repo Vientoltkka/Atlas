@@ -9,6 +9,13 @@ from agents.coding_agent import CodingAgent
 from agents.project_agent import ProjectAgent
 from agents.registry import AgentRegistry
 
+from bootstrap.capability_execution_service import build_capability_execution_service
+from bootstrap.capability_orchestrator import build_core_capability_orchestrator
+from bootstrap.capability_planner import build_core_capability_planner
+from bootstrap.capability_resolver import build_core_capability_resolver
+from bootstrap.execution_plan_library import build_core_execution_plan_library
+from bootstrap.workflow_selector import build_core_workflow_selector
+from core.capability_execution_service import CapabilityExecutionService
 from core.model_manager import ModelManager
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Planner
@@ -593,6 +600,33 @@ class Bootstrap:
         )
 
     @staticmethod
+    def build_capability_execution_service(
+        *,
+        tool_registry: ToolRegistry,
+        execution_plan_validator: ExecutionPlanValidator,
+        execution_plan_executor: ExecutionPlanExecutor,
+    ) -> CapabilityExecutionService:
+        """Build capability execution from explicitly shared runtime objects."""
+        core_library = build_core_execution_plan_library()
+        execution_plan_libraries = () if core_library is None else (core_library,)
+        capability_resolver = build_core_capability_resolver(
+            tool_registry=tool_registry,
+            execution_plan_libraries=execution_plan_libraries,
+        )
+        workflow_selector, _policy = build_core_workflow_selector()
+        capability_planner = build_core_capability_planner(
+            capability_resolver=capability_resolver,
+            workflow_selector=workflow_selector,
+            execution_plan_libraries=execution_plan_libraries,
+        )
+        capability_orchestrator = build_core_capability_orchestrator(
+            capability_planner,
+            execution_plan_validator,
+            execution_plan_executor,
+        )
+        return build_capability_execution_service(capability_orchestrator)
+
+    @staticmethod
     def build() -> AtlasOrchestrator:
 
         # -----------------------
@@ -636,6 +670,18 @@ class Bootstrap:
             minimum=0,
             maximum=10_000,
         )
+        execution_retry_policy = RetryPolicy(
+            max_attempts=(
+                execution_max_attempts
+                if execution_retry_enabled
+                else 1
+            ),
+            delay_ms=(
+                execution_retry_delay_ms
+                if execution_retry_enabled
+                else 0
+            ),
+        )
         semantic_catalog = None
         hybrid_execution_planner = None
         structured_plan_provider = None
@@ -676,25 +722,22 @@ class Bootstrap:
         # Tools
         # -----------------------
 
+        execution_plan_validator = ExecutionPlanValidator(tool_registry)
+        execution_plan_executor = ExecutionPlanExecutor(
+            tool_registry,
+            tool_executor,
+            retry_policy=execution_retry_policy,
+        )
+        capability_execution_service = Bootstrap.build_capability_execution_service(
+            tool_registry=tool_registry,
+            execution_plan_validator=execution_plan_validator,
+            execution_plan_executor=execution_plan_executor,
+        )
+
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
-            validator=ExecutionPlanValidator(tool_registry),
-            executor=ExecutionPlanExecutor(
-                tool_registry,
-                tool_executor,
-                retry_policy=RetryPolicy(
-                    max_attempts=(
-                        execution_max_attempts
-                        if execution_retry_enabled
-                        else 1
-                    ),
-                    delay_ms=(
-                        execution_retry_delay_ms
-                        if execution_retry_enabled
-                        else 0
-                    ),
-                ),
-            ),
+            validator=execution_plan_validator,
+            executor=execution_plan_executor,
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
@@ -881,6 +924,7 @@ class Bootstrap:
             voice_conversation=voice_conversation,
             permanent_assistant=permanent_assistant,
             structured_execution_coordinator=structured_execution,
+            capability_execution_service=capability_execution_service,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
