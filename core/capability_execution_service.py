@@ -18,6 +18,7 @@ from core.capability_planner import CapabilityPlanningRequest
 from core.capability_resolver import CapabilityType, WorkflowCapabilitySource
 from core.execution_plan_executor import ExecutionControl
 from core.execution_replanner import ReplanningPolicy
+from core.goal_driven_execution import GoalDrivenExecutionPolicy
 from core.goal_verifier import GoalVerificationResult
 from core.execution_plan_registry import ExecutionPlanReference
 from core.multi_capability_planner import (
@@ -94,6 +95,7 @@ class CapabilityExecutionRequest:
     confirmation_granted: bool = False
     control: ExecutionControl | None = None
     replanning_policy: ReplanningPolicy | None = None
+    goal_driven_policy: GoalDrivenExecutionPolicy | None = None
     inputs: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -118,6 +120,13 @@ class CapabilityExecutionRequest:
             raise InvalidCapabilityExecutionRequestError("control must be ExecutionControl or None.")
         if self.replanning_policy is not None and not isinstance(self.replanning_policy, ReplanningPolicy):
             raise InvalidCapabilityExecutionRequestError("replanning_policy must be ReplanningPolicy or None.")
+        if self.goal_driven_policy is not None and not isinstance(
+            self.goal_driven_policy,
+            GoalDrivenExecutionPolicy,
+        ):
+            raise InvalidCapabilityExecutionRequestError(
+                "goal_driven_policy must be GoalDrivenExecutionPolicy or None."
+            )
         object.__setattr__(self, "inputs", MappingProxyType(_safe_inputs(self.inputs)))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
         _build_planning_request(self)
@@ -143,6 +152,7 @@ class CapabilityExecutionResult:
     replanning_reason: str | None = None
     original_plan_signature: str | None = None
     final_plan_signature: str | None = None
+    goal_driven_status: str | None = None
     orchestration_result: CapabilityOrchestrationResult | None = None
 
     def __post_init__(self) -> None:
@@ -219,6 +229,7 @@ class CapabilityExecutionService:
                     confirmation_granted=request.confirmation_granted,
                     control=request.control,
                     replanning_policy=request.replanning_policy,
+                    goal_driven_policy=request.goal_driven_policy,
                 ),
                 inputs=request.inputs,
                 metadata=request.metadata,
@@ -261,6 +272,7 @@ class CapabilityExecutionService:
                 confirmation_granted=request.confirmation_granted,
                 control=request.control,
                 replanning_policy=request.replanning_policy,
+                goal_driven_policy=request.goal_driven_policy,
             ),
             inputs=request.inputs,
             metadata={
@@ -354,6 +366,11 @@ def _result_from_orchestration(
         replanning_reason=orchestration_result.replanning_reason,
         original_plan_signature=orchestration_result.original_plan_signature,
         final_plan_signature=orchestration_result.final_plan_signature,
+        goal_driven_status=(
+            orchestration_result.goal_driven_result.status.value
+            if orchestration_result.goal_driven_result is not None
+            else None
+        ),
         orchestration_result=orchestration_result,
     )
 

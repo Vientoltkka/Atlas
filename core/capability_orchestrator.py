@@ -34,6 +34,13 @@ from core.execution_replanner import (
     ReplanningStatus,
     ReplanningStrategy,
 )
+from core.goal_driven_execution import (
+    GoalDrivenExecutionController,
+    GoalDrivenExecutionPolicy,
+    GoalDrivenExecutionRequest,
+    GoalDrivenExecutionResult,
+    GoalDrivenExecutionStatus,
+)
 from core.planner import ExecutionPlan
 
 
@@ -101,6 +108,7 @@ class CapabilityOrchestrationPolicy:
     confirmation_granted: bool = False
     control: ExecutionControl | None = None
     replanning_policy: ReplanningPolicy | None = None
+    goal_driven_policy: GoalDrivenExecutionPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.confirmation_granted, bool):
@@ -109,6 +117,13 @@ class CapabilityOrchestrationPolicy:
             raise InvalidCapabilityOrchestrationRequestError("control must be ExecutionControl or None.")
         if self.replanning_policy is not None and not isinstance(self.replanning_policy, ReplanningPolicy):
             raise InvalidCapabilityOrchestrationRequestError("replanning_policy must be ReplanningPolicy or None.")
+        if self.goal_driven_policy is not None and not isinstance(
+            self.goal_driven_policy,
+            GoalDrivenExecutionPolicy,
+        ):
+            raise InvalidCapabilityOrchestrationRequestError(
+                "goal_driven_policy must be GoalDrivenExecutionPolicy or None."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +165,7 @@ class CapabilityOrchestrationResult:
     original_plan_signature: str | None = None
     final_plan_signature: str | None = None
     replanning_history: tuple[Mapping[str, object], ...] = ()
+    goal_driven_result: GoalDrivenExecutionResult | None = None
     events: tuple[CapabilityOrchestrationEvent, ...] = ()
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -190,6 +206,7 @@ class CapabilityOrchestrator:
         execution_plan_executor: ExecutionPlanExecutor,
         *,
         execution_replanner: ExecutionReplanner | None = None,
+        goal_driven_controller: GoalDrivenExecutionController | None = None,
         observer: Observer | None = None,
     ) -> None:
         if not isinstance(capability_planner, CapabilityPlanner):
@@ -204,6 +221,7 @@ class CapabilityOrchestrator:
         self._execution_plan_validator = execution_plan_validator
         self._execution_plan_executor = execution_plan_executor
         self._execution_replanner = execution_replanner or ExecutionReplanner()
+        self._goal_driven_controller = goal_driven_controller
         self._observer = observer
 
     def orchestrate(self, request: CapabilityOrchestrationRequest) -> CapabilityOrchestrationResult:
@@ -329,6 +347,14 @@ class CapabilityOrchestrator:
         *,
         planning_decision: CapabilityPlanningDecision | None = None,
     ) -> CapabilityOrchestrationResult:
+        if policy.goal_driven_policy is not None and policy.goal_driven_policy.enabled:
+            return self._execute_goal_driven_plan(
+                plan,
+                policy,
+                inputs,
+                events,
+                planning_decision=planning_decision,
+            )
         _record(
             events,
             self._observer,
@@ -501,6 +527,54 @@ class CapabilityOrchestrator:
             validation_result=validation,
             execution_result=execution,
             goal_verification_result=goal_verification,
+        )
+
+    def _execute_goal_driven_plan(
+        self,
+        plan: ExecutionPlan,
+        policy: CapabilityOrchestrationPolicy,
+        inputs: Mapping[str, object],
+        events: list[CapabilityOrchestrationEvent],
+        *,
+        planning_decision: CapabilityPlanningDecision | None = None,
+    ) -> CapabilityOrchestrationResult:
+        controller = self._goal_driven_controller or GoalDrivenExecutionController(
+            self._execution_plan_validator,
+            self._execution_plan_executor,
+            execution_replanner=self._execution_replanner,
+        )
+        candidates = self._replanning_candidates(planning_decision)
+        result = controller.execute(
+            GoalDrivenExecutionRequest(
+                plan=plan,
+                policy=policy.goal_driven_policy or GoalDrivenExecutionPolicy(),
+                candidates=candidates,
+                inputs=inputs,
+                confirmation_granted=policy.confirmation_granted,
+                control=policy.control,
+            )
+        )
+        for event in result.events:
+            _record(events, self._observer, event.name, event.status, event.details)
+        status = _orchestration_status_for_goal_driven(result.status)
+        return self._complete(
+            status,
+            events,
+            planning_decision=planning_decision,
+            selected_plan=result.current_plan or plan,
+            validation_result=result.validation_result,
+            execution_result=result.execution_result,
+            goal_verification_result=result.goal_verification_result,
+            error_code=result.error_code or result.status.value,
+            error_message=result.error_message or result.terminal_reason,
+            replanning_decision=result.replanning_decision,
+            original_plan_signature=plan_signature(plan),
+            final_plan_signature=(
+                plan_signature(result.current_plan)
+                if result.current_plan is not None
+                else plan_signature(plan)
+            ),
+            goal_driven_result=result,
         )
 
     def _try_replanning(
@@ -742,6 +816,7 @@ class CapabilityOrchestrator:
         replanning_history: tuple[ReplanningHistoryEntry, ...] = (),
         original_plan_signature: str | None = None,
         final_plan_signature: str | None = None,
+        goal_driven_result: GoalDrivenExecutionResult | None = None,
     ) -> CapabilityOrchestrationResult:
         _record(
             events,
@@ -764,6 +839,7 @@ class CapabilityOrchestrator:
             replanning_history=replanning_history,
             original_plan_signature=original_plan_signature,
             final_plan_signature=final_plan_signature,
+            goal_driven_result=goal_driven_result,
         )
 
     def _status_for_unselected_decision(
@@ -801,6 +877,7 @@ def _result(
     replanning_history: tuple[ReplanningHistoryEntry, ...] = (),
     original_plan_signature: str | None = None,
     final_plan_signature: str | None = None,
+    goal_driven_result: GoalDrivenExecutionResult | None = None,
 ) -> CapabilityOrchestrationResult:
     return CapabilityOrchestrationResult(
         status=status,
@@ -830,8 +907,25 @@ def _result(
         original_plan_signature=original_plan_signature,
         final_plan_signature=final_plan_signature,
         replanning_history=tuple(_history_entry_to_metadata(entry) for entry in replanning_history),
+        goal_driven_result=goal_driven_result,
         events=tuple(events),
     )
+
+
+def _orchestration_status_for_goal_driven(
+    status: GoalDrivenExecutionStatus,
+) -> CapabilityOrchestrationStatus:
+    if status in {GoalDrivenExecutionStatus.COMPLETED, GoalDrivenExecutionStatus.GOAL_SATISFIED}:
+        return CapabilityOrchestrationStatus.COMPLETED
+    if status is GoalDrivenExecutionStatus.POLICY_DISABLED:
+        return CapabilityOrchestrationStatus.INVALID_REQUEST
+    if status is GoalDrivenExecutionStatus.VALIDATION_FAILED:
+        return CapabilityOrchestrationStatus.PLAN_VALIDATION_FAILED
+    if status is GoalDrivenExecutionStatus.CANCELLED:
+        return CapabilityOrchestrationStatus.CANCELLED
+    if status is GoalDrivenExecutionStatus.INVALID_REQUEST:
+        return CapabilityOrchestrationStatus.INVALID_REQUEST
+    return CapabilityOrchestrationStatus.EXECUTION_FAILED
 
 
 def _effective_replanning_policy(

@@ -32,6 +32,7 @@ from core.capability_resolver import CapabilityResolver, CapabilityType
 from core.execution_plan_executor import ExecutionControl, ExecutionPlanExecutor
 from core.execution_replanner import ReplanningPolicy, ReplanningStrategy
 from core.goal_verifier import GoalVerificationReason, OutputValidatorKind
+from core.goal_driven_execution import GoalDrivenExecutionPolicy
 from core.execution_plan_library import ExecutionPlanLibrary, WorkflowDefinition
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_validator import ExecutionPlanValidator
@@ -300,6 +301,37 @@ def test_service_replans_from_failed_goal_to_alternative_workflow_with_real_read
     assert result.output == {"entries": ("README.md",)}
     assert result.orchestration_result is not None
     assert result.orchestration_result.replanning_history[0]["workflow_plan_id"] == "workflow.good"
+
+
+def test_service_can_activate_goal_driven_execution_policy() -> None:
+    tool = SpyTool(output="done")
+    plan = ExecutionPlan(
+        goal="Execute goal-driven workflow.",
+        ordered_steps=(ExecutionStep("step_1", "Run.", "demo.tool"),),
+        estimated_steps=1,
+        required_tools=("demo.tool",),
+        detected_risks=(),
+        requires_confirmation=False,
+        output={"value": StepOutputReference("step_1")},
+        required_outputs=("value",),
+    )
+    registry = _registry(tool)
+    library = ExecutionPlanLibrary("atlas.test", (_workflow(plan),), version="1.0")
+    service = _service_for_library(registry, library)
+
+    result = service.execute(
+        CapabilityExecutionRequest(
+            required_tags=("demo",),
+            goal_driven_policy=GoalDrivenExecutionPolicy(enabled=True, max_cycles=2),
+        )
+    )
+
+    assert result.status is CapabilityExecutionStatus.COMPLETED
+    assert result.goal_driven_status == "COMPLETED"
+    assert result.orchestration_result is not None
+    assert result.orchestration_result.goal_driven_result is not None
+    assert len(result.orchestration_result.goal_driven_result.cycles) == 1
+    assert tool.calls == 1
 
 
 @pytest.mark.parametrize(

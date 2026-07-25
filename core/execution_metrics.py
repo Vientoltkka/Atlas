@@ -59,6 +59,15 @@ class ExecutionMetrics:
     replanned_plans_executed: int = 0
     replanned_goals_satisfied: int = 0
     replanned_goals_unsatisfied: int = 0
+    goal_driven_executions_started: int = 0
+    goal_driven_executions_completed: int = 0
+    goal_driven_executions_failed: int = 0
+    goal_driven_cycles_completed: int = 0
+    goal_driven_goals_satisfied: int = 0
+    goal_driven_goals_unsatisfied: int = 0
+    goal_driven_replans_requested: int = 0
+    goal_driven_replans_succeeded: int = 0
+    goal_driven_cycle_limits_reached: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -122,6 +131,25 @@ class ExecutionMetricsCalculator:
             if event.action == "replanning_failed"
             and event.details.get("goal_satisfied") is False
         )
+        goal_driven_executions_started = _count_action(events, "goal_driven_execution_started")
+        goal_driven_executions_completed = _count_action(events, "goal_driven_execution_succeeded")
+        goal_driven_executions_failed = _count_action(events, "goal_driven_execution_failed")
+        goal_driven_cycles_completed = _count_action(events, "goal_driven_cycle_completed")
+        goal_driven_goals_satisfied = sum(
+            1
+            for event in events
+            if event.action == "goal_driven_goal_verified"
+            and _event_status_is(event, "FINISHED")
+        )
+        goal_driven_goals_unsatisfied = sum(
+            1
+            for event in events
+            if event.action == "goal_driven_goal_verified"
+            and _event_status_is(event, "FAILED")
+        )
+        goal_driven_replans_requested = _count_action(events, "goal_driven_replanning_requested")
+        goal_driven_replans_succeeded = _count_action(events, "goal_driven_replanning_selected")
+        goal_driven_cycle_limits_reached = _count_action(events, "goal_driven_cycle_limit_reached")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -194,6 +222,15 @@ class ExecutionMetricsCalculator:
             replanned_plans_executed=replanned_plans_executed,
             replanned_goals_satisfied=replanned_goals_satisfied,
             replanned_goals_unsatisfied=replanned_goals_unsatisfied,
+            goal_driven_executions_started=goal_driven_executions_started,
+            goal_driven_executions_completed=goal_driven_executions_completed,
+            goal_driven_executions_failed=goal_driven_executions_failed,
+            goal_driven_cycles_completed=goal_driven_cycles_completed,
+            goal_driven_goals_satisfied=goal_driven_goals_satisfied,
+            goal_driven_goals_unsatisfied=goal_driven_goals_unsatisfied,
+            goal_driven_replans_requested=goal_driven_replans_requested,
+            goal_driven_replans_succeeded=goal_driven_replans_succeeded,
+            goal_driven_cycle_limits_reached=goal_driven_cycle_limits_reached,
         )
 
 

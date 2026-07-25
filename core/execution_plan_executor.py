@@ -214,6 +214,12 @@ class ResumableExecutionState:
     replanning_history: tuple[object, ...] = ()
     original_plan_signature: str | None = None
     current_plan_signature: str | None = None
+    goal_driven_policy: object | None = None
+    goal_driven_cycle: int = 0
+    goal_driven_history: tuple[object, ...] = ()
+    goal_driven_used_signatures: tuple[str, ...] = ()
+    goal_driven_last_decision: str | None = None
+    goal_driven_terminal_status: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     execution_context_snapshot: ExecutionContextSnapshot | None = None
     goal_verification_result: GoalVerificationResult | None = None

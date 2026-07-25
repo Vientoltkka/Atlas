@@ -14,6 +14,14 @@ from core.goal_verifier import (
     goal_verification_result_from_dict,
     goal_verification_result_to_dict,
 )
+from core.goal_driven_execution import (
+    GoalDrivenExecutionCycle,
+    GoalDrivenExecutionPolicy,
+    goal_driven_cycles_from_dict,
+    goal_driven_cycles_to_dict,
+    goal_driven_policy_from_dict,
+    goal_driven_policy_to_dict,
+)
 from core.execution_condition import (
     AllOfCondition,
     AnyOfCondition,
@@ -106,6 +114,12 @@ class JsonResumableExecutionStore:
         "replanning_history",
         "original_plan_signature",
         "current_plan_signature",
+        "goal_driven_policy",
+        "goal_driven_cycle",
+        "goal_driven_history",
+        "goal_driven_used_signatures",
+        "goal_driven_last_decision",
+        "goal_driven_terminal_status",
         "metadata",
         "execution_context_snapshot",
         "goal_verification_result",
@@ -255,6 +269,22 @@ class JsonResumableExecutionStore:
             ),
             "original_plan_signature": state.original_plan_signature,
             "current_plan_signature": state.current_plan_signature,
+            "goal_driven_policy": goal_driven_policy_to_dict(
+                state.goal_driven_policy
+                if isinstance(state.goal_driven_policy, GoalDrivenExecutionPolicy)
+                else None
+            ),
+            "goal_driven_cycle": state.goal_driven_cycle,
+            "goal_driven_history": goal_driven_cycles_to_dict(
+                tuple(
+                    item
+                    for item in state.goal_driven_history
+                    if isinstance(item, GoalDrivenExecutionCycle)
+                )
+            ),
+            "goal_driven_used_signatures": list(state.goal_driven_used_signatures),
+            "goal_driven_last_decision": state.goal_driven_last_decision,
+            "goal_driven_terminal_status": state.goal_driven_terminal_status,
             "metadata": _safe_metadata(state.metadata, created_at=created_at),
             "execution_context_snapshot": (
                 _context_snapshot_to_dict(state.execution_context_snapshot)
@@ -317,6 +347,22 @@ class JsonResumableExecutionStore:
             replan_attempts = 0
         original_plan_signature = _optional_str(payload, "original_plan_signature")
         current_plan_signature = _optional_str(payload, "current_plan_signature")
+        try:
+            goal_driven_policy = goal_driven_policy_from_dict(payload.get("goal_driven_policy"))
+            goal_driven_history = goal_driven_cycles_from_dict(payload.get("goal_driven_history"))
+        except ValueError as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Goal-driven checkpoint data is invalid.",
+            ) from error
+        goal_driven_cycle = _optional_int(payload, "goal_driven_cycle") if "goal_driven_cycle" in payload else 0
+        if goal_driven_cycle is None:
+            goal_driven_cycle = 0
+        goal_driven_used_signatures = (
+            _str_tuple(payload, "goal_driven_used_signatures")
+            if "goal_driven_used_signatures" in payload
+            else ()
+        )
         metadata = _required_dict(payload, "metadata")
         context_snapshot = _optional_context_snapshot(
             payload.get("execution_context_snapshot"),
@@ -381,6 +427,12 @@ class JsonResumableExecutionStore:
             replanning_history=replanning_history,
             original_plan_signature=original_plan_signature,
             current_plan_signature=current_plan_signature,
+            goal_driven_policy=goal_driven_policy,
+            goal_driven_cycle=goal_driven_cycle,
+            goal_driven_history=goal_driven_history,
+            goal_driven_used_signatures=goal_driven_used_signatures,
+            goal_driven_last_decision=_optional_str(payload, "goal_driven_last_decision"),
+            goal_driven_terminal_status=_optional_str(payload, "goal_driven_terminal_status"),
             metadata=metadata,
             execution_context_snapshot=context_snapshot,
             goal_verification_result=goal_verification_result,
