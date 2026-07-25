@@ -652,6 +652,17 @@ class StructuredExecutionCoordinator:
             for result in execution.step_results
             if result.metadata.get("retry_history")
         }
+        retry_decisions = {
+            result.step_id: {
+                "retry_reason": result.metadata.get("retry_reason"),
+                "retry_scheduled": result.metadata.get("retry_scheduled"),
+                "retry_exhausted": result.metadata.get("retry_exhausted"),
+                "attempt_number": result.metadata.get("attempt_number"),
+                "max_attempts": result.metadata.get("max_attempts"),
+            }
+            for result in execution.step_results
+            if "retry_reason" in result.metadata
+        }
         execution_id = (
             execution.trace.execution_id
             if execution.trace is not None
@@ -695,6 +706,7 @@ class StructuredExecutionCoordinator:
             confirmation_granted=confirmation_granted,
             retry_attempts=retry_attempts,
             retry_history=retry_history,
+            retry_decisions=retry_decisions,
             execution_context_snapshot=execution_context.snapshot(),
             goal_verification_result=execution.goal_verification_result,
         )

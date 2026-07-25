@@ -17,6 +17,7 @@ from core.execution_plan_output import (
     copy_execution_plan_output,
 )
 from core.execution_plan_registry import ExecutionPlanReference
+from core.execution_retry import RetryPolicy, copy_retry_policy
 from core.execution_variable_binding import (
     ExecutionVariableBinding,
     copy_execution_variable_binding,
@@ -62,6 +63,7 @@ class ExecutionStep:
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
     output_binding: ExecutionVariableBinding | None = None
     condition: ExecutionConditionNode | None = None
+    retry_policy: RetryPolicy | None = None
 
     def __init__(
         self,
@@ -79,6 +81,7 @@ class ExecutionStep:
         arguments: ExecutionArguments | Mapping[str, Any] | None = None,
         output_binding: ExecutionVariableBinding | None = None,
         condition: ExecutionConditionNode | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         dependencies_source = dependencies if depends_on is None else depends_on
         object.__setattr__(self, "id", id)
@@ -105,6 +108,11 @@ class ExecutionStep:
             self,
             "condition",
             copy_execution_condition(condition),
+        )
+        object.__setattr__(
+            self,
+            "retry_policy",
+            copy_retry_policy(retry_policy),
         )
 
     @property

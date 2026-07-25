@@ -18,6 +18,7 @@ from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult, plan_signature
 from core.goal_verifier import GoalVerificationReason, GoalVerificationResult
+from core.execution_retry import RetryPolicy
 from core.planner import ExecutionPlan, ExecutionStep
 from core.resumable_execution_store import (
     JsonResumableExecutionStore,
@@ -142,6 +143,61 @@ def test_json_store_loads_checkpoint_without_goal_verification_fields(tmp_path) 
     assert loaded.goal_verification_result is None
     assert loaded.original_plan.required_outputs == ()
     assert dict(loaded.original_plan.output_validators) == {}
+
+
+def test_json_store_preserves_retry_policy_and_decision_state(tmp_path) -> None:
+    plan = ExecutionPlan(
+        goal="Retry persisted plan.",
+        ordered_steps=(
+            ExecutionStep(
+                "step_1",
+                "Read.",
+                "read_file",
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+            _step("step_2", "write_file", dependencies=("step_1",)),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file", "write_file"),
+        detected_risks=("writes a file",),
+        requires_confirmation=True,
+    )
+    validation = ExecutionPlanValidator().validate(plan)
+    context = ExecutionContext("exec-store-retry")
+    context.mark_step_started("step_1", 1)
+    context.mark_step_succeeded("step_1", {"content": "alpha"})
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+    state = ResumableExecutionState(
+        objective="resume retry",
+        original_plan=plan,
+        validation_result=validation,
+        validated_plan_signature=validation.plan_signature,
+        completed_step_ids=("step_1",),
+        pending_step_ids=("step_2",),
+        failed_step_ids=(),
+        interrupted_step_id="step_2",
+        previous_results={"step_1": {"content": "alpha"}},
+        resumable=True,
+        confirmation_granted=True,
+        retry_attempts={"step_1": 1},
+        retry_decisions={
+            "step_1": {
+                "retry_reason": "TRANSIENT_FAILURE",
+                "retry_scheduled": True,
+                "attempt_number": 1,
+                "max_attempts": 2,
+            }
+        },
+        execution_context_snapshot=context.snapshot(),
+    )
+
+    store.save(state)
+    loaded = store.load()
+
+    assert loaded is not None
+    assert loaded.original_plan.ordered_steps[0].retry_policy is not None
+    assert loaded.original_plan.ordered_steps[0].retry_policy.max_attempts == 2
+    assert loaded.retry_decisions["step_1"]["retry_reason"] == "TRANSIENT_FAILURE"
 
 
 def test_json_store_persists_step_conditions(tmp_path) -> None:

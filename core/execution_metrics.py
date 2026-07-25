@@ -45,6 +45,11 @@ class ExecutionMetrics:
     goals_failed: int = 0
     missing_required_outputs: int = 0
     output_validation_failures: int = 0
+    retries_started: int = 0
+    retry_attempts: int = 0
+    retry_successes: int = 0
+    retry_failures: int = 0
+    retry_abortions: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -89,6 +94,11 @@ class ExecutionMetricsCalculator:
         goals_failed = _count_action(events, "goal_verification_failed")
         missing_required_outputs = _count_action(events, "goal_missing_output")
         output_validation_failures = _count_action(events, "goal_output_invalid")
+        retries_started = _count_action(events, "execution_retry_started")
+        retry_attempts = _count_action(events, "execution_retry_attempt")
+        retry_successes = _count_action(events, "execution_retry_succeeded")
+        retry_failures = _count_action(events, "execution_retry_failed")
+        retry_abortions = _count_action(events, "execution_retry_aborted")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -147,6 +157,11 @@ class ExecutionMetricsCalculator:
             goals_failed=goals_failed,
             missing_required_outputs=missing_required_outputs,
             output_validation_failures=output_validation_failures,
+            retries_started=retries_started,
+            retry_attempts=retry_attempts,
+            retry_successes=retry_successes,
+            retry_failures=retry_failures,
+            retry_abortions=retry_abortions,
         )
 
 

@@ -27,6 +27,7 @@ from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRegistryError
 from core.execution_plan_executor import ResumableExecutionState
+from core.execution_retry import RetryPolicy, RetryStrategy, RetryableErrorClassifier
 from core.execution_plan_topology import (
     ExecutionPlanTopologicalSorter,
     ExecutionPlanTopologyError,
@@ -91,6 +92,7 @@ class JsonResumableExecutionStore:
         "confirmation_granted",
         "retry_attempts",
         "retry_history",
+        "retry_decisions",
         "metadata",
         "execution_context_snapshot",
         "goal_verification_result",
@@ -224,6 +226,7 @@ class JsonResumableExecutionStore:
                 step_id: list(history)
                 for step_id, history in state.retry_history.items()
             },
+            "retry_decisions": state.retry_decisions,
             "metadata": _safe_metadata(state.metadata, created_at=created_at),
             "execution_context_snapshot": (
                 _context_snapshot_to_dict(state.execution_context_snapshot)
@@ -272,6 +275,7 @@ class JsonResumableExecutionStore:
         confirmation_granted = _required_bool(payload, "confirmation_granted")
         retry_attempts = _int_mapping(payload, "retry_attempts", default={})
         retry_history = _retry_history(payload, "retry_history", default={})
+        retry_decisions = _retry_decisions(payload, "retry_decisions", default={})
         metadata = _required_dict(payload, "metadata")
         context_snapshot = _optional_context_snapshot(
             payload.get("execution_context_snapshot"),
@@ -330,6 +334,7 @@ class JsonResumableExecutionStore:
             confirmation_granted=confirmation_granted,
             retry_attempts=retry_attempts,
             retry_history=retry_history,
+            retry_decisions=retry_decisions,
             metadata=metadata,
             execution_context_snapshot=context_snapshot,
             goal_verification_result=goal_verification_result,
@@ -369,6 +374,7 @@ def _step_to_dict(
         "arguments": _argument_to_json(step.arguments.as_dict()),
         "output_binding": _binding_to_json(step.output_binding),
         "condition": _condition_to_json(step.condition),
+        "retry_policy": _retry_policy_to_json(step.retry_policy),
     }
 
 
@@ -449,6 +455,7 @@ def _dict_to_step(
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
         output_binding=_binding_from_json(payload.get("output_binding")),
         condition=_condition_from_json(payload.get("condition")),
+        retry_policy=_retry_policy_from_json(payload.get("retry_policy")),
     )
 
 
@@ -729,6 +736,58 @@ def _binding_from_json(
         path=tuple(raw_path),
         overwrite=overwrite,
     )
+
+
+def _retry_policy_to_json(
+    policy: RetryPolicy | None,
+) -> dict[str, Any] | None:
+    if policy is None:
+        return None
+    return {
+        "$type": "retry_policy",
+        "max_attempts": policy.max_attempts,
+        "strategy": policy.strategy.value,
+        "retryable_error_codes": sorted(policy.classifier.retryable_error_codes),
+    }
+
+
+def _retry_policy_from_json(
+    payload: Any,
+) -> RetryPolicy | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {
+        "$type",
+        "max_attempts",
+        "strategy",
+        "retryable_error_codes",
+    }:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Retry policy must be an explicit object or null.",
+        )
+    if payload.get("$type") != "retry_policy":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Retry policy type is invalid.",
+        )
+    raw_codes = payload.get("retryable_error_codes")
+    if not isinstance(raw_codes, list) or not all(isinstance(item, str) for item in raw_codes):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Retry policy retryable_error_codes must be a list of strings.",
+        )
+    try:
+        return RetryPolicy(
+            max_attempts=_required_int(payload, "max_attempts"),
+            strategy=RetryStrategy(_required_str(payload, "strategy")),
+            classifier=RetryableErrorClassifier(frozenset(raw_codes)),
+        )
+    except (TypeError, ValueError) as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Retry policy is invalid.",
+        ) from error
 
 
 def _argument_to_json(
@@ -1285,6 +1344,42 @@ def _retry_history(
             }
             entries.append(safe_entry)
         result[item_key] = tuple(entries)
+    return result
+
+
+def _retry_decisions(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    value = payload.get(key, default)
+    if not isinstance(value, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be an object.",
+        )
+    result: dict[str, dict[str, object]] = {}
+    allowed = {
+        "retry_reason",
+        "retry_scheduled",
+        "retry_exhausted",
+        "attempt_number",
+        "max_attempts",
+    }
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str) or not isinstance(item_value, dict):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                f"Execution state field '{key}' must map strings to objects.",
+            )
+        result[item_key] = {
+            entry_key: entry_value
+            for entry_key, entry_value in item_value.items()
+            if isinstance(entry_key, str)
+            and entry_key in allowed
+            and _is_json_safe(entry_value)
+        }
     return result
 
 

@@ -43,6 +43,7 @@ from core.execution_plan_registry import (
     ExecutionPlanRegistry,
     ExecutionPlanRegistryError,
 )
+from core.execution_retry import MAX_RETRY_ATTEMPTS, RetryPolicy, RetryStrategy
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.parameter_resolver import (
@@ -319,6 +320,7 @@ class ExecutionPlanValidator:
 
             self._validate_output_binding(step, errors)
             self._validate_condition(step, errors)
+            self._validate_retry_policy(step, errors)
             self._validate_branch_condition(step, errors)
             self._validate_loop(step, errors)
 
@@ -353,6 +355,8 @@ class ExecutionPlanValidator:
         loop = getattr(step, "loop", None)
         if loop is None:
             return
+        if getattr(step, "retry_policy", None) is not None:
+            errors.append(f"Step '{step.id}' cannot combine retry_policy with loop.")
         if not isinstance(loop, ExecutionLoop):
             errors.append(f"Step '{step.id}' loop must be ExecutionLoop.")
             return
@@ -403,6 +407,30 @@ class ExecutionPlanValidator:
             return
         if type(binding.overwrite) is not bool:
             errors.append(f"Step '{step.id}' output_binding overwrite must be boolean.")
+
+    def _validate_retry_policy(
+        self,
+        step: Any,
+        errors: list[str],
+    ) -> None:
+        policy = getattr(step, "retry_policy", None)
+        if policy is None:
+            return
+        if not isinstance(policy, RetryPolicy):
+            errors.append(f"Step '{step.id}' retry_policy must be RetryPolicy.")
+            return
+        if isinstance(policy.max_attempts, bool) or not isinstance(policy.max_attempts, int):
+            errors.append(f"Step '{step.id}' retry_policy max_attempts must be an int.")
+        elif policy.max_attempts <= 0:
+            errors.append(f"Step '{step.id}' retry_policy max_attempts must be > 0.")
+        elif policy.max_attempts > MAX_RETRY_ATTEMPTS:
+            errors.append(
+                f"Step '{step.id}' retry_policy max_attempts cannot exceed {MAX_RETRY_ATTEMPTS}."
+            )
+        if not isinstance(policy.strategy, RetryStrategy):
+            errors.append(f"Step '{step.id}' retry_policy strategy must be RetryStrategy.")
+        if policy.strategy is RetryStrategy.NO_RETRY and policy.max_attempts != 1:
+            errors.append(f"Step '{step.id}' NO_RETRY policy requires max_attempts=1.")
 
     def _validate_tool_argument_schemas(
         self,
@@ -1124,6 +1152,7 @@ def plan_signature(
                 ),
                 "output_binding": _signature_safe_value(step.output_binding),
                 "condition": _signature_safe_value(step.condition),
+                "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
             }
             for step in plan.ordered_steps
         ],
@@ -1184,6 +1213,7 @@ def _signature_safe_value(
                     ),
                     "output_binding": _signature_safe_value(step.output_binding),
                     "condition": _signature_safe_value(step.condition),
+                    "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
                 }
                 for step in value.ordered_steps
             ],
@@ -1250,6 +1280,14 @@ def _signature_safe_value(
             "variable_name": value.variable_name,
             "path": list(value.path),
             "overwrite": value.overwrite,
+        }
+
+    if isinstance(value, RetryPolicy):
+        return {
+            "$type": "retry_policy",
+            "max_attempts": value.max_attempts,
+            "strategy": value.strategy.value,
+            "retryable_error_codes": sorted(value.classifier.retryable_error_codes),
         }
 
     if isinstance(value, ExecutionCondition):

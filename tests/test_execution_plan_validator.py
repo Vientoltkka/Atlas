@@ -17,8 +17,9 @@ from core.execution_condition import (
 )
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
+from core.execution_retry import RetryPolicy
 from core.parameter_resolver import MAX_TEMPLATE_LENGTH, MAX_TEMPLATE_REFERENCES
-from core.planner import ExecutionPlan, ExecutionStep, Planner
+from core.planner import ExecutionLoop, ExecutionPlan, ExecutionStep, Planner
 from core.step_output_reference import StepOutputReference
 
 
@@ -1733,6 +1734,69 @@ def test_plan_signature_includes_required_outputs_and_validators() -> None:
     assert plan_signature(base) != plan_signature(required)
     assert plan_signature(base) != plan_signature(validators)
     assert plan_signature(validators) != plan_signature(changed_validator)
+
+
+def test_plan_signature_includes_retry_policy() -> None:
+    base = _valid_plan()
+    retry_once = replace(
+        base,
+        ordered_steps=(
+            ExecutionStep(
+                base.ordered_steps[0].id,
+                base.ordered_steps[0].description,
+                base.ordered_steps[0].tool,
+                dependencies=base.ordered_steps[0].dependencies,
+                arguments=base.ordered_steps[0].arguments,
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+            base.ordered_steps[1],
+        ),
+    )
+    retry_more = replace(
+        base,
+        ordered_steps=(
+            ExecutionStep(
+                base.ordered_steps[0].id,
+                base.ordered_steps[0].description,
+                base.ordered_steps[0].tool,
+                dependencies=base.ordered_steps[0].dependencies,
+                arguments=base.ordered_steps[0].arguments,
+                retry_policy=RetryPolicy(max_attempts=3),
+            ),
+            base.ordered_steps[1],
+        ),
+    )
+
+    assert plan_signature(base) != plan_signature(retry_once)
+    assert plan_signature(retry_once) != plan_signature(retry_more)
+
+
+def test_rejects_retry_policy_on_loop_step() -> None:
+    loop_plan = ExecutionPlan(
+        goal="Loop with retry.",
+        ordered_steps=(
+            ExecutionStep(
+                "loop",
+                "Loop.",
+                None,
+                loop=ExecutionLoop(
+                    condition=ExecutionCondition(True, ExecutionConditionOperator.TRUTHY),
+                    body_plan=_valid_plan(),
+                    max_iterations=1,
+                ),
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=(),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    result = _validate(loop_plan)
+
+    assert result.is_valid is False
+    assert "Step 'loop' cannot combine retry_policy with loop." in result.errors
 
 
 def test_rejects_invalid_goal_output_contract() -> None:

@@ -198,6 +198,27 @@ def test_goal_verification_metrics_are_counted() -> None:
     assert metrics.output_validation_failures == 1
 
 
+def test_retry_metrics_are_counted() -> None:
+    trace = ExecutionTrace("exec-retry")
+    for action, status in (
+        ("execution_retry_started", "STARTED"),
+        ("execution_retry_failed", "FAILED"),
+        ("execution_retry_attempt", "STARTED"),
+        ("execution_retry_succeeded", "FINISHED"),
+        ("execution_retry_aborted", "FINISHED"),
+    ):
+        trace.add_event(component="RetryEngine", action=action, status=status)
+    trace.finish("SUCCESS")
+
+    metrics = ExecutionMetricsCalculator().calculate(trace)
+
+    assert metrics.retries_started == 1
+    assert metrics.retry_attempts == 1
+    assert metrics.retry_successes == 1
+    assert metrics.retry_failures == 1
+    assert metrics.retry_abortions == 1
+
+
 def test_skipped_steps_are_counted_but_excluded_from_success_rate() -> None:
     trace = _trace()
     trace.add_event(

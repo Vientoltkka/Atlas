@@ -126,6 +126,11 @@ class ExecutionObservabilityDeserializer:
         goals_failed = _optional_non_negative_int(payload, "goals_failed", default=0)
         missing_required_outputs = _optional_non_negative_int(payload, "missing_required_outputs", default=0)
         output_validation_failures = _optional_non_negative_int(payload, "output_validation_failures", default=0)
+        retries_started = _optional_non_negative_int(payload, "retries_started", default=0)
+        retry_attempts = _optional_non_negative_int(payload, "retry_attempts", default=0)
+        retry_successes = _optional_non_negative_int(payload, "retry_successes", default=0)
+        retry_failures = _optional_non_negative_int(payload, "retry_failures", default=0)
+        retry_abortions = _optional_non_negative_int(payload, "retry_abortions", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -176,6 +181,11 @@ class ExecutionObservabilityDeserializer:
             goals_failed=goals_failed,
             missing_required_outputs=missing_required_outputs,
             output_validation_failures=output_validation_failures,
+            retries_started=retries_started,
+            retry_attempts=retry_attempts,
+            retry_successes=retry_successes,
+            retry_failures=retry_failures,
+            retry_abortions=retry_abortions,
         )
 
     def trace_from_json(

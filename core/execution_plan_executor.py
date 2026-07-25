@@ -50,7 +50,7 @@ from core.execution_plan_topology import (
     ExecutionPlanTopologyError,
     TopologicalExecutionOrder,
 )
-from core.execution_retry import RetryPolicy
+from core.execution_retry import RetryEngine, RetryPolicy, RetryReason, RetryStrategy
 from core.execution_trace import ExecutionTrace, TraceEventStatus, TraceStatus
 from core.parameter_resolver import ParameterResolver
 from core.planner import ExecutionPlan, ExecutionStep
@@ -208,6 +208,7 @@ class ResumableExecutionState:
     confirmation_granted: bool = False
     retry_attempts: dict[str, int] = field(default_factory=dict)
     retry_history: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
+    retry_decisions: dict[str, dict[str, object]] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
     execution_context_snapshot: ExecutionContextSnapshot | None = None
     goal_verification_result: GoalVerificationResult | None = None
@@ -371,6 +372,7 @@ class ExecutionPlanExecutor:
         self._dependency_checker = dependency_checker or ExecutionDependencyChecker()
         self._topological_sorter = topological_sorter or ExecutionPlanTopologicalSorter()
         self._retry_policy = retry_policy or RetryPolicy()
+        self._retry_engine = RetryEngine()
         self._execution_history = execution_history
         self._plan_registry = plan_registry
 
@@ -2080,11 +2082,16 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
+        effective_retry_policy = step.retry_policy or self._retry_policy
         attempt_number = retry_attempts.get(step.id, 0) + 1
         history = retry_history.setdefault(step.id, [])
+        if effective_retry_policy.max_attempts > 1:
+            self._trace_retry_started(trace, step, effective_retry_policy)
 
         while True:
             retry_attempts[step.id] = attempt_number
+            if attempt_number > 1:
+                self._trace_retry_attempt(trace, step, attempt_number, effective_retry_policy)
             starts_before_resolution = step.branch is None and step.loop is None
             if starts_before_resolution:
                 self._mark_context_started(
@@ -2178,10 +2185,11 @@ class ExecutionPlanExecutor:
                     )
                     metadata = dict(outcome.metadata)
                     metadata["attempt_number"] = attempt_number
-                    metadata["max_attempts"] = self._retry_policy.max_attempts
+                    metadata["max_attempts"] = effective_retry_policy.max_attempts
                     metadata["retry_history"] = list(history)
                     metadata["completed_after_retry"] = attempt_number > 1
                     if attempt_number > 1:
+                        self._trace_retry_succeeded(trace, step, attempt_number, effective_retry_policy)
                         self._emit_progress(
                             on_progress,
                             "step_completed_after_retry",
@@ -2190,7 +2198,7 @@ class ExecutionPlanExecutor:
                             step_index=step_index,
                             total_steps=total_steps,
                             attempt_number=attempt_number,
-                            max_attempts=self._retry_policy.max_attempts,
+                            max_attempts=effective_retry_policy.max_attempts,
                         )
                     return StepExecutionResult(
                         step_id=outcome.step_id,
@@ -2218,10 +2226,10 @@ class ExecutionPlanExecutor:
                     "error": outcome.error,
                 }
             )
-            decision = self._retry_policy.decide(
+            decision = self._retry_engine.decide(
+                effective_retry_policy,
                 attempt_number=attempt_number,
                 error_code=outcome.error_code,
-                error=outcome.error,
                 metadata=outcome.metadata,
             )
             if not decision.should_retry:
@@ -2230,10 +2238,18 @@ class ExecutionPlanExecutor:
                 metadata["max_attempts"] = decision.max_attempts
                 metadata["retry_history"] = list(history)
                 metadata["retry_scheduled"] = False
-                metadata["retry_reason"] = decision.reason
+                metadata["retry_reason"] = decision.reason.value
                 metadata["retry_exhausted"] = (
-                    decision.reason == "max_attempts_reached"
+                    decision.reason is RetryReason.MAX_RETRIES_REACHED
                 )
+                if attempt_number > 1 or effective_retry_policy.max_attempts > 1:
+                    self._trace_retry_aborted(
+                        trace,
+                        step,
+                        attempt_number,
+                        effective_retry_policy,
+                        decision.reason,
+                    )
                 if metadata["retry_exhausted"]:
                     self._emit_progress(
                         on_progress,
@@ -2244,7 +2260,7 @@ class ExecutionPlanExecutor:
                         total_steps=total_steps,
                         attempt_number=attempt_number,
                         max_attempts=decision.max_attempts,
-                        retry_reason=decision.reason,
+                        retry_reason=decision.reason.value,
                     )
                 return StepExecutionResult(
                     step_id=outcome.step_id,
@@ -2269,12 +2285,16 @@ class ExecutionPlanExecutor:
                 total_steps=total_steps,
                 attempt_number=decision.attempt_number,
                 max_attempts=decision.max_attempts,
-                retry_reason=decision.reason,
+                retry_reason=decision.reason.value,
             )
-            stop_result = self._wait_before_retry(
-                control=control,
-                delay_ms=decision.delay_ms,
+            self._trace_retry_failed(
+                trace,
+                step,
+                attempt_number,
+                effective_retry_policy,
+                decision.reason,
             )
+            stop_result = self._retry_control_status(control)
             if stop_result is not None:
                 if execution_context.state_for_step(step.id) == ExecutionStepState.FAILED.value:
                     self._mark_context_started(
@@ -2305,7 +2325,7 @@ class ExecutionPlanExecutor:
                         "max_attempts": decision.max_attempts,
                         "retry_history": list(history),
                         "retry_scheduled": True,
-                        "retry_reason": decision.reason,
+                        "retry_reason": decision.reason.value,
                     },
                 )
             attempt_number = decision.attempt_number
@@ -4579,6 +4599,104 @@ class ExecutionPlanExecutor:
             },
         )
 
+    def _trace_retry_started(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        policy: RetryPolicy,
+    ) -> None:
+        trace.add_event(
+            component="RetryEngine",
+            action="execution_retry_started",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "max_attempts": policy.max_attempts,
+                "strategy": policy.strategy.value,
+            },
+        )
+
+    def _trace_retry_attempt(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        attempt_number: int,
+        policy: RetryPolicy,
+    ) -> None:
+        trace.add_event(
+            component="RetryEngine",
+            action="execution_retry_attempt",
+            status=TraceEventStatus.STARTED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "attempt_number": attempt_number,
+                "max_attempts": policy.max_attempts,
+            },
+        )
+
+    def _trace_retry_succeeded(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        attempt_number: int,
+        policy: RetryPolicy,
+    ) -> None:
+        trace.add_event(
+            component="RetryEngine",
+            action="execution_retry_succeeded",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "attempt_number": attempt_number,
+                "max_attempts": policy.max_attempts,
+            },
+        )
+
+    def _trace_retry_failed(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        attempt_number: int,
+        policy: RetryPolicy,
+        reason: RetryReason,
+    ) -> None:
+        trace.add_event(
+            component="RetryEngine",
+            action="execution_retry_failed",
+            status=TraceEventStatus.FAILED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "attempt_number": attempt_number,
+                "max_attempts": policy.max_attempts,
+                "retry_reason": reason.value,
+            },
+        )
+
+    def _trace_retry_aborted(
+        self,
+        trace: ExecutionTrace,
+        step: ExecutionStep,
+        attempt_number: int,
+        policy: RetryPolicy,
+        reason: RetryReason,
+    ) -> None:
+        trace.add_event(
+            component="RetryEngine",
+            action="execution_retry_aborted",
+            status=TraceEventStatus.FINISHED.value,
+            details={
+                "step_id": step.id,
+                "tool_name": step.tool,
+                "attempt_number": attempt_number,
+                "max_attempts": policy.max_attempts,
+                "retry_reason": reason.value,
+            },
+        )
+
     def _trace_schema_validation_started(
         self,
         trace: ExecutionTrace,
@@ -4996,12 +5114,10 @@ class ExecutionPlanExecutor:
         control: ExecutionControl | None,
         delay_ms: int,
     ) -> str | None:
+        del delay_ms
         before = self._retry_control_status(control)
         if before is not None:
             return before
-
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000)
 
         return self._retry_control_status(control)
 
@@ -5447,7 +5563,7 @@ def _is_retryable(
     reason = result.metadata.get("retry_reason")
     exhausted = result.metadata.get("retry_exhausted")
     scheduled = result.metadata.get("retry_scheduled")
-    return bool(scheduled or exhausted or reason == "max_attempts_reached")
+    return bool(scheduled or exhausted or reason == RetryReason.MAX_RETRIES_REACHED.value)
 
 
 def _metadata_signature(

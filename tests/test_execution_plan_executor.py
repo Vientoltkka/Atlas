@@ -35,7 +35,7 @@ from core.execution_plan_executor import (
     partial_execution_state_to_dict,
 )
 from core.execution_plan_output import ExecutionPlanOutput
-from core.execution_retry import RetryPolicy, RetryableErrorClassifier
+from core.execution_retry import RetryPolicy, RetryReason, RetryStrategy, RetryableErrorClassifier
 from core.execution_trace import TraceEventStatus, TraceStatus
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
@@ -44,6 +44,7 @@ from core.execution_plan_validator import (
 from core.planner import ExecutionPlan, ExecutionStep
 from core.step_output_reference import StepOutputReference
 from tools.base_tool import BaseTool
+from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 
@@ -150,6 +151,7 @@ def _step(
     output_binding: ExecutionVariableBinding | None = None,
     condition: ExecutionCondition | None = None,
     subplan: ExecutionPlan | None = None,
+    retry_policy: RetryPolicy | None = None,
 ) -> ExecutionStep:
     return ExecutionStep(
         id=step_id,
@@ -161,6 +163,7 @@ def _step(
         arguments={} if arguments is None else arguments,
         output_binding=output_binding,
         condition=condition,
+        retry_policy=retry_policy,
     )
 
 
@@ -2273,6 +2276,94 @@ def test_retry_policy_retries_transient_failure_and_then_completes() -> None:
     assert result.step_results[0].metadata["attempt_number"] == 2
     assert result.step_results[0].metadata["completed_after_retry"] is True
     assert len(result.step_results[0].metadata["retry_history"]) == 1
+    assert result.metrics is not None
+    assert result.metrics.retries_started == 1
+    assert result.metrics.retry_attempts == 1
+    assert result.metrics.retry_successes == 1
+    assert result.metrics.retry_failures == 1
+    assert result.metrics.retry_abortions == 0
+    assert result.trace is not None
+    assert "execution_retry_started" in [event.action for event in result.trace.events]
+
+
+def test_step_retry_policy_retries_without_executor_global_policy() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "structured", "error_code": "TRANSIENT_ERROR"},
+            "done",
+        ],
+    )
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert calls == ["safe_tool", "safe_tool"]
+    assert result.step_results[0].metadata["attempt_number"] == 2
+
+
+def test_step_no_retry_strategy_does_not_retry_transient_failure() -> None:
+    calls: list[str] = []
+    tool = SequenceTool(
+        "safe_tool",
+        calls,
+        [
+            {"success": False, "error": "structured", "error_code": "TRANSIENT_ERROR"},
+            "must not run",
+        ],
+    )
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "safe_tool",
+                retry_policy=RetryPolicy(
+                    max_attempts=1,
+                    strategy=RetryStrategy.NO_RETRY,
+                ),
+            ),
+        )
+    )
+
+    result = ExecutionPlanExecutor(_registry(tool)).execute(plan, _validation(plan))
+
+    assert result.success is False
+    assert calls == ["safe_tool"]
+    assert result.step_results[0].metadata["retry_reason"] == RetryReason.TRANSIENT_FAILURE.value
+
+
+def test_retry_policy_e2e_with_real_read_only_tool(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("atlas", encoding="utf-8")
+    plan = _plan(
+        (
+            _step(
+                "step_1",
+                "list_directory",
+                arguments={"path": str(tmp_path)},
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+        ),
+        required_tools=("list_directory",),
+    )
+    registry = ToolRegistry()
+    registry.register(ListDirectoryTool())
+
+    result = ExecutionPlanExecutor(registry).execute(plan, _validation(plan))
+
+    assert result.success is True
+    assert result.step_results[0].output == ["README.md"]
+    assert result.step_results[0].metadata["max_attempts"] == 2
 
 
 def test_retry_preserves_and_resolves_variable_each_attempt() -> None:
@@ -2768,12 +2859,12 @@ def test_retry_policy_does_not_retry_non_retryable_error() -> None:
 
     assert result.success is False
     assert calls == ["safe_tool"]
-    assert result.step_results[0].metadata["retry_reason"] == "non_retryable_error"
+    assert result.step_results[0].metadata["retry_reason"] == RetryReason.PERMANENT_FAILURE.value
 
 
-def test_retry_policy_does_not_retry_unknown_exception() -> None:
+def test_retry_policy_retries_tool_exception() -> None:
     calls: list[str] = []
-    tool = SequenceTool("safe_tool", calls, [RuntimeError("boom"), "must not run"])
+    tool = SequenceTool("safe_tool", calls, [RuntimeError("boom"), "done"])
     plan = _plan((_step("step_1", "safe_tool"),))
 
     result = ExecutionPlanExecutor(
@@ -2781,10 +2872,11 @@ def test_retry_policy_does_not_retry_unknown_exception() -> None:
         retry_policy=RetryPolicy(max_attempts=2),
     ).execute(plan, _validation(plan))
 
-    assert result.success is False
-    assert calls == ["safe_tool"]
-    assert result.step_results[0].error_code == ExecutionErrorCode.TOOL_EXCEPTION.value
-    assert result.step_results[0].metadata["retry_reason"] == "non_retryable_error"
+    assert result.success is True
+    assert calls == ["safe_tool", "safe_tool"]
+    assert result.step_results[0].metadata["retry_history"][0]["error_code"] == (
+        ExecutionErrorCode.TOOL_EXCEPTION.value
+    )
 
 
 def test_confirmed_dangerous_step_can_retry_same_validated_step() -> None:
