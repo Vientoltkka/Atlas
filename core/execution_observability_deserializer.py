@@ -116,6 +116,11 @@ class ExecutionObservabilityDeserializer:
         else_branches_selected = _optional_non_negative_int(payload, "else_branches_selected", default=0)
         branches_skipped = _optional_non_negative_int(payload, "branches_skipped", default=0)
         branches_failed = _optional_non_negative_int(payload, "branches_failed", default=0)
+        loops_started = _optional_non_negative_int(payload, "loops_started", default=0)
+        loops_completed = _optional_non_negative_int(payload, "loops_completed", default=0)
+        loops_failed = _optional_non_negative_int(payload, "loops_failed", default=0)
+        loop_iterations_completed = _optional_non_negative_int(payload, "loop_iterations_completed", default=0)
+        loops_max_iterations_reached = _optional_non_negative_int(payload, "loops_max_iterations_reached", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -156,6 +161,11 @@ class ExecutionObservabilityDeserializer:
             else_branches_selected=else_branches_selected,
             branches_skipped=branches_skipped,
             branches_failed=branches_failed,
+            loops_started=loops_started,
+            loops_completed=loops_completed,
+            loops_failed=loops_failed,
+            loop_iterations_completed=loop_iterations_completed,
+            loops_max_iterations_reached=loops_max_iterations_reached,
         )
 
     def trace_from_json(

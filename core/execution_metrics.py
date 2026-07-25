@@ -35,6 +35,11 @@ class ExecutionMetrics:
     else_branches_selected: int = 0
     branches_skipped: int = 0
     branches_failed: int = 0
+    loops_started: int = 0
+    loops_completed: int = 0
+    loops_failed: int = 0
+    loop_iterations_completed: int = 0
+    loops_max_iterations_reached: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -59,6 +64,21 @@ class ExecutionMetricsCalculator:
         else_branches_selected = _count_action(events, "execution_branch_else_selected")
         branches_skipped = _count_action(events, "execution_branch_skipped")
         branches_failed = _count_action(events, "execution_branch_failed")
+        loops_started = _count_action(events, "execution_loop_started")
+        loops_completed = sum(
+            1
+            for event in events
+            if event.action == "execution_loop_terminated"
+            and _event_status_is(event, "FINISHED")
+        )
+        loops_failed = sum(
+            1
+            for event in events
+            if event.action == "execution_loop_terminated"
+            and _event_status_is(event, "FAILED")
+        )
+        loop_iterations_completed = _count_action(events, "execution_loop_iteration_succeeded")
+        loops_max_iterations_reached = _count_action(events, "execution_loop_max_iterations_reached")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -107,6 +127,11 @@ class ExecutionMetricsCalculator:
             else_branches_selected=else_branches_selected,
             branches_skipped=branches_skipped,
             branches_failed=branches_failed,
+            loops_started=loops_started,
+            loops_completed=loops_completed,
+            loops_failed=loops_failed,
+            loop_iterations_completed=loop_iterations_completed,
+            loops_max_iterations_reached=loops_max_iterations_reached,
         )
 
 
@@ -115,6 +140,14 @@ def _count_action(
     action: str,
 ) -> int:
     return sum(1 for event in events if event.action == action)
+
+
+def _event_status_is(
+    event: TraceEvent,
+    status: str,
+) -> bool:
+    raw_status = getattr(event.status, "value", event.status)
+    return str(raw_status).upper() == status.upper()
 
 
 def _count_by(

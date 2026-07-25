@@ -52,7 +52,7 @@ from core.parameter_resolver import (
     REFERENCE_PATTERN,
     TEMPLATE_REFERENCE_PATTERN,
 )
-from core.planner import ExecutionBranch, ExecutionPlan
+from core.planner import MAX_LOOP_ITERATIONS, ExecutionBranch, ExecutionLoop, ExecutionPlan
 from core.step_output_reference import StepOutputReference
 from tools.registry import ToolRegistry
 
@@ -248,6 +248,7 @@ class ExecutionPlanValidator:
                 step.subplan is not None
                 or getattr(step, "subplan_ref", None) is not None
                 or getattr(step, "branch", None) is not None
+                or getattr(step, "loop", None) is not None
             ):
                 continue
             if step.tool is None:
@@ -277,6 +278,7 @@ class ExecutionPlanValidator:
                 and step.subplan is None
                 and getattr(step, "subplan_ref", None) is None
                 and getattr(step, "branch", None) is None
+                and getattr(step, "loop", None) is None
                 and step.arguments
             ):
                 errors.append(
@@ -309,6 +311,7 @@ class ExecutionPlanValidator:
             self._validate_output_binding(step, errors)
             self._validate_condition(step, errors)
             self._validate_branch_condition(step, errors)
+            self._validate_loop(step, errors)
 
         self._validate_static_references(plan, errors)
         self._validate_structured_references(plan, errors)
@@ -332,6 +335,34 @@ class ExecutionPlanValidator:
             _signature_safe_value(branch.condition)
         except (InvalidConditionTreeError, TypeError) as error:
             errors.append(f"Step '{step.id}' branch condition is invalid: {error}.")
+
+    def _validate_loop(
+        self,
+        step: Any,
+        errors: list[str],
+    ) -> None:
+        loop = getattr(step, "loop", None)
+        if loop is None:
+            return
+        if not isinstance(loop, ExecutionLoop):
+            errors.append(f"Step '{step.id}' loop must be ExecutionLoop.")
+            return
+        if isinstance(loop.max_iterations, bool) or not isinstance(loop.max_iterations, int):
+            errors.append(f"Step '{step.id}' loop max_iterations must be an int.")
+        elif loop.max_iterations <= 0 or loop.max_iterations > MAX_LOOP_ITERATIONS:
+            errors.append(
+                f"Step '{step.id}' loop max_iterations must be between 1 and {MAX_LOOP_ITERATIONS}."
+            )
+        if not isinstance(loop.body_plan, ExecutionPlan):
+            errors.append(f"Step '{step.id}' loop body_plan must be ExecutionPlan.")
+        if not is_execution_condition_node(loop.condition):
+            errors.append(f"Step '{step.id}' loop condition must be a valid condition node.")
+            return
+        try:
+            validate_condition_tree(loop.condition, step_id=step.id)
+            _signature_safe_value(loop.condition)
+        except (InvalidConditionTreeError, TypeError) as error:
+            errors.append(f"Step '{step.id}' loop condition is invalid: {error}.")
 
     def _validate_condition(
         self,
@@ -377,6 +408,7 @@ class ExecutionPlanValidator:
                 step.subplan is not None
                 or getattr(step, "subplan_ref", None) is not None
                 or getattr(step, "branch", None) is not None
+                or getattr(step, "loop", None) is not None
             ):
                 continue
             if step.tool in {None, "direct_response"}:
@@ -440,6 +472,9 @@ class ExecutionPlanValidator:
             branch = getattr(step, "branch", None)
             if isinstance(branch, ExecutionBranch):
                 reference_sources.extend(iter_condition_operands(branch.condition))
+            loop = getattr(step, "loop", None)
+            if isinstance(loop, ExecutionLoop):
+                reference_sources.extend(iter_condition_operands(loop.condition))
             for reference_source in reference_sources:
                 for reference in self._iter_structured_references(reference_source):
                     if isinstance(reference, StepOutputReference):
@@ -512,6 +547,9 @@ class ExecutionPlanValidator:
             branch = getattr(step, "branch", None)
             if isinstance(branch, ExecutionBranch):
                 reference_sources.extend(iter_condition_operands(branch.condition))
+            loop = getattr(step, "loop", None)
+            if isinstance(loop, ExecutionLoop):
+                reference_sources.extend(iter_condition_operands(loop.condition))
 
             for reference_source in reference_sources:
                 for reference in self._iter_special_objects(reference_source, "$ref"):
@@ -785,6 +823,7 @@ class ExecutionPlanValidator:
             if step.subplan is None
             and getattr(step, "subplan_ref", None) is None
             and getattr(step, "branch", None) is None
+            and getattr(step, "loop", None) is None
             and step.tool is not None
             and step.tool in self._DANGEROUS_TOOLS
         )
@@ -813,6 +852,7 @@ class ExecutionPlanValidator:
             if step.subplan is None
             and getattr(step, "subplan_ref", None) is None
             and getattr(step, "branch", None) is None
+            and getattr(step, "loop", None) is None
             and step.tool is not None
             and step.tool != "direct_response"
         }
@@ -839,10 +879,11 @@ class ExecutionPlanValidator:
             has_subplan = step.subplan is not None
             has_subplan_ref = getattr(step, "subplan_ref", None) is not None
             has_branch = getattr(step, "branch", None) is not None
-            if sum((has_tool, has_subplan, has_subplan_ref, has_branch)) != 1:
+            has_loop = getattr(step, "loop", None) is not None
+            if sum((has_tool, has_subplan, has_subplan_ref, has_branch, has_loop)) != 1:
                 errors.append(
                     f"InvalidSubplanStepError: Step '{step.id}' must define "
-                    "exactly one of tool, subplan, or subplan_ref, or branch."
+                    "exactly one of tool, subplan, or subplan_ref, branch, or loop."
                 )
             if step.subplan is not None and not isinstance(step.subplan, ExecutionPlan):
                 errors.append(
@@ -860,6 +901,10 @@ class ExecutionPlanValidator:
             if has_branch and not isinstance(step.branch, ExecutionBranch):
                 errors.append(
                     f"InvalidBranchStepError: Step '{step.id}' branch must be ExecutionBranch."
+                )
+            if has_loop and not isinstance(step.loop, ExecutionLoop):
+                errors.append(
+                    f"InvalidLoopStepError: Step '{step.id}' loop must be ExecutionLoop."
                 )
 
     def _validate_subplans(
@@ -905,6 +950,18 @@ class ExecutionPlanValidator:
                         plan_stack=plan_stack,
                         reference_stack=reference_stack,
                     )
+                continue
+
+            loop = getattr(step, "loop", None)
+            if isinstance(loop, ExecutionLoop):
+                self._validate_plan(
+                    loop.body_plan,
+                    errors,
+                    warnings,
+                    depth=depth + 1,
+                    plan_stack=plan_stack,
+                    reference_stack=reference_stack,
+                )
                 continue
 
             reference = getattr(step, "subplan_ref", None)
@@ -1030,6 +1087,7 @@ def plan_signature(
                 "subplan": _signature_safe_value(step.subplan),
                 "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
                 "branch": _signature_safe_value(getattr(step, "branch", None)),
+                "loop": _signature_safe_value(getattr(step, "loop", None)),
                 "depends_on": list(step.depends_on),
                 "status": step.status,
                 "arguments": _signature_safe_value(
@@ -1077,6 +1135,7 @@ def _signature_safe_value(
                     "subplan": _signature_safe_value(step.subplan),
                     "subplan_ref": _signature_safe_value(getattr(step, "subplan_ref", None)),
                     "branch": _signature_safe_value(getattr(step, "branch", None)),
+                    "loop": _signature_safe_value(getattr(step, "loop", None)),
                     "depends_on": list(step.depends_on),
                     "status": step.status,
                     "arguments": _signature_safe_value(
@@ -1113,6 +1172,14 @@ def _signature_safe_value(
             "condition": _signature_safe_value(value.condition),
             "then_plan": _signature_safe_value(value.then_plan),
             "else_plan": _signature_safe_value(value.else_plan),
+        }
+
+    if isinstance(value, ExecutionLoop):
+        return {
+            "$type": "execution_loop",
+            "condition": _signature_safe_value(value.condition),
+            "body_plan": _signature_safe_value(value.body_plan),
+            "max_iterations": value.max_iterations,
         }
 
     if isinstance(value, ExecutionPlanReference):

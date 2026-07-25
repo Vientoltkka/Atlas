@@ -28,7 +28,7 @@ from core.execution_plan_topology import (
     ExecutionPlanTopologyError,
 )
 from core.execution_plan_validator import PlanValidationResult, plan_signature
-from core.planner import ExecutionBranch, ExecutionPlan, ExecutionStep
+from core.planner import ExecutionBranch, ExecutionLoop, ExecutionPlan, ExecutionStep
 from core.step_output_reference import StepOutputReference
 
 
@@ -343,6 +343,7 @@ def _step_to_dict(
         "subplan": _plan_to_dict(step.subplan) if step.subplan is not None else None,
         "subplan_ref": _plan_reference_to_json(step.subplan_ref),
         "branch": _branch_to_json(step.branch),
+        "loop": _loop_to_json(step.loop),
         "depends_on": list(step.depends_on),
         "status": step.status,
         "arguments": _argument_to_json(step.arguments.as_dict()),
@@ -402,6 +403,12 @@ def _dict_to_step(
             "EXECUTION_STATE_INVALID",
             "Execution step branch must be an execution branch object or null.",
         )
+    raw_loop = payload.get("loop")
+    if raw_loop is not None and not isinstance(raw_loop, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution step loop must be an execution loop object or null.",
+        )
 
     return ExecutionStep(
         id=_required_str(payload, "id"),
@@ -410,6 +417,7 @@ def _dict_to_step(
         subplan=_dict_to_plan(raw_subplan) if raw_subplan is not None else None,
         subplan_ref=_plan_reference_from_json(raw_subplan_ref),
         branch=_branch_from_json(raw_branch),
+        loop=_loop_from_json(raw_loop),
         depends_on=_step_dependencies(payload),
         status=_required_str(payload, "status"),
         arguments=_argument_from_json(_required_dict(payload, "arguments")),
@@ -463,6 +471,48 @@ def _branch_from_json(
         condition=condition,
         then_plan=_dict_to_plan(raw_then),
         else_plan=_dict_to_plan(raw_else) if raw_else is not None else None,
+    )
+
+
+def _loop_to_json(
+    loop: ExecutionLoop | None,
+) -> dict[str, Any] | None:
+    if loop is None:
+        return None
+    return {
+        "$type": "execution_loop",
+        "condition": _condition_to_json(loop.condition),
+        "body_plan": _plan_to_dict(loop.body_plan),
+        "max_iterations": loop.max_iterations,
+    }
+
+
+def _loop_from_json(
+    payload: dict[str, Any] | None,
+) -> ExecutionLoop | None:
+    if payload is None:
+        return None
+    if payload.get("$type") != "execution_loop":
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution loop type is invalid.",
+        )
+    raw_body = payload.get("body_plan")
+    if not isinstance(raw_body, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution loop body_plan must be an execution plan object.",
+        )
+    condition = _condition_from_json(payload.get("condition"))
+    if condition is None:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution loop condition is required.",
+        )
+    return ExecutionLoop(
+        condition=condition,
+        body_plan=_dict_to_plan(raw_body),
+        max_iterations=_required_int(payload, "max_iterations"),
     )
 
 

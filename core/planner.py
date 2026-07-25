@@ -36,6 +36,9 @@ from tools.tool_proposal_builder import (
 from tools.semantic_catalog import SemanticToolCatalog
 
 
+MAX_LOOP_ITERATIONS = 100
+
+
 @dataclass
 class Plan:
     task: str
@@ -52,6 +55,7 @@ class ExecutionStep:
     subplan: ExecutionPlan | None
     subplan_ref: ExecutionPlanReference | None
     branch: ExecutionBranch | None
+    loop: ExecutionLoop | None
     dependencies: tuple[str, ...] = field(default_factory=tuple)
     status: str = "pending"
     arguments: ExecutionArguments | Mapping[str, Any] = field(default_factory=ExecutionArguments.empty)
@@ -68,6 +72,7 @@ class ExecutionStep:
         subplan: ExecutionPlan | None = None,
         subplan_ref: ExecutionPlanReference | None = None,
         branch: ExecutionBranch | None = None,
+        loop: ExecutionLoop | None = None,
         depends_on: Sequence[str] | None = None,
         status: str = "pending",
         arguments: ExecutionArguments | Mapping[str, Any] | None = None,
@@ -81,6 +86,7 @@ class ExecutionStep:
         object.__setattr__(self, "subplan", subplan)
         object.__setattr__(self, "subplan_ref", _copy_execution_plan_reference(subplan_ref))
         object.__setattr__(self, "branch", copy_execution_branch(branch))
+        object.__setattr__(self, "loop", copy_execution_loop(loop))
         object.__setattr__(self, "dependencies", tuple(dependencies_source))
         object.__setattr__(self, "status", status)
         raw_arguments = ExecutionArguments.empty() if arguments is None else arguments
@@ -164,6 +170,40 @@ def copy_execution_branch(
         condition=branch.condition,
         then_plan=branch.then_plan,
         else_plan=branch.else_plan,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLoop:
+    """Controlled declarative loop embedded in an execution step."""
+
+    condition: ExecutionConditionNode
+    body_plan: ExecutionPlan
+    max_iterations: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "condition", copy_execution_condition(self.condition))
+        if not isinstance(self.body_plan, ExecutionPlan):
+            raise TypeError("body_plan must be ExecutionPlan.")
+        if isinstance(self.max_iterations, bool) or not isinstance(self.max_iterations, int):
+            raise TypeError("max_iterations must be an int.")
+        if self.max_iterations <= 0 or self.max_iterations > MAX_LOOP_ITERATIONS:
+            raise ValueError(
+                f"max_iterations must be between 1 and {MAX_LOOP_ITERATIONS}."
+            )
+
+
+def copy_execution_loop(
+    loop: ExecutionLoop | None,
+) -> ExecutionLoop | None:
+    if loop is None:
+        return None
+    if not isinstance(loop, ExecutionLoop):
+        raise TypeError("loop must be ExecutionLoop or None.")
+    return ExecutionLoop(
+        condition=loop.condition,
+        body_plan=loop.body_plan,
+        max_iterations=loop.max_iterations,
     )
 
 

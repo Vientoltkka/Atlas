@@ -144,6 +144,22 @@ class ExecutionErrorCode(str, Enum):
     EXECUTION_PLAN_REGISTRY_UNAVAILABLE = "EXECUTION_PLAN_REGISTRY_UNAVAILABLE"
     EXECUTION_PLAN_REFERENCE_NOT_FOUND = "EXECUTION_PLAN_REFERENCE_NOT_FOUND"
     REGISTERED_EXECUTION_PLAN_SIGNATURE_MISMATCH = "REGISTERED_EXECUTION_PLAN_SIGNATURE_MISMATCH"
+    LOOP_MAX_ITERATIONS_REACHED = "LOOP_MAX_ITERATIONS_REACHED"
+    LOOP_CONDITION_FAILED = "LOOP_CONDITION_FAILED"
+    LOOP_BODY_FAILED = "LOOP_BODY_FAILED"
+    LOOP_BODY_CANCELLED = "LOOP_BODY_CANCELLED"
+    LOOP_BODY_BLOCKED = "LOOP_BODY_BLOCKED"
+
+
+class LoopTerminationReason(str, Enum):
+    """Closed termination reasons for controlled execution loops."""
+
+    CONDITION_FALSE = "CONDITION_FALSE"
+    MAX_ITERATIONS_REACHED = "MAX_ITERATIONS_REACHED"
+    BODY_FAILED = "BODY_FAILED"
+    BODY_CANCELLED = "BODY_CANCELLED"
+    BODY_BLOCKED = "BODY_BLOCKED"
+    CONDITION_EVALUATION_FAILED = "CONDITION_EVALUATION_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +226,17 @@ class StepExecutionResult:
     started_at: str | None = None
     finished_at: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LoopExecutionResult:
+    """Structured outcome of one controlled loop step attempt."""
+
+    iterations_completed: int
+    termination_reason: str
+    last_output: object | None
+    child_results: tuple[PlanExecutionResult, ...]
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,6 +768,7 @@ class ExecutionPlanExecutor:
                 ExecutionErrorCode.EXECUTION_CANCELLED.value,
                 ExecutionErrorCode.EXECUTION_INTERRUPTED.value,
                 ExecutionErrorCode.SUBPLAN_CANCELLED.value,
+                ExecutionErrorCode.LOOP_BODY_CANCELLED.value,
             }:
                 self._trace_step_event(
                     trace,
@@ -1954,7 +1982,12 @@ class ExecutionPlanExecutor:
         subplan_depth: int,
         plan_stack: tuple[int, ...],
     ) -> StepExecutionResult | PlanExecutionResult:
-        if step.subplan is not None or step.subplan_ref is not None or step.branch is not None:
+        if (
+            step.subplan is not None
+            or step.subplan_ref is not None
+            or step.branch is not None
+            or step.loop is not None
+        ):
             return self._execute_resolved_step_with_retries(
                 step,
                 plan_signature=plan_signature,
@@ -2049,7 +2082,7 @@ class ExecutionPlanExecutor:
 
         while True:
             retry_attempts[step.id] = attempt_number
-            starts_before_resolution = step.branch is None
+            starts_before_resolution = step.branch is None and step.loop is None
             if starts_before_resolution:
                 self._mark_context_started(
                     trace,
@@ -2095,6 +2128,7 @@ class ExecutionPlanExecutor:
                 execution_context=execution_context,
                 resolved_arguments=resolution.resolved_arguments.as_dict(),
                 trace=trace,
+                control=control,
                 attempt_number=attempt_number,
                 history=history,
                 subplan_depth=subplan_depth,
@@ -2281,6 +2315,7 @@ class ExecutionPlanExecutor:
         execution_context: ExecutionContext,
         resolved_arguments: dict[str, object],
         trace: ExecutionTrace,
+        control: ExecutionControl | None,
         attempt_number: int,
         history: list[dict[str, object]],
         subplan_depth: int,
@@ -2292,6 +2327,20 @@ class ExecutionPlanExecutor:
                 execution_context=execution_context,
                 resolved_arguments=resolved_arguments,
                 trace=trace,
+                control=control,
+                attempt_number=attempt_number,
+                history=history,
+                subplan_depth=subplan_depth,
+                plan_stack=plan_stack,
+            )
+
+        if step.loop is not None:
+            return self._execute_loop_step_once(
+                step,
+                execution_context=execution_context,
+                resolved_arguments=resolved_arguments,
+                trace=trace,
+                control=control,
                 attempt_number=attempt_number,
                 history=history,
                 subplan_depth=subplan_depth,
@@ -2408,6 +2457,7 @@ class ExecutionPlanExecutor:
         execution_context: ExecutionContext,
         resolved_arguments: dict[str, object],
         trace: ExecutionTrace,
+        control: ExecutionControl | None,
         attempt_number: int,
         history: list[dict[str, object]],
         subplan_depth: int,
@@ -2689,6 +2739,405 @@ class ExecutionPlanExecutor:
                 "branch": True,
                 "selected_branch": selected_branch,
                 "attempt_number": attempt_number,
+                "retry_scheduled": False,
+            },
+        )
+
+    def _execute_loop_step_once(
+        self,
+        step: ExecutionStep,
+        *,
+        execution_context: ExecutionContext,
+        resolved_arguments: dict[str, object],
+        trace: ExecutionTrace,
+        control: ExecutionControl | None,
+        attempt_number: int,
+        history: list[dict[str, object]],
+        subplan_depth: int,
+        plan_stack: tuple[int, ...],
+    ) -> StepExecutionResult:
+        loop = step.loop
+        assert loop is not None
+        depth = subplan_depth + 1
+        iterations_completed = 0
+        child_results: list[PlanExecutionResult] = []
+        last_output: object | None = None
+        parent_started = False
+        body_signature = self._safe_plan_signature(loop.body_plan)
+        if body_signature is None:
+            self._mark_context_started(trace, execution_context, step.id, attempt_number)
+            return self._loop_step_result(
+                step,
+                status=StepExecutionStatus.FAILED.value,
+                success=False,
+                termination_reason=LoopTerminationReason.BODY_FAILED,
+                iterations_completed=0,
+                last_output=None,
+                child_results=(),
+                attempt_number=attempt_number,
+                history=history,
+                error="Loop body plan is not deterministically serializable.",
+                error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+            )
+
+        self._trace_loop_event(
+            trace,
+            "execution_loop_started",
+            TraceEventStatus.STARTED.value,
+            execution_id=execution_context.execution_id,
+            step_id=step.id,
+            iteration_index=None,
+            iterations_completed=iterations_completed,
+            max_iterations=loop.max_iterations,
+            termination_reason=None,
+            child_execution_id=None,
+            child_status=None,
+            error_code=None,
+        )
+
+        while True:
+            try:
+                condition_result = self._condition_evaluator.evaluate(loop.condition, execution_context)
+            except ExecutionConditionEvaluationError as error:
+                if not parent_started:
+                    self._mark_context_started(trace, execution_context, step.id, attempt_number)
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_condition_evaluated",
+                    TraceEventStatus.FAILED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iterations_completed,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.CONDITION_EVALUATION_FAILED.value,
+                    child_execution_id=None,
+                    child_status=None,
+                    error_code=ExecutionErrorCode.LOOP_CONDITION_FAILED.value,
+                )
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_terminated",
+                    TraceEventStatus.FAILED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iterations_completed,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.CONDITION_EVALUATION_FAILED.value,
+                    child_execution_id=None,
+                    child_status=None,
+                    error_code=ExecutionErrorCode.LOOP_CONDITION_FAILED.value,
+                )
+                return self._loop_step_result(
+                    step,
+                    status=StepExecutionStatus.FAILED.value,
+                    success=False,
+                    termination_reason=LoopTerminationReason.CONDITION_EVALUATION_FAILED,
+                    iterations_completed=iterations_completed,
+                    last_output=last_output,
+                    child_results=tuple(child_results),
+                    attempt_number=attempt_number,
+                    history=history,
+                    error=str(error),
+                    error_code=ExecutionErrorCode.LOOP_CONDITION_FAILED.value,
+                )
+
+            self._trace_loop_event(
+                trace,
+                "execution_loop_condition_evaluated",
+                TraceEventStatus.FINISHED.value,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                iteration_index=iterations_completed,
+                iterations_completed=iterations_completed,
+                max_iterations=loop.max_iterations,
+                termination_reason=(
+                    None
+                    if condition_result.matched
+                    else LoopTerminationReason.CONDITION_FALSE.value
+                ),
+                child_execution_id=None,
+                child_status=None,
+                error_code=None,
+            )
+            if not condition_result.matched:
+                if not parent_started:
+                    self._mark_context_started(trace, execution_context, step.id, attempt_number)
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_terminated",
+                    TraceEventStatus.FINISHED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iterations_completed,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.CONDITION_FALSE.value,
+                    child_execution_id=None,
+                    child_status=StepExecutionStatus.COMPLETED.value,
+                    error_code=None,
+                )
+                return self._loop_step_result(
+                    step,
+                    status=StepExecutionStatus.COMPLETED.value,
+                    success=True,
+                    termination_reason=LoopTerminationReason.CONDITION_FALSE,
+                    iterations_completed=iterations_completed,
+                    last_output=last_output,
+                    child_results=tuple(child_results),
+                    attempt_number=attempt_number,
+                    history=history,
+                    error=None,
+                    error_code=None,
+                )
+
+            if iterations_completed >= loop.max_iterations:
+                if not parent_started:
+                    self._mark_context_started(trace, execution_context, step.id, attempt_number)
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_max_iterations_reached",
+                    TraceEventStatus.FAILED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iterations_completed,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.MAX_ITERATIONS_REACHED.value,
+                    child_execution_id=None,
+                    child_status=None,
+                    error_code=ExecutionErrorCode.LOOP_MAX_ITERATIONS_REACHED.value,
+                )
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_terminated",
+                    TraceEventStatus.FAILED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iterations_completed,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.MAX_ITERATIONS_REACHED.value,
+                    child_execution_id=None,
+                    child_status=None,
+                    error_code=ExecutionErrorCode.LOOP_MAX_ITERATIONS_REACHED.value,
+                )
+                return self._loop_step_result(
+                    step,
+                    status=StepExecutionStatus.FAILED.value,
+                    success=False,
+                    termination_reason=LoopTerminationReason.MAX_ITERATIONS_REACHED,
+                    iterations_completed=iterations_completed,
+                    last_output=last_output,
+                    child_results=tuple(child_results),
+                    attempt_number=attempt_number,
+                    history=history,
+                    error="Loop reached max_iterations before condition became false.",
+                    error_code=ExecutionErrorCode.LOOP_MAX_ITERATIONS_REACHED.value,
+                )
+
+            if not parent_started:
+                self._mark_context_started(trace, execution_context, step.id, attempt_number)
+                parent_started = True
+            iteration_number = iterations_completed + 1
+            self._trace_loop_event(
+                trace,
+                "execution_loop_iteration_started",
+                TraceEventStatus.STARTED.value,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                iteration_index=iteration_number,
+                iterations_completed=iterations_completed,
+                max_iterations=loop.max_iterations,
+                termination_reason=None,
+                child_execution_id=None,
+                child_status=None,
+                error_code=None,
+            )
+            child_context = ExecutionContext(
+                initial_variables={
+                    **execution_context.variables_snapshot(),
+                    **deepcopy(resolved_arguments),
+                },
+                metadata={
+                    "parent_execution_id": execution_context.execution_id,
+                    "parent_step_id": step.id,
+                    "loop_iteration": iteration_number,
+                    "depth": depth,
+                },
+            )
+            validation = ExecutionPlanValidator(
+                self._tool_registry,
+                self._topological_sorter,
+                plan_registry=self._plan_registry,
+            ).validate(loop.body_plan, depth=depth, plan_stack=plan_stack)
+            if not validation.is_valid:
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_iteration_failed",
+                    TraceEventStatus.FAILED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iteration_number,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=LoopTerminationReason.BODY_FAILED.value,
+                    child_execution_id=child_context.execution_id,
+                    child_status=None,
+                    error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                )
+                return self._loop_step_result(
+                    step,
+                    status=StepExecutionStatus.FAILED.value,
+                    success=False,
+                    termination_reason=LoopTerminationReason.BODY_FAILED,
+                    iterations_completed=iterations_completed,
+                    last_output=last_output,
+                    child_results=tuple(child_results),
+                    attempt_number=attempt_number,
+                    history=history,
+                    error="Loop body plan did not pass validation.",
+                    error_code=ExecutionErrorCode.SUBPLAN_VALIDATION_FAILED.value,
+                )
+            child_result = self._child_executor().execute(
+                loop.body_plan,
+                validation,
+                confirmation_granted=True,
+                control=control,
+                execution_context=child_context,
+                subplan_depth=depth,
+                plan_stack=plan_stack,
+            )
+            child_results.append(child_result)
+            if child_result.success:
+                iterations_completed += 1
+                last_output = child_result.output
+                self._sync_loop_child_variables(execution_context, child_context)
+                self._trace_loop_event(
+                    trace,
+                    "execution_loop_iteration_succeeded",
+                    TraceEventStatus.FINISHED.value,
+                    execution_id=execution_context.execution_id,
+                    step_id=step.id,
+                    iteration_index=iteration_number,
+                    iterations_completed=iterations_completed,
+                    max_iterations=loop.max_iterations,
+                    termination_reason=None,
+                    child_execution_id=child_context.execution_id,
+                    child_status=child_result.plan_status,
+                    error_code=None,
+                )
+                continue
+
+            if child_result.cancelled:
+                termination = LoopTerminationReason.BODY_CANCELLED
+                status = StepExecutionStatus.CANCELLED.value
+                error_code = ExecutionErrorCode.LOOP_BODY_CANCELLED.value
+                trace_status = TraceEventStatus.FAILED.value
+            elif child_result.blocked:
+                termination = LoopTerminationReason.BODY_BLOCKED
+                status = StepExecutionStatus.FAILED.value
+                error_code = ExecutionErrorCode.LOOP_BODY_BLOCKED.value
+                trace_status = TraceEventStatus.FAILED.value
+            else:
+                termination = LoopTerminationReason.BODY_FAILED
+                status = StepExecutionStatus.FAILED.value
+                error_code = ExecutionErrorCode.LOOP_BODY_FAILED.value
+                trace_status = TraceEventStatus.FAILED.value
+            self._trace_loop_event(
+                trace,
+                "execution_loop_iteration_failed",
+                trace_status,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                iteration_index=iteration_number,
+                iterations_completed=iterations_completed,
+                max_iterations=loop.max_iterations,
+                termination_reason=termination.value,
+                child_execution_id=child_context.execution_id,
+                child_status=child_result.plan_status,
+                error_code=error_code,
+            )
+            self._trace_loop_event(
+                trace,
+                "execution_loop_terminated",
+                trace_status,
+                execution_id=execution_context.execution_id,
+                step_id=step.id,
+                iteration_index=iteration_number,
+                iterations_completed=iterations_completed,
+                max_iterations=loop.max_iterations,
+                termination_reason=termination.value,
+                child_execution_id=child_context.execution_id,
+                child_status=child_result.plan_status,
+                error_code=error_code,
+            )
+            return self._loop_step_result(
+                step,
+                status=status,
+                success=False,
+                termination_reason=termination,
+                iterations_completed=iterations_completed,
+                last_output=last_output,
+                child_results=tuple(child_results),
+                attempt_number=attempt_number,
+                history=history,
+                error=child_result.error or child_result.failure_reason,
+                error_code=error_code,
+            )
+
+    def _sync_loop_child_variables(
+        self,
+        parent_context: ExecutionContext,
+        child_context: ExecutionContext,
+    ) -> None:
+        for name, value in child_context.variables_snapshot().items():
+            parent_context.set_variable(name, value)
+
+    def _loop_step_result(
+        self,
+        step: ExecutionStep,
+        *,
+        status: str,
+        success: bool,
+        termination_reason: LoopTerminationReason,
+        iterations_completed: int,
+        last_output: object | None,
+        child_results: tuple[PlanExecutionResult, ...],
+        attempt_number: int,
+        history: list[dict[str, object]],
+        error: str | None,
+        error_code: str | None,
+    ) -> StepExecutionResult:
+        loop_result = LoopExecutionResult(
+            iterations_completed=iterations_completed,
+            termination_reason=termination_reason.value,
+            last_output=deepcopy(last_output),
+            child_results=child_results,
+            status=status,
+        )
+        del loop_result
+        return StepExecutionResult(
+            step_id=step.id,
+            status=status,
+            success=success,
+            tool_name=None,
+            output=last_output if success else None,
+            error=error,
+            error_code=error_code,
+            metadata={
+                "loop": True,
+                "iterations_completed": iterations_completed,
+                "termination_reason": termination_reason.value,
+                "child_result_count": len(child_results),
+                "child_execution_ids": tuple(
+                    result.trace.execution_id
+                    for result in child_results
+                    if result.trace is not None
+                ),
+                "attempt_number": attempt_number,
+                "retry_history": list(history),
                 "retry_scheduled": False,
             },
         )
@@ -3440,6 +3889,45 @@ class ExecutionPlanExecutor:
             details["child_status"] = child_status
         if child_step_count is not None:
             details["child_step_count"] = child_step_count
+        if error_code is not None:
+            details["error_code"] = error_code
+        trace.add_event(
+            component="ExecutionPlanExecutor",
+            action=action,
+            status=status,
+            details=details,
+        )
+
+    def _trace_loop_event(
+        self,
+        trace: ExecutionTrace,
+        action: str,
+        status: str,
+        *,
+        execution_id: str,
+        step_id: str,
+        iteration_index: int | None,
+        iterations_completed: int,
+        max_iterations: int,
+        termination_reason: str | None,
+        child_execution_id: str | None,
+        child_status: str | None,
+        error_code: str | None,
+    ) -> None:
+        details: dict[str, object] = {
+            "execution_id": execution_id,
+            "step_id": step_id,
+            "iterations_completed": iterations_completed,
+            "max_iterations": max_iterations,
+        }
+        if iteration_index is not None:
+            details["iteration_index"] = iteration_index
+        if termination_reason is not None:
+            details["termination_reason"] = termination_reason
+        if child_execution_id is not None:
+            details["child_execution_id"] = child_execution_id
+        if child_status is not None:
+            details["child_status"] = child_status
         if error_code is not None:
             details["error_code"] = error_code
         trace.add_event(
