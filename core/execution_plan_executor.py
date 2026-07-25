@@ -31,6 +31,7 @@ from core.execution_condition import (
 )
 from core.execution_arguments import ExecutionArguments
 from core.execution_metrics import ExecutionMetrics, ExecutionMetricsCalculator
+from core.goal_verifier import GoalVerificationResult, GoalVerifier
 from core.execution_plan_output import (
     ExecutionPlanOutput,
     ExecutionPlanOutputError,
@@ -209,6 +210,7 @@ class ResumableExecutionState:
     retry_history: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
     execution_context_snapshot: ExecutionContextSnapshot | None = None
+    goal_verification_result: GoalVerificationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +320,7 @@ class PlanExecutionResult:
     trace: ExecutionTrace | None = None
     metrics: ExecutionMetrics | None = None
     output: object | None = None
+    goal_verification_result: GoalVerificationResult | None = None
 
     @property
     def status(self) -> str:
@@ -3643,6 +3646,14 @@ class ExecutionPlanExecutor:
         active_trace = trace or result.trace or ExecutionTrace()
         result = replace(result, trace=active_trace)
         result = self._resolve_terminal_plan_output(plan, result, active_trace)
+        result = replace(
+            result,
+            goal_verification_result=GoalVerifier().verify(
+                plan,
+                result,
+                trace=active_trace,
+            ),
+        )
         if "execution_context_snapshot" in result.metadata:
             result = replace(
                 result,

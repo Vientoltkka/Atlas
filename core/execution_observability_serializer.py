@@ -9,6 +9,7 @@ import math
 from typing import Any
 
 from core.execution_metrics import ExecutionMetrics
+from core.goal_verifier import goal_verification_result_to_dict as _goal_verification_result_to_dict
 from core.execution_plan_executor import PlanExecutionResult, StepExecutionResult
 from core.execution_trace import ExecutionTrace, TraceEvent
 
@@ -78,6 +79,11 @@ class ExecutionObservabilitySerializer:
             "loops_failed": metrics.loops_failed,
             "loop_iterations_completed": metrics.loop_iterations_completed,
             "loops_max_iterations_reached": metrics.loops_max_iterations_reached,
+            "goals_verified": metrics.goals_verified,
+            "goals_satisfied": metrics.goals_satisfied,
+            "goals_failed": metrics.goals_failed,
+            "missing_required_outputs": metrics.missing_required_outputs,
+            "output_validation_failures": metrics.output_validation_failures,
             "success_rate": metrics.success_rate,
             "total_step_duration_ms": metrics.total_step_duration_ms,
             "average_step_duration_ms": metrics.average_step_duration_ms,
@@ -138,6 +144,9 @@ class ExecutionObservabilitySerializer:
                 self.metrics_to_dict(result.metrics)
                 if result.metrics is not None
                 else None
+            ),
+            "goal_verification_result": (
+                _goal_verification_result_to_dict(result.goal_verification_result)
             ),
         }
 

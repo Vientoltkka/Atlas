@@ -696,6 +696,7 @@ class StructuredExecutionCoordinator:
             retry_attempts=retry_attempts,
             retry_history=retry_history,
             execution_context_snapshot=execution_context.snapshot(),
+            goal_verification_result=execution.goal_verification_result,
         )
 
     def _save_resumable_state(

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 import json
 import re
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 import unicodedata
 
@@ -134,12 +135,24 @@ class ExecutionPlan:
     requires_confirmation: bool
     status: str = "planned"
     output: ExecutionPlanOutput | object | None = None
+    required_outputs: tuple[str, ...] = ()
+    output_validators: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "output",
             copy_execution_plan_output(self.output),
+        )
+        object.__setattr__(
+            self,
+            "required_outputs",
+            _normalize_required_outputs(self.required_outputs),
+        )
+        object.__setattr__(
+            self,
+            "output_validators",
+            MappingProxyType(_normalize_output_validators(self.output_validators)),
         )
 
 
@@ -205,6 +218,39 @@ def copy_execution_loop(
         body_plan=loop.body_plan,
         max_iterations=loop.max_iterations,
     )
+
+
+def _normalize_required_outputs(values: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("required_outputs must contain non-empty strings.")
+        name = value.strip()
+        if name not in normalized:
+            normalized.append(name)
+    return tuple(normalized)
+
+
+def _normalize_output_validators(
+    values: Mapping[str, Sequence[str]],
+) -> dict[str, tuple[str, ...]]:
+    normalized: dict[str, tuple[str, ...]] = {}
+    for raw_name, raw_validators in values.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("output_validators keys must be non-empty strings.")
+        if isinstance(raw_validators, (str, bytes)):
+            raise ValueError("output_validators values must be sequences.")
+        validator_values: list[str] = []
+        for raw_validator in raw_validators:
+            if not isinstance(raw_validator, str) or not raw_validator.strip():
+                raise ValueError("output validators must be non-empty strings.")
+            validator = raw_validator.strip()
+            if validator not in validator_values:
+                validator_values.append(validator)
+        if not validator_values:
+            raise ValueError("output_validators values cannot be empty.")
+        normalized[raw_name.strip()] = tuple(validator_values)
+    return normalized
 
 
 class PlannerErrorCode(str, Enum):

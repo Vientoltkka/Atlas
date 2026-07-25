@@ -82,6 +82,14 @@ class ExecutionPlanValidator:
         "desktop.press_hotkey",
     }
     _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+    _OUTPUT_VALIDATORS = {
+        "exists",
+        "not_null",
+        "non_empty_collection",
+        "non_empty_string",
+        "boolean_true",
+        "non_empty",
+    }
 
     def __init__(
         self,
@@ -160,6 +168,7 @@ class ExecutionPlanValidator:
         self._validate_dependencies(plan, errors)
         self._validate_topology(plan, errors)
         self._validate_plan_output(plan, errors)
+        self._validate_goal_outputs(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
         self._validate_subplans(
@@ -1038,6 +1047,24 @@ class ExecutionPlanValidator:
                         f"{segment}."
                     )
 
+    def _validate_goal_outputs(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        for output_name in plan.required_outputs:
+            if not _is_safe_output_name(output_name):
+                errors.append(f"ExecutionPlan required output is invalid: {output_name}.")
+        for output_name, validators in plan.output_validators.items():
+            if not _is_safe_output_name(output_name):
+                errors.append(f"ExecutionPlan output validator name is invalid: {output_name}.")
+            for validator in validators:
+                if validator not in self._OUTPUT_VALIDATORS:
+                    errors.append(
+                        "ExecutionPlan output validator is unsupported: "
+                        f"{validator}."
+                    )
+
     def _find_cycles(
         self,
         dependency_graph: dict[str, tuple[str, ...]],
@@ -1110,6 +1137,8 @@ def plan_signature(
             if isinstance(plan.output, ExecutionPlanOutput)
             else None
         ),
+        "required_outputs": list(plan.required_outputs),
+        "output_validators": _signature_safe_value(dict(plan.output_validators)),
     }
     encoded = json.dumps(
         payload,
@@ -1118,6 +1147,16 @@ def plan_signature(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_safe_output_name(
+    value: str,
+) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value.strip()))
+    )
 
 
 def _signature_safe_value(
@@ -1158,6 +1197,8 @@ def _signature_safe_value(
                 if isinstance(value.output, ExecutionPlanOutput)
                 else None
             ),
+            "required_outputs": list(value.required_outputs),
+            "output_validators": _signature_safe_value(dict(value.output_validators)),
         }
 
     if isinstance(value, ExecutionPlanOutput):

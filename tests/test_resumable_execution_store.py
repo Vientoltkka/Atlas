@@ -17,6 +17,7 @@ from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult, plan_signature
+from core.goal_verifier import GoalVerificationReason, GoalVerificationResult
 from core.planner import ExecutionPlan, ExecutionStep
 from core.resumable_execution_store import (
     JsonResumableExecutionStore,
@@ -90,6 +91,11 @@ def _state() -> ResumableExecutionState:
             )
         },
         execution_context_snapshot=context.snapshot(),
+        goal_verification_result=GoalVerificationResult(
+            satisfied=True,
+            reason=GoalVerificationReason.SUCCESS,
+            verified_outputs=("content",),
+        ),
     )
 
 
@@ -116,7 +122,26 @@ def test_json_store_saves_and_loads_valid_state(tmp_path) -> None:
         "step_1": {"content": "alpha"}
     }
     assert loaded.execution_context_snapshot.variables == {}  # type: ignore[union-attr]
+    assert loaded.goal_verification_result is not None  # type: ignore[union-attr]
+    assert loaded.goal_verification_result.satisfied is True  # type: ignore[union-attr]
     assert store.exists() is True
+
+
+def test_json_store_loads_checkpoint_without_goal_verification_fields(tmp_path) -> None:
+    store = JsonResumableExecutionStore(tmp_path / "state.json")
+    store.save(_state())
+    payload = _payload(store.path)
+    payload.pop("goal_verification_result")
+    payload["original_plan"].pop("required_outputs")
+    payload["original_plan"].pop("output_validators")
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load()
+
+    assert loaded is not None
+    assert loaded.goal_verification_result is None
+    assert loaded.original_plan.required_outputs == ()
+    assert dict(loaded.original_plan.output_validators) == {}
 
 
 def test_json_store_persists_step_conditions(tmp_path) -> None:

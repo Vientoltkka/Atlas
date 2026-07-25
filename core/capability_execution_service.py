@@ -17,6 +17,7 @@ from core.capability_orchestrator import (
 from core.capability_planner import CapabilityPlanningRequest
 from core.capability_resolver import CapabilityType, WorkflowCapabilitySource
 from core.execution_plan_executor import ExecutionControl
+from core.goal_verifier import GoalVerificationResult
 from core.execution_plan_registry import ExecutionPlanReference
 from core.multi_capability_planner import (
     MultiCapabilityPlanner,
@@ -128,6 +129,7 @@ class CapabilityExecutionResult:
     plan_signature: str | None = None
     execution_id: str | None = None
     execution_status: str | None = None
+    goal_verification_result: GoalVerificationResult | None = None
     output: object | None = None
     error_code: str | None = None
     message: str | None = None
@@ -330,6 +332,7 @@ def _result_from_orchestration(
         ),
         execution_id=execution_id,
         execution_status=execution.status if execution is not None else None,
+        goal_verification_result=orchestration_result.goal_verification_result,
         output=execution.output if execution is not None else None,
         error_code=orchestration_result.error_code,
         message=_message_for(status, orchestration_result),

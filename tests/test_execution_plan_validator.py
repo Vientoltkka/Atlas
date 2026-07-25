@@ -1722,3 +1722,28 @@ def test_plan_signature_changes_when_output_changes() -> None:
     assert plan_signature(base) != plan_signature(changed_path)
     assert plan_signature(base) != plan_signature(changed_order)
     assert plan_signature(base) == plan_signature(replace(base, output=ExecutionPlanOutput(base.output.as_definition())))
+
+
+def test_plan_signature_includes_required_outputs_and_validators() -> None:
+    base = _valid_plan()
+    required = replace(base, required_outputs=("entries",))
+    validators = replace(base, output_validators={"entries": ("exists",)})
+    changed_validator = replace(base, output_validators={"entries": ("not_null",)})
+
+    assert plan_signature(base) != plan_signature(required)
+    assert plan_signature(base) != plan_signature(validators)
+    assert plan_signature(validators) != plan_signature(changed_validator)
+
+
+def test_rejects_invalid_goal_output_contract() -> None:
+    plan = replace(
+        _valid_plan(),
+        required_outputs=("bad-name",),
+        output_validators={"entries": ("unknown_validator",)},
+    )
+
+    result = _validate(plan)
+
+    assert result.is_valid is False
+    assert "ExecutionPlan required output is invalid: bad-name." in result.errors
+    assert "ExecutionPlan output validator is unsupported: unknown_validator." in result.errors

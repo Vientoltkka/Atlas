@@ -40,6 +40,11 @@ class ExecutionMetrics:
     loops_failed: int = 0
     loop_iterations_completed: int = 0
     loops_max_iterations_reached: int = 0
+    goals_verified: int = 0
+    goals_satisfied: int = 0
+    goals_failed: int = 0
+    missing_required_outputs: int = 0
+    output_validation_failures: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -79,6 +84,11 @@ class ExecutionMetricsCalculator:
         )
         loop_iterations_completed = _count_action(events, "execution_loop_iteration_succeeded")
         loops_max_iterations_reached = _count_action(events, "execution_loop_max_iterations_reached")
+        goals_verified = _count_action(events, "goal_verification_started")
+        goals_satisfied = _count_action(events, "goal_verification_succeeded")
+        goals_failed = _count_action(events, "goal_verification_failed")
+        missing_required_outputs = _count_action(events, "goal_missing_output")
+        output_validation_failures = _count_action(events, "goal_output_invalid")
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -132,6 +142,11 @@ class ExecutionMetricsCalculator:
             loops_failed=loops_failed,
             loop_iterations_completed=loop_iterations_completed,
             loops_max_iterations_reached=loops_max_iterations_reached,
+            goals_verified=goals_verified,
+            goals_satisfied=goals_satisfied,
+            goals_failed=goals_failed,
+            missing_required_outputs=missing_required_outputs,
+            output_validation_failures=output_validation_failures,
         )
 
 

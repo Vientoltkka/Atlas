@@ -21,6 +21,7 @@ from core.execution_plan_executor import (
     PlanExecutionResult,
 )
 from core.execution_context import ExecutionContext
+from core.goal_verifier import GoalVerificationResult
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.planner import ExecutionPlan
 
@@ -125,6 +126,7 @@ class CapabilityOrchestrationResult:
     selected_plan: ExecutionPlan | None = None
     validation_result: PlanValidationResult | None = None
     execution_result: PlanExecutionResult | None = None
+    goal_verification_result: GoalVerificationResult | None = None
     error_code: str | None = None
     error_message: str | None = None
     events: tuple[CapabilityOrchestrationEvent, ...] = ()
@@ -406,6 +408,34 @@ class CapabilityOrchestrator:
                 error_message=execution.error,
             )
 
+        goal_verification = execution.goal_verification_result
+        if goal_verification is None or not goal_verification.satisfied:
+            _record(
+                events,
+                self._observer,
+                "capability_execution_failed",
+                "failed",
+                {
+                    "execution_status": execution.status,
+                    "goal_satisfied": False,
+                },
+            )
+            return self._complete(
+                CapabilityOrchestrationStatus.EXECUTION_FAILED,
+                events,
+                planning_decision=planning_decision,
+                selected_plan=plan,
+                validation_result=validation,
+                execution_result=execution,
+                goal_verification_result=goal_verification,
+                error_code=(
+                    goal_verification.reason.value
+                    if goal_verification is not None
+                    else "UNKNOWN"
+                ),
+                error_message="Capability goal verification failed.",
+            )
+
         _record(
             events,
             self._observer,
@@ -420,6 +450,7 @@ class CapabilityOrchestrator:
             selected_plan=plan,
             validation_result=validation,
             execution_result=execution,
+            goal_verification_result=goal_verification,
         )
 
     def _complete(
@@ -431,6 +462,7 @@ class CapabilityOrchestrator:
         selected_plan: ExecutionPlan | None = None,
         validation_result: PlanValidationResult | None = None,
         execution_result: PlanExecutionResult | None = None,
+        goal_verification_result: GoalVerificationResult | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> CapabilityOrchestrationResult:
@@ -448,6 +480,7 @@ class CapabilityOrchestrator:
             selected_plan=selected_plan,
             validation_result=validation_result,
             execution_result=execution_result,
+            goal_verification_result=goal_verification_result,
             error_code=error_code,
             error_message=error_message,
         )
@@ -480,6 +513,7 @@ def _result(
     selected_plan: ExecutionPlan | None = None,
     validation_result: PlanValidationResult | None = None,
     execution_result: PlanExecutionResult | None = None,
+    goal_verification_result: GoalVerificationResult | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> CapabilityOrchestrationResult:
@@ -489,6 +523,7 @@ def _result(
         selected_plan=selected_plan,
         validation_result=validation_result,
         execution_result=execution_result,
+        goal_verification_result=goal_verification_result,
         error_code=error_code,
         error_message=error_message,
         events=tuple(events),

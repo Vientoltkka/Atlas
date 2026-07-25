@@ -176,3 +176,22 @@ def test_execution_plan_accepts_and_copies_declarative_output() -> None:
         "summary": StepOutputReference("step_1"),
         "items": ["a"],
     }
+
+
+def test_execution_plan_accepts_required_outputs_and_validators() -> None:
+    validators = {"entries": ("exists", "non_empty_collection")}
+    plan = ExecutionPlan(
+        goal="List directory.",
+        ordered_steps=(ExecutionStep("step_1", "List.", "list_directory"),),
+        estimated_steps=1,
+        required_tools=("list_directory",),
+        detected_risks=(),
+        requires_confirmation=False,
+        required_outputs=("entries", "entries"),
+        output_validators=validators,
+    )
+
+    validators["entries"] = ("exists",)
+
+    assert plan.required_outputs == ("entries",)
+    assert plan.output_validators["entries"] == ("exists", "non_empty_collection")

@@ -218,6 +218,8 @@ def test_service_executes_valid_request_with_real_chain_and_safe_output() -> Non
     assert result.plan_signature
     assert result.execution_id
     assert result.execution_status == "completed"
+    assert result.goal_verification_result is not None
+    assert result.goal_verification_result.satisfied is True
     assert result.output == {"public": "done", "api_token": "[redacted]"}
     assert tool.calls == 1
     assert tool.contexts[0].parameters == {}

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.execution_context import ExecutionContextSnapshot
+from core.goal_verifier import (
+    goal_verification_result_from_dict,
+    goal_verification_result_to_dict,
+)
 from core.execution_condition import (
     AllOfCondition,
     AnyOfCondition,
@@ -89,6 +93,7 @@ class JsonResumableExecutionStore:
         "retry_history",
         "metadata",
         "execution_context_snapshot",
+        "goal_verification_result",
     }
 
     def __init__(
@@ -225,6 +230,9 @@ class JsonResumableExecutionStore:
                 if state.execution_context_snapshot is not None
                 else None
             ),
+            "goal_verification_result": goal_verification_result_to_dict(
+                state.goal_verification_result
+            ),
         }
 
     def _payload_to_state(
@@ -268,6 +276,15 @@ class JsonResumableExecutionStore:
         context_snapshot = _optional_context_snapshot(
             payload.get("execution_context_snapshot"),
         )
+        try:
+            goal_verification_result = goal_verification_result_from_dict(
+                payload.get("goal_verification_result"),
+            )
+        except ValueError as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Goal verification result is invalid.",
+            ) from error
 
         if not resumable:
             raise ResumableExecutionStoreError(
@@ -315,6 +332,7 @@ class JsonResumableExecutionStore:
             retry_history=retry_history,
             metadata=metadata,
             execution_context_snapshot=context_snapshot,
+            goal_verification_result=goal_verification_result,
         )
 
 
@@ -330,6 +348,8 @@ def _plan_to_dict(
         "requires_confirmation": plan.requires_confirmation,
         "status": plan.status,
         "output": _output_to_json(plan.output),
+        "required_outputs": list(plan.required_outputs),
+        "output_validators": _output_validators_to_json(plan.output_validators),
     }
 
 
@@ -372,6 +392,12 @@ def _dict_to_plan(
         requires_confirmation=_required_bool(payload, "requires_confirmation"),
         status=_required_str(payload, "status"),
         output=_output_from_json(payload.get("output")),
+        required_outputs=_str_tuple(payload, "required_outputs") if "required_outputs" in payload else (),
+        output_validators=(
+            _output_validators_from_json(payload.get("output_validators"))
+            if "output_validators" in payload
+            else {}
+        ),
     )
 
 
@@ -769,6 +795,43 @@ def _output_from_json(
             "Execution plan output type is invalid.",
         )
     return ExecutionPlanOutput(_argument_from_json(payload.get("value")))
+
+
+def _output_validators_to_json(
+    validators: Any,
+) -> dict[str, list[str]]:
+    return {
+        str(name): list(kinds)
+        for name, kinds in dict(validators).items()
+    }
+
+
+def _output_validators_from_json(
+    payload: Any,
+) -> dict[str, tuple[str, ...]]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution plan output_validators must be an object.",
+        )
+    result: dict[str, tuple[str, ...]] = {}
+    for name, validators in payload.items():
+        if not isinstance(name, str):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Execution plan output validator names must be strings.",
+            )
+        if not isinstance(validators, list) or not all(
+            isinstance(item, str) for item in validators
+        ):
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Execution plan output validators must be lists of strings.",
+            )
+        result[name] = tuple(validators)
+    return result
 
 
 def _plan_reference_to_json(

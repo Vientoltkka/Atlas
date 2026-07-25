@@ -1401,6 +1401,8 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
         "step_state_changed",
         "STEP_FINISHED",
         "execution_context_snapshot_created",
+        "goal_verification_started",
+        "goal_verification_succeeded",
     ]
     assert result.trace.events[1].status == TraceEventStatus.STARTED.value
     assert result.trace.events[2].status == TraceEventStatus.FINISHED.value
@@ -1413,6 +1415,8 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     assert result.metrics.successful_steps == 1
     assert result.metrics.failed_steps == 0
     assert result.metrics.success_rate == 1.0
+    assert result.metrics.goals_verified == 1
+    assert result.metrics.goals_satisfied == 1
 
 
 def test_executor_trace_records_failed_step_event() -> None:
@@ -1436,6 +1440,8 @@ def test_executor_trace_records_failed_step_event() -> None:
         "step_state_changed",
         "STEP_FAILED",
         "execution_context_snapshot_created",
+        "goal_verification_started",
+        "goal_verification_failed",
     ]
     assert result.trace.events[8].status == TraceEventStatus.FAILED.value
     assert result.trace.events[8].details["error_code"] == (
@@ -1446,6 +1452,8 @@ def test_executor_trace_records_failed_step_event() -> None:
     assert result.metrics.execution_status == TraceStatus.FAILED.value
     assert result.metrics.started_steps == 1
     assert result.metrics.failed_steps == 1
+    assert result.metrics.goals_verified == 1
+    assert result.metrics.goals_failed == 1
 
 
 def test_executor_trace_marks_cancelled_execution() -> None:
@@ -1467,10 +1475,14 @@ def test_executor_trace_marks_cancelled_execution() -> None:
         "execution_topology_succeeded",
         "step_state_changed",
         "step_state_changed",
+        "goal_verification_started",
+        "goal_verification_failed",
     ]
     assert result.metrics is not None
     assert result.metrics.execution_status == TraceStatus.CANCELLED.value
-    assert result.metrics.total_events == 5
+    assert result.metrics.total_events == 7
+    assert result.metrics.goals_verified == 1
+    assert result.metrics.goals_failed == 1
     assert calls == []
 
 

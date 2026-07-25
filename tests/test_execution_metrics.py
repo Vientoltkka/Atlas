@@ -163,6 +163,41 @@ def test_calculator_does_not_modify_trace_or_event_order() -> None:
     assert [event.component for event in trace.events] == ["B", "A"]
 
 
+def test_goal_verification_metrics_are_counted() -> None:
+    trace = ExecutionTrace("exec-goal")
+    trace.add_event(
+        component="GoalVerifier",
+        action="goal_verification_started",
+        status="STARTED",
+    )
+    trace.add_event(
+        component="GoalVerifier",
+        action="goal_verification_failed",
+        status="FAILED",
+    )
+    trace.add_event(
+        component="GoalVerifier",
+        action="goal_missing_output",
+        status="FAILED",
+        details={"output_name": "entries"},
+    )
+    trace.add_event(
+        component="GoalVerifier",
+        action="goal_output_invalid",
+        status="FAILED",
+        details={"output_name": "entries"},
+    )
+    trace.finish("FAILED")
+
+    metrics = ExecutionMetricsCalculator().calculate(trace)
+
+    assert metrics.goals_verified == 1
+    assert metrics.goals_failed == 1
+    assert metrics.goals_satisfied == 0
+    assert metrics.missing_required_outputs == 1
+    assert metrics.output_validation_failures == 1
+
+
 def test_skipped_steps_are_counted_but_excluded_from_success_rate() -> None:
     trace = _trace()
     trace.add_event(

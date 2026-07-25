@@ -121,6 +121,11 @@ class ExecutionObservabilityDeserializer:
         loops_failed = _optional_non_negative_int(payload, "loops_failed", default=0)
         loop_iterations_completed = _optional_non_negative_int(payload, "loop_iterations_completed", default=0)
         loops_max_iterations_reached = _optional_non_negative_int(payload, "loops_max_iterations_reached", default=0)
+        goals_verified = _optional_non_negative_int(payload, "goals_verified", default=0)
+        goals_satisfied = _optional_non_negative_int(payload, "goals_satisfied", default=0)
+        goals_failed = _optional_non_negative_int(payload, "goals_failed", default=0)
+        missing_required_outputs = _optional_non_negative_int(payload, "missing_required_outputs", default=0)
+        output_validation_failures = _optional_non_negative_int(payload, "output_validation_failures", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -166,6 +171,11 @@ class ExecutionObservabilityDeserializer:
             loops_failed=loops_failed,
             loop_iterations_completed=loop_iterations_completed,
             loops_max_iterations_reached=loops_max_iterations_reached,
+            goals_verified=goals_verified,
+            goals_satisfied=goals_satisfied,
+            goals_failed=goals_failed,
+            missing_required_outputs=missing_required_outputs,
+            output_validation_failures=output_validation_failures,
         )
 
     def trace_from_json(
