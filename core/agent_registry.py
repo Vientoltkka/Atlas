@@ -102,12 +102,40 @@ class AgentContextPolicy:
     include_project_context: bool = True
     include_conversation_context: bool = False
     include_runtime_context: bool = False
+    allow_user_input: bool = False
+    allow_shared_context: bool = True
+    allow_tool_results: bool = False
+    allow_workflow_results: bool = False
     max_context_items: int = 16
+    max_context_depth: int = 4
+    max_string_length: int = 1_000
+    max_sequence_items: int = 32
+    max_mapping_items: int = 32
+    max_total_items: int = 256
     allowed_context_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _validate_bool_fields(self, exclude=("max_context_items", "allowed_context_keys"))
-        _validate_positive_int(self.max_context_items, "max_context_items")
+        _validate_bool_fields(
+            self,
+            exclude=(
+                "max_context_items",
+                "max_context_depth",
+                "max_string_length",
+                "max_sequence_items",
+                "max_mapping_items",
+                "max_total_items",
+                "allowed_context_keys",
+            ),
+        )
+        for field_name in (
+            "max_context_items",
+            "max_context_depth",
+            "max_string_length",
+            "max_sequence_items",
+            "max_mapping_items",
+            "max_total_items",
+        ):
+            _validate_positive_int(getattr(self, field_name), field_name)
         object.__setattr__(
             self,
             "allowed_context_keys",
