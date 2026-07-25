@@ -43,6 +43,7 @@ from core.execution_plan_registry import (
     ExecutionPlanRegistry,
     ExecutionPlanRegistryError,
 )
+from core.execution_replanner import MAX_REPLANS, ReplanningPolicy
 from core.execution_retry import MAX_RETRY_ATTEMPTS, RetryPolicy, RetryStrategy
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
@@ -170,6 +171,7 @@ class ExecutionPlanValidator:
         self._validate_topology(plan, errors)
         self._validate_plan_output(plan, errors)
         self._validate_goal_outputs(plan, errors)
+        self._validate_replanning_policy(plan, errors)
         self._validate_confirmation(plan, errors, warnings)
         self._validate_warnings(plan, warnings)
         self._validate_subplans(
@@ -1093,6 +1095,22 @@ class ExecutionPlanValidator:
                         f"{validator}."
                     )
 
+    def _validate_replanning_policy(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        policy = getattr(plan, "replanning_policy", None)
+        if policy is None:
+            return
+        if not isinstance(policy, ReplanningPolicy):
+            errors.append("ExecutionPlan replanning_policy must be ReplanningPolicy.")
+            return
+        if policy.max_replans > MAX_REPLANS:
+            errors.append(f"ExecutionPlan replanning_policy max_replans cannot exceed {MAX_REPLANS}.")
+        if not policy.enabled and policy.max_replans != 0:
+            errors.append("ExecutionPlan disabled replanning_policy requires max_replans=0.")
+
     def _find_cycles(
         self,
         dependency_graph: dict[str, tuple[str, ...]],
@@ -1168,6 +1186,7 @@ def plan_signature(
         ),
         "required_outputs": list(plan.required_outputs),
         "output_validators": _signature_safe_value(dict(plan.output_validators)),
+        "replanning_policy": _signature_safe_value(getattr(plan, "replanning_policy", None)),
     }
     encoded = json.dumps(
         payload,
@@ -1229,6 +1248,7 @@ def _signature_safe_value(
             ),
             "required_outputs": list(value.required_outputs),
             "output_validators": _signature_safe_value(dict(value.output_validators)),
+            "replanning_policy": _signature_safe_value(getattr(value, "replanning_policy", None)),
         }
 
     if isinstance(value, ExecutionPlanOutput):
@@ -1288,6 +1308,16 @@ def _signature_safe_value(
             "max_attempts": value.max_attempts,
             "strategy": value.strategy.value,
             "retryable_error_codes": sorted(value.classifier.retryable_error_codes),
+        }
+
+    if isinstance(value, ReplanningPolicy):
+        return {
+            "$type": "replanning_policy",
+            "enabled": value.enabled,
+            "max_replans": value.max_replans,
+            "strategy": value.strategy.value,
+            "retryable_goal_reasons": list(value.retryable_goal_reasons),
+            "retryable_execution_errors": list(value.retryable_execution_errors),
         }
 
     if isinstance(value, ExecutionCondition):

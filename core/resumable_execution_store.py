@@ -27,6 +27,14 @@ from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRegistryError
 from core.execution_plan_executor import ResumableExecutionState
+from core.execution_replanner import (
+    ReplanningHistoryEntry,
+    ReplanningPolicy,
+    replanning_history_from_dict,
+    replanning_history_to_dict,
+    replanning_policy_from_dict,
+    replanning_policy_to_dict,
+)
 from core.execution_retry import RetryPolicy, RetryStrategy, RetryableErrorClassifier
 from core.execution_plan_topology import (
     ExecutionPlanTopologicalSorter,
@@ -93,6 +101,11 @@ class JsonResumableExecutionStore:
         "retry_attempts",
         "retry_history",
         "retry_decisions",
+        "replanning_policy",
+        "replan_attempts",
+        "replanning_history",
+        "original_plan_signature",
+        "current_plan_signature",
         "metadata",
         "execution_context_snapshot",
         "goal_verification_result",
@@ -227,6 +240,21 @@ class JsonResumableExecutionStore:
                 for step_id, history in state.retry_history.items()
             },
             "retry_decisions": state.retry_decisions,
+            "replanning_policy": replanning_policy_to_dict(
+                state.replanning_policy
+                if isinstance(state.replanning_policy, ReplanningPolicy)
+                else None
+            ),
+            "replan_attempts": state.replan_attempts,
+            "replanning_history": replanning_history_to_dict(
+                tuple(
+                    entry
+                    for entry in state.replanning_history
+                    if isinstance(entry, ReplanningHistoryEntry)
+                )
+            ),
+            "original_plan_signature": state.original_plan_signature,
+            "current_plan_signature": state.current_plan_signature,
             "metadata": _safe_metadata(state.metadata, created_at=created_at),
             "execution_context_snapshot": (
                 _context_snapshot_to_dict(state.execution_context_snapshot)
@@ -276,6 +304,19 @@ class JsonResumableExecutionStore:
         retry_attempts = _int_mapping(payload, "retry_attempts", default={})
         retry_history = _retry_history(payload, "retry_history", default={})
         retry_decisions = _retry_decisions(payload, "retry_decisions", default={})
+        try:
+            replanning_policy = replanning_policy_from_dict(payload.get("replanning_policy"))
+            replanning_history = replanning_history_from_dict(payload.get("replanning_history"))
+        except ValueError as error:
+            raise ResumableExecutionStoreError(
+                "EXECUTION_STATE_INVALID",
+                "Replanning checkpoint data is invalid.",
+            ) from error
+        replan_attempts = _optional_int(payload, "replan_attempts") if "replan_attempts" in payload else 0
+        if replan_attempts is None:
+            replan_attempts = 0
+        original_plan_signature = _optional_str(payload, "original_plan_signature")
+        current_plan_signature = _optional_str(payload, "current_plan_signature")
         metadata = _required_dict(payload, "metadata")
         context_snapshot = _optional_context_snapshot(
             payload.get("execution_context_snapshot"),
@@ -335,6 +376,11 @@ class JsonResumableExecutionStore:
             retry_attempts=retry_attempts,
             retry_history=retry_history,
             retry_decisions=retry_decisions,
+            replanning_policy=replanning_policy,
+            replan_attempts=replan_attempts,
+            replanning_history=replanning_history,
+            original_plan_signature=original_plan_signature,
+            current_plan_signature=current_plan_signature,
             metadata=metadata,
             execution_context_snapshot=context_snapshot,
             goal_verification_result=goal_verification_result,
@@ -355,6 +401,7 @@ def _plan_to_dict(
         "output": _output_to_json(plan.output),
         "required_outputs": list(plan.required_outputs),
         "output_validators": _output_validators_to_json(plan.output_validators),
+        "replanning_policy": replanning_policy_to_dict(plan.replanning_policy),
     }
 
 
@@ -403,6 +450,11 @@ def _dict_to_plan(
             _output_validators_from_json(payload.get("output_validators"))
             if "output_validators" in payload
             else {}
+        ),
+        replanning_policy=(
+            _replanning_policy_from_json(payload.get("replanning_policy"))
+            if "replanning_policy" in payload
+            else None
         ),
     )
 
@@ -787,6 +839,18 @@ def _retry_policy_from_json(
         raise ResumableExecutionStoreError(
             "EXECUTION_STATE_INVALID",
             "Retry policy is invalid.",
+        ) from error
+
+
+def _replanning_policy_from_json(
+    payload: Any,
+) -> ReplanningPolicy | None:
+    try:
+        return replanning_policy_from_dict(payload)
+    except ValueError as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Replanning policy is invalid.",
         ) from error
 
 

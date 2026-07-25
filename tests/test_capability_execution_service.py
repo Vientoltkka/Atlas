@@ -30,15 +30,19 @@ from core.capability_planner import (
 )
 from core.capability_resolver import CapabilityResolver, CapabilityType
 from core.execution_plan_executor import ExecutionControl, ExecutionPlanExecutor
+from core.execution_replanner import ReplanningPolicy, ReplanningStrategy
+from core.goal_verifier import GoalVerificationReason, OutputValidatorKind
 from core.execution_plan_library import ExecutionPlanLibrary, WorkflowDefinition
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.orchestrator import AtlasOrchestrator
 from core.planner import ExecutionPlan, ExecutionStep
 from core.router import Router
+from core.step_output_reference import StepOutputReference
 from core.workflow_selector import WorkflowSelector
 from memory.conversation import ConversationMemory
 from tools.base_tool import BaseTool
+from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 
@@ -223,6 +227,79 @@ def test_service_executes_valid_request_with_real_chain_and_safe_output() -> Non
     assert result.output == {"public": "done", "api_token": "[redacted]"}
     assert tool.calls == 1
     assert tool.contexts[0].parameters == {}
+
+
+def test_service_replans_from_failed_goal_to_alternative_workflow_with_real_read_only_tool(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("atlas", encoding="utf-8")
+    bad_plan = ExecutionPlan(
+        goal="List a directory.",
+        ordered_steps=(
+            ExecutionStep(
+                "step_1",
+                "List directory.",
+                "list_directory",
+                arguments={"path": str(tmp_path)},
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("list_directory",),
+        detected_risks=(),
+        requires_confirmation=False,
+        output={"items": StepOutputReference("step_1")},
+        required_outputs=("entries",),
+    )
+    good_plan = ExecutionPlan(
+        goal="List a directory.",
+        ordered_steps=(
+            ExecutionStep(
+                "step_1",
+                "List directory.",
+                "list_directory",
+                arguments={"path": str(tmp_path)},
+            ),
+        ),
+        estimated_steps=1,
+        required_tools=("list_directory",),
+        detected_risks=(),
+        requires_confirmation=False,
+        output={"entries": StepOutputReference("step_1")},
+        required_outputs=("entries",),
+        output_validators={"entries": (OutputValidatorKind.NON_EMPTY_COLLECTION.value,)},
+    )
+    registry = _registry(ListDirectoryTool())
+    library = ExecutionPlanLibrary(
+        "atlas.test",
+        (
+            _workflow(bad_plan, "workflow.bad"),
+            _workflow(good_plan, "workflow.good"),
+        ),
+        version="1.0",
+    )
+    service = _service_for_library(registry, library)
+
+    result = service.execute(
+        CapabilityExecutionRequest(
+            required_tags=("demo",),
+            require_unique_top_score=False,
+            replanning_policy=ReplanningPolicy(
+                enabled=True,
+                max_replans=1,
+                strategy=ReplanningStrategy.ALTERNATIVE_WORKFLOW,
+                retryable_goal_reasons=(GoalVerificationReason.MISSING_REQUIRED_OUTPUTS.value,),
+            ),
+        )
+    )
+
+    assert result.status is CapabilityExecutionStatus.COMPLETED
+    assert result.replanning_attempted is True
+    assert result.replan_attempts == 1
+    assert result.replanning_status == "REPLANNED"
+    assert result.original_plan_signature != result.final_plan_signature
+    assert result.goal_verification_result is not None
+    assert result.goal_verification_result.satisfied is True
+    assert result.output == {"entries": ("README.md",)}
+    assert result.orchestration_result is not None
+    assert result.orchestration_result.replanning_history[0]["workflow_plan_id"] == "workflow.good"
 
 
 @pytest.mark.parametrize(

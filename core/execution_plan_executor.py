@@ -209,6 +209,11 @@ class ResumableExecutionState:
     retry_attempts: dict[str, int] = field(default_factory=dict)
     retry_history: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     retry_decisions: dict[str, dict[str, object]] = field(default_factory=dict)
+    replanning_policy: object | None = None
+    replan_attempts: int = 0
+    replanning_history: tuple[object, ...] = ()
+    original_plan_signature: str | None = None
+    current_plan_signature: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     execution_context_snapshot: ExecutionContextSnapshot | None = None
     goal_verification_result: GoalVerificationResult | None = None

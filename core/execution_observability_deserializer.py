@@ -131,6 +131,15 @@ class ExecutionObservabilityDeserializer:
         retry_successes = _optional_non_negative_int(payload, "retry_successes", default=0)
         retry_failures = _optional_non_negative_int(payload, "retry_failures", default=0)
         retry_abortions = _optional_non_negative_int(payload, "retry_abortions", default=0)
+        replanning_requests = _optional_non_negative_int(payload, "replanning_requests", default=0)
+        replanning_started = _optional_non_negative_int(payload, "replanning_started", default=0)
+        replanning_succeeded = _optional_non_negative_int(payload, "replanning_succeeded", default=0)
+        replanning_failed = _optional_non_negative_int(payload, "replanning_failed", default=0)
+        replanning_skipped = _optional_non_negative_int(payload, "replanning_skipped", default=0)
+        replanning_limit_reached = _optional_non_negative_int(payload, "replanning_limit_reached", default=0)
+        replanned_plans_executed = _optional_non_negative_int(payload, "replanned_plans_executed", default=0)
+        replanned_goals_satisfied = _optional_non_negative_int(payload, "replanned_goals_satisfied", default=0)
+        replanned_goals_unsatisfied = _optional_non_negative_int(payload, "replanned_goals_unsatisfied", default=0)
         minimum = _optional_non_negative_number(payload, "minimum_step_duration_ms")
         maximum = _optional_non_negative_number(payload, "maximum_step_duration_ms")
         if minimum is not None and maximum is not None and minimum > maximum:
@@ -186,6 +195,15 @@ class ExecutionObservabilityDeserializer:
             retry_successes=retry_successes,
             retry_failures=retry_failures,
             retry_abortions=retry_abortions,
+            replanning_requests=replanning_requests,
+            replanning_started=replanning_started,
+            replanning_succeeded=replanning_succeeded,
+            replanning_failed=replanning_failed,
+            replanning_skipped=replanning_skipped,
+            replanning_limit_reached=replanning_limit_reached,
+            replanned_plans_executed=replanned_plans_executed,
+            replanned_goals_satisfied=replanned_goals_satisfied,
+            replanned_goals_unsatisfied=replanned_goals_unsatisfied,
         )
 
     def trace_from_json(

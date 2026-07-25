@@ -50,6 +50,15 @@ class ExecutionMetrics:
     retry_successes: int = 0
     retry_failures: int = 0
     retry_abortions: int = 0
+    replanning_requests: int = 0
+    replanning_started: int = 0
+    replanning_succeeded: int = 0
+    replanning_failed: int = 0
+    replanning_skipped: int = 0
+    replanning_limit_reached: int = 0
+    replanned_plans_executed: int = 0
+    replanned_goals_satisfied: int = 0
+    replanned_goals_unsatisfied: int = 0
 
 
 class ExecutionMetricsCalculator:
@@ -99,6 +108,20 @@ class ExecutionMetricsCalculator:
         retry_successes = _count_action(events, "execution_retry_succeeded")
         retry_failures = _count_action(events, "execution_retry_failed")
         retry_abortions = _count_action(events, "execution_retry_aborted")
+        replanning_requests = _count_action(events, "replanning_requested")
+        replanning_started = _count_action(events, "replanning_plan_selected")
+        replanning_succeeded = _count_action(events, "replanning_succeeded")
+        replanning_failed = _count_action(events, "replanning_failed")
+        replanning_skipped = _count_action(events, "replanning_skipped")
+        replanning_limit_reached = _count_action(events, "replanning_limit_reached")
+        replanned_plans_executed = _count_action(events, "replanned_plan_execution_started")
+        replanned_goals_satisfied = replanning_succeeded
+        replanned_goals_unsatisfied = sum(
+            1
+            for event in events
+            if event.action == "replanning_failed"
+            and event.details.get("goal_satisfied") is False
+        )
         finished_steps = successful_steps + failed_steps
         step_durations = tuple(
             event.duration_ms
@@ -162,6 +185,15 @@ class ExecutionMetricsCalculator:
             retry_successes=retry_successes,
             retry_failures=retry_failures,
             retry_abortions=retry_abortions,
+            replanning_requests=replanning_requests,
+            replanning_started=replanning_started,
+            replanning_succeeded=replanning_succeeded,
+            replanning_failed=replanning_failed,
+            replanning_skipped=replanning_skipped,
+            replanning_limit_reached=replanning_limit_reached,
+            replanned_plans_executed=replanned_plans_executed,
+            replanned_goals_satisfied=replanned_goals_satisfied,
+            replanned_goals_unsatisfied=replanned_goals_unsatisfied,
         )
 
 

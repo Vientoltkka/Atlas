@@ -17,6 +17,7 @@ from core.execution_plan_output import (
     copy_execution_plan_output,
 )
 from core.execution_plan_registry import ExecutionPlanReference
+from core.execution_replanner import ReplanningPolicy, copy_replanning_policy
 from core.execution_retry import RetryPolicy, copy_retry_policy
 from core.execution_variable_binding import (
     ExecutionVariableBinding,
@@ -145,6 +146,7 @@ class ExecutionPlan:
     output: ExecutionPlanOutput | object | None = None
     required_outputs: tuple[str, ...] = ()
     output_validators: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    replanning_policy: ReplanningPolicy | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -161,6 +163,11 @@ class ExecutionPlan:
             self,
             "output_validators",
             MappingProxyType(_normalize_output_validators(self.output_validators)),
+        )
+        object.__setattr__(
+            self,
+            "replanning_policy",
+            copy_replanning_policy(self.replanning_policy),
         )
 
 

@@ -23,6 +23,17 @@ from core.execution_plan_executor import (
 from core.execution_context import ExecutionContext
 from core.goal_verifier import GoalVerificationResult
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
+from core.execution_plan_validator import plan_signature
+from core.execution_replanner import (
+    ExecutionReplanner,
+    ReplanningCandidate,
+    ReplanningDecision,
+    ReplanningHistoryEntry,
+    ReplanningPolicy,
+    ReplanningRequest,
+    ReplanningStatus,
+    ReplanningStrategy,
+)
 from core.planner import ExecutionPlan
 
 
@@ -89,12 +100,15 @@ class CapabilityOrchestrationPolicy:
 
     confirmation_granted: bool = False
     control: ExecutionControl | None = None
+    replanning_policy: ReplanningPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.confirmation_granted, bool):
             raise InvalidCapabilityOrchestrationRequestError("confirmation_granted must be a bool.")
         if self.control is not None and not isinstance(self.control, ExecutionControl):
             raise InvalidCapabilityOrchestrationRequestError("control must be ExecutionControl or None.")
+        if self.replanning_policy is not None and not isinstance(self.replanning_policy, ReplanningPolicy):
+            raise InvalidCapabilityOrchestrationRequestError("replanning_policy must be ReplanningPolicy or None.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,12 +143,20 @@ class CapabilityOrchestrationResult:
     goal_verification_result: GoalVerificationResult | None = None
     error_code: str | None = None
     error_message: str | None = None
+    replanning_attempted: bool = False
+    replan_attempts: int = 0
+    replanning_status: str | None = None
+    replanning_reason: str | None = None
+    original_plan_signature: str | None = None
+    final_plan_signature: str | None = None
+    replanning_history: tuple[Mapping[str, object], ...] = ()
     events: tuple[CapabilityOrchestrationEvent, ...] = ()
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", _validate_status(self.status))
         object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "replanning_history", tuple(self.replanning_history))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
 
     @property
@@ -167,6 +189,7 @@ class CapabilityOrchestrator:
         execution_plan_validator: ExecutionPlanValidator,
         execution_plan_executor: ExecutionPlanExecutor,
         *,
+        execution_replanner: ExecutionReplanner | None = None,
         observer: Observer | None = None,
     ) -> None:
         if not isinstance(capability_planner, CapabilityPlanner):
@@ -180,6 +203,7 @@ class CapabilityOrchestrator:
         self._capability_planner = capability_planner
         self._execution_plan_validator = execution_plan_validator
         self._execution_plan_executor = execution_plan_executor
+        self._execution_replanner = execution_replanner or ExecutionReplanner()
         self._observer = observer
 
     def orchestrate(self, request: CapabilityOrchestrationRequest) -> CapabilityOrchestrationResult:
@@ -397,6 +421,19 @@ class CapabilityOrchestrator:
                 "failed",
                 {"execution_status": execution.status, "failed_step_count": len(execution.failed_steps)},
             )
+            replanned = self._try_replanning(
+                original_plan=plan,
+                failed_plan=plan,
+                policy=policy,
+                inputs=inputs,
+                events=events,
+                planning_decision=planning_decision,
+                failed_validation=validation,
+                failed_execution=execution,
+                failed_goal_verification=execution.goal_verification_result,
+            )
+            if replanned is not None:
+                return replanned
             return self._complete(
                 CapabilityOrchestrationStatus.EXECUTION_FAILED,
                 events,
@@ -420,6 +457,19 @@ class CapabilityOrchestrator:
                     "goal_satisfied": False,
                 },
             )
+            replanned = self._try_replanning(
+                original_plan=plan,
+                failed_plan=plan,
+                policy=policy,
+                inputs=inputs,
+                events=events,
+                planning_decision=planning_decision,
+                failed_validation=validation,
+                failed_execution=execution,
+                failed_goal_verification=goal_verification,
+            )
+            if replanned is not None:
+                return replanned
             return self._complete(
                 CapabilityOrchestrationStatus.EXECUTION_FAILED,
                 events,
@@ -453,6 +503,229 @@ class CapabilityOrchestrator:
             goal_verification_result=goal_verification,
         )
 
+    def _try_replanning(
+        self,
+        *,
+        original_plan: ExecutionPlan,
+        failed_plan: ExecutionPlan,
+        policy: CapabilityOrchestrationPolicy,
+        inputs: Mapping[str, object],
+        events: list[CapabilityOrchestrationEvent],
+        planning_decision: CapabilityPlanningDecision | None,
+        failed_validation: PlanValidationResult | None,
+        failed_execution: PlanExecutionResult | None,
+        failed_goal_verification: GoalVerificationResult | None,
+    ) -> CapabilityOrchestrationResult | None:
+        replanning_policy = _effective_replanning_policy(policy, original_plan)
+        if not replanning_policy.enabled:
+            return None
+        candidates = self._replanning_candidates(planning_decision)
+        history: list[ReplanningHistoryEntry] = []
+        current_plan = failed_plan
+        current_execution = failed_execution
+        current_goal = failed_goal_verification
+        latest_validation: PlanValidationResult | None = failed_validation
+        latest_status = CapabilityOrchestrationStatus.EXECUTION_FAILED
+        latest_error_code = (
+            current_goal.reason.value
+            if current_goal is not None
+            else (current_execution.error_code if current_execution is not None else "UNKNOWN")
+        )
+        latest_error_message = "Capability goal verification failed."
+
+        for attempt_index in range(replanning_policy.max_replans):
+            _record(
+                events,
+                self._observer,
+                "replanning_requested",
+                "started",
+                {"attempt": attempt_index + 1, "strategy": replanning_policy.strategy.value},
+            )
+            decision = self._execution_replanner.decide(
+                replanning_policy,
+                ReplanningRequest(
+                    original_plan=original_plan,
+                    failed_plan=current_plan,
+                    execution_result=current_execution,
+                    goal_verification_result=current_goal,
+                    candidates=candidates,
+                    replan_attempts=attempt_index,
+                    history=tuple(history),
+                ),
+            )
+            if not decision.should_replan:
+                _record(
+                    events,
+                    self._observer,
+                    _event_name_for_replanning_status(decision.status),
+                    "finished",
+                    {"status": decision.status.value, "reason": decision.reason},
+                )
+                return self._complete(
+                    latest_status,
+                    events,
+                    planning_decision=planning_decision,
+                    selected_plan=current_plan,
+                    validation_result=latest_validation,
+                    execution_result=current_execution,
+                    goal_verification_result=current_goal,
+                    error_code=latest_error_code,
+                    error_message=latest_error_message,
+                    replanning_decision=decision,
+                    replanning_history=tuple(history),
+                    original_plan_signature=plan_signature(original_plan),
+                    final_plan_signature=plan_signature(current_plan),
+                )
+
+            if decision.history_entry is not None:
+                history.append(decision.history_entry)
+            _record(
+                events,
+                self._observer,
+                "replanning_plan_selected",
+                "finished",
+                {
+                    "attempt": decision.replan_attempts,
+                    "previous_plan_signature": decision.previous_plan_signature,
+                    "replacement_plan_signature": decision.replacement_plan_signature,
+                },
+            )
+            replacement = decision.replacement_plan
+            if replacement is None:
+                return None
+
+            _record(
+                events,
+                self._observer,
+                "replanned_plan_validation_started",
+                "started",
+                {"attempt": decision.replan_attempts, "step_count": len(replacement.ordered_steps)},
+            )
+            validation = self._execution_plan_validator.validate(replacement)
+            latest_validation = validation
+            if not validation.is_valid:
+                _record(
+                    events,
+                    self._observer,
+                    "replanning_failed",
+                    "failed",
+                    {"attempt": decision.replan_attempts, "error_count": len(validation.errors)},
+                )
+                current_plan = replacement
+                latest_error_code = "PLAN_VALIDATION_FAILED"
+                latest_error_message = "Replanned execution plan did not pass validation."
+                continue
+
+            _record(
+                events,
+                self._observer,
+                "replanned_plan_execution_started",
+                "started",
+                {"attempt": decision.replan_attempts, "step_count": len(replacement.ordered_steps)},
+            )
+            execution = self._execution_plan_executor.execute(
+                replacement,
+                validation,
+                confirmation_granted=policy.confirmation_granted,
+                control=policy.control,
+                execution_context=ExecutionContext(initial_variables=inputs),
+            )
+            current_plan = replacement
+            current_execution = execution
+            current_goal = execution.goal_verification_result
+            latest_error_code = execution.error_code
+            latest_error_message = execution.error or "Replanned capability execution failed."
+            if execution.cancelled:
+                latest_status = CapabilityOrchestrationStatus.CANCELLED
+                _record(events, self._observer, "replanning_failed", "failed", {"cancelled": True})
+                break
+            if execution.success and current_goal is not None and current_goal.satisfied:
+                _record(
+                    events,
+                    self._observer,
+                    "replanning_succeeded",
+                    "finished",
+                    {"attempt": decision.replan_attempts},
+                )
+                return self._complete(
+                    CapabilityOrchestrationStatus.COMPLETED,
+                    events,
+                    planning_decision=planning_decision,
+                    selected_plan=replacement,
+                    validation_result=validation,
+                    execution_result=execution,
+                    goal_verification_result=current_goal,
+                    replanning_decision=decision,
+                    replanning_history=tuple(history),
+                    original_plan_signature=plan_signature(original_plan),
+                    final_plan_signature=plan_signature(replacement),
+                )
+
+            _record(
+                events,
+                self._observer,
+                "replanning_failed",
+                "failed",
+                {
+                    "attempt": decision.replan_attempts,
+                    "execution_status": execution.status,
+                    "goal_satisfied": current_goal.satisfied if current_goal is not None else False,
+                },
+            )
+
+        return self._complete(
+            latest_status,
+            events,
+            planning_decision=planning_decision,
+            selected_plan=current_plan,
+            validation_result=latest_validation,
+            execution_result=current_execution,
+            goal_verification_result=current_goal,
+            error_code=latest_error_code,
+            error_message=latest_error_message,
+            replanning_decision=ReplanningDecision(
+                should_replan=False,
+                status=ReplanningStatus.LIMIT_REACHED,
+                reason="replanning limit reached",
+                replan_attempts=len(history),
+                previous_plan_signature=plan_signature(current_plan),
+            ),
+            replanning_history=tuple(history),
+            original_plan_signature=plan_signature(original_plan),
+            final_plan_signature=plan_signature(current_plan),
+        )
+
+    def _replanning_candidates(
+        self,
+        planning_decision: CapabilityPlanningDecision | None,
+    ) -> tuple[ReplanningCandidate, ...]:
+        if planning_decision is None or planning_decision.workflow_selection_result is None:
+            return ()
+        resolver = getattr(self._capability_planner, "_workflow_for", None)
+        if not callable(resolver):
+            return ()
+        candidates: list[ReplanningCandidate] = []
+        for scored in planning_decision.workflow_selection_result.considered_candidates:
+            capability = scored.candidate.capability
+            try:
+                workflow = resolver(capability)
+            except (TypeError, ValueError, RuntimeError):
+                continue
+            candidates.append(
+                ReplanningCandidate(
+                    plan=workflow.plan,
+                    plan_signature=plan_signature(workflow.plan),
+                    workflow_reference=workflow.reference,
+                    library_id=(
+                        capability.source_reference.library.library_id
+                        if hasattr(capability.source_reference, "library")
+                        else None
+                    ),
+                    score=scored.final_score,
+                )
+            )
+        return tuple(candidates)
+
     def _complete(
         self,
         status: CapabilityOrchestrationStatus,
@@ -465,6 +738,10 @@ class CapabilityOrchestrator:
         goal_verification_result: GoalVerificationResult | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        replanning_decision: ReplanningDecision | None = None,
+        replanning_history: tuple[ReplanningHistoryEntry, ...] = (),
+        original_plan_signature: str | None = None,
+        final_plan_signature: str | None = None,
     ) -> CapabilityOrchestrationResult:
         _record(
             events,
@@ -483,6 +760,10 @@ class CapabilityOrchestrator:
             goal_verification_result=goal_verification_result,
             error_code=error_code,
             error_message=error_message,
+            replanning_decision=replanning_decision,
+            replanning_history=replanning_history,
+            original_plan_signature=original_plan_signature,
+            final_plan_signature=final_plan_signature,
         )
 
     def _status_for_unselected_decision(
@@ -516,6 +797,10 @@ def _result(
     goal_verification_result: GoalVerificationResult | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    replanning_decision: ReplanningDecision | None = None,
+    replanning_history: tuple[ReplanningHistoryEntry, ...] = (),
+    original_plan_signature: str | None = None,
+    final_plan_signature: str | None = None,
 ) -> CapabilityOrchestrationResult:
     return CapabilityOrchestrationResult(
         status=status,
@@ -526,8 +811,63 @@ def _result(
         goal_verification_result=goal_verification_result,
         error_code=error_code,
         error_message=error_message,
+        replanning_attempted=replanning_decision is not None,
+        replan_attempts=(
+            replanning_decision.replan_attempts
+            if replanning_decision is not None
+            else 0
+        ),
+        replanning_status=(
+            replanning_decision.status.value
+            if replanning_decision is not None
+            else None
+        ),
+        replanning_reason=(
+            replanning_decision.reason
+            if replanning_decision is not None
+            else None
+        ),
+        original_plan_signature=original_plan_signature,
+        final_plan_signature=final_plan_signature,
+        replanning_history=tuple(_history_entry_to_metadata(entry) for entry in replanning_history),
         events=tuple(events),
     )
+
+
+def _effective_replanning_policy(
+    policy: CapabilityOrchestrationPolicy,
+    plan: ExecutionPlan,
+) -> ReplanningPolicy:
+    if policy.replanning_policy is not None:
+        return policy.replanning_policy
+    if isinstance(plan.replanning_policy, ReplanningPolicy):
+        return plan.replanning_policy
+    return ReplanningPolicy()
+
+
+def _event_name_for_replanning_status(
+    status: ReplanningStatus,
+) -> str:
+    if status is ReplanningStatus.LIMIT_REACHED:
+        return "replanning_limit_reached"
+    if status in {ReplanningStatus.NO_ALTERNATIVE_PLAN, ReplanningStatus.FAILURE_NOT_REPLANNABLE}:
+        return "replanning_skipped"
+    return "replanning_failed"
+
+
+def _history_entry_to_metadata(
+    entry: ReplanningHistoryEntry,
+) -> dict[str, object]:
+    return {
+        "attempt": entry.attempt,
+        "status": entry.status.value,
+        "reason": entry.reason,
+        "previous_plan_signature": entry.previous_plan_signature,
+        "replacement_plan_signature": entry.replacement_plan_signature,
+        "workflow_plan_id": entry.workflow_plan_id,
+        "workflow_version": entry.workflow_version,
+        "library_id": entry.library_id,
+    }
 
 
 def _validate_status(status: CapabilityOrchestrationStatus | str) -> CapabilityOrchestrationStatus:
