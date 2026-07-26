@@ -12,6 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from core.agent_context import AgentContextBuilder
+from core.agent_delegation import AgentDelegationService
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutor, AgentHandlerRegistry
 from core.agent_handler_registration import (
@@ -86,6 +87,7 @@ class AgentSystem:
     multi_agent_resolver: MultiAgentResolver
     multi_agent_coordinator: MultiAgentCoordinator
     skill_system: SkillSystem
+    agent_delegation_service: AgentDelegationService
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -114,6 +116,8 @@ class AgentSystem:
             raise InvalidAgentSystemBuildRequestError("multi_agent_coordinator must be MultiAgentCoordinator.")
         if not isinstance(self.skill_system, SkillSystem):
             raise InvalidAgentSystemBuildRequestError("skill_system must be SkillSystem.")
+        if not isinstance(self.agent_delegation_service, AgentDelegationService):
+            raise InvalidAgentSystemBuildRequestError("agent_delegation_service must be AgentDelegationService.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +200,7 @@ class AgentSystemBuilder:
         multi_agent_resolver: MultiAgentResolver | None = None,
         multi_agent_coordinator: MultiAgentCoordinator | None = None,
         skill_system: SkillSystem | None = None,
+        agent_delegation_service: AgentDelegationService | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -209,6 +214,7 @@ class AgentSystemBuilder:
         self._multi_agent_resolver = multi_agent_resolver
         self._multi_agent_coordinator = multi_agent_coordinator
         self._skill_system = skill_system
+        self._agent_delegation_service = agent_delegation_service
 
     def build(
         self,
@@ -264,6 +270,16 @@ class AgentSystemBuilder:
             else MultiAgentCoordinator(multi_agent_resolver, executor)
         )
         skill_system = self._skill_system if self._skill_system is not None else build_skill_system()
+        agent_delegation_service = (
+            self._agent_delegation_service
+            if self._agent_delegation_service is not None
+            else AgentDelegationService(
+                agent_registry=registry,
+                agent_resolver=resolver,
+                agent_context_builder=context_builder,
+                agent_executor=executor,
+            )
+        )
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -277,6 +293,7 @@ class AgentSystemBuilder:
             multi_agent_resolver=multi_agent_resolver,
             multi_agent_coordinator=multi_agent_coordinator,
             skill_system=skill_system,
+            agent_delegation_service=agent_delegation_service,
         )
 
         agent_snapshot = registry.list_agents()

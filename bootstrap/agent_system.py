@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from core.agent_context import AgentContextBuilder
+from core.agent_delegation import AgentDelegationService
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutor, AgentHandlerRegistry
 from core.agent_handler_registration import AgentHandlerRegistrationService
@@ -30,6 +31,7 @@ def build_core_agent_system(
     multi_agent_resolver: MultiAgentResolver | None = None,
     multi_agent_coordinator: MultiAgentCoordinator | None = None,
     skill_system: SkillSystem | None = None,
+    agent_delegation_service: AgentDelegationService | None = None,
 ) -> AgentSystemBuildResult:
     """Build a fully composed AgentSystem with explicit optional injections."""
 
@@ -46,4 +48,5 @@ def build_core_agent_system(
         multi_agent_resolver=multi_agent_resolver,
         multi_agent_coordinator=multi_agent_coordinator,
         skill_system=skill_system,
+        agent_delegation_service=agent_delegation_service,
     ).build(request)
