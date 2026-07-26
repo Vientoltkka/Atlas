@@ -122,6 +122,19 @@ def test_preferences_add_score_without_becoming_requirements() -> None:
     assert {candidate.agent.agent_id for candidate in result.candidates} == {"agent.fallback", "agent.preferred"}
 
 
+def test_filters_by_required_agent_id() -> None:
+    required = _agent("agent.required")
+    other = _agent("agent.other")
+
+    result = _resolver(other, required).resolve(
+        AgentResolutionRequest(required_agent_ids=("agent.required",))
+    )
+
+    assert result.status is AgentResolutionStatus.RESOLVED
+    assert result.selected_agent is required
+    assert [item.agent_id for item in result.rejections] == ["agent.other"]
+
+
 def test_excludes_agents() -> None:
     excluded = _agent("agent.excluded", capabilities=("project.inspect", "code.edit"))
     selected = _agent("agent.selected", capabilities=("project.inspect",))

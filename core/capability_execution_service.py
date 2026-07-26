@@ -8,6 +8,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from core.capability_orchestrator import (
+    AgentExecutionPolicy,
     CapabilityOrchestrationPolicy,
     CapabilityOrchestrationRequest,
     CapabilityOrchestrationResult,
@@ -96,6 +97,7 @@ class CapabilityExecutionRequest:
     control: ExecutionControl | None = None
     replanning_policy: ReplanningPolicy | None = None
     goal_driven_policy: GoalDrivenExecutionPolicy | None = None
+    agent_execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
     inputs: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -126,6 +128,10 @@ class CapabilityExecutionRequest:
         ):
             raise InvalidCapabilityExecutionRequestError(
                 "goal_driven_policy must be GoalDrivenExecutionPolicy or None."
+            )
+        if not isinstance(self.agent_execution_policy, AgentExecutionPolicy):
+            raise InvalidCapabilityExecutionRequestError(
+                "agent_execution_policy must be AgentExecutionPolicy."
             )
         object.__setattr__(self, "inputs", MappingProxyType(_safe_inputs(self.inputs)))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
@@ -220,7 +226,11 @@ class CapabilityExecutionService:
             )
 
         try:
-            multi_result = self._execute_multi_capability_request(request)
+            multi_result = (
+                None
+                if request.agent_execution_policy.enabled
+                else self._execute_multi_capability_request(request)
+            )
             if multi_result is not None:
                 return multi_result
             orchestration_request = CapabilityOrchestrationRequest(
@@ -230,6 +240,7 @@ class CapabilityExecutionService:
                     control=request.control,
                     replanning_policy=request.replanning_policy,
                     goal_driven_policy=request.goal_driven_policy,
+                    agent_execution_policy=request.agent_execution_policy,
                 ),
                 inputs=request.inputs,
                 metadata=request.metadata,
@@ -273,6 +284,7 @@ class CapabilityExecutionService:
                 control=request.control,
                 replanning_policy=request.replanning_policy,
                 goal_driven_policy=request.goal_driven_policy,
+                agent_execution_policy=request.agent_execution_policy,
             ),
             inputs=request.inputs,
             metadata={
@@ -318,6 +330,7 @@ def _result_from_orchestration(
 ) -> CapabilityExecutionResult:
     decision = orchestration_result.planning_decision
     execution = orchestration_result.execution_result
+    agent_execution = orchestration_result.agent_execution_result
     selected_workflow_reference = None
     selected_capability = None
     if decision is not None:
@@ -340,6 +353,8 @@ def _result_from_orchestration(
     execution_id = None
     if execution is not None and execution.trace is not None:
         execution_id = execution.trace.execution_id
+    elif agent_execution is not None:
+        execution_id = agent_execution.execution_id
 
     status = CapabilityExecutionService._STATUS_MAP.get(
         orchestration_result.status,
@@ -355,9 +370,13 @@ def _result_from_orchestration(
             else None
         ),
         execution_id=execution_id,
-        execution_status=execution.status if execution is not None else None,
+        execution_status=(
+            execution.status
+            if execution is not None
+            else (agent_execution.status.value if agent_execution is not None else None)
+        ),
         goal_verification_result=orchestration_result.goal_verification_result,
-        output=execution.output if execution is not None else None,
+        output=execution.output if execution is not None else (agent_execution.output if agent_execution is not None else None),
         error_code=orchestration_result.error_code,
         message=_message_for(status, orchestration_result),
         replanning_attempted=orchestration_result.replanning_attempted,

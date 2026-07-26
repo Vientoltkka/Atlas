@@ -89,6 +89,7 @@ class AgentResolutionRequest:
     preferred_agent_types: tuple[AgentType | str, ...] = ()
     required_permission_ids: tuple[str, ...] = ()
     preferred_permission_ids: tuple[str, ...] = ()
+    required_agent_ids: tuple[str, ...] = ()
     excluded_agent_ids: tuple[str, ...] = ()
     preferred_agent_ids: tuple[str, ...] = ()
     enabled_only: bool = True
@@ -127,6 +128,11 @@ class AgentResolutionRequest:
             self,
             "preferred_permission_ids",
             _permission_tuple(self.preferred_permission_ids, "preferred_permission_ids"),
+        )
+        object.__setattr__(
+            self,
+            "required_agent_ids",
+            _identifier_tuple(self.required_agent_ids, "required_agent_ids"),
         )
         object.__setattr__(
             self,
@@ -351,6 +357,7 @@ def agent_resolution_request_signature(
         "preferred_agent_types": sorted(item.value for item in request.preferred_agent_types),
         "required_permission_ids": sorted(request.required_permission_ids),
         "preferred_permission_ids": sorted(request.preferred_permission_ids),
+        "required_agent_ids": sorted(request.required_agent_ids),
         "excluded_agent_ids": sorted(request.excluded_agent_ids),
         "preferred_agent_ids": sorted(request.preferred_agent_ids),
         "enabled_only": request.enabled_only,
@@ -369,6 +376,12 @@ def _rejection(
 ) -> AgentResolutionRejection | None:
     if request.enabled_only and not agent.enabled:
         return AgentResolutionRejection(agent.agent_id, AgentResolutionRejectionCode.DISABLED, "agent is disabled")
+    if request.required_agent_ids and agent.agent_id not in request.required_agent_ids:
+        return AgentResolutionRejection(
+            agent.agent_id,
+            AgentResolutionRejectionCode.EXCLUDED_AGENT_ID,
+            "agent id is not required",
+        )
     if agent.agent_id in request.excluded_agent_ids:
         return AgentResolutionRejection(
             agent.agent_id,

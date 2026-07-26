@@ -8,6 +8,14 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Callable
 
+from core.agent_executor import (
+    AgentExecutionRequest,
+    AgentExecutionResult,
+    AgentExecutionStatus,
+    AgentExecutor,
+)
+from core.agent_registry import validate_agent_id
+from core.agent_resolver import AgentResolutionRequest
 from core.capability_planner import (
     CapabilityPlanner,
     CapabilityPlanningDecision,
@@ -45,6 +53,16 @@ from core.planner import ExecutionPlan
 
 
 MAX_CAPABILITY_ORCHESTRATION_METADATA_ITEMS = 32
+_PERMISSION_IDS = frozenset(
+    {
+        "can_read_project",
+        "can_write_files",
+        "can_execute_tools",
+        "can_modify_memory",
+        "can_use_network",
+        "requires_confirmation",
+    }
+)
 
 
 class CapabilityOrchestrationError(RuntimeError):
@@ -102,6 +120,41 @@ class CapabilityOrchestrationEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentExecutionPolicy:
+    """Explicit opt-in policy for running a specialized agent pipeline."""
+
+    enabled: bool = False
+    allow_agent_execution: bool = False
+    preferred_agent_id: str | None = None
+    require_explicit_agent: bool = True
+    fail_if_agent_missing: bool = True
+    required_capability_ids: tuple[str, ...] = ()
+    required_permission_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "enabled",
+            "allow_agent_execution",
+            "require_explicit_agent",
+            "fail_if_agent_missing",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise InvalidCapabilityOrchestrationRequestError(f"{field_name} must be a bool.")
+        if self.preferred_agent_id is not None:
+            object.__setattr__(self, "preferred_agent_id", validate_agent_id(self.preferred_agent_id))
+        object.__setattr__(
+            self,
+            "required_capability_ids",
+            _identifier_tuple(self.required_capability_ids, "required_capability_ids"),
+        )
+        object.__setattr__(
+            self,
+            "required_permission_ids",
+            _permission_tuple(self.required_permission_ids, "required_permission_ids"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityOrchestrationPolicy:
     """Explicit execution policy for a selected and validated capability plan."""
 
@@ -109,6 +162,7 @@ class CapabilityOrchestrationPolicy:
     control: ExecutionControl | None = None
     replanning_policy: ReplanningPolicy | None = None
     goal_driven_policy: GoalDrivenExecutionPolicy | None = None
+    agent_execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
 
     def __post_init__(self) -> None:
         if not isinstance(self.confirmation_granted, bool):
@@ -123,6 +177,10 @@ class CapabilityOrchestrationPolicy:
         ):
             raise InvalidCapabilityOrchestrationRequestError(
                 "goal_driven_policy must be GoalDrivenExecutionPolicy or None."
+            )
+        if not isinstance(self.agent_execution_policy, AgentExecutionPolicy):
+            raise InvalidCapabilityOrchestrationRequestError(
+                "agent_execution_policy must be AgentExecutionPolicy."
             )
 
 
@@ -166,6 +224,9 @@ class CapabilityOrchestrationResult:
     final_plan_signature: str | None = None
     replanning_history: tuple[Mapping[str, object], ...] = ()
     goal_driven_result: GoalDrivenExecutionResult | None = None
+    agent_execution_result: AgentExecutionResult | None = None
+    checkpoint: Mapping[str, object] = field(default_factory=dict)
+    metrics: Mapping[str, object] = field(default_factory=dict)
     events: tuple[CapabilityOrchestrationEvent, ...] = ()
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -173,6 +234,15 @@ class CapabilityOrchestrationResult:
         object.__setattr__(self, "status", _validate_status(self.status))
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "replanning_history", tuple(self.replanning_history))
+        if self.agent_execution_result is not None and not isinstance(
+            self.agent_execution_result,
+            AgentExecutionResult,
+        ):
+            raise InvalidCapabilityOrchestrationRequestError(
+                "agent_execution_result must be AgentExecutionResult or None."
+            )
+        object.__setattr__(self, "checkpoint", MappingProxyType(_safe_metadata(self.checkpoint)))
+        object.__setattr__(self, "metrics", MappingProxyType(_safe_metadata(self.metrics)))
         object.__setattr__(self, "metadata", MappingProxyType(_safe_metadata(self.metadata)))
 
     @property
@@ -207,6 +277,7 @@ class CapabilityOrchestrator:
         *,
         execution_replanner: ExecutionReplanner | None = None,
         goal_driven_controller: GoalDrivenExecutionController | None = None,
+        agent_executor: AgentExecutor | None = None,
         observer: Observer | None = None,
     ) -> None:
         if not isinstance(capability_planner, CapabilityPlanner):
@@ -215,6 +286,8 @@ class CapabilityOrchestrator:
             raise CapabilityOrchestrationError("CapabilityOrchestrator requires ExecutionPlanValidator.")
         if not isinstance(execution_plan_executor, ExecutionPlanExecutor):
             raise CapabilityOrchestrationError("CapabilityOrchestrator requires ExecutionPlanExecutor.")
+        if agent_executor is not None and not isinstance(agent_executor, AgentExecutor):
+            raise CapabilityOrchestrationError("agent_executor must be AgentExecutor or None.")
         if observer is not None and not callable(observer):
             raise CapabilityOrchestrationError("observer must be callable or None.")
         self._capability_planner = capability_planner
@@ -222,6 +295,7 @@ class CapabilityOrchestrator:
         self._execution_plan_executor = execution_plan_executor
         self._execution_replanner = execution_replanner or ExecutionReplanner()
         self._goal_driven_controller = goal_driven_controller
+        self._agent_executor = agent_executor
         self._observer = observer
 
     def orchestrate(self, request: CapabilityOrchestrationRequest) -> CapabilityOrchestrationResult:
@@ -238,6 +312,9 @@ class CapabilityOrchestrator:
             )
 
         _record(events, self._observer, "capability_orchestration_started", "started")
+        if request.policy.agent_execution_policy.enabled:
+            return self._execute_agent_pipeline(request, events)
+
         _record(events, self._observer, "capability_planning_started", "started")
         try:
             decision = self._capability_planner.plan(request.planning_request)
@@ -337,6 +414,121 @@ class CapabilityOrchestrator:
             },
         )
         return self._execute_selected_plan(plan, active_policy, safe_inputs, events)
+
+    def _execute_agent_pipeline(
+        self,
+        request: CapabilityOrchestrationRequest,
+        events: list[CapabilityOrchestrationEvent],
+    ) -> CapabilityOrchestrationResult:
+        policy = request.policy.agent_execution_policy
+        _record(
+            events,
+            self._observer,
+            "agent_pipeline_started",
+            "started",
+            {"preferred_agent": policy.preferred_agent_id is not None},
+        )
+        if not policy.allow_agent_execution:
+            _record(events, self._observer, "agent_pipeline_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.INVALID_REQUEST,
+                events,
+                error_code="AGENT_EXECUTION_NOT_ALLOWED",
+                error_message="Agent execution policy is enabled but allow_agent_execution is false.",
+                checkpoint=_agent_checkpoint(policy, None, CapabilityOrchestrationStatus.INVALID_REQUEST),
+                metrics=_agent_metrics(started=1, completed=0, failed=1),
+            )
+        if policy.require_explicit_agent and policy.preferred_agent_id is None:
+            _record(events, self._observer, "agent_pipeline_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.INVALID_REQUEST,
+                events,
+                error_code="EXPLICIT_AGENT_REQUIRED",
+                error_message="Agent execution requires preferred_agent_id.",
+                checkpoint=_agent_checkpoint(policy, None, CapabilityOrchestrationStatus.INVALID_REQUEST),
+                metrics=_agent_metrics(started=1, completed=0, failed=1),
+            )
+        if self._agent_executor is None:
+            _record(events, self._observer, "agent_pipeline_failed", "failed")
+            status = (
+                CapabilityOrchestrationStatus.EXECUTION_FAILED
+                if policy.fail_if_agent_missing
+                else CapabilityOrchestrationStatus.NO_CAPABILITY_CANDIDATES
+            )
+            return self._complete(
+                status,
+                events,
+                error_code="AGENT_EXECUTOR_UNAVAILABLE",
+                error_message="Agent executor is not configured.",
+                checkpoint=_agent_checkpoint(policy, None, status),
+                metrics=_agent_metrics(started=1, completed=0, failed=1),
+            )
+
+        agent_request = AgentExecutionRequest(
+            resolution_request=AgentResolutionRequest(
+                required_agent_ids=(
+                    (policy.preferred_agent_id,)
+                    if policy.preferred_agent_id is not None
+                    else ()
+                ),
+                preferred_agent_ids=(
+                    (policy.preferred_agent_id,)
+                    if policy.preferred_agent_id is not None
+                    else ()
+                ),
+                enabled_only=False,
+                require_unique_top_score=True,
+            ),
+            structured_input=request.inputs,
+            metadata={
+                "source": "capability_orchestrator",
+                "request_metadata_items": len(request.metadata),
+            },
+            required_capability_ids=policy.required_capability_ids,
+            required_permission_ids=policy.required_permission_ids,
+        )
+        try:
+            agent_result = self._agent_executor.execute(agent_request)
+        except (TypeError, ValueError, RuntimeError) as error:
+            _record(events, self._observer, "agent_pipeline_failed", "failed")
+            return self._complete(
+                CapabilityOrchestrationStatus.EXECUTION_FAILED,
+                events,
+                error_code=type(error).__name__,
+                error_message=str(error),
+                checkpoint=_agent_checkpoint(policy, None, CapabilityOrchestrationStatus.EXECUTION_FAILED),
+                metrics=_agent_metrics(started=1, completed=0, failed=1),
+            )
+
+        status = _orchestration_status_for_agent(agent_result.status)
+        if agent_result.completed:
+            _record(
+                events,
+                self._observer,
+                "agent_pipeline_completed",
+                "finished",
+                {"agent_id": agent_result.agent_id or ""},
+            )
+            metrics = _agent_metrics(started=1, completed=1, failed=0)
+        else:
+            _record(
+                events,
+                self._observer,
+                "agent_pipeline_failed",
+                "failed",
+                {"agent_status": agent_result.status.value, "agent_id": agent_result.agent_id or ""},
+            )
+            metrics = _agent_metrics(started=1, completed=0, failed=1)
+
+        return self._complete(
+            status,
+            events,
+            error_code=agent_result.error_code,
+            error_message=agent_result.safe_message,
+            agent_execution_result=agent_result,
+            checkpoint=_agent_checkpoint(policy, agent_result, status),
+            metrics=metrics,
+        )
 
     def _execute_selected_plan(
         self,
@@ -817,6 +1009,9 @@ class CapabilityOrchestrator:
         original_plan_signature: str | None = None,
         final_plan_signature: str | None = None,
         goal_driven_result: GoalDrivenExecutionResult | None = None,
+        agent_execution_result: AgentExecutionResult | None = None,
+        checkpoint: Mapping[str, object] | None = None,
+        metrics: Mapping[str, object] | None = None,
     ) -> CapabilityOrchestrationResult:
         _record(
             events,
@@ -840,6 +1035,9 @@ class CapabilityOrchestrator:
             original_plan_signature=original_plan_signature,
             final_plan_signature=final_plan_signature,
             goal_driven_result=goal_driven_result,
+            agent_execution_result=agent_execution_result,
+            checkpoint=checkpoint or {},
+            metrics=metrics or {},
         )
 
     def _status_for_unselected_decision(
@@ -878,6 +1076,9 @@ def _result(
     original_plan_signature: str | None = None,
     final_plan_signature: str | None = None,
     goal_driven_result: GoalDrivenExecutionResult | None = None,
+    agent_execution_result: AgentExecutionResult | None = None,
+    checkpoint: Mapping[str, object] | None = None,
+    metrics: Mapping[str, object] | None = None,
 ) -> CapabilityOrchestrationResult:
     return CapabilityOrchestrationResult(
         status=status,
@@ -908,6 +1109,9 @@ def _result(
         final_plan_signature=final_plan_signature,
         replanning_history=tuple(_history_entry_to_metadata(entry) for entry in replanning_history),
         goal_driven_result=goal_driven_result,
+        agent_execution_result=agent_execution_result,
+        checkpoint=checkpoint or {},
+        metrics=metrics or {},
         events=tuple(events),
     )
 
@@ -926,6 +1130,61 @@ def _orchestration_status_for_goal_driven(
     if status is GoalDrivenExecutionStatus.INVALID_REQUEST:
         return CapabilityOrchestrationStatus.INVALID_REQUEST
     return CapabilityOrchestrationStatus.EXECUTION_FAILED
+
+
+def _orchestration_status_for_agent(
+    status: AgentExecutionStatus,
+) -> CapabilityOrchestrationStatus:
+    if status is AgentExecutionStatus.COMPLETED:
+        return CapabilityOrchestrationStatus.COMPLETED
+    if status is AgentExecutionStatus.INVALID_REQUEST:
+        return CapabilityOrchestrationStatus.INVALID_REQUEST
+    if status is AgentExecutionStatus.NO_AGENT_CANDIDATES:
+        return CapabilityOrchestrationStatus.NO_CAPABILITY_CANDIDATES
+    if status is AgentExecutionStatus.AGENT_AMBIGUOUS:
+        return CapabilityOrchestrationStatus.CAPABILITY_AMBIGUOUS
+    if status is AgentExecutionStatus.CANCELLED:
+        return CapabilityOrchestrationStatus.CANCELLED
+    return CapabilityOrchestrationStatus.EXECUTION_FAILED
+
+
+def _agent_metrics(
+    *,
+    started: int,
+    completed: int,
+    failed: int,
+) -> dict[str, object]:
+    return {
+        "agent_pipeline_started": started,
+        "agent_pipeline_completed": completed,
+        "agent_pipeline_failed": failed,
+    }
+
+
+def _agent_checkpoint(
+    policy: AgentExecutionPolicy,
+    result: AgentExecutionResult | None,
+    status: CapabilityOrchestrationStatus,
+) -> dict[str, object]:
+    output = result.output if result is not None else None
+    output_keys = tuple(output.keys()) if isinstance(output, Mapping) else ()
+    return {
+        "agent_policy_enabled": policy.enabled,
+        "agent_policy_allow_agent_execution": policy.allow_agent_execution,
+        "agent_policy_preferred_agent_id": policy.preferred_agent_id,
+        "agent_policy_require_explicit_agent": policy.require_explicit_agent,
+        "agent_policy_fail_if_agent_missing": policy.fail_if_agent_missing,
+        "agent_id": result.agent_id if result is not None else None,
+        "agent_status": result.status.value if result is not None else status.value,
+        "result_has_output": bool(output),
+        "result_output_key_count": len(output_keys),
+        "result_output_keys": tuple(str(key) for key in output_keys[:16]),
+        "result_sanitized_output_fields": (
+            int(result.metadata.get("sanitized_output_fields", 0))
+            if result is not None
+            else 0
+        ),
+    }
 
 
 def _effective_replanning_policy(
@@ -995,4 +1254,33 @@ def _safe_value(value: object) -> object:
         if value != value or value in (float("inf"), float("-inf")):
             raise InvalidCapabilityOrchestrationRequestError("metadata floats must be finite.")
         return value
+    if isinstance(value, tuple):
+        return tuple(_safe_value(item) for item in value)
     raise InvalidCapabilityOrchestrationRequestError("metadata values must be primitive safe values.")
+
+
+def _identifier_tuple(
+    values: tuple[str, ...],
+    field_name: str,
+) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise InvalidCapabilityOrchestrationRequestError(f"{field_name} must be a tuple of strings.")
+    if len(values) > MAX_CAPABILITY_ORCHESTRATION_METADATA_ITEMS:
+        raise InvalidCapabilityOrchestrationRequestError(f"{field_name} has too many items.")
+    normalized: list[str] = []
+    for value in values:
+        item = validate_agent_id(value)
+        if item not in normalized:
+            normalized.append(item)
+    return tuple(normalized)
+
+
+def _permission_tuple(
+    values: tuple[str, ...],
+    field_name: str,
+) -> tuple[str, ...]:
+    normalized = _identifier_tuple(values, field_name)
+    unknown = tuple(value for value in normalized if value not in _PERMISSION_IDS)
+    if unknown:
+        raise InvalidCapabilityOrchestrationRequestError(f"{field_name} contains an unknown permission id.")
+    return normalized
