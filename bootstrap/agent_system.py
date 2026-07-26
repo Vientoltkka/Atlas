@@ -8,6 +8,7 @@ from core.agent_executor import AgentExecutor, AgentHandlerRegistry
 from core.agent_handler_registration import AgentHandlerRegistrationService
 from core.agent_manifest import AgentManifestLoader
 from core.multi_agent import MultiAgentCoordinator, MultiAgentResolver
+from core.skill_system import SkillSystem
 from core.agent_registration import AgentRegistrationService
 from core.agent_registry import AgentRegistry
 from core.agent_resolver import AgentResolver
@@ -28,6 +29,7 @@ def build_core_agent_system(
     agent_executor: AgentExecutor | None = None,
     multi_agent_resolver: MultiAgentResolver | None = None,
     multi_agent_coordinator: MultiAgentCoordinator | None = None,
+    skill_system: SkillSystem | None = None,
 ) -> AgentSystemBuildResult:
     """Build a fully composed AgentSystem with explicit optional injections."""
 
@@ -43,4 +45,5 @@ def build_core_agent_system(
         agent_executor=agent_executor,
         multi_agent_resolver=multi_agent_resolver,
         multi_agent_coordinator=multi_agent_coordinator,
+        skill_system=skill_system,
     ).build(request)

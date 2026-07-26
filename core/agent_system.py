@@ -24,6 +24,7 @@ from core.agent_handler_registration import (
 )
 from core.agent_manifest import AgentManifestLoader
 from core.multi_agent import MultiAgentCoordinator, MultiAgentResolver
+from core.skill_system import SkillSystem, build_skill_system
 from core.agent_registration import (
     AgentRegistrationPolicy,
     AgentRegistrationRequest,
@@ -84,6 +85,7 @@ class AgentSystem:
     agent_executor: AgentExecutor
     multi_agent_resolver: MultiAgentResolver
     multi_agent_coordinator: MultiAgentCoordinator
+    skill_system: SkillSystem
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -110,6 +112,8 @@ class AgentSystem:
             raise InvalidAgentSystemBuildRequestError("multi_agent_resolver must be MultiAgentResolver.")
         if not isinstance(self.multi_agent_coordinator, MultiAgentCoordinator):
             raise InvalidAgentSystemBuildRequestError("multi_agent_coordinator must be MultiAgentCoordinator.")
+        if not isinstance(self.skill_system, SkillSystem):
+            raise InvalidAgentSystemBuildRequestError("skill_system must be SkillSystem.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +195,7 @@ class AgentSystemBuilder:
         agent_executor: AgentExecutor | None = None,
         multi_agent_resolver: MultiAgentResolver | None = None,
         multi_agent_coordinator: MultiAgentCoordinator | None = None,
+        skill_system: SkillSystem | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -203,6 +208,7 @@ class AgentSystemBuilder:
         self._agent_executor = agent_executor
         self._multi_agent_resolver = multi_agent_resolver
         self._multi_agent_coordinator = multi_agent_coordinator
+        self._skill_system = skill_system
 
     def build(
         self,
@@ -257,6 +263,7 @@ class AgentSystemBuilder:
             if self._multi_agent_coordinator is not None
             else MultiAgentCoordinator(multi_agent_resolver, executor)
         )
+        skill_system = self._skill_system if self._skill_system is not None else build_skill_system()
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -269,6 +276,7 @@ class AgentSystemBuilder:
             agent_executor=executor,
             multi_agent_resolver=multi_agent_resolver,
             multi_agent_coordinator=multi_agent_coordinator,
+            skill_system=skill_system,
         )
 
         agent_snapshot = registry.list_agents()
