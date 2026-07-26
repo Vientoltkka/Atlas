@@ -201,6 +201,33 @@ def test_deterministic_tiebreak_when_unique_top_score_not_required() -> None:
     assert result.selected_agent_id == "agent.a"
 
 
+def test_preferred_agent_type_order_breaks_tie_declaratively() -> None:
+    coding = _agent("agent.coding", agent_type=AgentType.CODING)
+    memory = _agent("agent.memory", agent_type=AgentType.MEMORY)
+
+    result = _resolver(coding, memory).resolve(
+        AgentResolutionRequest(
+            required_capability_ids=("project.inspect",),
+            preferred_agent_types=(AgentType.MEMORY, AgentType.CODING),
+        )
+    )
+
+    assert result.status is AgentResolutionStatus.RESOLVED
+    assert result.selected_agent_id == "agent.memory"
+
+
+def test_unique_selection_does_not_hide_real_tie_with_agent_id_sorting() -> None:
+    result = _resolver(_agent("agent.a"), _agent("agent.b")).resolve(
+        AgentResolutionRequest(
+            required_capability_ids=("project.inspect",),
+            preferred_agent_types=(AgentType.GENERAL,),
+        )
+    )
+
+    assert result.status is AgentResolutionStatus.AMBIGUOUS
+    assert result.selected_agent is None
+
+
 def test_stable_order_uses_score_then_tiebreakers() -> None:
     best = _agent("agent.best", capabilities=("project.inspect", "code.edit"))
     middle = _agent("agent.middle", capabilities=("project.inspect",))

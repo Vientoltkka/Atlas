@@ -316,7 +316,10 @@ class AgentResolver:
                 error_message="top candidate score is below minimum_score.",
             )
 
-        ambiguous = tuple(candidate for candidate in considered if candidate.score == top.score)
+        top_selection_key = _candidate_selection_key(top, request)
+        ambiguous = tuple(
+            candidate for candidate in considered if _candidate_selection_key(candidate, request) == top_selection_key
+        )
         if request.require_unique_top_score and len(ambiguous) > 1:
             return _result(
                 AgentResolutionStatus.AMBIGUOUS,
@@ -461,15 +464,45 @@ def _candidate_sort_key(
         if candidate.agent.agent_id in request.preferred_agent_ids
         else MAX_AGENT_RESOLUTION_IDS + 1
     )
+    preferred_type_index = _preferred_agent_type_index(candidate, request)
     return (
         -candidate.score,
         0 if candidate.agent.enabled else 1,
         0 if candidate.preferred_agent_id_match else 1,
         preferred_index,
+        preferred_type_index,
         -candidate.satisfied_capability_count,
         candidate.agent.agent_type.value,
         candidate.agent.agent_id,
     )
+
+
+def _candidate_selection_key(
+    candidate: AgentResolutionCandidate,
+    request: AgentResolutionRequest,
+) -> tuple[object, ...]:
+    preferred_index = (
+        request.preferred_agent_ids.index(candidate.agent.agent_id)
+        if candidate.agent.agent_id in request.preferred_agent_ids
+        else MAX_AGENT_RESOLUTION_IDS + 1
+    )
+    return (
+        candidate.score,
+        candidate.agent.enabled,
+        candidate.preferred_agent_id_match,
+        preferred_index,
+        _preferred_agent_type_index(candidate, request),
+        candidate.satisfied_capability_count,
+    )
+
+
+def _preferred_agent_type_index(
+    candidate: AgentResolutionCandidate,
+    request: AgentResolutionRequest,
+) -> int:
+    if candidate.agent.agent_type in request.preferred_agent_types:
+        return request.preferred_agent_types.index(candidate.agent.agent_type)
+    return MAX_AGENT_RESOLUTION_IDS + 1
 
 
 def _permission_enabled(

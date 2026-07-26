@@ -230,7 +230,6 @@ def test_missing_capability_service_and_wrong_payload_are_structured_results() -
         AtlasRouteType.CONVERSATION,
         AtlasRouteType.TOOL,
         AtlasRouteType.WORKFLOW,
-        AtlasRouteType.AGENT,
     ),
 )
 def test_unavailable_routes_do_not_call_capability_service(route_type: AtlasRouteType) -> None:
@@ -239,6 +238,15 @@ def test_unavailable_routes_do_not_call_capability_service(route_type: AtlasRout
 
     assert result.status is AtlasRoutingStatus.ROUTE_UNAVAILABLE
     assert result.error_code == "ROUTE_UNAVAILABLE"
+    assert service.calls == 0
+
+
+def test_agent_route_without_agent_system_does_not_call_capability_service() -> None:
+    service = CountingCapabilityService()
+    result = AtlasRouter(service).route(AtlasRoutingRequest(AtlasRouteType.AGENT, payload={"agent_id": "atlas.agent.echo"}))
+
+    assert result.status is AtlasRoutingStatus.SERVICE_UNAVAILABLE
+    assert result.error_code == "AGENT_SYSTEM_UNAVAILABLE"
     assert service.calls == 0
 
 

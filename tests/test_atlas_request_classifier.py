@@ -396,7 +396,7 @@ def test_route_capability_e2e_from_structured_input() -> None:
     assert tool.calls == 1
 
 
-@pytest.mark.parametrize("route", ("tool", "workflow", "agent", "conversation"))
+@pytest.mark.parametrize("route", ("tool", "workflow", "conversation"))
 def test_unsupported_routes_remain_not_executable(route: str) -> None:
     router = build_core_atlas_router(capability_execution_service=None)
     orchestrator, _agent = _atlas_orchestrator(
@@ -408,6 +408,20 @@ def test_unsupported_routes_remain_not_executable(route: str) -> None:
     result = orchestrator.route_structured_input(StructuredInput(route=route, payload={"safe": "value"}))
 
     assert result.status is AtlasRoutingStatus.ROUTE_UNAVAILABLE
+
+
+def test_agent_route_with_unsupported_payload_through_classifier_flow_is_invalid() -> None:
+    router = build_core_atlas_router(capability_execution_service=None)
+    orchestrator, _agent = _atlas_orchestrator(
+        classifier=AtlasRequestClassifier(),
+        adapter=AtlasRequestAdapter(),
+        router=router,
+    )
+
+    result = orchestrator.route_structured_input(StructuredInput(route="agent", payload={"safe": "value"}))
+
+    assert result.status is AtlasRoutingStatus.INVALID_REQUEST
+    assert result.error_code == "INVALID_AGENT_PAYLOAD"
 
 
 def test_invalid_input_object_returns_structured_failure() -> None:

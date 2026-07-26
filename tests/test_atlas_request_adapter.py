@@ -341,7 +341,7 @@ def test_capability_route_e2e_from_structured_request_to_completed() -> None:
 
 @pytest.mark.parametrize(
     "route_type",
-    (AtlasRouteType.CONVERSATION, AtlasRouteType.TOOL, AtlasRouteType.WORKFLOW, AtlasRouteType.AGENT),
+    (AtlasRouteType.CONVERSATION, AtlasRouteType.TOOL, AtlasRouteType.WORKFLOW),
 )
 def test_non_capability_routes_still_do_not_execute(route_type: AtlasRouteType) -> None:
     router = build_core_atlas_router(capability_execution_service=None)
@@ -351,6 +351,18 @@ def test_non_capability_routes_still_do_not_execute(route_type: AtlasRouteType) 
 
     assert result.status is AtlasRoutingStatus.ROUTE_UNAVAILABLE
     assert result.error_code == "ROUTE_UNAVAILABLE"
+
+
+def test_agent_route_with_unsupported_payload_through_adapter_is_invalid() -> None:
+    router = build_core_atlas_router(capability_execution_service=None)
+    orchestrator, _agent = _atlas_orchestrator(adapter=AtlasRequestAdapter(), router=router)
+
+    result = orchestrator.route_structured_request(
+        StructuredAtlasRequest(AtlasRouteType.AGENT, payload={"safe": "value"})
+    )
+
+    assert result.status is AtlasRoutingStatus.INVALID_REQUEST
+    assert result.error_code == "INVALID_AGENT_PAYLOAD"
 
 
 def test_unknown_route_does_not_execute_capability_and_invalid_route_does_not_route() -> None:

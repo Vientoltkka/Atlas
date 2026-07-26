@@ -13,6 +13,7 @@ from bootstrap.atlas_request_classifier import build_core_atlas_request_classifi
 from bootstrap.atlas_request_adapter import build_core_atlas_request_adapter
 from bootstrap.atlas_request_normalizer import build_core_atlas_request_normalizer
 from bootstrap.atlas_router import build_core_atlas_router
+from bootstrap.agent_system import build_core_agent_system
 from bootstrap.capability_execution_service import build_capability_execution_service
 from bootstrap.capability_orchestrator import build_core_capability_orchestrator
 from bootstrap.capability_planner import build_core_capability_planner
@@ -761,8 +762,11 @@ class Bootstrap:
             execution_plan_libraries=execution_plan_libraries,
             execution_plan_registry=execution_plan_registry,
         )
+        agent_system_result = build_core_agent_system()
+        agent_system = agent_system_result.system if agent_system_result.system is not None else None
         atlas_router = build_core_atlas_router(
             capability_execution_service=capability_execution_service,
+            agent_system=agent_system,
         )
         atlas_request_adapter = build_core_atlas_request_adapter()
         atlas_request_classifier = build_core_atlas_request_classifier()
