@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.agent_cooperation_automatic_planner import AgentCooperationAutomaticPlanner
+from core.agent_cooperation_plan import AgentCooperationPlanner
 from core.agent_context import AgentContextBuilder
 from core.agent_delegation import AgentDelegationService
 from core.agent_delegation_chain import AgentDelegationChainService
@@ -36,6 +38,8 @@ def build_core_agent_system(
     agent_delegation_service: AgentDelegationService | None = None,
     agent_delegation_chain_service: AgentDelegationChainService | None = None,
     agent_delegation_coordinator: AgentDelegationCoordinator | None = None,
+    agent_cooperation_planner: AgentCooperationPlanner | None = None,
+    agent_cooperation_automatic_planner: AgentCooperationAutomaticPlanner | None = None,
 ) -> AgentSystemBuildResult:
     """Build a fully composed AgentSystem with explicit optional injections."""
 
@@ -55,4 +59,6 @@ def build_core_agent_system(
         agent_delegation_service=agent_delegation_service,
         agent_delegation_chain_service=agent_delegation_chain_service,
         agent_delegation_coordinator=agent_delegation_coordinator,
+        agent_cooperation_planner=agent_cooperation_planner,
+        agent_cooperation_automatic_planner=agent_cooperation_automatic_planner,
     ).build(request)
