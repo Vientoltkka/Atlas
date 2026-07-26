@@ -11,6 +11,9 @@ import math
 from pathlib import Path
 from types import MappingProxyType
 
+from core.agent_cooperation_automatic_execution import (
+    AgentCooperationAutomaticExecutionService,
+)
 from core.agent_cooperation_automatic_planner import AgentCooperationAutomaticPlanner
 from core.agent_cooperation_plan import AgentCooperationPlanner
 from core.agent_context import AgentContextBuilder
@@ -96,6 +99,7 @@ class AgentSystem:
     agent_delegation_coordinator: AgentDelegationCoordinator
     agent_cooperation_planner: AgentCooperationPlanner
     agent_cooperation_automatic_planner: AgentCooperationAutomaticPlanner
+    agent_cooperation_automatic_execution_service: AgentCooperationAutomaticExecutionService
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -141,6 +145,14 @@ class AgentSystem:
         if not isinstance(self.agent_cooperation_automatic_planner, AgentCooperationAutomaticPlanner):
             raise InvalidAgentSystemBuildRequestError(
                 "agent_cooperation_automatic_planner must be AgentCooperationAutomaticPlanner."
+            )
+        if not isinstance(
+            self.agent_cooperation_automatic_execution_service,
+            AgentCooperationAutomaticExecutionService,
+        ):
+            raise InvalidAgentSystemBuildRequestError(
+                "agent_cooperation_automatic_execution_service must be "
+                "AgentCooperationAutomaticExecutionService."
             )
 
 
@@ -229,6 +241,7 @@ class AgentSystemBuilder:
         agent_delegation_coordinator: AgentDelegationCoordinator | None = None,
         agent_cooperation_planner: AgentCooperationPlanner | None = None,
         agent_cooperation_automatic_planner: AgentCooperationAutomaticPlanner | None = None,
+        agent_cooperation_automatic_execution_service: AgentCooperationAutomaticExecutionService | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -247,6 +260,9 @@ class AgentSystemBuilder:
         self._agent_delegation_coordinator = agent_delegation_coordinator
         self._agent_cooperation_planner = agent_cooperation_planner
         self._agent_cooperation_automatic_planner = agent_cooperation_automatic_planner
+        self._agent_cooperation_automatic_execution_service = (
+            agent_cooperation_automatic_execution_service
+        )
 
     def build(
         self,
@@ -366,6 +382,24 @@ class AgentSystemBuilder:
                 multi_agent_coordinator=multi_agent_coordinator,
             )
         )
+        agent_cooperation_automatic_execution_service = (
+            self._agent_cooperation_automatic_execution_service
+            if self._agent_cooperation_automatic_execution_service is not None
+            else AgentCooperationAutomaticExecutionService(
+                agent_registry=registry,
+                agent_resolver=resolver,
+                agent_context_builder=context_builder,
+                agent_executor=executor,
+                skill_system=skill_system,
+                agent_delegation_service=agent_delegation_service,
+                agent_delegation_chain_service=agent_delegation_chain_service,
+                agent_delegation_coordinator=agent_delegation_coordinator,
+                multi_agent_resolver=multi_agent_resolver,
+                multi_agent_coordinator=multi_agent_coordinator,
+                agent_cooperation_planner=agent_cooperation_planner,
+                agent_cooperation_automatic_planner=agent_cooperation_automatic_planner,
+            )
+        )
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -384,6 +418,9 @@ class AgentSystemBuilder:
             agent_delegation_coordinator=agent_delegation_coordinator,
             agent_cooperation_planner=agent_cooperation_planner,
             agent_cooperation_automatic_planner=agent_cooperation_automatic_planner,
+            agent_cooperation_automatic_execution_service=(
+                agent_cooperation_automatic_execution_service
+            ),
         )
 
         agent_snapshot = registry.list_agents()
