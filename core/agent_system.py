@@ -23,6 +23,7 @@ from core.agent_handler_registration import (
     AgentHandlerRegistrationStatus,
 )
 from core.agent_manifest import AgentManifestLoader
+from core.multi_agent import MultiAgentCoordinator, MultiAgentResolver
 from core.agent_registration import (
     AgentRegistrationPolicy,
     AgentRegistrationRequest,
@@ -81,6 +82,8 @@ class AgentSystem:
     agent_resolver: AgentResolver
     agent_context_builder: AgentContextBuilder
     agent_executor: AgentExecutor
+    multi_agent_resolver: MultiAgentResolver
+    multi_agent_coordinator: MultiAgentCoordinator
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -103,6 +106,10 @@ class AgentSystem:
             raise InvalidAgentSystemBuildRequestError("agent_context_builder must be AgentContextBuilder.")
         if not isinstance(self.agent_executor, AgentExecutor):
             raise InvalidAgentSystemBuildRequestError("agent_executor must be AgentExecutor.")
+        if not isinstance(self.multi_agent_resolver, MultiAgentResolver):
+            raise InvalidAgentSystemBuildRequestError("multi_agent_resolver must be MultiAgentResolver.")
+        if not isinstance(self.multi_agent_coordinator, MultiAgentCoordinator):
+            raise InvalidAgentSystemBuildRequestError("multi_agent_coordinator must be MultiAgentCoordinator.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +189,8 @@ class AgentSystemBuilder:
         agent_resolver: AgentResolver | None = None,
         agent_context_builder: AgentContextBuilder | None = None,
         agent_executor: AgentExecutor | None = None,
+        multi_agent_resolver: MultiAgentResolver | None = None,
+        multi_agent_coordinator: MultiAgentCoordinator | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -192,6 +201,8 @@ class AgentSystemBuilder:
         self._agent_resolver = agent_resolver
         self._agent_context_builder = agent_context_builder
         self._agent_executor = agent_executor
+        self._multi_agent_resolver = multi_agent_resolver
+        self._multi_agent_coordinator = multi_agent_coordinator
 
     def build(
         self,
@@ -238,6 +249,14 @@ class AgentSystemBuilder:
             self._agent_context_builder if self._agent_context_builder is not None else AgentContextBuilder()
         )
         executor = self._agent_executor if self._agent_executor is not None else AgentExecutor(resolver, context_builder, handler_registry)
+        multi_agent_resolver = (
+            self._multi_agent_resolver if self._multi_agent_resolver is not None else MultiAgentResolver(registry)
+        )
+        multi_agent_coordinator = (
+            self._multi_agent_coordinator
+            if self._multi_agent_coordinator is not None
+            else MultiAgentCoordinator(multi_agent_resolver, executor)
+        )
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -248,6 +267,8 @@ class AgentSystemBuilder:
             agent_resolver=resolver,
             agent_context_builder=context_builder,
             agent_executor=executor,
+            multi_agent_resolver=multi_agent_resolver,
+            multi_agent_coordinator=multi_agent_coordinator,
         )
 
         agent_snapshot = registry.list_agents()

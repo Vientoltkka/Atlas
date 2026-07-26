@@ -21,6 +21,13 @@ from core.capability_execution_service import (
     CapabilityExecutionService,
     CapabilityExecutionStatus,
 )
+from core.multi_agent import (
+    MultiAgentExecutionPolicy,
+    MultiAgentExecutionRequest,
+    MultiAgentExecutionResult,
+    MultiAgentExecutionStatus,
+    MultiAgentFailurePolicy,
+)
 
 
 MAX_ATLAS_ROUTING_METADATA_ITEMS = 32
@@ -131,6 +138,13 @@ class AtlasAgentRoutingRequest:
     preferred_agent_ids: tuple[str, ...] = ()
     excluded_agent_ids: tuple[str, ...] = ()
     enabled_only: bool = True
+    multi_agent_enabled: bool = False
+    required_agent_ids: tuple[str, ...] = ()
+    required_agent_types: tuple[AgentType | str, ...] = ()
+    min_agents: int = 2
+    max_agents: int = 4
+    failure_policy: MultiAgentFailurePolicy | str = MultiAgentFailurePolicy.STOP_ON_FIRST_FAILURE
+    share_previous_outputs: bool = False
     task_id: str | None = None
     execution_id: str | None = None
     correlation_id: str | None = None
@@ -173,6 +187,25 @@ class AtlasAgentRoutingRequest:
         )
         if not isinstance(self.enabled_only, bool):
             raise InvalidAtlasRoutingRequestError("enabled_only must be a bool.")
+        if not isinstance(self.multi_agent_enabled, bool):
+            raise InvalidAtlasRoutingRequestError("multi_agent_enabled must be a bool.")
+        object.__setattr__(
+            self,
+            "required_agent_ids",
+            _safe_agent_id_tuple(self.required_agent_ids, "required_agent_ids"),
+        )
+        object.__setattr__(
+            self,
+            "required_agent_types",
+            _safe_agent_type_tuple(self.required_agent_types, "required_agent_types"),
+        )
+        object.__setattr__(self, "min_agents", _positive_int(self.min_agents, "min_agents"))
+        object.__setattr__(self, "max_agents", _positive_int(self.max_agents, "max_agents"))
+        if self.min_agents > self.max_agents:
+            raise InvalidAtlasRoutingRequestError("min_agents cannot exceed max_agents.")
+        object.__setattr__(self, "failure_policy", _multi_agent_failure_policy(self.failure_policy))
+        if not isinstance(self.share_previous_outputs, bool):
+            raise InvalidAtlasRoutingRequestError("share_previous_outputs must be a bool.")
         for field_name in ("task_id", "execution_id", "correlation_id", "session_id"):
             value = getattr(self, field_name)
             if value is not None:
@@ -194,6 +227,7 @@ class AtlasRoutingResult:
     capability_result: CapabilityExecutionResult | None = None
     agent_result: AgentExecutionResult | None = None
     agent_resolution_result: AgentResolutionResult | None = None
+    multi_agent_result: MultiAgentExecutionResult | None = None
     events: tuple[AtlasRoutingEvent, ...] = ()
     request_signature: str | None = None
     metrics: Mapping[str, int] = field(default_factory=dict)
@@ -217,6 +251,8 @@ class AtlasRoutingResult:
             AgentResolutionResult,
         ):
             raise InvalidAtlasRoutingRequestError("agent_resolution_result must be AgentResolutionResult or None.")
+        if self.multi_agent_result is not None and not isinstance(self.multi_agent_result, MultiAgentExecutionResult):
+            raise InvalidAtlasRoutingRequestError("multi_agent_result must be MultiAgentExecutionResult or None.")
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "metrics", MappingProxyType(_safe_metrics(self.metrics)))
 
@@ -451,6 +487,9 @@ class AtlasRouter:
                 metrics=_agent_metrics(unavailable=1),
             )
 
+        if agent_request.agent_id is None and agent_request.multi_agent_enabled:
+            return self._route_multi_agent(request, agent_request, events, signature)
+
         if agent_request.agent_id is None:
             return self._route_agent_automatic(request, agent_request, events, signature)
 
@@ -500,6 +539,77 @@ class AtlasRouter:
             signature,
             selected_agent_id=agent_request.agent_id,
             selection_metrics=_agent_metrics(),
+        )
+
+    def _route_multi_agent(
+        self,
+        request: AtlasRoutingRequest,
+        agent_request: AtlasAgentRoutingRequest,
+        events: list[AtlasRoutingEvent],
+        signature: str,
+    ) -> AtlasRoutingResult:
+        try:
+            multi_request = MultiAgentExecutionRequest(
+                required_agent_ids=agent_request.required_agent_ids,
+                required_agent_types=agent_request.required_agent_types,
+                required_capability_ids=agent_request.required_capabilities,
+                required_permission_ids=agent_request.required_permissions,
+                excluded_agent_ids=agent_request.excluded_agent_ids,
+                payload=agent_request.payload,
+                shared_context=agent_request.shared_context,
+                user_input=agent_request.user_input,
+                metadata=agent_request.metadata,
+                task_id=agent_request.task_id,
+                execution_id=agent_request.execution_id,
+                correlation_id=agent_request.correlation_id,
+                session_id=agent_request.session_id,
+                policy=MultiAgentExecutionPolicy(
+                    min_agents=agent_request.min_agents,
+                    max_agents=agent_request.max_agents,
+                    enabled_only=agent_request.enabled_only,
+                    failure_policy=agent_request.failure_policy,
+                    share_previous_outputs=agent_request.share_previous_outputs,
+                ),
+            )
+        except (ValueError, TypeError, RuntimeError) as error:
+            _record(events, self._observer, "multi_agent_execution_failed", "failed", {"reason": "invalid_request"})
+            return _result(
+                AtlasRoutingStatus.INVALID_REQUEST,
+                request.route_type,
+                events,
+                request_id=request.request_id,
+                request_signature=signature,
+                error_code="INVALID_MULTI_AGENT_REQUEST",
+                message=str(error),
+                metrics=_multi_agent_metrics(invalid=1),
+            )
+        try:
+            multi_result = self._agent_system.multi_agent_coordinator.execute(multi_request)
+        except (ValueError, TypeError, RuntimeError):
+            _record(events, self._observer, "multi_agent_execution_failed", "failed", {"reason": "internal_error"})
+            return _result(
+                AtlasRoutingStatus.INTERNAL_ERROR,
+                request.route_type,
+                events,
+                request_id=request.request_id,
+                request_signature=signature,
+                error_code="MULTI_AGENT_INTERNAL_ERROR",
+                message="Multi-agent route failed before returning a structured result.",
+                metrics=_multi_agent_metrics(failed=1),
+            )
+        _record_multi_agent_events(events, self._observer, multi_result)
+        routing_status = _routing_status_for_multi_agent(multi_result.status)
+        return _result(
+            routing_status,
+            request.route_type,
+            events,
+            output=multi_result.output if routing_status is AtlasRoutingStatus.COMPLETED else multi_result.output,
+            error_code=multi_result.error_code,
+            message=multi_result.safe_message,
+            request_id=request.request_id,
+            multi_agent_result=multi_result,
+            request_signature=signature,
+            metrics=multi_result.metrics,
         )
 
     def _route_agent_automatic(
@@ -822,6 +932,16 @@ def _routing_status_for_agent(status: AgentExecutionStatus) -> AtlasRoutingStatu
     return AtlasRoutingStatus.EXECUTION_FAILED
 
 
+def _routing_status_for_multi_agent(status: MultiAgentExecutionStatus) -> AtlasRoutingStatus:
+    if status in (MultiAgentExecutionStatus.SUCCESS, MultiAgentExecutionStatus.PARTIAL_SUCCESS):
+        return AtlasRoutingStatus.COMPLETED
+    if status is MultiAgentExecutionStatus.INVALID_REQUEST:
+        return AtlasRoutingStatus.INVALID_REQUEST
+    if status is MultiAgentExecutionStatus.SERVICE_UNAVAILABLE:
+        return AtlasRoutingStatus.SERVICE_UNAVAILABLE
+    return AtlasRoutingStatus.EXECUTION_FAILED
+
+
 def _record(
     events: list[AtlasRoutingEvent],
     observer: RoutingObserver | None,
@@ -847,6 +967,7 @@ def _result(
     capability_result: CapabilityExecutionResult | None = None,
     agent_result: AgentExecutionResult | None = None,
     agent_resolution_result: AgentResolutionResult | None = None,
+    multi_agent_result: MultiAgentExecutionResult | None = None,
     request_signature: str | None = None,
     metrics: Mapping[str, int] | None = None,
 ) -> AtlasRoutingResult:
@@ -860,6 +981,7 @@ def _result(
         capability_result=capability_result,
         agent_result=agent_result,
         agent_resolution_result=agent_resolution_result,
+        multi_agent_result=multi_agent_result,
         events=tuple(events),
         request_signature=request_signature,
         metrics={} if metrics is None else metrics,
@@ -1034,6 +1156,25 @@ def _safe_agent_type_tuple(values: Sequence[AgentType | str], field_name: str) -
     return tuple(normalized)
 
 
+def _positive_int(value: int, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidAtlasRoutingRequestError(f"{field_name} must be an integer.")
+    if value <= 0 or value > MAX_ATLAS_ROUTING_METADATA_ITEMS:
+        raise InvalidAtlasRoutingRequestError(f"{field_name} is outside the allowed range.")
+    return value
+
+
+def _multi_agent_failure_policy(value: MultiAgentFailurePolicy | str) -> MultiAgentFailurePolicy:
+    if isinstance(value, MultiAgentFailurePolicy):
+        return value
+    if isinstance(value, str):
+        try:
+            return MultiAgentFailurePolicy(value)
+        except ValueError as error:
+            raise InvalidAtlasRoutingRequestError("failure_policy is invalid.") from error
+    raise InvalidAtlasRoutingRequestError("failure_policy is invalid.")
+
+
 def _agent_routing_request(value: object) -> AtlasAgentRoutingRequest:
     if isinstance(value, AtlasAgentRoutingRequest):
         return value
@@ -1050,6 +1191,13 @@ def _agent_routing_request(value: object) -> AtlasAgentRoutingRequest:
         "preferred_agent_ids",
         "excluded_agent_ids",
         "enabled_only",
+        "multi_agent_enabled",
+        "required_agent_ids",
+        "required_agent_types",
+        "min_agents",
+        "max_agents",
+        "failure_policy",
+        "share_previous_outputs",
         "task_id",
         "execution_id",
         "correlation_id",
@@ -1073,6 +1221,13 @@ def _agent_routing_request(value: object) -> AtlasAgentRoutingRequest:
         preferred_agent_ids=tuple(value.get("preferred_agent_ids", ())),  # type: ignore[arg-type]
         excluded_agent_ids=tuple(value.get("excluded_agent_ids", ())),  # type: ignore[arg-type]
         enabled_only=value.get("enabled_only", True),  # type: ignore[arg-type]
+        multi_agent_enabled=value.get("multi_agent_enabled", False),  # type: ignore[arg-type]
+        required_agent_ids=tuple(value.get("required_agent_ids", ())),  # type: ignore[arg-type]
+        required_agent_types=tuple(value.get("required_agent_types", ())),  # type: ignore[arg-type]
+        min_agents=value.get("min_agents", 2),  # type: ignore[arg-type]
+        max_agents=value.get("max_agents", 4),  # type: ignore[arg-type]
+        failure_policy=value.get("failure_policy", MultiAgentFailurePolicy.STOP_ON_FIRST_FAILURE),  # type: ignore[arg-type]
+        share_previous_outputs=value.get("share_previous_outputs", False),  # type: ignore[arg-type]
         task_id=value.get("task_id"),  # type: ignore[arg-type]
         execution_id=value.get("execution_id"),  # type: ignore[arg-type]
         correlation_id=value.get("correlation_id"),  # type: ignore[arg-type]
@@ -1116,6 +1271,31 @@ def _merge_metrics(*metrics: Mapping[str, int]) -> Mapping[str, int]:
         for key, value in metric.items():
             merged[key] = merged.get(key, 0) + value
     return merged
+
+
+def _multi_agent_metrics(*, invalid: int = 0, failed: int = 0) -> Mapping[str, int]:
+    return {
+        "multi_agent_executions_requested": 1 if invalid or failed else 0,
+        "multi_agent_executions_succeeded": 0,
+        "multi_agent_executions_partial": 0,
+        "multi_agent_executions_failed": invalid + failed,
+        "multi_agent_teams_resolved": 0,
+        "multi_agent_team_resolution_failures": 0,
+        "multi_agent_steps_started": 0,
+        "multi_agent_steps_succeeded": 0,
+        "multi_agent_steps_failed": 0,
+        "multi_agent_aggregations_succeeded": 0,
+        "multi_agent_aggregations_failed": 0,
+    }
+
+
+def _record_multi_agent_events(
+    events: list[AtlasRoutingEvent],
+    observer: RoutingObserver | None,
+    result: MultiAgentExecutionResult,
+) -> None:
+    for event in result.events:
+        _record(events, observer, event.name, event.status, event.details)
 
 
 def _has_automatic_selection_criteria(request: AtlasAgentRoutingRequest) -> bool:
@@ -1171,6 +1351,13 @@ def _signature_payload(value: object) -> object:
             "preferred_agent_ids": tuple(value.preferred_agent_ids),
             "excluded_agent_ids": tuple(sorted(value.excluded_agent_ids)),
             "enabled_only": value.enabled_only,
+            "multi_agent_enabled": value.multi_agent_enabled,
+            "required_agent_ids": tuple(value.required_agent_ids),
+            "required_agent_types": tuple(item.value for item in value.required_agent_types),
+            "min_agents": value.min_agents,
+            "max_agents": value.max_agents,
+            "failure_policy": value.failure_policy.value,
+            "share_previous_outputs": value.share_previous_outputs,
             "task_id": value.task_id,
             "execution_id": value.execution_id,
             "correlation_id": value.correlation_id,
