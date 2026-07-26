@@ -13,6 +13,7 @@ from types import MappingProxyType
 
 from core.agent_context import AgentContextBuilder
 from core.agent_delegation import AgentDelegationService
+from core.agent_delegation_chain import AgentDelegationChainService
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutor, AgentHandlerRegistry
 from core.agent_handler_registration import (
@@ -88,6 +89,7 @@ class AgentSystem:
     multi_agent_coordinator: MultiAgentCoordinator
     skill_system: SkillSystem
     agent_delegation_service: AgentDelegationService
+    agent_delegation_chain_service: AgentDelegationChainService
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -118,6 +120,10 @@ class AgentSystem:
             raise InvalidAgentSystemBuildRequestError("skill_system must be SkillSystem.")
         if not isinstance(self.agent_delegation_service, AgentDelegationService):
             raise InvalidAgentSystemBuildRequestError("agent_delegation_service must be AgentDelegationService.")
+        if not isinstance(self.agent_delegation_chain_service, AgentDelegationChainService):
+            raise InvalidAgentSystemBuildRequestError(
+                "agent_delegation_chain_service must be AgentDelegationChainService."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +207,7 @@ class AgentSystemBuilder:
         multi_agent_coordinator: MultiAgentCoordinator | None = None,
         skill_system: SkillSystem | None = None,
         agent_delegation_service: AgentDelegationService | None = None,
+        agent_delegation_chain_service: AgentDelegationChainService | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -215,6 +222,7 @@ class AgentSystemBuilder:
         self._multi_agent_coordinator = multi_agent_coordinator
         self._skill_system = skill_system
         self._agent_delegation_service = agent_delegation_service
+        self._agent_delegation_chain_service = agent_delegation_chain_service
 
     def build(
         self,
@@ -280,6 +288,17 @@ class AgentSystemBuilder:
                 agent_executor=executor,
             )
         )
+        agent_delegation_chain_service = (
+            self._agent_delegation_chain_service
+            if self._agent_delegation_chain_service is not None
+            else AgentDelegationChainService(
+                agent_registry=registry,
+                agent_resolver=resolver,
+                agent_context_builder=context_builder,
+                agent_executor=executor,
+                agent_delegation_service=agent_delegation_service,
+            )
+        )
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -294,6 +313,7 @@ class AgentSystemBuilder:
             multi_agent_coordinator=multi_agent_coordinator,
             skill_system=skill_system,
             agent_delegation_service=agent_delegation_service,
+            agent_delegation_chain_service=agent_delegation_chain_service,
         )
 
         agent_snapshot = registry.list_agents()
