@@ -51,6 +51,10 @@ class ReplanRequest:
     max_attempts: int
     active_plan: ExecutionPlan | None = None
     error_code: str | None = None
+    completed_step_ids: tuple[str, ...] = ()
+    pending_step_ids: tuple[str, ...] = ()
+    blocked_step_ids: tuple[str, ...] = ()
+    dependency_graph: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -67,6 +71,31 @@ class ReplanRequest:
             self,
             "partial_results",
             MappingProxyType(dict(self.partial_results)),
+        )
+        object.__setattr__(
+            self,
+            "completed_step_ids",
+            tuple(self.completed_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "pending_step_ids",
+            tuple(self.pending_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "blocked_step_ids",
+            tuple(self.blocked_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "dependency_graph",
+            MappingProxyType(
+                {
+                    str(step_id): tuple(dependencies)
+                    for step_id, dependencies in self.dependency_graph.items()
+                }
+            ),
         )
 
 
@@ -237,6 +266,8 @@ class ExecutionReplanner:
                 f"Failed step: {request.failed_step or 'unknown'}",
                 f"Error: {request.error}",
                 f"Completed step results available: {completed}",
+                f"Pending steps: {', '.join(request.pending_step_ids) or 'none'}",
+                f"Blocked steps: {', '.join(request.blocked_step_ids) or 'none'}",
                 f"Replan attempt: {request.attempt_number} of {request.max_attempts}",
             ]
         )

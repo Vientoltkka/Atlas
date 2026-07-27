@@ -14,6 +14,7 @@ from core.execution_supervisor import (
     ExecutionState,
     ExecutionSupervisor,
     InvalidExecutionTransitionError,
+    StepExecutionState,
 )
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult
 from core.structured_execution import StructuredExecutionCoordinator
@@ -153,6 +154,36 @@ def _failed_result(
     )
 
 
+def _blocked_result() -> PlanExecutionResult:
+    return PlanExecutionResult(
+        plan_status=PlanExecutionStatus.BLOCKED.value,
+        success=False,
+        blocked=True,
+        completed_steps=["step_1"],
+        blocked_steps=["step_2"],
+        pending_steps=["step_3"],
+        current_step="step_2",
+        error="blocked",
+        error_code="DEPENDENCY_NOT_COMPLETED",
+        step_results=[
+            StepExecutionResult(
+                step_id="step_1",
+                status="completed",
+                success=True,
+                tool_name="read_file",
+                output="ok",
+            ),
+            StepExecutionResult(
+                step_id="step_2",
+                status="blocked",
+                success=False,
+                tool_name="write_file",
+                error="blocked",
+            ),
+        ],
+    )
+
+
 def test_start_creates_pending_session_with_initial_event() -> None:
     supervisor = ExecutionSupervisor(clock=_Clock())
     plan = _plan()
@@ -166,6 +197,7 @@ def test_start_creates_pending_session_with_initial_event() -> None:
     assert session.finished_at is None
     assert session.last_error is None
     assert session.results == {}
+    assert session.step_states["step_1"].state is StepExecutionState.PENDING
     assert [event.event_type for event in session.events] == ["execution_started"]
 
 
@@ -523,6 +555,24 @@ def test_replanning_is_active_and_can_resume_running() -> None:
     assert running.state is ExecutionState.RUNNING
 
 
+def test_supervisor_records_step_state_snapshots_and_events() -> None:
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    session = supervisor.start(_plan())
+
+    supervisor.mark_step_ready(session.session_id, "step_1")
+    supervisor.mark_step_started(session.session_id, "step_1")
+    supervisor.mark_step_completed(session.session_id, "step_1")
+    updated = supervisor.get_session(session.session_id)
+
+    assert updated.step_states["step_1"].state is StepExecutionState.COMPLETED
+    assert updated.step_states["step_1"].dependency_ids == ()
+    assert [event.event_type for event in updated.events][-3:] == [
+        "step_ready",
+        "step_started",
+        "step_completed",
+    ]
+
+
 def test_invalid_transitions_raise_clear_exception() -> None:
     supervisor = ExecutionSupervisor(clock=_Clock())
     session = supervisor.start(_plan())
@@ -710,6 +760,10 @@ def test_recoverable_failure_creates_replan_request_with_context() -> None:
     assert request.error == "tool failed"
     assert request.error_code == "TOOL_EXECUTION_FAILED"
     assert request.partial_results["step_0"] == {"value": "partial"}
+    assert request.completed_step_ids == ("step_0",)
+    assert request.pending_step_ids == ()
+    assert request.blocked_step_ids == ()
+    assert request.dependency_graph == {"step_1": ()}
     assert request.attempt_number == 1
     assert request.max_attempts == 1
 
@@ -842,7 +896,10 @@ def test_replan_planner_error_preserves_original_error_and_records_failure() -> 
     assert session.replan_count == 0
     assert session.last_error == "planner crashed"
     assert [event.event_type for event in session.events].count("execution_failed") == 2
-    assert session.events[2].details["error"] == "tool failed first"
+    first_failure = next(
+        event for event in session.events if event.event_type == "execution_failed"
+    )
+    assert first_failure.details["error"] == "tool failed first"
     assert "replan_failed" in [event.event_type for event in session.events]
 
 
@@ -950,3 +1007,35 @@ def test_replan_history_is_immutable_from_outside() -> None:
         session.replan_count = 10  # type: ignore[misc]
     with pytest.raises(AttributeError):
         session.replan_history.append("bad")  # type: ignore[attr-defined]
+
+
+def test_blocked_execution_records_blocked_step_state() -> None:
+    plan = ExecutionPlan(
+        goal="blocked",
+        ordered_steps=(
+            ExecutionStep("step_1", "read", "read_file"),
+            ExecutionStep("step_2", "write", "write_file", ("step_1",)),
+            ExecutionStep("step_3", "independent", "read_file"),
+        ),
+        estimated_steps=3,
+        required_tools=("read_file", "write_file"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_SequenceExecutor(_blocked_result()),  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "blocked"
+    assert session.state is ExecutionState.FAILED
+    assert session.step_states["step_1"].state is StepExecutionState.COMPLETED
+    assert session.step_states["step_2"].state is StepExecutionState.BLOCKED
+    assert session.step_states["step_3"].state is StepExecutionState.READY
+    assert "execution_blocked" in [event.event_type for event in session.events]

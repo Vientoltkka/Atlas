@@ -28,6 +28,18 @@ class ExecutionState(str, Enum):
     CANCELLED = "cancelled"
 
 
+class StepExecutionState(str, Enum):
+    """Closed supervised states for one execution step."""
+
+    PENDING = "pending"
+    READY = "ready"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    SKIPPED = "skipped"
+
+
 _TERMINAL_STATES = frozenset(
     {
         ExecutionState.FAILED,
@@ -72,6 +84,23 @@ class ExecutionSupervisorEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StepExecutionSnapshot:
+    """Immutable state snapshot for one supervised execution step."""
+
+    step_id: str
+    state: StepExecutionState
+    dependency_ids: tuple[str, ...] = ()
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.step_id.strip():
+            raise ValueError("step_id must be a non-empty string.")
+        if not isinstance(self.state, StepExecutionState):
+            raise TypeError("state must be a StepExecutionState.")
+        object.__setattr__(self, "dependency_ids", tuple(self.dependency_ids))
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionSession:
     """Current in-memory lifecycle snapshot for one execution."""
 
@@ -88,6 +117,7 @@ class ExecutionSession:
     active_plan: Any | None = None
     replan_count: int = 0
     replan_history: tuple[ReplanRecord, ...] = ()
+    step_states: Mapping[str, StepExecutionSnapshot] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -95,6 +125,11 @@ class ExecutionSession:
         if not isinstance(self.state, ExecutionState):
             raise TypeError("state must be an ExecutionState.")
         object.__setattr__(self, "results", MappingProxyType(dict(self.results)))
+        object.__setattr__(
+            self,
+            "step_states",
+            MappingProxyType(dict(self.step_states)),
+        )
         object.__setattr__(
             self,
             "original_plan",
@@ -239,6 +274,7 @@ class ExecutionSupervisor:
             state=ExecutionState.PENDING,
             current_step=None,
             started_at=started_at,
+            step_states=self._initial_step_states(plan),
         )
         session = self._with_event(
             session,
@@ -342,6 +378,134 @@ class ExecutionSupervisor:
             ExecutionState.WAITING_CONFIRMATION,
             event_type="execution_waiting_confirmation",
             current_step=current_step,
+        )
+
+    def mark_step_ready(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+    ) -> ExecutionSession:
+        """Record one step as ready without executing it."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.READY,
+            event_type="step_ready",
+            dependency_ids=dependency_ids,
+        )
+
+    def mark_step_started(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+    ) -> ExecutionSession:
+        """Record one step as running."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.RUNNING,
+            event_type="step_started",
+            dependency_ids=dependency_ids,
+            current_step=step_id,
+        )
+
+    def mark_step_completed(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+    ) -> ExecutionSession:
+        """Record one step as completed."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.COMPLETED,
+            event_type="step_completed",
+            dependency_ids=dependency_ids,
+            current_step=step_id,
+        )
+
+    def mark_step_failed(
+        self,
+        session_id: str,
+        step_id: str,
+        error: object,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+    ) -> ExecutionSession:
+        """Record one step as failed."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.FAILED,
+            event_type="step_failed",
+            dependency_ids=dependency_ids,
+            current_step=step_id,
+            error=self._error_message(error),
+        )
+
+    def mark_step_blocked(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+        error: object | None = None,
+    ) -> ExecutionSession:
+        """Record one step as blocked by dependencies."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.BLOCKED,
+            event_type="step_blocked",
+            dependency_ids=dependency_ids,
+            error=self._error_message(error) if error is not None else None,
+        )
+
+    def record_dependency_graph_validated(
+        self,
+        session_id: str,
+        *,
+        step_count: int,
+        dependency_count: int,
+    ) -> ExecutionSession:
+        """Record a validated dependency graph event."""
+        return self._record_graph_event(
+            session_id,
+            "dependency_graph_validated",
+            step_count=step_count,
+            dependency_count=dependency_count,
+        )
+
+    def record_dependency_graph_rejected(
+        self,
+        session_id: str,
+        *,
+        error: object,
+    ) -> ExecutionSession:
+        """Record a rejected dependency graph event."""
+        return self._record_graph_event(
+            session_id,
+            "dependency_graph_rejected",
+            error=self._error_message(error),
+        )
+
+    def record_execution_blocked(
+        self,
+        session_id: str,
+        *,
+        error: object,
+    ) -> ExecutionSession:
+        """Record an execution blocked event."""
+        return self._record_graph_event(
+            session_id,
+            "execution_blocked",
+            error=self._error_message(error),
         )
 
     def mark_completed(
@@ -551,6 +715,72 @@ class ExecutionSupervisor:
         )
         self._events.append(event)
         return replace(session, events=session.events + (event,))
+
+    def _mark_step_state(
+        self,
+        session_id: str,
+        step_id: str,
+        state: StepExecutionState,
+        *,
+        event_type: str,
+        dependency_ids: tuple[str, ...] = (),
+        current_step: str | None = None,
+        error: str | None = None,
+    ) -> ExecutionSession:
+        session = self.get_session(session_id)
+        snapshot = StepExecutionSnapshot(
+            step_id=step_id,
+            state=state,
+            dependency_ids=dependency_ids,
+            error=error,
+        )
+        step_states = dict(session.step_states)
+        step_states[step_id] = snapshot
+        updated = replace(
+            session,
+            current_step=current_step
+            if current_step is not None
+            else session.current_step,
+            step_states=step_states,
+        )
+        details: dict[str, object] = {
+            "step_id": step_id,
+            "state": state.value,
+            "dependency_ids": list(dependency_ids),
+        }
+        if error is not None:
+            details["error"] = error
+        updated = self._with_event(updated, event_type, details=details)
+        self._sessions[session_id] = updated
+        return updated
+
+    def _record_graph_event(
+        self,
+        session_id: str,
+        event_type: str,
+        **details: object,
+    ) -> ExecutionSession:
+        session = self.get_session(session_id)
+        updated = self._with_event(session, event_type, details=details)
+        self._sessions[session_id] = updated
+        return updated
+
+    def _initial_step_states(
+        self,
+        plan: Any,
+    ) -> Mapping[str, StepExecutionSnapshot]:
+        steps = getattr(plan, "ordered_steps", ())
+        snapshots: dict[str, StepExecutionSnapshot] = {}
+        for step in steps:
+            step_id = getattr(step, "id", None)
+            if not isinstance(step_id, str) or not step_id.strip():
+                continue
+            snapshots[step_id] = StepExecutionSnapshot(
+                step_id=step_id,
+                state=StepExecutionState.PENDING,
+                dependency_ids=tuple(getattr(step, "depends_on", ())),
+            )
+        return snapshots
 
     @staticmethod
     def _error_message(error: object) -> str:

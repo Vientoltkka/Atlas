@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from core.execution_context import ExecutionContext
+from core.execution_dependency_resolver import ExecutionDependencyResolver
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionProgress,
@@ -92,6 +93,7 @@ class StructuredExecutionCoordinator:
         execution_supervisor: ExecutionSupervisor | None = None,
         execution_replanner: StructuredExecutionReplanner | None = None,
         replan_policy: ReplanPolicy | None = None,
+        dependency_resolver: ExecutionDependencyResolver | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -99,6 +101,7 @@ class StructuredExecutionCoordinator:
         self._execution_supervisor = execution_supervisor or ExecutionSupervisor()
         self._execution_replanner = execution_replanner
         self._replan_policy = replan_policy or ReplanPolicy(max_replans_per_session=0)
+        self._dependency_resolver = dependency_resolver or ExecutionDependencyResolver()
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -631,12 +634,21 @@ class StructuredExecutionCoordinator:
         active_validation = validation
         try:
             while True:
+                self._record_dependency_graph_state(
+                    session.session_id,
+                    active_plan,
+                )
                 execution = self._executor.execute(
                     active_plan,
                     active_validation,
                     confirmation_granted=confirmation_granted,
                     control=control,
                     on_progress=on_progress,
+                )
+                self._record_step_states_from_execution(
+                    session.session_id,
+                    active_plan,
+                    execution,
                 )
                 if self._execution_can_finish_without_replan(execution):
                     self._finalize_supervised_session(session.session_id, execution)
@@ -678,6 +690,97 @@ class StructuredExecutionCoordinator:
 
         self._finalize_supervised_session(session.session_id, execution)
         return execution
+
+    def _record_dependency_graph_state(
+        self,
+        session_id: str,
+        plan: ExecutionPlan,
+    ) -> None:
+        step_count = len(plan.ordered_steps)
+        dependency_count = sum(len(step.depends_on) for step in plan.ordered_steps)
+        try:
+            ready_steps = self._dependency_resolver.get_ready_steps(
+                plan,
+                completed_step_ids=(),
+            )
+        except Exception as error:
+            self._execution_supervisor.record_dependency_graph_rejected(
+                session_id,
+                error=error,
+            )
+            return
+
+        self._execution_supervisor.record_dependency_graph_validated(
+            session_id,
+            step_count=step_count,
+            dependency_count=dependency_count,
+        )
+        for step in ready_steps:
+            self._execution_supervisor.mark_step_ready(
+                session_id,
+                step.id,
+                dependency_ids=tuple(step.depends_on),
+            )
+
+    def _record_step_states_from_execution(
+        self,
+        session_id: str,
+        plan: ExecutionPlan,
+        execution: PlanExecutionResult,
+    ) -> None:
+        step_by_id = {step.id: step for step in plan.ordered_steps}
+        for step_result in execution.step_results:
+            step = step_by_id.get(step_result.step_id)
+            dependency_ids = tuple(step.depends_on) if step is not None else ()
+            if step_result.status in {"completed", "failed", "blocked"}:
+                self._execution_supervisor.mark_step_started(
+                    session_id,
+                    step_result.step_id,
+                    dependency_ids=dependency_ids,
+                )
+            if step_result.status == "completed":
+                self._execution_supervisor.mark_step_completed(
+                    session_id,
+                    step_result.step_id,
+                    dependency_ids=dependency_ids,
+                )
+            elif step_result.status == "failed":
+                self._execution_supervisor.mark_step_failed(
+                    session_id,
+                    step_result.step_id,
+                    step_result.error or step_result.error_code or "step failed",
+                    dependency_ids=dependency_ids,
+                )
+            elif step_result.status == "blocked":
+                self._execution_supervisor.mark_step_blocked(
+                    session_id,
+                    step_result.step_id,
+                    dependency_ids=dependency_ids,
+                    error=step_result.error,
+                )
+
+        for step_id in execution.completed_steps:
+            if step_id not in step_by_id:
+                continue
+            step = step_by_id[step_id]
+            current = self._execution_supervisor.get_session(session_id).step_states.get(step_id)
+            if current is None or current.state.value != "completed":
+                self._execution_supervisor.mark_step_started(
+                    session_id,
+                    step_id,
+                    dependency_ids=tuple(step.depends_on),
+                )
+                self._execution_supervisor.mark_step_completed(
+                    session_id,
+                    step_id,
+                    dependency_ids=tuple(step.depends_on),
+                )
+
+        if execution.plan_status == PlanExecutionStatus.BLOCKED.value:
+            self._execution_supervisor.record_execution_blocked(
+                session_id,
+                error=execution.error or execution.failure_reason or "execution blocked",
+            )
 
     def _execution_can_finish_without_replan(
         self,
@@ -844,6 +947,13 @@ class StructuredExecutionCoordinator:
             ),
             error_code=execution.error_code,
             partial_results=self._partial_results(execution),
+            completed_step_ids=tuple(execution.completed_steps),
+            pending_step_ids=tuple(execution.pending_steps),
+            blocked_step_ids=tuple(execution.blocked_steps),
+            dependency_graph={
+                step.id: tuple(step.depends_on)
+                for step in failed_plan.ordered_steps
+            },
             attempt_number=attempt_number,
             max_attempts=self._replan_policy.max_replans_per_session,
         )
