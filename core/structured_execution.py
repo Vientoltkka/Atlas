@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Callable
 
+from core.concurrent_step_executor import (
+    ConcurrentStepExecutor,
+    ExecutionBatchResult,
+    ExecutionConcurrencyPolicy,
+    build_execution_batch,
+)
 from core.execution_context import ExecutionContext
 from core.execution_dependency_resolver import ExecutionDependencyResolver
 from core.execution_plan_executor import (
     ExecutionControl,
+    ExecutionErrorCode,
     ExecutionProgress,
     ExecutionPlanExecutor,
     PartialExecutionState,
     PlanExecutionResult,
     PlanExecutionStatus,
     ResumableExecutionState,
+    StepExecutionResult,
+    StepExecutionStatus,
 )
 from core.execution_supervisor import (
     ExecutionOverview,
@@ -41,6 +51,10 @@ from core.structured_plan_replanner import (
     replan_record,
 )
 from core.structured_reference_path import navigate_structured_path
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +108,8 @@ class StructuredExecutionCoordinator:
         execution_replanner: StructuredExecutionReplanner | None = None,
         replan_policy: ReplanPolicy | None = None,
         dependency_resolver: ExecutionDependencyResolver | None = None,
+        concurrency_policy: ExecutionConcurrencyPolicy | None = None,
+        concurrent_step_executor: ConcurrentStepExecutor | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -102,6 +118,8 @@ class StructuredExecutionCoordinator:
         self._execution_replanner = execution_replanner
         self._replan_policy = replan_policy or ReplanPolicy(max_replans_per_session=0)
         self._dependency_resolver = dependency_resolver or ExecutionDependencyResolver()
+        self._concurrency_policy = concurrency_policy or ExecutionConcurrencyPolicy()
+        self._concurrent_step_executor = concurrent_step_executor
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -638,13 +656,21 @@ class StructuredExecutionCoordinator:
                     session.session_id,
                     active_plan,
                 )
-                execution = self._executor.execute(
-                    active_plan,
-                    active_validation,
-                    confirmation_granted=confirmation_granted,
-                    control=control,
-                    on_progress=on_progress,
-                )
+                if self._can_use_concurrent_execution(active_plan, active_validation):
+                    execution = self._execute_plan_concurrently_under_supervision(
+                        session.session_id,
+                        active_plan,
+                        control=control,
+                        on_progress=on_progress,
+                    )
+                else:
+                    execution = self._executor.execute(
+                        active_plan,
+                        active_validation,
+                        confirmation_granted=confirmation_granted,
+                        control=control,
+                        on_progress=on_progress,
+                    )
                 self._record_step_states_from_execution(
                     session.session_id,
                     active_plan,
@@ -666,6 +692,270 @@ class StructuredExecutionCoordinator:
         except Exception as error:
             self._execution_supervisor.mark_failed(session.session_id, error)
             raise
+
+    def _can_use_concurrent_execution(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+    ) -> bool:
+        return (
+            self._concurrent_step_executor is not None
+            and self._concurrency_policy.enabled
+            and self._concurrency_policy.max_concurrency > 1
+            and not plan.requires_confirmation
+            and not getattr(validation, "requires_confirmation", False)
+        )
+
+    def _execute_plan_concurrently_under_supervision(
+        self,
+        session_id: str,
+        plan: ExecutionPlan,
+        *,
+        control: ExecutionControl | None = None,
+        on_progress: Callable[[ExecutionProgress], None] | None = None,
+    ) -> PlanExecutionResult:
+        assert self._concurrent_step_executor is not None
+        completed: list[str] = []
+        failed: list[str] = []
+        cancelled: list[str] = []
+        blocked: list[str] = []
+        step_results: list[StepExecutionResult] = []
+        started_at = _utc_iso()
+        batch_number = 0
+        total_steps = len(plan.ordered_steps)
+
+        while len(completed) < total_steps:
+            if control is not None and control.should_cancel and control.should_cancel():
+                pending = [
+                    step.id
+                    for step in plan.ordered_steps
+                    if step.id not in completed and step.id not in failed
+                ]
+                return PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.CANCELLED.value,
+                    success=False,
+                    completed_steps=completed,
+                    failed_steps=failed,
+                    pending_steps=pending,
+                    step_results=step_results,
+                    error=control.cancellation_reason,
+                    interrupted=True,
+                    cancelled=True,
+                    error_code=ExecutionErrorCode.EXECUTION_CANCELLED.value,
+                    started_at=started_at,
+                    finished_at=_utc_iso(),
+                )
+
+            resolution = self._dependency_resolver.resolve(
+                plan,
+                completed_step_ids=tuple(completed),
+                failed_step_ids=tuple(failed),
+            )
+            blocked = list(resolution.blocked_step_ids)
+            if failed or blocked:
+                pending = list(resolution.pending_step_ids)
+                return PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.FAILED.value
+                    if failed
+                    else PlanExecutionStatus.BLOCKED.value,
+                    success=False,
+                    completed_steps=completed,
+                    failed_step=failed[0] if failed else None,
+                    failed_steps=failed,
+                    blocked_steps=blocked,
+                    pending_steps=pending,
+                    step_results=step_results,
+                    error="one or more concurrent steps failed"
+                    if failed
+                    else "execution blocked by dependencies",
+                    failed=bool(failed),
+                    blocked=bool(blocked),
+                    current_step=failed[0] if failed else None,
+                    error_code=ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+                    if failed
+                    else ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value,
+                    started_at=started_at,
+                    finished_at=_utc_iso(),
+                    metadata=self._concurrent_metadata(
+                        step_results,
+                        last_batch=None,
+                    ),
+                )
+
+            ready_steps = list(resolution.ready_steps)
+            if not ready_steps:
+                pending = list(resolution.pending_step_ids)
+                return PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.BLOCKED.value,
+                    success=False,
+                    completed_steps=completed,
+                    failed_steps=failed,
+                    blocked_steps=blocked,
+                    pending_steps=pending,
+                    step_results=step_results,
+                    error="no ready steps available",
+                    blocked=True,
+                    error_code=ExecutionErrorCode.DEPENDENCY_NOT_COMPLETED.value,
+                    started_at=started_at,
+                    finished_at=_utc_iso(),
+                )
+
+            batch_number += 1
+            batch = build_execution_batch(
+                ready_steps,
+                self._concurrency_policy,
+                batch_id=f"{session_id}.batch.{batch_number:06d}",
+            )
+            self._execution_supervisor.record_execution_batch_created(
+                session_id,
+                batch,
+            )
+            if len(batch.step_ids) == self._concurrency_policy.max_concurrency:
+                self._execution_supervisor.record_concurrency_limit_applied(
+                    session_id,
+                    max_concurrency=self._concurrency_policy.max_concurrency,
+                    selected_step_count=len(batch.step_ids),
+                )
+            selected_steps = [
+                step for step in ready_steps if step.id in set(batch.step_ids)
+            ]
+            for step in selected_steps:
+                self._execution_supervisor.mark_step_started(
+                    session_id,
+                    step.id,
+                    dependency_ids=tuple(step.depends_on),
+                )
+            self._execution_supervisor.mark_execution_batch_started(
+                session_id,
+                batch,
+            )
+            if on_progress is not None:
+                on_progress(
+                    ExecutionProgress(
+                        phase="concurrent_batch_running",
+                        total_steps=total_steps,
+                        elapsed_ms=0,
+                        message=batch.batch_id,
+                    )
+                )
+            batch_result = self._concurrent_step_executor.run_batch(
+                batch,
+                selected_steps,
+                self._concurrency_policy,
+            )
+            self._execution_supervisor.record_execution_batch_result(
+                session_id,
+                batch_result,
+            )
+            if batch_result.fail_fast_triggered:
+                self._execution_supervisor.record_fail_fast_triggered(
+                    session_id,
+                    batch_id=batch_result.batch_id,
+                )
+
+            converted = self._batch_step_results(batch_result, selected_steps)
+            step_results.extend(converted)
+            completed.extend(batch_result.completed_step_ids)
+            failed.extend(batch_result.failed_step_ids)
+            cancelled.extend(batch_result.cancelled_step_ids)
+            if failed or cancelled:
+                resolution = self._dependency_resolver.resolve(
+                    plan,
+                    completed_step_ids=tuple(completed),
+                    failed_step_ids=tuple(failed + cancelled),
+                )
+                return PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.CANCELLED.value
+                    if cancelled and not failed
+                    else PlanExecutionStatus.FAILED.value,
+                    success=False,
+                    completed_steps=completed,
+                    failed_step=(failed + cancelled)[0],
+                    failed_steps=failed,
+                    blocked_steps=list(resolution.blocked_step_ids),
+                    pending_steps=list(resolution.pending_step_ids),
+                    step_results=step_results,
+                    error="one or more concurrent steps failed"
+                    if failed
+                    else "one or more concurrent steps were cancelled",
+                    failed=bool(failed),
+                    cancelled=bool(cancelled and not failed),
+                    current_step=(failed + cancelled)[0],
+                    error_code=ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+                    if failed
+                    else ExecutionErrorCode.EXECUTION_CANCELLED.value,
+                    started_at=started_at,
+                    finished_at=_utc_iso(),
+                    metadata=self._concurrent_metadata(
+                        step_results,
+                        last_batch=batch_result,
+                    ),
+                )
+
+        return PlanExecutionResult(
+            plan_status=PlanExecutionStatus.COMPLETED.value,
+            success=True,
+            completed_steps=completed,
+            step_results=step_results,
+            completed=True,
+            started_at=started_at,
+            finished_at=_utc_iso(),
+            metadata={"concurrent_execution": True},
+        )
+
+    def _batch_step_results(
+        self,
+        batch_result: ExecutionBatchResult,
+        selected_steps: list[Any],
+    ) -> list[StepExecutionResult]:
+        step_by_id = {step.id: step for step in selected_steps}
+        converted: list[StepExecutionResult] = []
+        for result in batch_result.step_results:
+            step = step_by_id.get(result.step_id)
+            if result.status == "completed":
+                status = StepExecutionStatus.COMPLETED.value
+                error_code = None
+            elif result.status == "cancelled":
+                status = StepExecutionStatus.CANCELLED.value
+                error_code = ExecutionErrorCode.EXECUTION_CANCELLED.value
+            else:
+                status = StepExecutionStatus.FAILED.value
+                error_code = ExecutionErrorCode.TOOL_EXECUTION_FAILED.value
+            converted.append(
+                StepExecutionResult(
+                    step_id=result.step_id,
+                    status=status,
+                    success=result.status == "completed",
+                    tool_name=getattr(step, "tool", None),
+                    output=result.result,
+                    error=result.error,
+                    error_code=error_code,
+                    started_at=result.started_at,
+                    finished_at=result.finished_at,
+                    metadata={"batch_id": batch_result.batch_id},
+                )
+            )
+        return converted
+
+    def _concurrent_metadata(
+        self,
+        step_results: list[StepExecutionResult],
+        *,
+        last_batch: ExecutionBatchResult | None,
+    ) -> dict[str, object]:
+        errors_by_step = {
+            result.step_id: result.error or result.error_code or "step failed"
+            for result in step_results
+            if not result.success
+        }
+        metadata: dict[str, object] = {
+            "concurrent_execution": True,
+            "errors_by_step": errors_by_step,
+        }
+        if last_batch is not None:
+            metadata["batch_id"] = last_batch.batch_id
+            metadata["cancelled_step_ids"] = tuple(last_batch.cancelled_step_ids)
+        return metadata
 
     def _resume_under_supervision(
         self,
@@ -753,6 +1043,13 @@ class StructuredExecutionCoordinator:
                 )
             elif step_result.status == "blocked":
                 self._execution_supervisor.mark_step_blocked(
+                    session_id,
+                    step_result.step_id,
+                    dependency_ids=dependency_ids,
+                    error=step_result.error,
+                )
+            elif step_result.status == "cancelled":
+                self._execution_supervisor.mark_step_cancelled(
                     session_id,
                     step_result.step_id,
                     dependency_ids=dependency_ids,
@@ -948,12 +1245,32 @@ class StructuredExecutionCoordinator:
             error_code=execution.error_code,
             partial_results=self._partial_results(execution),
             completed_step_ids=tuple(execution.completed_steps),
+            failed_step_ids=tuple(execution.failed_steps),
+            cancelled_step_ids=tuple(
+                item
+                for item in execution.metadata.get("cancelled_step_ids", ())
+                if isinstance(item, str)
+            ),
             pending_step_ids=tuple(execution.pending_steps),
             blocked_step_ids=tuple(execution.blocked_steps),
             dependency_graph={
                 step.id: tuple(step.depends_on)
                 for step in failed_plan.ordered_steps
             },
+            batch_id=(
+                execution.metadata.get("batch_id")
+                if isinstance(execution.metadata.get("batch_id"), str)
+                else None
+            ),
+            errors_by_step={
+                str(step_id): str(error)
+                for step_id, error in execution.metadata.get(
+                    "errors_by_step",
+                    {},
+                ).items()
+            }
+            if isinstance(execution.metadata.get("errors_by_step"), dict)
+            else {},
             attempt_number=attempt_number,
             max_attempts=self._replan_policy.max_replans_per_session,
         )

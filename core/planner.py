@@ -65,6 +65,8 @@ class ExecutionStep:
     output_binding: ExecutionVariableBinding | None = None
     condition: ExecutionConditionNode | None = None
     retry_policy: RetryPolicy | None = None
+    parallel_safe: bool = False
+    resource_keys: tuple[str, ...] = field(default_factory=tuple)
 
     def __init__(
         self,
@@ -83,7 +85,11 @@ class ExecutionStep:
         output_binding: ExecutionVariableBinding | None = None,
         condition: ExecutionConditionNode | None = None,
         retry_policy: RetryPolicy | None = None,
+        parallel_safe: bool = False,
+        resource_keys: Sequence[str] = (),
     ) -> None:
+        if type(parallel_safe) is not bool:
+            raise TypeError("parallel_safe must be a bool.")
         dependencies_source = dependencies if depends_on is None else depends_on
         object.__setattr__(self, "id", id)
         object.__setattr__(self, "description", description)
@@ -115,6 +121,12 @@ class ExecutionStep:
             "retry_policy",
             copy_retry_policy(retry_policy),
         )
+        object.__setattr__(self, "parallel_safe", parallel_safe)
+        object.__setattr__(
+            self,
+            "resource_keys",
+            _normalize_resource_keys(resource_keys),
+        )
 
     @property
     def depends_on(self) -> tuple[str, ...]:
@@ -130,6 +142,22 @@ def _copy_execution_plan_reference(
     if not isinstance(reference, ExecutionPlanReference):
         raise TypeError("subplan_ref must be ExecutionPlanReference or None.")
     return ExecutionPlanReference(reference.plan_id, reference.version)
+
+
+def _normalize_resource_keys(values: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise TypeError("resource_keys must contain strings.")
+        resource_key = value.strip()
+        if not resource_key:
+            raise ValueError("resource_keys cannot contain empty strings.")
+        if resource_key in seen:
+            continue
+        seen.add(resource_key)
+        normalized.append(resource_key)
+    return tuple(normalized)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
+from threading import Lock, Thread
 
 import pytest
 
+from core.concurrent_step_executor import (
+    ConcurrentStepExecutor,
+    ExecutionConcurrencyPolicy,
+)
 from core.execution_plan_executor import PlanExecutionResult, PlanExecutionStatus
 from core.execution_plan_executor import StepExecutionResult
 from core.execution_plan_validator import PlanValidationResult, plan_signature
@@ -1039,3 +1044,174 @@ def test_blocked_execution_records_blocked_step_state() -> None:
     assert session.step_states["step_2"].state is StepExecutionState.BLOCKED
     assert session.step_states["step_3"].state is StepExecutionState.READY
     assert "execution_blocked" in [event.event_type for event in session.events]
+
+
+def test_supervisor_records_batch_state_and_history() -> None:
+    from core.concurrent_step_executor import ExecutionBatch, ExecutionBatchResult
+
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    session = supervisor.start(_plan())
+    supervisor.mark_running(session.session_id)
+    batch = ExecutionBatch(
+        batch_id="batch.1",
+        step_ids=("step_1",),
+        created_at="2026-01-01T00:00:00+00:00",
+        concurrency_limit=1,
+        execution_order=("step_1",),
+    )
+    result = ExecutionBatchResult(batch_id="batch.1", step_results=())
+
+    supervisor.record_execution_batch_created(session.session_id, batch)
+    supervisor.mark_execution_batch_started(session.session_id, batch)
+    supervisor.record_execution_batch_result(session.session_id, result)
+
+    current = supervisor.get_session(session.session_id)
+    assert current.active_batch_id is None
+    assert current.active_step_ids == ()
+    assert current.last_batch_result is result
+    assert current.batch_history == (result,)
+    assert "execution_batch_result_recorded" in [
+        event.event_type for event in current.events
+    ]
+
+
+def test_supervisor_step_updates_are_thread_safe() -> None:
+    plan = ExecutionPlan(
+        goal="parallel states",
+        ordered_steps=tuple(
+            ExecutionStep(f"step_{index}", "run", "tool")
+            for index in range(1, 6)
+        ),
+        estimated_steps=5,
+        required_tools=("tool",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    session = supervisor.start(plan)
+    supervisor.mark_running(session.session_id)
+
+    def mark(step_id: str) -> None:
+        supervisor.mark_step_started(session.session_id, step_id)
+        supervisor.mark_step_completed(session.session_id, step_id)
+
+    threads = [
+        Thread(target=mark, args=(step.id,))
+        for step in plan.ordered_steps
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    current = supervisor.get_session(session.session_id)
+    assert {
+        snapshot.state
+        for snapshot in current.step_states.values()
+    } == {StepExecutionState.COMPLETED}
+
+
+def test_coordinator_executes_ready_independent_steps_in_parallel_when_opted_in() -> None:
+    plan = ExecutionPlan(
+        goal="parallel plan",
+        ordered_steps=(
+            ExecutionStep("a", "root", "tool", parallel_safe=True),
+            ExecutionStep("b", "left", "tool", ("a",), parallel_safe=True),
+            ExecutionStep("c", "right", "tool", ("a",), parallel_safe=True),
+            ExecutionStep("d", "join", "tool", ("b", "c"), parallel_safe=True),
+        ),
+        estimated_steps=4,
+        required_tools=("tool",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    active = 0
+    max_seen = 0
+    lock = Lock()
+
+    def runner(step: ExecutionStep) -> str:
+        nonlocal active, max_seen
+        with lock:
+            active += 1
+            max_seen = max(max_seen, active)
+        if step.id in {"b", "c"}:
+            import time
+
+            time.sleep(0.02)
+        with lock:
+            active -= 1
+        return f"done:{step.id}"
+
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_SequenceExecutor(),  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        concurrency_policy=ExecutionConcurrencyPolicy(
+            enabled=True,
+            max_concurrency=2,
+        ),
+        concurrent_step_executor=ConcurrentStepExecutor(runner),
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "completed"
+    assert response.execution_result is not None
+    assert response.execution_result.completed_steps == ["a", "b", "c", "d"]
+    assert max_seen == 2
+    assert len(session.batch_history) == 3
+    assert "execution_batch_started" in [event.event_type for event in session.events]
+
+
+def test_concurrent_failure_replan_request_includes_batch_context() -> None:
+    failed_plan = ExecutionPlan(
+        goal="parallel failure",
+        ordered_steps=(
+            ExecutionStep("a", "root", "tool", parallel_safe=True),
+            ExecutionStep("b", "left", "tool", parallel_safe=True),
+        ),
+        estimated_steps=2,
+        required_tools=("tool",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    revised_plan = _plan(goal="revised")
+
+    def runner(step: ExecutionStep) -> str:
+        if step.id == "b":
+            raise RuntimeError("tool broke")
+        return step.id
+
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.ACCEPTED,
+            revised_plan=revised_plan,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+        )
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(failed_plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_SequenceExecutor(_completed_result()),  # type: ignore[arg-type]
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+        concurrency_policy=ExecutionConcurrencyPolicy(
+            enabled=True,
+            max_concurrency=2,
+            fail_fast=False,
+        ),
+        concurrent_step_executor=ConcurrentStepExecutor(runner),
+    )
+
+    response = coordinator.handle("run")
+
+    assert response.status == "completed"
+    assert replanner.calls
+    request = replanner.calls[0]
+    assert request.batch_id == "execution.session.000001.batch.000001"
+    assert request.completed_step_ids == ("a",)
+    assert request.failed_step_ids == ("b",)
+    assert request.errors_by_step["b"] == "tool broke"

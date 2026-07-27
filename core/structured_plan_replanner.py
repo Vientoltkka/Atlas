@@ -52,9 +52,13 @@ class ReplanRequest:
     active_plan: ExecutionPlan | None = None
     error_code: str | None = None
     completed_step_ids: tuple[str, ...] = ()
+    failed_step_ids: tuple[str, ...] = ()
+    cancelled_step_ids: tuple[str, ...] = ()
     pending_step_ids: tuple[str, ...] = ()
     blocked_step_ids: tuple[str, ...] = ()
     dependency_graph: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    batch_id: str | None = None
+    errors_by_step: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -79,6 +83,16 @@ class ReplanRequest:
         )
         object.__setattr__(
             self,
+            "failed_step_ids",
+            tuple(self.failed_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "cancelled_step_ids",
+            tuple(self.cancelled_step_ids),
+        )
+        object.__setattr__(
+            self,
             "pending_step_ids",
             tuple(self.pending_step_ids),
         )
@@ -94,6 +108,16 @@ class ReplanRequest:
                 {
                     str(step_id): tuple(dependencies)
                     for step_id, dependencies in self.dependency_graph.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "errors_by_step",
+            MappingProxyType(
+                {
+                    str(step_id): str(error)
+                    for step_id, error in self.errors_by_step.items()
                 }
             ),
         )

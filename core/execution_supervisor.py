@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+from threading import RLock
 from types import MappingProxyType
 from typing import Any
 
@@ -38,6 +39,7 @@ class StepExecutionState(str, Enum):
     FAILED = "failed"
     BLOCKED = "blocked"
     SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 _TERMINAL_STATES = frozenset(
@@ -118,6 +120,10 @@ class ExecutionSession:
     replan_count: int = 0
     replan_history: tuple[ReplanRecord, ...] = ()
     step_states: Mapping[str, StepExecutionSnapshot] = field(default_factory=dict)
+    active_batch_id: str | None = None
+    active_step_ids: tuple[str, ...] = ()
+    last_batch_result: Any | None = None
+    batch_history: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -141,6 +147,8 @@ class ExecutionSession:
             self.plan if self.active_plan is None else self.active_plan,
         )
         object.__setattr__(self, "replan_history", tuple(self.replan_history))
+        object.__setattr__(self, "active_step_ids", tuple(self.active_step_ids))
+        object.__setattr__(self, "batch_history", tuple(self.batch_history))
         if self.replan_count < 0:
             raise ValueError("replan_count cannot be negative.")
         if self.replan_count != len(self.replan_history):
@@ -262,40 +270,44 @@ class ExecutionSupervisor:
         self._counter = 0
         self._sessions: dict[str, ExecutionSession] = {}
         self._events: list[ExecutionSupervisorEvent] = []
+        self._lock = RLock()
 
     def start(self, plan: Any) -> ExecutionSession:
         """Create a pending supervised session for an execution plan."""
-        self._counter += 1
-        session_id = f"{self._session_id_prefix}.{self._counter:06d}"
-        started_at = self._clock()
-        session = ExecutionSession(
-            session_id=session_id,
-            plan=plan,
-            state=ExecutionState.PENDING,
-            current_step=None,
-            started_at=started_at,
-            step_states=self._initial_step_states(plan),
-        )
-        session = self._with_event(
-            session,
-            "execution_started",
-            timestamp=started_at,
-        )
-        self._sessions[session_id] = session
-        return session
+        with self._lock:
+            self._counter += 1
+            session_id = f"{self._session_id_prefix}.{self._counter:06d}"
+            started_at = self._clock()
+            session = ExecutionSession(
+                session_id=session_id,
+                plan=plan,
+                state=ExecutionState.PENDING,
+                current_step=None,
+                started_at=started_at,
+                step_states=self._initial_step_states(plan),
+            )
+            session = self._with_event(
+                session,
+                "execution_started",
+                timestamp=started_at,
+            )
+            self._sessions[session_id] = session
+            return session
 
     def get_session(self, session_id: str) -> ExecutionSession:
         """Return the current immutable snapshot for a session."""
-        try:
-            return self._sessions[session_id]
-        except KeyError as exc:
-            raise ExecutionSessionNotFoundError(
-                f"Execution session '{session_id}' was not found."
-            ) from exc
+        with self._lock:
+            try:
+                return self._sessions[session_id]
+            except KeyError as exc:
+                raise ExecutionSessionNotFoundError(
+                    f"Execution session '{session_id}' was not found."
+                ) from exc
 
     def get_overview(self) -> ExecutionOverview:
         """Return an immutable aggregate snapshot of all known sessions."""
-        sessions = tuple(self._sessions.values())
+        with self._lock:
+            sessions = tuple(self._sessions.values())
         counts = {state: 0 for state in ExecutionState}
         for session in sessions:
             counts[session.state] += 1
@@ -337,7 +349,8 @@ class ExecutionSupervisor:
             if limit < 0:
                 raise ValueError("limit cannot be negative.")
 
-        sessions = tuple(self._sessions.values())
+        with self._lock:
+            sessions = tuple(self._sessions.values())
         if state is not None:
             sessions = tuple(session for session in sessions if session.state is state)
 
@@ -467,6 +480,24 @@ class ExecutionSupervisor:
             error=self._error_message(error) if error is not None else None,
         )
 
+    def mark_step_cancelled(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+        error: object | None = None,
+    ) -> ExecutionSession:
+        """Record one step as cancelled."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.CANCELLED,
+            event_type="step_cancelled",
+            dependency_ids=dependency_ids,
+            error=self._error_message(error) if error is not None else None,
+        )
+
     def record_dependency_graph_validated(
         self,
         session_id: str,
@@ -506,6 +537,108 @@ class ExecutionSupervisor:
             session_id,
             "execution_blocked",
             error=self._error_message(error),
+        )
+
+    def record_execution_batch_created(
+        self,
+        session_id: str,
+        batch: Any,
+    ) -> ExecutionSession:
+        """Record that a deterministic execution batch was created."""
+        step_ids = tuple(getattr(batch, "step_ids", ()))
+        details = {
+            "batch_id": getattr(batch, "batch_id", None),
+            "step_ids": list(step_ids),
+            "concurrency_limit": getattr(batch, "concurrency_limit", None),
+        }
+        return self._record_batch_event(
+            session_id,
+            "execution_batch_created",
+            active_batch_id=getattr(batch, "batch_id", None),
+            active_step_ids=step_ids,
+            **details,
+        )
+
+    def mark_execution_batch_started(
+        self,
+        session_id: str,
+        batch: Any,
+    ) -> ExecutionSession:
+        """Record that a selected execution batch started."""
+        step_ids = tuple(getattr(batch, "step_ids", ()))
+        return self._record_batch_event(
+            session_id,
+            "execution_batch_started",
+            active_batch_id=getattr(batch, "batch_id", None),
+            active_step_ids=step_ids,
+            batch_id=getattr(batch, "batch_id", None),
+            step_ids=list(step_ids),
+        )
+
+    def record_execution_batch_result(
+        self,
+        session_id: str,
+        result: Any,
+    ) -> ExecutionSession:
+        """Record the terminal result of one execution batch."""
+        details = {
+            "batch_id": getattr(result, "batch_id", None),
+            "completed_step_ids": list(getattr(result, "completed_step_ids", ())),
+            "failed_step_ids": list(getattr(result, "failed_step_ids", ())),
+            "cancelled_step_ids": list(getattr(result, "cancelled_step_ids", ())),
+            "fail_fast_triggered": bool(getattr(result, "fail_fast_triggered", False)),
+        }
+        return self._record_batch_event(
+            session_id,
+            "execution_batch_result_recorded",
+            active_batch_id=None,
+            active_step_ids=(),
+            last_batch_result=result,
+            append_batch_result=result,
+            **details,
+        )
+
+    def record_resource_conflict_detected(
+        self,
+        session_id: str,
+        *,
+        step_id: str,
+        resource_keys: tuple[str, ...],
+    ) -> ExecutionSession:
+        """Record a resource conflict that kept a step out of a batch."""
+        return self._record_graph_event(
+            session_id,
+            "execution_resource_conflict_detected",
+            step_id=step_id,
+            resource_keys=list(resource_keys),
+        )
+
+    def record_concurrency_limit_applied(
+        self,
+        session_id: str,
+        *,
+        max_concurrency: int,
+        selected_step_count: int,
+    ) -> ExecutionSession:
+        """Record that the configured concurrency bound was applied."""
+        return self._record_graph_event(
+            session_id,
+            "execution_concurrency_limit_applied",
+            max_concurrency=max_concurrency,
+            selected_step_count=selected_step_count,
+        )
+
+    def record_fail_fast_triggered(
+        self,
+        session_id: str,
+        *,
+        batch_id: str,
+    ) -> ExecutionSession:
+        """Record that batch fail-fast stopped pending work."""
+        return self._record_graph_event(
+            session_id,
+            "execution_fail_fast_triggered",
+            batch_id=batch_id,
         )
 
     def mark_completed(
@@ -556,32 +689,33 @@ class ExecutionSupervisor:
         """Attach one accepted replan record and make its plan active."""
         if not isinstance(record, ReplanRecord):
             raise TypeError("record must be a ReplanRecord.")
-        session = self.get_session(session_id)
-        if session.state is not ExecutionState.REPLANNING:
-            raise InvalidExecutionTransitionError(
-                "Replan records can only be added while session "
-                f"'{session_id}' is replanning."
+        with self._lock:
+            session = self.get_session(session_id)
+            if session.state is not ExecutionState.REPLANNING:
+                raise InvalidExecutionTransitionError(
+                    "Replan records can only be added while session "
+                    f"'{session_id}' is replanning."
+                )
+            updated = replace(
+                session,
+                plan=record.revised_plan,
+                active_plan=record.revised_plan,
+                replan_count=session.replan_count + 1,
+                replan_history=session.replan_history + (record,),
             )
-        updated = replace(
-            session,
-            plan=record.revised_plan,
-            active_plan=record.revised_plan,
-            replan_count=session.replan_count + 1,
-            replan_history=session.replan_history + (record,),
-        )
-        updated = self._with_event(
-            updated,
-            "replan_produced",
-            details={
-                "attempt_number": record.attempt_number,
-                "failed_step": record.failed_step,
-                "reason": record.reason.value,
-                "previous_plan": f"attempt.{record.attempt_number - 1}",
-                "revised_plan": f"attempt.{record.attempt_number}",
-            },
-        )
-        self._sessions[session_id] = updated
-        return updated
+            updated = self._with_event(
+                updated,
+                "replan_produced",
+                details={
+                    "attempt_number": record.attempt_number,
+                    "failed_step": record.failed_step,
+                    "reason": record.reason.value,
+                    "previous_plan": f"attempt.{record.attempt_number - 1}",
+                    "revised_plan": f"attempt.{record.attempt_number}",
+                },
+            )
+            self._sessions[session_id] = updated
+            return updated
 
     def record_replan_event(
         self,
@@ -596,17 +730,18 @@ class ExecutionSupervisor:
         """Append a structured replanning event without changing state."""
         if attempt_number < 1:
             raise ValueError("attempt_number must be greater than zero.")
-        session = self.get_session(session_id)
-        details: dict[str, object] = {"attempt_number": attempt_number}
-        if failed_step is not None:
-            details["failed_step"] = failed_step
-        if reason is not None:
-            details["reason"] = reason
-        if error is not None:
-            details["error"] = error
-        updated = self._with_event(session, event_type, details=details)
-        self._sessions[session_id] = updated
-        return updated
+        with self._lock:
+            session = self.get_session(session_id)
+            details: dict[str, object] = {"attempt_number": attempt_number}
+            if failed_step is not None:
+                details["failed_step"] = failed_step
+            if reason is not None:
+                details["reason"] = reason
+            if error is not None:
+                details["error"] = error
+            updated = self._with_event(session, event_type, details=details)
+            self._sessions[session_id] = updated
+            return updated
 
     def mark_failed(
         self,
@@ -654,7 +789,8 @@ class ExecutionSupervisor:
     @property
     def events(self) -> tuple[ExecutionSupervisorEvent, ...]:
         """Return structured lifecycle events emitted by the supervisor."""
-        return tuple(self._events)
+        with self._lock:
+            return tuple(self._events)
 
     def _transition(
         self,
@@ -668,35 +804,36 @@ class ExecutionSupervisor:
         finished_at: datetime | None = None,
         details: Mapping[str, object] | None = None,
     ) -> ExecutionSession:
-        session = self.get_session(session_id)
-        allowed = self._ALLOWED_TRANSITIONS[session.state]
-        if target_state not in allowed:
-            raise InvalidExecutionTransitionError(
-                "Invalid execution transition "
-                f"{session.state.value} -> {target_state.value} "
-                f"for session '{session_id}'."
-            )
+        with self._lock:
+            session = self.get_session(session_id)
+            allowed = self._ALLOWED_TRANSITIONS[session.state]
+            if target_state not in allowed:
+                raise InvalidExecutionTransitionError(
+                    "Invalid execution transition "
+                    f"{session.state.value} -> {target_state.value} "
+                    f"for session '{session_id}'."
+                )
 
-        updated_results: Mapping[str, object] = (
-            session.results if results is None else results
-        )
-        updated = replace(
-            session,
-            state=target_state,
-            current_step=current_step
-            if current_step is not None
-            else session.current_step,
-            finished_at=finished_at,
-            last_error=last_error if last_error is not None else session.last_error,
-            results=updated_results,
-        )
-        updated = self._with_event(
-            updated,
-            event_type,
-            details=details,
-        )
-        self._sessions[session_id] = updated
-        return updated
+            updated_results: Mapping[str, object] = (
+                session.results if results is None else results
+            )
+            updated = replace(
+                session,
+                state=target_state,
+                current_step=current_step
+                if current_step is not None
+                else session.current_step,
+                finished_at=finished_at,
+                last_error=last_error if last_error is not None else session.last_error,
+                results=updated_results,
+            )
+            updated = self._with_event(
+                updated,
+                event_type,
+                details=details,
+            )
+            self._sessions[session_id] = updated
+            return updated
 
     def _with_event(
         self,
@@ -727,32 +864,33 @@ class ExecutionSupervisor:
         current_step: str | None = None,
         error: str | None = None,
     ) -> ExecutionSession:
-        session = self.get_session(session_id)
-        snapshot = StepExecutionSnapshot(
-            step_id=step_id,
-            state=state,
-            dependency_ids=dependency_ids,
-            error=error,
-        )
-        step_states = dict(session.step_states)
-        step_states[step_id] = snapshot
-        updated = replace(
-            session,
-            current_step=current_step
-            if current_step is not None
-            else session.current_step,
-            step_states=step_states,
-        )
-        details: dict[str, object] = {
-            "step_id": step_id,
-            "state": state.value,
-            "dependency_ids": list(dependency_ids),
-        }
-        if error is not None:
-            details["error"] = error
-        updated = self._with_event(updated, event_type, details=details)
-        self._sessions[session_id] = updated
-        return updated
+        with self._lock:
+            session = self.get_session(session_id)
+            snapshot = StepExecutionSnapshot(
+                step_id=step_id,
+                state=state,
+                dependency_ids=dependency_ids,
+                error=error,
+            )
+            step_states = dict(session.step_states)
+            step_states[step_id] = snapshot
+            updated = replace(
+                session,
+                current_step=current_step
+                if current_step is not None
+                else session.current_step,
+                step_states=step_states,
+            )
+            details: dict[str, object] = {
+                "step_id": step_id,
+                "state": state.value,
+                "dependency_ids": list(dependency_ids),
+            }
+            if error is not None:
+                details["error"] = error
+            updated = self._with_event(updated, event_type, details=details)
+            self._sessions[session_id] = updated
+            return updated
 
     def _record_graph_event(
         self,
@@ -760,10 +898,42 @@ class ExecutionSupervisor:
         event_type: str,
         **details: object,
     ) -> ExecutionSession:
-        session = self.get_session(session_id)
-        updated = self._with_event(session, event_type, details=details)
-        self._sessions[session_id] = updated
-        return updated
+        with self._lock:
+            session = self.get_session(session_id)
+            updated = self._with_event(session, event_type, details=details)
+            self._sessions[session_id] = updated
+            return updated
+
+    def _record_batch_event(
+        self,
+        session_id: str,
+        event_type: str,
+        *,
+        active_batch_id: str | None,
+        active_step_ids: tuple[str, ...],
+        last_batch_result: Any | None = None,
+        append_batch_result: Any | None = None,
+        **details: object,
+    ) -> ExecutionSession:
+        with self._lock:
+            session = self.get_session(session_id)
+            history = session.batch_history
+            if append_batch_result is not None:
+                history = history + (append_batch_result,)
+            updated = replace(
+                session,
+                active_batch_id=active_batch_id,
+                active_step_ids=active_step_ids,
+                last_batch_result=(
+                    session.last_batch_result
+                    if last_batch_result is None
+                    else last_batch_result
+                ),
+                batch_history=history,
+            )
+            updated = self._with_event(updated, event_type, details=details)
+            self._sessions[session_id] = updated
+            return updated
 
     def _initial_step_states(
         self,

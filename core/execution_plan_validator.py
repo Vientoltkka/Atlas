@@ -1171,6 +1171,8 @@ def plan_signature(
                 "output_binding": _signature_safe_value(step.output_binding),
                 "condition": _signature_safe_value(step.condition),
                 "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
+                "parallel_safe": bool(getattr(step, "parallel_safe", False)),
+                "resource_keys": list(getattr(step, "resource_keys", ())),
             }
             for step in plan.ordered_steps
         ],
@@ -1233,6 +1235,8 @@ def _signature_safe_value(
                     "output_binding": _signature_safe_value(step.output_binding),
                     "condition": _signature_safe_value(step.condition),
                     "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
+                    "parallel_safe": bool(getattr(step, "parallel_safe", False)),
+                    "resource_keys": list(getattr(step, "resource_keys", ())),
                 }
                 for step in value.ordered_steps
             ],
