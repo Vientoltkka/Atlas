@@ -39,6 +39,18 @@ from core.execution_plan_validator import (
     plan_signature,
 )
 from core.execution_priority import ExecutionPriorityPolicy, ReadyStepPrioritizer
+from core.execution_resources import (
+    BudgetReservation,
+    ExecutionBudgetExceededError,
+    ExecutionBudgetManager,
+    ExecutionResourceCatalog,
+    ExecutionResourceOptimizer,
+    ExecutionResourcePolicy,
+    NoCompatibleResourceError,
+    ResourceSelectionError,
+    ResourceSelectionDecision,
+    ResourceSelectionReason,
+)
 from core.execution_session_persistence import (
     ExecutionRecoveryService,
     RecoveryDecisionType,
@@ -121,6 +133,10 @@ class StructuredExecutionCoordinator:
         priority_policy: ExecutionPriorityPolicy | None = None,
         ready_step_prioritizer: ReadyStepPrioritizer | None = None,
         priority_clock: Callable[[], datetime] | None = None,
+        resource_policy: ExecutionResourcePolicy | None = None,
+        resource_catalog: ExecutionResourceCatalog | None = None,
+        resource_optimizer: ExecutionResourceOptimizer | None = None,
+        budget_manager: ExecutionBudgetManager | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -138,6 +154,13 @@ class StructuredExecutionCoordinator:
             or ReadyStepPrioritizer(self._priority_policy)
         )
         self._priority_clock = priority_clock or (lambda: datetime.now(timezone.utc))
+        self._resource_policy = resource_policy or ExecutionResourcePolicy()
+        self._resource_catalog = resource_catalog or ExecutionResourceCatalog()
+        self._resource_optimizer = (
+            resource_optimizer
+            or ExecutionResourceOptimizer(self._resource_policy)
+        )
+        self._budget_manager = budget_manager
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -988,6 +1011,35 @@ class StructuredExecutionCoordinator:
             selected_steps = [
                 step for step in ready_steps if step.id in set(batch.step_ids)
             ]
+            try:
+                resource_reservations = self._select_resources_for_steps(
+                    session_id,
+                    selected_steps,
+                )
+            except ResourceSelectionError as error:
+                pending = list(resolution.pending_step_ids)
+                return PlanExecutionResult(
+                    plan_status=PlanExecutionStatus.FAILED.value,
+                    success=False,
+                    completed_steps=completed,
+                    failed_step=error.step_id,
+                    failed_steps=tuple([error.step_id] if error.step_id else ()),
+                    blocked_steps=blocked,
+                    pending_steps=pending,
+                    step_results=step_results,
+                    error=error.message,
+                    failed=True,
+                    current_step=error.step_id,
+                    error_code=error.error_code,
+                    started_at=started_at,
+                    finished_at=_utc_iso(),
+                    metadata=self._concurrent_metadata(
+                        step_results,
+                        last_batch=None,
+                        resource_selection_failure=error.message,
+                        rejected_candidate_ids=error.candidates_considered,
+                    ),
+                )
             for step in selected_steps:
                 self._execution_supervisor.mark_step_started(
                     session_id,
@@ -1016,6 +1068,7 @@ class StructuredExecutionCoordinator:
                 session_id,
                 batch_result,
             )
+            self._confirm_resource_reservations(session_id, resource_reservations)
             if batch_result.fail_fast_triggered:
                 self._execution_supervisor.record_fail_fast_triggered(
                     session_id,
@@ -1072,6 +1125,115 @@ class StructuredExecutionCoordinator:
             metadata={"concurrent_execution": True},
         )
 
+    def _select_resources_for_steps(
+        self,
+        session_id: str,
+        selected_steps: list[ExecutionStep],
+    ) -> list[BudgetReservation]:
+        if not self._resource_policy.enabled:
+            return []
+        reservations: list[BudgetReservation] = []
+        selected_resource_ids: list[str | None] = []
+        try:
+            for step in selected_steps:
+                budget_snapshot = (
+                    self._budget_manager.snapshot()
+                    if self._budget_manager is not None
+                    else None
+                )
+                decision = self._resource_optimizer.select(
+                    step_id=step.id,
+                    requirements=step.resource_requirements,
+                    catalog=self._resource_catalog,
+                    budget_usage=budget_snapshot,
+                )
+                selected_resource_ids.append(decision.selected_resource_id)
+                if (
+                    self._budget_manager is not None
+                    and decision.selected_resource_id is not None
+                ):
+                    reservation = self._budget_manager.reserve(
+                        step_id=step.id,
+                        resource_id=decision.selected_resource_id,
+                        estimated_cost=decision.estimated_cost,
+                        estimated_tokens=decision.estimated_tokens,
+                    )
+                    reservations.append(reservation)
+                    self._execution_supervisor.record_budget_usage(
+                        session_id,
+                        self._budget_manager.snapshot(),
+                        event_type="execution_budget_reserved",
+                    )
+                self._execution_supervisor.record_resource_decision(
+                    session_id,
+                    decision,
+                    budget_usage=(
+                        self._budget_manager.snapshot()
+                        if self._budget_manager is not None
+                        else decision.budget_snapshot
+                    ),
+                )
+        except ResourceSelectionError as error:
+            self._execution_supervisor.record_resource_decision(
+                session_id,
+                ResourceSelectionDecision(
+                    step_id=error.step_id or "",
+                    selected_resource_id=None,
+                    provider_id=None,
+                    scores=(),
+                    rejected_candidate_ids=error.candidates_considered,
+                    reason=(
+                        ResourceSelectionReason.BUDGET_EXCEEDED
+                        if isinstance(error, ExecutionBudgetExceededError)
+                        else ResourceSelectionReason.NO_COMPATIBLE_RESOURCE
+                    ),
+                    optimization_goal=self._resource_policy.optimization_goal,
+                    budget_snapshot=(
+                        self._budget_manager.snapshot()
+                        if self._budget_manager is not None
+                        else None
+                    ),
+                ),
+                budget_usage=(
+                    self._budget_manager.snapshot()
+                    if self._budget_manager is not None
+                    else None
+                ),
+            )
+            self._release_resource_reservations(reservations)
+            for resource_id in selected_resource_ids:
+                self._resource_optimizer.release(resource_id)
+            raise
+        return reservations
+
+    def _confirm_resource_reservations(
+        self,
+        session_id: str,
+        reservations: list[BudgetReservation],
+    ) -> None:
+        if self._budget_manager is None:
+            for reservation in reservations:
+                self._resource_optimizer.release(reservation.resource_id)
+            return
+        for reservation in reservations:
+            usage = self._budget_manager.confirm_consumption(
+                reservation.reservation_id,
+            )
+            self._resource_optimizer.release(reservation.resource_id)
+            self._execution_supervisor.record_budget_usage(
+                session_id,
+                usage,
+            )
+
+    def _release_resource_reservations(
+        self,
+        reservations: list[BudgetReservation],
+    ) -> None:
+        if self._budget_manager is None:
+            return
+        for reservation in reservations:
+            self._budget_manager.release(reservation.reservation_id)
+
     def _batch_step_results(
         self,
         batch_result: ExecutionBatchResult,
@@ -1111,6 +1273,8 @@ class StructuredExecutionCoordinator:
         step_results: list[StepExecutionResult],
         *,
         last_batch: ExecutionBatchResult | None,
+        resource_selection_failure: str | None = None,
+        rejected_candidate_ids: tuple[str, ...] = (),
     ) -> dict[str, object]:
         errors_by_step = {
             result.step_id: result.error or result.error_code or "step failed"
@@ -1124,6 +1288,10 @@ class StructuredExecutionCoordinator:
         if last_batch is not None:
             metadata["batch_id"] = last_batch.batch_id
             metadata["cancelled_step_ids"] = tuple(last_batch.cancelled_step_ids)
+        if resource_selection_failure is not None:
+            metadata["resource_selection_failure"] = resource_selection_failure
+            metadata["rejected_candidate_ids"] = tuple(rejected_candidate_ids)
+            metadata["optimization_goal"] = self._resource_policy.optimization_goal.value
         return metadata
 
     def _resume_under_supervision(
@@ -1514,6 +1682,43 @@ class StructuredExecutionCoordinator:
                 session.last_priority_decision,
                 "rationale_summary",
                 None,
+            ),
+            resource_selection_failure=(
+                str(execution.metadata.get("resource_selection_failure"))
+                if execution.metadata.get("resource_selection_failure") is not None
+                else None
+            ),
+            rejected_candidate_ids=tuple(
+                str(item)
+                for item in execution.metadata.get("rejected_candidate_ids", ())
+            ),
+            budget_snapshot=getattr(session, "budget_usage", None),
+            selected_resource_id=getattr(
+                session.last_resource_decision,
+                "selected_resource_id",
+                None,
+            ),
+            previous_resource_id=(
+                session.selected_resources_by_step.get(
+                    execution.current_step or execution.failed_step or "",
+                )
+                if session.selected_resources_by_step
+                else None
+            ),
+            optimization_goal=(
+                getattr(
+                    getattr(session.last_resource_decision, "optimization_goal", None),
+                    "value",
+                    None,
+                )
+                or (
+                    str(execution.metadata.get("optimization_goal"))
+                    if execution.metadata.get("optimization_goal") is not None
+                    else None
+                )
+            ),
+            degradation_applied=bool(
+                getattr(session.last_resource_decision, "degradation_applied", False)
             ),
             attempt_number=attempt_number,
             max_attempts=self._replan_policy.max_replans_per_session,

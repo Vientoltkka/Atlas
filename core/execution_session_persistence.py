@@ -24,6 +24,14 @@ from core.execution_priority import (
     PriorityDecision,
     PriorityScore,
 )
+from core.execution_resources import (
+    ExecutionBudget,
+    ExecutionBudgetUsage,
+    OptimizationGoal,
+    ResourceScore,
+    ResourceSelectionDecision,
+    ResourceSelectionReason,
+)
 from core.execution_plan_topology import ExecutionPlanTopologyError
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_supervisor import (
@@ -133,6 +141,11 @@ class ExecutionSessionSnapshot:
     batch_history: tuple[ExecutionBatchResult, ...]
     last_priority_decision: PriorityDecision | None
     priority_history: tuple[PriorityDecision, ...]
+    execution_budget: ExecutionBudget | None
+    budget_usage: ExecutionBudgetUsage | None
+    last_resource_decision: ResourceSelectionDecision | None
+    resource_decision_history: tuple[ResourceSelectionDecision, ...]
+    selected_resources_by_step: MappingProxyType
     created_at: datetime
     updated_at: datetime
     recovery_metadata: MappingProxyType
@@ -153,6 +166,16 @@ class ExecutionSessionSnapshot:
         object.__setattr__(self, "active_step_ids", tuple(self.active_step_ids))
         object.__setattr__(self, "batch_history", tuple(self.batch_history))
         object.__setattr__(self, "priority_history", tuple(self.priority_history))
+        object.__setattr__(
+            self,
+            "resource_decision_history",
+            tuple(self.resource_decision_history),
+        )
+        object.__setattr__(
+            self,
+            "selected_resources_by_step",
+            MappingProxyType(dict(self.selected_resources_by_step)),
+        )
         object.__setattr__(
             self,
             "recovery_metadata",
@@ -221,6 +244,29 @@ class ExecutionSessionSnapshot:
                 for item in session.priority_history
                 if isinstance(item, PriorityDecision)
             ),
+            execution_budget=(
+                session.execution_budget
+                if isinstance(session.execution_budget, ExecutionBudget)
+                else None
+            ),
+            budget_usage=(
+                session.budget_usage
+                if isinstance(session.budget_usage, ExecutionBudgetUsage)
+                else None
+            ),
+            last_resource_decision=(
+                session.last_resource_decision
+                if isinstance(session.last_resource_decision, ResourceSelectionDecision)
+                else None
+            ),
+            resource_decision_history=tuple(
+                item
+                for item in session.resource_decision_history
+                if isinstance(item, ResourceSelectionDecision)
+            ),
+            selected_resources_by_step=MappingProxyType(
+                dict(session.selected_resources_by_step)
+            ),
             created_at=created_at or session.started_at,
             updated_at=now,
             recovery_metadata=recovery_metadata or {},
@@ -266,6 +312,11 @@ class ExecutionSessionSnapshot:
             last_priority_decision=self.last_priority_decision,
             priority_history=self.priority_history,
             max_priority_history_entries=MAX_PRIORITY_HISTORY_ENTRIES,
+            execution_budget=self.execution_budget,
+            budget_usage=self.budget_usage,
+            last_resource_decision=self.last_resource_decision,
+            resource_decision_history=self.resource_decision_history,
+            selected_resources_by_step=self.selected_resources_by_step,
         )
 
 
@@ -610,6 +661,16 @@ def snapshot_to_dict(snapshot: ExecutionSessionSnapshot) -> dict[str, Any]:
             _priority_decision_to_json(item)
             for item in snapshot.priority_history
         ],
+        "execution_budget": _budget_to_json(snapshot.execution_budget),
+        "budget_usage": _budget_usage_to_json(snapshot.budget_usage),
+        "last_resource_decision": _resource_decision_to_json(
+            snapshot.last_resource_decision
+        ),
+        "resource_decision_history": [
+            _resource_decision_to_json(item)
+            for item in snapshot.resource_decision_history
+        ],
+        "selected_resources_by_step": dict(snapshot.selected_resources_by_step),
         "created_at": _datetime_to_json(snapshot.created_at),
         "updated_at": _datetime_to_json(snapshot.updated_at),
         "recovery_metadata": _safe_mapping(snapshot.recovery_metadata),
@@ -673,6 +734,26 @@ def snapshot_from_dict(payload: Any) -> ExecutionSessionSnapshot:
                 for item in payload.get("priority_history", [])
             )
             if decision is not None
+        ),
+        execution_budget=_budget_from_json(payload.get("execution_budget")),
+        budget_usage=_budget_usage_from_json(payload.get("budget_usage")),
+        last_resource_decision=_resource_decision_from_json(
+            payload.get("last_resource_decision")
+        ),
+        resource_decision_history=tuple(
+            decision
+            for decision in (
+                _resource_decision_from_json(item)
+                for item in payload.get("resource_decision_history", [])
+            )
+            if decision is not None
+        ),
+        selected_resources_by_step=MappingProxyType(
+            {
+                str(key): str(value)
+                for key, value in payload.get("selected_resources_by_step", {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
         ),
         created_at=_datetime_from_json(_required_str(payload, "created_at"), "created_at"),
         updated_at=_datetime_from_json(_required_str(payload, "updated_at"), "updated_at"),
@@ -887,6 +968,161 @@ def _priority_score_from_json(payload: Any) -> PriorityScore:
         cost_penalty=_required_number(payload, "cost_penalty"),
         duration_penalty=_required_number(payload, "duration_penalty"),
         risk_penalty=_required_number(payload, "risk_penalty"),
+        final_score=_required_number(payload, "final_score"),
+    )
+
+
+def _budget_to_json(budget: ExecutionBudget | None) -> dict[str, Any] | None:
+    if budget is None:
+        return None
+    return {
+        "max_total_cost": budget.max_total_cost,
+        "max_tokens": budget.max_tokens,
+        "max_duration_seconds": budget.max_duration_seconds,
+        "max_remote_calls": budget.max_remote_calls,
+        "max_model_calls": budget.max_model_calls,
+        "max_tool_calls": budget.max_tool_calls,
+        "max_replans": budget.max_replans,
+        "reserved_cost": budget.reserved_cost,
+        "reserved_tokens": budget.reserved_tokens,
+        "currency_code": budget.currency_code,
+        "hard_limit": budget.hard_limit,
+    }
+
+
+def _budget_from_json(payload: Any) -> ExecutionBudget | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Execution budget must be an object.")
+    return ExecutionBudget(
+        max_total_cost=payload.get("max_total_cost"),
+        max_tokens=payload.get("max_tokens"),
+        max_duration_seconds=payload.get("max_duration_seconds"),
+        max_remote_calls=payload.get("max_remote_calls"),
+        max_model_calls=payload.get("max_model_calls"),
+        max_tool_calls=payload.get("max_tool_calls"),
+        max_replans=payload.get("max_replans"),
+        reserved_cost=float(payload.get("reserved_cost", 0.0)),
+        reserved_tokens=int(payload.get("reserved_tokens", 0)),
+        currency_code=_required_str(payload, "currency_code"),
+        hard_limit=_required_bool(payload, "hard_limit"),
+    )
+
+
+def _budget_usage_to_json(usage: ExecutionBudgetUsage | None) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    return {
+        "estimated_cost": usage.estimated_cost,
+        "actual_cost": usage.actual_cost,
+        "estimated_tokens": usage.estimated_tokens,
+        "actual_tokens": usage.actual_tokens,
+        "elapsed_duration": usage.elapsed_duration,
+        "remote_calls": usage.remote_calls,
+        "model_calls": usage.model_calls,
+        "tool_calls": usage.tool_calls,
+        "remaining_cost": usage.remaining_cost,
+        "remaining_tokens": usage.remaining_tokens,
+        "exhausted_limits": list(usage.exhausted_limits),
+    }
+
+
+def _budget_usage_from_json(payload: Any) -> ExecutionBudgetUsage | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Execution budget usage must be an object.")
+    return ExecutionBudgetUsage(
+        estimated_cost=_required_number(payload, "estimated_cost"),
+        actual_cost=payload.get("actual_cost"),
+        estimated_tokens=_required_int(payload, "estimated_tokens"),
+        actual_tokens=payload.get("actual_tokens"),
+        elapsed_duration=_required_number(payload, "elapsed_duration"),
+        remote_calls=_required_int(payload, "remote_calls"),
+        model_calls=_required_int(payload, "model_calls"),
+        tool_calls=_required_int(payload, "tool_calls"),
+        remaining_cost=payload.get("remaining_cost"),
+        remaining_tokens=payload.get("remaining_tokens"),
+        exhausted_limits=_str_tuple(payload, "exhausted_limits"),
+    )
+
+
+def _resource_decision_to_json(
+    decision: ResourceSelectionDecision | None,
+) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "step_id": decision.step_id,
+        "selected_resource_id": decision.selected_resource_id,
+        "provider_id": decision.provider_id,
+        "scores": [_resource_score_to_json(score) for score in decision.scores],
+        "rejected_candidate_ids": list(decision.rejected_candidate_ids),
+        "reason": decision.reason.value,
+        "optimization_goal": decision.optimization_goal.value,
+        "degradation_applied": decision.degradation_applied,
+        "estimated_cost": decision.estimated_cost,
+        "estimated_tokens": decision.estimated_tokens,
+        "budget_snapshot": _budget_usage_to_json(decision.budget_snapshot),
+        "tie_breaker_used": decision.tie_breaker_used,
+    }
+
+
+def _resource_decision_from_json(payload: Any) -> ResourceSelectionDecision | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Resource decision must be an object.")
+    return ResourceSelectionDecision(
+        step_id=_required_str(payload, "step_id"),
+        selected_resource_id=_optional_str(payload, "selected_resource_id"),
+        provider_id=_optional_str(payload, "provider_id"),
+        scores=tuple(
+            _resource_score_from_json(item)
+            for item in _required_list(payload, "scores")
+        ),
+        rejected_candidate_ids=_str_tuple(payload, "rejected_candidate_ids"),
+        reason=ResourceSelectionReason(_required_str(payload, "reason")),
+        optimization_goal=OptimizationGoal(_required_str(payload, "optimization_goal")),
+        degradation_applied=_required_bool(payload, "degradation_applied"),
+        estimated_cost=payload.get("estimated_cost"),
+        estimated_tokens=payload.get("estimated_tokens"),
+        budget_snapshot=_budget_usage_from_json(payload.get("budget_snapshot")),
+        tie_breaker_used=_optional_str(payload, "tie_breaker_used"),
+    )
+
+
+def _resource_score_to_json(score: ResourceScore) -> dict[str, Any]:
+    return {
+        "resource_id": score.resource_id,
+        "capability_score": score.capability_score,
+        "quality_score": score.quality_score,
+        "cost_score": score.cost_score,
+        "latency_score": score.latency_score,
+        "reliability_score": score.reliability_score,
+        "privacy_score": score.privacy_score,
+        "locality_score": score.locality_score,
+        "availability_penalty": score.availability_penalty,
+        "budget_penalty": score.budget_penalty,
+        "final_score": score.final_score,
+    }
+
+
+def _resource_score_from_json(payload: Any) -> ResourceScore:
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Resource score must be an object.")
+    return ResourceScore(
+        resource_id=_required_str(payload, "resource_id"),
+        capability_score=_required_number(payload, "capability_score"),
+        quality_score=_required_number(payload, "quality_score"),
+        cost_score=_required_number(payload, "cost_score"),
+        latency_score=_required_number(payload, "latency_score"),
+        reliability_score=_required_number(payload, "reliability_score"),
+        privacy_score=_required_number(payload, "privacy_score"),
+        locality_score=_required_number(payload, "locality_score"),
+        availability_penalty=_required_number(payload, "availability_penalty"),
+        budget_penalty=_required_number(payload, "budget_penalty"),
         final_score=_required_number(payload, "final_score"),
     )
 

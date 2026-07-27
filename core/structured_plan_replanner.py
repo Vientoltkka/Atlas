@@ -65,6 +65,13 @@ class ReplanRequest:
     priority_scores: Mapping[str, float] = field(default_factory=dict)
     failed_step_priority: float | None = None
     priority_rationale_summary: str | None = None
+    resource_selection_failure: str | None = None
+    rejected_candidate_ids: tuple[str, ...] = ()
+    budget_snapshot: object | None = None
+    selected_resource_id: str | None = None
+    previous_resource_id: str | None = None
+    optimization_goal: str | None = None
+    degradation_applied: bool = False
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -147,6 +154,13 @@ class ReplanRequest:
                 }
             ),
         )
+        object.__setattr__(
+            self,
+            "rejected_candidate_ids",
+            tuple(str(item) for item in self.rejected_candidate_ids),
+        )
+        if type(self.degradation_applied) is not bool:
+            raise TypeError("degradation_applied must be a bool.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +225,9 @@ class ReplanPolicy:
                 "TOOL_EXCEPTION",
                 "TOOL_NOT_FOUND",
                 "PARAMETER_RESOLUTION_FAILED",
+                "NO_COMPATIBLE_RESOURCE",
+                "EXECUTION_BUDGET_EXCEEDED",
+                "EXECUTION_TOKEN_BUDGET_EXCEEDED",
             }
         )
     )

@@ -135,6 +135,12 @@ class ExecutionSession:
     last_priority_decision: Any | None = None
     priority_history: tuple[Any, ...] = ()
     max_priority_history_entries: int = 100
+    execution_budget: Any | None = None
+    budget_usage: Any | None = None
+    last_resource_decision: Any | None = None
+    resource_decision_history: tuple[Any, ...] = ()
+    selected_resources_by_step: Mapping[str, str] = field(default_factory=dict)
+    max_resource_decision_history_entries: int = 100
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -161,8 +167,20 @@ class ExecutionSession:
         object.__setattr__(self, "active_step_ids", tuple(self.active_step_ids))
         object.__setattr__(self, "batch_history", tuple(self.batch_history))
         object.__setattr__(self, "priority_history", tuple(self.priority_history))
+        object.__setattr__(
+            self,
+            "resource_decision_history",
+            tuple(self.resource_decision_history),
+        )
+        object.__setattr__(
+            self,
+            "selected_resources_by_step",
+            MappingProxyType(dict(self.selected_resources_by_step)),
+        )
         if self.max_priority_history_entries < 1:
             raise ValueError("max_priority_history_entries must be greater than zero.")
+        if self.max_resource_decision_history_entries < 1:
+            raise ValueError("max_resource_decision_history_entries must be greater than zero.")
         if self.replan_count < 0:
             raise ValueError("replan_count cannot be negative.")
         if self.replan_count != len(self.replan_history):
@@ -788,6 +806,95 @@ class ExecutionSupervisor:
                         "reason": getattr(decision, "tie_breaker_used", None),
                     },
                 )
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
+    def record_resource_decision(
+        self,
+        session_id: str,
+        decision: Any,
+        *,
+        budget_usage: Any | None = None,
+    ) -> ExecutionSession:
+        """Record a resource selection decision without computing it."""
+        step_id = getattr(decision, "step_id", None)
+        resource_id = getattr(decision, "selected_resource_id", None)
+        provider_id = getattr(decision, "provider_id", None)
+        details = {
+            "step_id": step_id,
+            "resource_id": resource_id,
+            "provider_id": provider_id,
+            "decision_reason": getattr(getattr(decision, "reason", None), "value", None),
+            "estimated_cost": getattr(decision, "estimated_cost", None),
+            "remaining_budget": getattr(budget_usage, "remaining_cost", None),
+        }
+        with self._lock:
+            session = self.get_session(session_id)
+            history = session.resource_decision_history + (decision,)
+            history = history[-session.max_resource_decision_history_entries :]
+            selected = dict(session.selected_resources_by_step)
+            if isinstance(step_id, str) and isinstance(resource_id, str):
+                selected[step_id] = resource_id
+            updated = replace(
+                session,
+                last_resource_decision=decision,
+                resource_decision_history=history,
+                selected_resources_by_step=selected,
+                budget_usage=budget_usage
+                if budget_usage is not None
+                else session.budget_usage,
+            )
+            event_type = (
+                "resource_selection_failed"
+                if resource_id is None
+                else "resource_selected"
+            )
+            updated = self._with_event(updated, event_type, details=details)
+            if resource_id is not None:
+                updated = self._with_event(
+                    updated,
+                    "model_selected_for_step",
+                    details=details,
+                )
+            if getattr(decision, "degradation_applied", False):
+                updated = self._with_event(
+                    updated,
+                    "resource_degradation_applied",
+                    details=details,
+                )
+            if getattr(decision, "tie_breaker_used", None):
+                updated = self._with_event(
+                    updated,
+                    "resource_tie_resolved",
+                    details=details,
+                )
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
+    def record_budget_usage(
+        self,
+        session_id: str,
+        budget_usage: Any,
+        *,
+        event_type: str = "execution_budget_consumed",
+    ) -> ExecutionSession:
+        """Record a budget usage snapshot."""
+        with self._lock:
+            session = self.get_session(session_id)
+            updated = replace(session, budget_usage=budget_usage)
+            updated = self._with_event(
+                updated,
+                event_type,
+                details={
+                    "estimated_cost": getattr(budget_usage, "estimated_cost", None),
+                    "actual_cost": getattr(budget_usage, "actual_cost", None),
+                    "estimated_tokens": getattr(budget_usage, "estimated_tokens", None),
+                    "actual_tokens": getattr(budget_usage, "actual_tokens", None),
+                    "remaining_budget": getattr(budget_usage, "remaining_cost", None),
+                },
+            )
             self._sessions[session_id] = updated
         self._persist_session(updated)
         return updated

@@ -44,6 +44,7 @@ from core.execution_plan_registry import (
     ExecutionPlanRegistryError,
 )
 from core.execution_replanner import MAX_REPLANS, ReplanningPolicy
+from core.execution_resources import ExecutionResourceRequirements
 from core.execution_retry import MAX_RETRY_ATTEMPTS, RetryPolicy, RetryStrategy
 from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
@@ -877,6 +878,35 @@ class ExecutionPlanValidator:
             deadline = getattr(step, "deadline", None)
             if deadline is not None and not hasattr(deadline, "isoformat"):
                 errors.append(f"Step '{step.id}' deadline must be a datetime or None.")
+            requirements = getattr(step, "resource_requirements", None)
+            if requirements is not None:
+                for name in ("maximum_latency_seconds", "maximum_estimated_cost"):
+                    value = getattr(requirements, name, None)
+                    if value is None:
+                        continue
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        or float(value) < 0
+                    ):
+                        errors.append(
+                            f"Step '{step.id}' resource requirement {name} must be finite and non-negative."
+                        )
+                if getattr(requirements, "local_only", False) and getattr(
+                    requirements,
+                    "remote_allowed",
+                    True,
+                ):
+                    errors.append(
+                        f"Step '{step.id}' resource requirements are contradictory."
+                    )
+                preferred_models = set(getattr(requirements, "preferred_model_ids", ()))
+                forbidden_models = set(getattr(requirements, "forbidden_model_ids", ()))
+                if preferred_models & forbidden_models:
+                    errors.append(
+                        f"Step '{step.id}' cannot prefer and forbid the same model."
+                    )
 
     def _validate_confirmation(
         self,
@@ -1218,6 +1248,9 @@ def plan_signature(
                     if getattr(step, "deadline", None) is not None
                     else None
                 ),
+                "resource_requirements": _signature_safe_value(
+                    getattr(step, "resource_requirements", None)
+                ),
             }
             for step in plan.ordered_steps
         ],
@@ -1298,6 +1331,9 @@ def _signature_safe_value(
                         step.deadline.isoformat()
                         if getattr(step, "deadline", None) is not None
                         else None
+                    ),
+                    "resource_requirements": _signature_safe_value(
+                        getattr(step, "resource_requirements", None)
                     ),
                 }
                 for step in value.ordered_steps
@@ -1384,6 +1420,29 @@ def _signature_safe_value(
             "strategy": value.strategy.value,
             "retryable_goal_reasons": list(value.retryable_goal_reasons),
             "retryable_execution_errors": list(value.retryable_execution_errors),
+        }
+
+    if isinstance(value, ExecutionResourceRequirements):
+        return {
+            "$type": "execution_resource_requirements",
+            "required_capabilities": list(value.required_capabilities),
+            "preferred_capabilities": list(value.preferred_capabilities),
+            "minimum_quality": value.minimum_quality,
+            "maximum_latency_seconds": value.maximum_latency_seconds,
+            "maximum_estimated_cost": value.maximum_estimated_cost,
+            "local_only": value.local_only,
+            "remote_allowed": value.remote_allowed,
+            "privacy_level": value.privacy_level.value,
+            "requires_tool_execution": value.requires_tool_execution,
+            "requires_vision": value.requires_vision,
+            "requires_audio": value.requires_audio,
+            "requires_code_execution": value.requires_code_execution,
+            "requires_long_context": value.requires_long_context,
+            "minimum_context_window": value.minimum_context_window,
+            "preferred_model_ids": list(value.preferred_model_ids),
+            "forbidden_model_ids": list(value.forbidden_model_ids),
+            "preferred_provider_ids": list(value.preferred_provider_ids),
+            "forbidden_provider_ids": list(value.forbidden_provider_ids),
         }
 
     if isinstance(value, ExecutionCondition):

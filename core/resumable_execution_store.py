@@ -35,6 +35,7 @@ from core.execution_variable_binding import ExecutionVariableBinding
 from core.execution_variable_reference import ExecutionVariableReference
 from core.execution_plan_output import ExecutionPlanOutput
 from core.execution_plan_registry import ExecutionPlanReference, ExecutionPlanRegistryError
+from core.execution_resources import ExecutionResourceRequirements, PrivacyLevel
 from core.execution_plan_executor import ResumableExecutionState
 from core.execution_replanner import (
     ReplanningHistoryEntry,
@@ -486,6 +487,9 @@ def _step_to_dict(
         "estimated_cost": step.estimated_cost,
         "estimated_duration_seconds": step.estimated_duration_seconds,
         "deadline": step.deadline.isoformat() if step.deadline is not None else None,
+        "resource_requirements": _resource_requirements_to_json(
+            step.resource_requirements
+        ),
     }
 
 
@@ -583,6 +587,9 @@ def _dict_to_step(
         estimated_cost=_optional_float(payload, "estimated_cost"),
         estimated_duration_seconds=_optional_float(payload, "estimated_duration_seconds"),
         deadline=_optional_datetime(payload, "deadline"),
+        resource_requirements=_resource_requirements_from_json(
+            payload.get("resource_requirements")
+        ),
     )
 
 
@@ -597,6 +604,69 @@ def _branch_to_json(
         "then_plan": _plan_to_dict(branch.then_plan),
         "else_plan": _plan_to_dict(branch.else_plan) if branch.else_plan is not None else None,
     }
+
+
+def _resource_requirements_to_json(
+    requirements: ExecutionResourceRequirements,
+) -> dict[str, Any]:
+    return {
+        "required_capabilities": list(requirements.required_capabilities),
+        "preferred_capabilities": list(requirements.preferred_capabilities),
+        "minimum_quality": requirements.minimum_quality,
+        "maximum_latency_seconds": requirements.maximum_latency_seconds,
+        "maximum_estimated_cost": requirements.maximum_estimated_cost,
+        "local_only": requirements.local_only,
+        "remote_allowed": requirements.remote_allowed,
+        "privacy_level": requirements.privacy_level.value,
+        "requires_tool_execution": requirements.requires_tool_execution,
+        "requires_vision": requirements.requires_vision,
+        "requires_audio": requirements.requires_audio,
+        "requires_code_execution": requirements.requires_code_execution,
+        "requires_long_context": requirements.requires_long_context,
+        "minimum_context_window": requirements.minimum_context_window,
+        "preferred_model_ids": list(requirements.preferred_model_ids),
+        "forbidden_model_ids": list(requirements.forbidden_model_ids),
+        "preferred_provider_ids": list(requirements.preferred_provider_ids),
+        "forbidden_provider_ids": list(requirements.forbidden_provider_ids),
+    }
+
+
+def _resource_requirements_from_json(
+    payload: Any,
+) -> ExecutionResourceRequirements | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution resource requirements must be an object or null.",
+        )
+    try:
+        return ExecutionResourceRequirements(
+            required_capabilities=_optional_str_list(payload, "required_capabilities", default=[]),
+            preferred_capabilities=_optional_str_list(payload, "preferred_capabilities", default=[]),
+            minimum_quality=_optional_int_with_default(payload, "minimum_quality", default=0),
+            maximum_latency_seconds=_optional_float(payload, "maximum_latency_seconds"),
+            maximum_estimated_cost=_optional_float(payload, "maximum_estimated_cost"),
+            local_only=_optional_bool(payload, "local_only", default=False),
+            remote_allowed=_optional_bool(payload, "remote_allowed", default=True),
+            privacy_level=PrivacyLevel(_required_str(payload, "privacy_level")),
+            requires_tool_execution=_optional_bool(payload, "requires_tool_execution", default=False),
+            requires_vision=_optional_bool(payload, "requires_vision", default=False),
+            requires_audio=_optional_bool(payload, "requires_audio", default=False),
+            requires_code_execution=_optional_bool(payload, "requires_code_execution", default=False),
+            requires_long_context=_optional_bool(payload, "requires_long_context", default=False),
+            minimum_context_window=_optional_int_with_default(payload, "minimum_context_window", default=0),
+            preferred_model_ids=_optional_str_list(payload, "preferred_model_ids", default=[]),
+            forbidden_model_ids=_optional_str_list(payload, "forbidden_model_ids", default=[]),
+            preferred_provider_ids=_optional_str_list(payload, "preferred_provider_ids", default=[]),
+            forbidden_provider_ids=_optional_str_list(payload, "forbidden_provider_ids", default=[]),
+        )
+    except ValueError as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            "Execution resource requirements are invalid.",
+        ) from error
 
 
 def _branch_from_json(

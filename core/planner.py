@@ -18,6 +18,7 @@ from core.execution_plan_output import (
     ExecutionPlanOutput,
     copy_execution_plan_output,
 )
+from core.execution_resources import ExecutionResourceRequirements
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_replanner import ReplanningPolicy, copy_replanning_policy
 from core.execution_retry import RetryPolicy, copy_retry_policy
@@ -78,6 +79,9 @@ class ExecutionStep:
     estimated_duration_seconds: float | None = None
     criticality: int = 0
     deadline: datetime | None = None
+    resource_requirements: ExecutionResourceRequirements = field(
+        default_factory=ExecutionResourceRequirements
+    )
 
     def __init__(
         self,
@@ -107,6 +111,7 @@ class ExecutionStep:
         estimated_duration_seconds: float | None = None,
         criticality: int = 0,
         deadline: datetime | None = None,
+        resource_requirements: ExecutionResourceRequirements | None = None,
     ) -> None:
         if type(parallel_safe) is not bool:
             raise TypeError("parallel_safe must be a bool.")
@@ -136,6 +141,13 @@ class ExecutionStep:
                 raise ValueError(f"{name} must be finite and non-negative.")
         if deadline is not None and not isinstance(deadline, datetime):
             raise TypeError("deadline must be a datetime or None.")
+        if resource_requirements is not None and not isinstance(
+            resource_requirements,
+            ExecutionResourceRequirements,
+        ):
+            raise TypeError(
+                "resource_requirements must be ExecutionResourceRequirements or None."
+            )
         dependencies_source = dependencies if depends_on is None else depends_on
         object.__setattr__(self, "id", id)
         object.__setattr__(self, "description", description)
@@ -192,6 +204,11 @@ class ExecutionStep:
             else float(estimated_duration_seconds),
         )
         object.__setattr__(self, "deadline", deadline)
+        object.__setattr__(
+            self,
+            "resource_requirements",
+            resource_requirements or ExecutionResourceRequirements(),
+        )
 
     @property
     def depends_on(self) -> tuple[str, ...]:
@@ -1076,6 +1093,7 @@ class Planner:
         estimated_cost = payload.get("estimated_cost")
         estimated_duration_seconds = payload.get("estimated_duration_seconds")
         deadline = payload.get("deadline")
+        resource_requirements = payload.get("resource_requirements")
         if not isinstance(description, str) or not description.strip():
             raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' description must be a non-empty string.")
         if tool is not None and not isinstance(tool, str):
@@ -1101,6 +1119,39 @@ class Planner:
                 parsed_deadline = datetime.fromisoformat(deadline)
             except ValueError as error:
                 raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' deadline must be a valid ISO timestamp.") from error
+        parsed_requirements = None
+        if resource_requirements is not None:
+            if not isinstance(resource_requirements, Mapping):
+                raise PlannerPayloadError(
+                    PlannerErrorCode.INVALID_PLAN_RESPONSE.value,
+                    f"Step '{step_id}' resource_requirements must be an object.",
+                )
+            try:
+                parsed_requirements = ExecutionResourceRequirements(
+                    required_capabilities=tuple(resource_requirements.get("required_capabilities", ())),
+                    preferred_capabilities=tuple(resource_requirements.get("preferred_capabilities", ())),
+                    minimum_quality=int(resource_requirements.get("minimum_quality", 0)),
+                    maximum_latency_seconds=resource_requirements.get("maximum_latency_seconds"),
+                    maximum_estimated_cost=resource_requirements.get("maximum_estimated_cost"),
+                    local_only=bool(resource_requirements.get("local_only", False)),
+                    remote_allowed=bool(resource_requirements.get("remote_allowed", True)),
+                    privacy_level=resource_requirements.get("privacy_level", "public"),
+                    requires_tool_execution=bool(resource_requirements.get("requires_tool_execution", False)),
+                    requires_vision=bool(resource_requirements.get("requires_vision", False)),
+                    requires_audio=bool(resource_requirements.get("requires_audio", False)),
+                    requires_code_execution=bool(resource_requirements.get("requires_code_execution", False)),
+                    requires_long_context=bool(resource_requirements.get("requires_long_context", False)),
+                    minimum_context_window=int(resource_requirements.get("minimum_context_window", 0)),
+                    preferred_model_ids=tuple(resource_requirements.get("preferred_model_ids", ())),
+                    forbidden_model_ids=tuple(resource_requirements.get("forbidden_model_ids", ())),
+                    preferred_provider_ids=tuple(resource_requirements.get("preferred_provider_ids", ())),
+                    forbidden_provider_ids=tuple(resource_requirements.get("forbidden_provider_ids", ())),
+                )
+            except (TypeError, ValueError) as error:
+                raise PlannerPayloadError(
+                    PlannerErrorCode.INVALID_PLAN_RESPONSE.value,
+                    f"Step '{step_id}' resource_requirements are invalid: {error}.",
+                ) from error
 
         return ExecutionStep(
             id=step_id,
@@ -1115,6 +1166,7 @@ class Planner:
             estimated_cost=estimated_cost,
             estimated_duration_seconds=estimated_duration_seconds,
             deadline=parsed_deadline,
+            resource_requirements=parsed_requirements,
         )
 
     def _is_architecture_query(
