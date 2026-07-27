@@ -37,6 +37,11 @@ from core.atlas_request_normalizer import (
 from core.model_manager import ModelManager
 from core.planner import Planner
 from core.router import Router
+from core.request_gateway import (
+    AtlasRequest,
+    RequestGateway,
+)
+from core.operational_request_router import RouteDecision
 from core.capability_execution_service import (
     CapabilityExecutionRequest,
     CapabilityExecutionResult,
@@ -87,6 +92,7 @@ class AtlasOrchestrator:
         atlas_request_adapter: AtlasRequestAdapter | None = None,
         atlas_request_classifier: AtlasRequestClassifier | None = None,
         atlas_request_normalizer: AtlasRequestNormalizer | None = None,
+        request_gateway: RequestGateway | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -115,6 +121,7 @@ class AtlasOrchestrator:
         self._atlas_request_adapter = atlas_request_adapter
         self._atlas_request_classifier = atlas_request_classifier
         self._atlas_request_normalizer = atlas_request_normalizer
+        self._request_gateway = request_gateway or RequestGateway(router=router)
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -251,19 +258,21 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
-        structured_response = self._handle_structured_execution(prompt)
+        request = self._request_gateway.from_text(prompt)
+        structured_response = self._handle_structured_execution(request.content)
         if structured_response is not None:
             return structured_response.message
 
         if self._execution_conversation is not None:
-            outcome = self._execution_conversation.handle(prompt)
+            outcome = self._execution_conversation.handle(request.content)
 
             if not outcome.direct_response_required:
                 return outcome.text
 
         return self._process_prompt_without_execution(
-            prompt,
+            request.content,
             confirm,
+            request=request,
         )
 
     def execute_capability(
@@ -275,6 +284,23 @@ class AtlasOrchestrator:
             return unavailable_capability_execution_result()
 
         return self._capability_execution_service.execute(request)
+
+    def classify_prompt(
+        self,
+        prompt: str,
+    ) -> RouteDecision:
+        """Classify text input through the request gateway without executing it."""
+        return self.classify_request(self._request_gateway.from_text(prompt))
+
+    def classify_request(
+        self,
+        request: AtlasRequest,
+    ) -> RouteDecision:
+        """Classify an AtlasRequest without executing the selected route."""
+        classify_request = getattr(self._router, "classify_request", None)
+        if not callable(classify_request):
+            raise RuntimeError("Router does not support request classification.")
+        return classify_request(request)
 
     def route_request(
         self,
@@ -395,8 +421,12 @@ class AtlasOrchestrator:
         self,
         prompt: str,
         confirm,
+        *,
+        request: AtlasRequest | None = None,
     ) -> str:
         """Process text through the pre-existing conversational flow."""
+        request = request or self._request_gateway.from_text(prompt)
+        prompt = request.content
         coding_agent = self._registry.get("coding")
 
         if (
@@ -444,7 +474,14 @@ class AtlasOrchestrator:
 
         self._memory.add_user(prompt)
         plan = self._planner.create_plan(prompt)
-        agent_name = self._router.route(plan)
+        route_request = getattr(self._router, "route_request", None)
+        if callable(route_request):
+            try:
+                agent_name = route_request(request, plan=plan)
+            except TypeError:
+                agent_name = route_request(request)
+        else:
+            agent_name = self._router.route(plan)
         agent = self._registry.get(agent_name)
 
         if agent is None:
@@ -725,7 +762,8 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Route transcribed voice text before falling back to the model."""
-        routing_text = self._voice_routing_text(prompt)
+        request = self._request_gateway.from_voice(prompt)
+        routing_text = self._voice_routing_text(request.content)
         route_voice_command = getattr(self._router, "route_voice_command", None)
         voice_route = (
             route_voice_command(routing_text)
@@ -755,7 +793,7 @@ class AtlasOrchestrator:
                 confirm,
             )
 
-        return self.process_prompt(prompt, confirm=confirm)
+        return self.process_prompt(request.content, confirm=confirm)
 
     def _execute_voice_desktop_command(
         self,

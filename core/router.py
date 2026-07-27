@@ -7,6 +7,11 @@ import unicodedata
 from typing import Literal
 
 from core.planner import Plan
+from core.operational_request_router import (
+    OperationalRequestRouter,
+    RouteDecision,
+)
+from core.request_gateway import AtlasRequest
 
 
 class Router:
@@ -19,6 +24,12 @@ class Router:
         "research": "chat",
     }
 
+    def __init__(
+        self,
+        operational_router: OperationalRequestRouter | None = None,
+    ) -> None:
+        self._operational_router = operational_router or OperationalRequestRouter()
+
     def route(self, plan: Plan) -> Literal["chat", "coding", "project"]:
         """Return the agent that must execute the plan.
 
@@ -28,6 +39,26 @@ class Router:
             return "project"
 
         return self._TASK_ROUTES.get(plan.task, "chat")
+
+    def route_request(
+        self,
+        request: AtlasRequest,
+        *,
+        plan: Plan | None = None,
+    ) -> Literal["chat", "coding", "project"]:
+        """Route a normalized Atlas request through the legacy Plan view."""
+        if not isinstance(request, AtlasRequest):
+            raise TypeError("request must be an AtlasRequest.")
+        return self.route(plan or Plan(task="chat", objective=request.content))
+
+    def classify_request(
+        self,
+        request: AtlasRequest,
+    ) -> RouteDecision:
+        """Classify a normalized request without executing any route."""
+        if not isinstance(request, AtlasRequest):
+            raise TypeError("request must be an AtlasRequest.")
+        return self._operational_router.classify(request)
 
     def route_voice_command(
         self,

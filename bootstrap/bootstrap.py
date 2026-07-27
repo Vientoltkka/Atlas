@@ -24,6 +24,7 @@ from core.capability_execution_service import CapabilityExecutionService
 from core.model_manager import ModelManager
 from core.multi_capability_planner import MultiCapabilityPlanner
 from core.orchestrator import AtlasOrchestrator
+from core.operational_request_router import OperationalRequestRouter
 from core.planner import Planner
 from core.router import Router
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
@@ -939,6 +940,12 @@ class Bootstrap:
                 find_project_file,
                 resolve_project_dependencies,
                 query_architecture_graph,
+            )
+        )
+        router = Router(
+            operational_router=OperationalRequestRouter(
+                tool_registry=tool_registry,
+                agent_registry=registry,
             )
         )
 
