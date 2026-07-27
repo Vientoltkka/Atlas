@@ -9,6 +9,8 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from core.structured_plan_replanner import ReplanRecord
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -20,6 +22,7 @@ class ExecutionState(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     WAITING_CONFIRMATION = "waiting_confirmation"
+    REPLANNING = "replanning"
     FAILED = "failed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -37,6 +40,7 @@ _ACTIVE_STATES = frozenset(
         ExecutionState.PENDING,
         ExecutionState.RUNNING,
         ExecutionState.WAITING_CONFIRMATION,
+        ExecutionState.REPLANNING,
     }
 )
 
@@ -80,6 +84,10 @@ class ExecutionSession:
     last_error: str | None = None
     results: Mapping[str, object] = field(default_factory=dict)
     events: tuple[ExecutionSupervisorEvent, ...] = ()
+    original_plan: Any | None = None
+    active_plan: Any | None = None
+    replan_count: int = 0
+    replan_history: tuple[ReplanRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -87,6 +95,21 @@ class ExecutionSession:
         if not isinstance(self.state, ExecutionState):
             raise TypeError("state must be an ExecutionState.")
         object.__setattr__(self, "results", MappingProxyType(dict(self.results)))
+        object.__setattr__(
+            self,
+            "original_plan",
+            self.plan if self.original_plan is None else self.original_plan,
+        )
+        object.__setattr__(
+            self,
+            "active_plan",
+            self.plan if self.active_plan is None else self.active_plan,
+        )
+        object.__setattr__(self, "replan_history", tuple(self.replan_history))
+        if self.replan_count < 0:
+            raise ValueError("replan_count cannot be negative.")
+        if self.replan_count != len(self.replan_history):
+            raise ValueError("replan_count must match replan_history length.")
         if self.finished_at is not None and self.finished_at < self.started_at:
             raise ValueError("finished_at cannot be earlier than started_at.")
 
@@ -104,6 +127,7 @@ class ExecutionOverview:
     pending_sessions: int
     running_sessions: int
     waiting_confirmation_sessions: int
+    replanning_sessions: int
     completed_sessions: int
     failed_sessions: int
     cancelled_sessions: int
@@ -118,6 +142,7 @@ class ExecutionOverview:
             self.pending_sessions,
             self.running_sessions,
             self.waiting_confirmation_sessions,
+            self.replanning_sessions,
             self.completed_sessions,
             self.failed_sessions,
             self.cancelled_sessions,
@@ -131,6 +156,7 @@ class ExecutionOverview:
             self.pending_sessions
             + self.running_sessions
             + self.waiting_confirmation_sessions
+            + self.replanning_sessions
             + self.completed_sessions
             + self.failed_sessions
             + self.cancelled_sessions
@@ -142,6 +168,7 @@ class ExecutionOverview:
             self.pending_sessions
             + self.running_sessions
             + self.waiting_confirmation_sessions
+            + self.replanning_sessions
         )
         if self.active_sessions != active_total:
             raise ValueError("Execution overview active_sessions invariant failed.")
@@ -163,6 +190,7 @@ class ExecutionSupervisor:
         ExecutionState.RUNNING: frozenset(
             {
                 ExecutionState.WAITING_CONFIRMATION,
+                ExecutionState.REPLANNING,
                 ExecutionState.FAILED,
                 ExecutionState.COMPLETED,
                 ExecutionState.CANCELLED,
@@ -174,7 +202,14 @@ class ExecutionSupervisor:
                 ExecutionState.CANCELLED,
             }
         ),
-        ExecutionState.FAILED: frozenset(),
+        ExecutionState.REPLANNING: frozenset(
+            {
+                ExecutionState.RUNNING,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            }
+        ),
+        ExecutionState.FAILED: frozenset({ExecutionState.REPLANNING}),
         ExecutionState.COMPLETED: frozenset(),
         ExecutionState.CANCELLED: frozenset(),
     }
@@ -237,6 +272,7 @@ class ExecutionSupervisor:
             waiting_confirmation_sessions=counts[
                 ExecutionState.WAITING_CONFIRMATION
             ],
+            replanning_sessions=counts[ExecutionState.REPLANNING],
             completed_sessions=counts[ExecutionState.COMPLETED],
             failed_sessions=counts[ExecutionState.FAILED],
             cancelled_sessions=counts[ExecutionState.CANCELLED],
@@ -324,6 +360,89 @@ class ExecutionSupervisor:
             results=results,
             finished_at=self._clock(),
         )
+
+    def mark_replanning(
+        self,
+        session_id: str,
+        *,
+        attempt_number: int,
+        current_step: str | None = None,
+        reason: str | None = None,
+    ) -> ExecutionSession:
+        """Move a failed or running session into REPLANNING state."""
+        if attempt_number < 1:
+            raise ValueError("attempt_number must be greater than zero.")
+        return self._transition(
+            session_id,
+            ExecutionState.REPLANNING,
+            event_type="replan_started",
+            current_step=current_step,
+            finished_at=None,
+            details={
+                "attempt_number": attempt_number,
+                "reason": reason or "recoverable_failure",
+            },
+        )
+
+    def record_replan(
+        self,
+        session_id: str,
+        record: ReplanRecord,
+    ) -> ExecutionSession:
+        """Attach one accepted replan record and make its plan active."""
+        if not isinstance(record, ReplanRecord):
+            raise TypeError("record must be a ReplanRecord.")
+        session = self.get_session(session_id)
+        if session.state is not ExecutionState.REPLANNING:
+            raise InvalidExecutionTransitionError(
+                "Replan records can only be added while session "
+                f"'{session_id}' is replanning."
+            )
+        updated = replace(
+            session,
+            plan=record.revised_plan,
+            active_plan=record.revised_plan,
+            replan_count=session.replan_count + 1,
+            replan_history=session.replan_history + (record,),
+        )
+        updated = self._with_event(
+            updated,
+            "replan_produced",
+            details={
+                "attempt_number": record.attempt_number,
+                "failed_step": record.failed_step,
+                "reason": record.reason.value,
+                "previous_plan": f"attempt.{record.attempt_number - 1}",
+                "revised_plan": f"attempt.{record.attempt_number}",
+            },
+        )
+        self._sessions[session_id] = updated
+        return updated
+
+    def record_replan_event(
+        self,
+        session_id: str,
+        event_type: str,
+        *,
+        attempt_number: int,
+        failed_step: str | None = None,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> ExecutionSession:
+        """Append a structured replanning event without changing state."""
+        if attempt_number < 1:
+            raise ValueError("attempt_number must be greater than zero.")
+        session = self.get_session(session_id)
+        details: dict[str, object] = {"attempt_number": attempt_number}
+        if failed_step is not None:
+            details["failed_step"] = failed_step
+        if reason is not None:
+            details["reason"] = reason
+        if error is not None:
+            details["error"] = error
+        updated = self._with_event(session, event_type, details=details)
+        self._sessions[session_id] = updated
+        return updated
 
     def mark_failed(
         self,

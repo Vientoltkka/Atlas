@@ -31,6 +31,14 @@ from core.resumable_execution_store import (
     ResumableExecutionStore,
     ResumableExecutionStoreError,
 )
+from core.structured_plan_replanner import (
+    ExecutionReplanner as StructuredExecutionReplanner,
+    ReplanPolicy,
+    ReplanRequest,
+    ReplanResult,
+    ReplanResultStatus,
+    replan_record,
+)
 from core.structured_reference_path import navigate_structured_path
 
 
@@ -82,11 +90,15 @@ class StructuredExecutionCoordinator:
         executor: ExecutionPlanExecutor,
         resumable_store: ResumableExecutionStore | None = None,
         execution_supervisor: ExecutionSupervisor | None = None,
+        execution_replanner: StructuredExecutionReplanner | None = None,
+        replan_policy: ReplanPolicy | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
         self._executor = executor
         self._execution_supervisor = execution_supervisor or ExecutionSupervisor()
+        self._execution_replanner = execution_replanner
+        self._replan_policy = replan_policy or ReplanPolicy(max_replans_per_session=0)
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -614,21 +626,34 @@ class StructuredExecutionCoordinator:
             if session_id is not None
             else self._execution_supervisor.start(plan)
         )
-        session = self._execution_supervisor.mark_running(session.session_id)
+        self._execution_supervisor.mark_running(session.session_id)
+        active_plan = plan
+        active_validation = validation
         try:
-            execution = self._executor.execute(
-                plan,
-                validation,
-                confirmation_granted=confirmation_granted,
-                control=control,
-                on_progress=on_progress,
-            )
+            while True:
+                execution = self._executor.execute(
+                    active_plan,
+                    active_validation,
+                    confirmation_granted=confirmation_granted,
+                    control=control,
+                    on_progress=on_progress,
+                )
+                if self._execution_can_finish_without_replan(execution):
+                    self._finalize_supervised_session(session.session_id, execution)
+                    return execution
+
+                replanned = self._attempt_replan(
+                    session.session_id,
+                    active_plan,
+                    execution,
+                )
+                if replanned is None:
+                    return execution
+                active_plan, active_validation = replanned
+                self._execution_supervisor.mark_running(session.session_id)
         except Exception as error:
             self._execution_supervisor.mark_failed(session.session_id, error)
             raise
-
-        self._finalize_supervised_session(session.session_id, execution)
-        return execution
 
     def _resume_under_supervision(
         self,
@@ -653,6 +678,185 @@ class StructuredExecutionCoordinator:
 
         self._finalize_supervised_session(session.session_id, execution)
         return execution
+
+    def _execution_can_finish_without_replan(
+        self,
+        execution: PlanExecutionResult,
+    ) -> bool:
+        if execution.success:
+            return True
+        if execution.plan_status in {
+            PlanExecutionStatus.CANCELLED.value,
+            PlanExecutionStatus.BLOCKED_CONFIRMATION.value,
+        }:
+            return True
+        return self._execution_replanner is None
+
+    def _attempt_replan(
+        self,
+        session_id: str,
+        failed_plan: ExecutionPlan,
+        execution: PlanExecutionResult,
+    ) -> tuple[ExecutionPlan, PlanValidationResult] | None:
+        session = self._execution_supervisor.get_session(session_id)
+        current_step = execution.current_step or execution.failed_step
+        results = self._supervisor_results(execution)
+        error = (
+            execution.error
+            or execution.failure_reason
+            or execution.error_code
+            or execution.plan_status
+        )
+        failed = self._execution_supervisor.mark_failed(
+            session_id,
+            error,
+            current_step=current_step,
+            results=results,
+        )
+        attempt_number = failed.replan_count + 1
+        request = self._replan_request(
+            failed,
+            failed_plan,
+            execution,
+            attempt_number=attempt_number,
+        )
+        self._execution_supervisor.record_replan_event(
+            session_id,
+            "replan_requested",
+            attempt_number=attempt_number,
+            failed_step=request.failed_step,
+            reason="execution_failed",
+        )
+
+        policy_decision = self._replan_policy.evaluate(
+            request,
+            current_replan_count=failed.replan_count,
+        )
+        if policy_decision.status is ReplanResultStatus.LIMIT_REACHED:
+            self._execution_supervisor.record_replan_event(
+                session_id,
+                "replan_limit_reached",
+                attempt_number=attempt_number,
+                failed_step=request.failed_step,
+                reason=policy_decision.reason.value,
+                error=policy_decision.error,
+            )
+            return None
+        if not policy_decision.accepted:
+            self._execution_supervisor.record_replan_event(
+                session_id,
+                "replan_rejected",
+                attempt_number=attempt_number,
+                failed_step=request.failed_step,
+                reason=policy_decision.reason.value,
+                error=policy_decision.error,
+            )
+            return None
+
+        self._execution_supervisor.mark_replanning(
+            session_id,
+            attempt_number=attempt_number,
+            current_step=request.failed_step,
+            reason=policy_decision.reason.value,
+        )
+        assert self._execution_replanner is not None
+        replan_result = self._execution_replanner.replan(request)
+        if not replan_result.accepted or replan_result.revised_plan is None:
+            self._record_replan_failure(session_id, request, replan_result)
+            return None
+
+        revised_validation = self._validator.validate(replan_result.revised_plan)
+        if not revised_validation.is_valid:
+            self._execution_supervisor.record_replan_event(
+                session_id,
+                "replan_failed",
+                attempt_number=attempt_number,
+                failed_step=request.failed_step,
+                reason="validation_error",
+                error="; ".join(revised_validation.errors),
+            )
+            self._execution_supervisor.mark_failed(
+                session_id,
+                "replanned plan validation failed",
+                current_step=request.failed_step,
+                results=results,
+            )
+            return None
+
+        record = replan_record(
+            request,
+            replan_result,
+            previous_plan=failed_plan,
+        )
+        self._execution_supervisor.record_replan(session_id, record)
+        self._execution_supervisor.record_replan_event(
+            session_id,
+            "execution_resumed_with_revised_plan",
+            attempt_number=attempt_number,
+            failed_step=request.failed_step,
+            reason=replan_result.reason.value,
+        )
+        return replan_result.revised_plan, revised_validation
+
+    def _record_replan_failure(
+        self,
+        session_id: str,
+        request: ReplanRequest,
+        replan_result: ReplanResult,
+    ) -> None:
+        event_type = (
+            "replan_failed"
+            if replan_result.status is ReplanResultStatus.PLANNER_ERROR
+            else "replan_rejected"
+        )
+        self._execution_supervisor.record_replan_event(
+            session_id,
+            event_type,
+            attempt_number=request.attempt_number,
+            failed_step=request.failed_step,
+            reason=replan_result.reason.value,
+            error=replan_result.error,
+        )
+        self._execution_supervisor.mark_failed(
+            session_id,
+            replan_result.error or replan_result.status.value,
+            current_step=request.failed_step,
+        )
+
+    def _replan_request(
+        self,
+        session: ExecutionSession,
+        failed_plan: ExecutionPlan,
+        execution: PlanExecutionResult,
+        *,
+        attempt_number: int,
+    ) -> ReplanRequest:
+        return ReplanRequest(
+            session_id=session.session_id,
+            original_plan=session.original_plan,
+            active_plan=failed_plan,
+            failed_step=execution.current_step or execution.failed_step,
+            error=(
+                execution.error
+                or execution.failure_reason
+                or execution.error_code
+                or execution.plan_status
+            ),
+            error_code=execution.error_code,
+            partial_results=self._partial_results(execution),
+            attempt_number=attempt_number,
+            max_attempts=self._replan_policy.max_replans_per_session,
+        )
+
+    def _partial_results(
+        self,
+        execution: PlanExecutionResult,
+    ) -> dict[str, object]:
+        return {
+            result.step_id: result.output
+            for result in execution.step_results
+            if result.success and result.status == "completed"
+        }
 
     def _finalize_supervised_session(
         self,

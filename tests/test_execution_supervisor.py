@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from core.execution_plan_executor import PlanExecutionResult, PlanExecutionStatus
+from core.execution_plan_executor import StepExecutionResult
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_supervisor import (
     ExecutionOverview,
@@ -16,6 +17,13 @@ from core.execution_supervisor import (
 )
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult
 from core.structured_execution import StructuredExecutionCoordinator
+from core.structured_plan_replanner import (
+    ReplanPolicy,
+    ReplanReason,
+    ReplanRequest,
+    ReplanResult,
+    ReplanResultStatus,
+)
 
 
 class _Clock:
@@ -62,14 +70,86 @@ class _FixedExecutor:
         return self.result
 
 
-def _plan(*, requires_confirmation: bool = False) -> ExecutionPlan:
+class _SequenceExecutor:
+    def __init__(self, *results: PlanExecutionResult) -> None:
+        self.results = list(results)
+        self.calls: list[ExecutionPlan] = []
+
+    def execute(self, plan: ExecutionPlan, *_args, **_kwargs) -> PlanExecutionResult:
+        self.calls.append(plan)
+        if not self.results:
+            raise AssertionError("unexpected executor call")
+        return self.results.pop(0)
+
+
+class _FakeReplanner:
+    def __init__(self, *results: ReplanResult) -> None:
+        self.results = list(results)
+        self.calls: list[ReplanRequest] = []
+
+    def replan(self, request: ReplanRequest) -> ReplanResult:
+        self.calls.append(request)
+        if not self.results:
+            raise AssertionError("unexpected replanner call")
+        return self.results.pop(0)
+
+
+def _plan(
+    *,
+    requires_confirmation: bool = False,
+    goal: str = "test plan",
+    tool: str = "read_file",
+) -> ExecutionPlan:
     return ExecutionPlan(
-        goal="test plan",
-        ordered_steps=(ExecutionStep("step_1", "read", "read_file"),),
+        goal=goal,
+        ordered_steps=(ExecutionStep("step_1", "read", tool),),
         estimated_steps=1,
-        required_tools=("read_file",),
+        required_tools=(tool,),
         detected_risks=(),
         requires_confirmation=requires_confirmation,
+    )
+
+
+def _completed_result(*, completed_steps: list[str] | None = None) -> PlanExecutionResult:
+    steps = completed_steps or ["step_1"]
+    return PlanExecutionResult(
+        plan_status=PlanExecutionStatus.COMPLETED.value,
+        success=True,
+        completed=True,
+        completed_steps=steps,
+    )
+
+
+def _failed_result(
+    *,
+    error_code: str = "TOOL_EXECUTION_FAILED",
+    error: str = "tool failed",
+    completed_step_result: bool = False,
+) -> PlanExecutionResult:
+    step_results = []
+    completed_steps = []
+    if completed_step_result:
+        completed_steps.append("step_0")
+        step_results.append(
+            StepExecutionResult(
+                step_id="step_0",
+                status="completed",
+                success=True,
+                tool_name="read_file",
+                output={"value": "partial"},
+            )
+        )
+    return PlanExecutionResult(
+        plan_status=PlanExecutionStatus.FAILED.value,
+        success=False,
+        failed=True,
+        failed_step="step_1",
+        current_step="step_1",
+        completed_steps=completed_steps,
+        failed_steps=["step_1"],
+        step_results=step_results,
+        error=error,
+        error_code=error_code,
     )
 
 
@@ -99,6 +179,7 @@ def test_empty_overview_has_zero_counts_and_no_latest_session() -> None:
         pending_sessions=0,
         running_sessions=0,
         waiting_confirmation_sessions=0,
+        replanning_sessions=0,
         completed_sessions=0,
         failed_sessions=0,
         cancelled_sessions=0,
@@ -214,6 +295,7 @@ def test_overview_counts_multiple_states_and_preserves_invariants() -> None:
     assert overview.pending_sessions == 1
     assert overview.running_sessions == 1
     assert overview.waiting_confirmation_sessions == 1
+    assert overview.replanning_sessions == 0
     assert overview.completed_sessions == 1
     assert overview.failed_sessions == 1
     assert overview.cancelled_sessions == 1
@@ -222,6 +304,7 @@ def test_overview_counts_multiple_states_and_preserves_invariants() -> None:
         == overview.pending_sessions
         + overview.running_sessions
         + overview.waiting_confirmation_sessions
+        + overview.replanning_sessions
         + overview.completed_sessions
         + overview.failed_sessions
         + overview.cancelled_sessions
@@ -231,6 +314,7 @@ def test_overview_counts_multiple_states_and_preserves_invariants() -> None:
         == overview.pending_sessions
         + overview.running_sessions
         + overview.waiting_confirmation_sessions
+        + overview.replanning_sessions
     )
     assert (
         overview.terminal_sessions
@@ -417,6 +501,28 @@ def test_waiting_confirmation_can_resume_running() -> None:
     assert running.state is ExecutionState.RUNNING
 
 
+def test_replanning_is_active_and_can_resume_running() -> None:
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    session = supervisor.start(_plan())
+
+    supervisor.mark_running(session.session_id)
+    supervisor.mark_failed(session.session_id, "tool failed", current_step="step_1")
+    replanning = supervisor.mark_replanning(
+        session.session_id,
+        attempt_number=1,
+        current_step="step_1",
+    )
+    overview = supervisor.get_overview()
+    replanning_sessions = supervisor.list_sessions(state=ExecutionState.REPLANNING)
+    running = supervisor.mark_running(session.session_id)
+
+    assert replanning.state is ExecutionState.REPLANNING
+    assert overview.replanning_sessions == 1
+    assert overview.active_sessions == 1
+    assert replanning_sessions == (replanning,)
+    assert running.state is ExecutionState.RUNNING
+
+
 def test_invalid_transitions_raise_clear_exception() -> None:
     supervisor = ExecutionSupervisor(clock=_Clock())
     session = supervisor.start(_plan())
@@ -546,3 +652,301 @@ def test_structured_execution_coordinator_exposes_supervisor_read_models() -> No
     assert overview.completed_sessions == 1
     assert len(sessions) == 1
     assert sessions[0].state is ExecutionState.COMPLETED
+
+
+def test_non_recoverable_failure_does_not_invoke_replanner() -> None:
+    plan = _plan()
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner()
+    executor = _SequenceExecutor(_failed_result(error_code="INVALID_PLAN"))
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "failed"
+    assert replanner.calls == []
+    assert session.state is ExecutionState.FAILED
+
+
+def test_recoverable_failure_creates_replan_request_with_context() -> None:
+    original = _plan(goal="original")
+    revised = _plan(goal="revised")
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.ACCEPTED,
+            revised_plan=revised,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+        )
+    )
+    executor = _SequenceExecutor(
+        _failed_result(completed_step_result=True),
+        _completed_result(),
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(original),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    coordinator.handle("run")
+    request = replanner.calls[0]
+
+    assert request.session_id == "execution.session.000001"
+    assert request.original_plan is original
+    assert request.active_plan is original
+    assert request.failed_step == "step_1"
+    assert request.error == "tool failed"
+    assert request.error_code == "TOOL_EXECUTION_FAILED"
+    assert request.partial_results["step_0"] == {"value": "partial"}
+    assert request.attempt_number == 1
+    assert request.max_attempts == 1
+
+
+def test_successful_replan_updates_active_plan_history_and_completes() -> None:
+    original = _plan(goal="original")
+    revised = _plan(goal="revised", tool="write_file")
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.ACCEPTED,
+            revised_plan=revised,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+        )
+    )
+    executor = _SequenceExecutor(_failed_result(), _completed_result())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(original),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "completed"
+    assert executor.calls == [original, revised]
+    assert session.state is ExecutionState.COMPLETED
+    assert session.original_plan is original
+    assert session.active_plan is revised
+    assert session.plan is revised
+    assert session.replan_count == 1
+    assert len(session.replan_history) == 1
+    assert session.replan_history[0].previous_plan is original
+    assert session.replan_history[0].revised_plan is revised
+    assert session.last_error == "tool failed"
+
+
+def test_second_failure_with_limit_one_does_not_replan_again() -> None:
+    original = _plan(goal="original")
+    revised = _plan(goal="revised")
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.ACCEPTED,
+            revised_plan=revised,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+        )
+    )
+    executor = _SequenceExecutor(
+        _failed_result(error="first failure"),
+        _failed_result(error="second failure"),
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(original),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "failed"
+    assert len(replanner.calls) == 1
+    assert session.state is ExecutionState.FAILED
+    assert session.replan_count == 1
+    assert session.last_error == "second failure"
+    assert "replan_limit_reached" in [event.event_type for event in session.events]
+
+
+def test_replan_rejected_keeps_session_failed_and_traced() -> None:
+    plan = _plan()
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.REJECTED,
+            reason=ReplanReason.REJECTED,
+            error="no revised plan",
+        )
+    )
+    executor = _SequenceExecutor(_failed_result())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert session.state is ExecutionState.FAILED
+    assert session.replan_count == 0
+    assert session.last_error == "no revised plan"
+    assert "replan_rejected" in [event.event_type for event in session.events]
+
+
+def test_replan_planner_error_preserves_original_error_and_records_failure() -> None:
+    plan = _plan()
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.PLANNER_ERROR,
+            reason=ReplanReason.PLANNER_ERROR,
+            error="planner crashed",
+        )
+    )
+    executor = _SequenceExecutor(_failed_result(error="tool failed first"))
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert session.state is ExecutionState.FAILED
+    assert session.replan_count == 0
+    assert session.last_error == "planner crashed"
+    assert [event.event_type for event in session.events].count("execution_failed") == 2
+    assert session.events[2].details["error"] == "tool failed first"
+    assert "replan_failed" in [event.event_type for event in session.events]
+
+
+def test_cancelled_execution_never_replans() -> None:
+    plan = _plan()
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner()
+    executor = _SequenceExecutor(
+        PlanExecutionResult(
+            plan_status=PlanExecutionStatus.CANCELLED.value,
+            success=False,
+            cancelled=True,
+            current_step="step_1",
+            interruption_reason="cancelled",
+            error_code="EXECUTION_CANCELLED",
+        )
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "cancelled"
+    assert replanner.calls == []
+    assert session.state is ExecutionState.CANCELLED
+
+
+def test_cancelled_pending_confirmation_never_replans() -> None:
+    plan = _plan(requires_confirmation=True)
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner()
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_SequenceExecutor(),  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    pending = coordinator.handle("run")
+    cancelled = coordinator.cancel_pending()
+    session = supervisor.get_session("execution.session.000001")
+
+    assert pending.status == "confirmation_required"
+    assert cancelled.status == "pending_execution_cancelled"
+    assert replanner.calls == []
+    assert session.state is ExecutionState.CANCELLED
+
+
+def test_max_replans_zero_disables_replanning_explicitly() -> None:
+    plan = _plan()
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner()
+    executor = _SequenceExecutor(_failed_result())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=0),
+    )
+
+    coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert replanner.calls == []
+    assert session.state is ExecutionState.FAILED
+    assert "replan_limit_reached" in [event.event_type for event in session.events]
+
+
+def test_replan_history_is_immutable_from_outside() -> None:
+    original = _plan(goal="original")
+    revised = _plan(goal="revised")
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    replanner = _FakeReplanner(
+        ReplanResult(
+            status=ReplanResultStatus.ACCEPTED,
+            revised_plan=revised,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+        )
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(original),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_SequenceExecutor(_failed_result(), _completed_result()),  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+        execution_replanner=replanner,  # type: ignore[arg-type]
+        replan_policy=ReplanPolicy(max_replans_per_session=1),
+    )
+
+    coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert isinstance(session.replan_history, tuple)
+    with pytest.raises(FrozenInstanceError):
+        session.replan_count = 10  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        session.replan_history.append("bad")  # type: ignore[attr-defined]
