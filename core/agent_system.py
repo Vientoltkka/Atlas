@@ -20,6 +20,10 @@ from core.agent_context import AgentContextBuilder
 from core.agent_delegation import AgentDelegationService
 from core.agent_delegation_chain import AgentDelegationChainService
 from core.agent_delegation_coordinator import AgentDelegationCoordinator
+from core.agent_replanned_execution import (
+    AgentReplannedExecutionService,
+    build_core_agent_replanned_execution_service,
+)
 from core.agent_plan_replanner import AgentPlanReplanner, build_core_agent_plan_replanner
 from core.agent_plan_supervisor import AgentPlanSupervisor, build_core_agent_plan_supervisor
 from core.agent_discovery import AgentDiscovery
@@ -104,6 +108,7 @@ class AgentSystem:
     agent_cooperation_automatic_execution_service: AgentCooperationAutomaticExecutionService
     agent_plan_supervisor: AgentPlanSupervisor
     agent_plan_replanner: AgentPlanReplanner
+    agent_replanned_execution_service: AgentReplannedExecutionService
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_registry, AgentRegistry):
@@ -165,6 +170,10 @@ class AgentSystem:
         if not isinstance(self.agent_plan_replanner, AgentPlanReplanner):
             raise InvalidAgentSystemBuildRequestError(
                 "agent_plan_replanner must be AgentPlanReplanner."
+            )
+        if not isinstance(self.agent_replanned_execution_service, AgentReplannedExecutionService):
+            raise InvalidAgentSystemBuildRequestError(
+                "agent_replanned_execution_service must be AgentReplannedExecutionService."
             )
 
 
@@ -256,6 +265,7 @@ class AgentSystemBuilder:
         agent_cooperation_automatic_execution_service: AgentCooperationAutomaticExecutionService | None = None,
         agent_plan_supervisor: AgentPlanSupervisor | None = None,
         agent_plan_replanner: AgentPlanReplanner | None = None,
+        agent_replanned_execution_service: AgentReplannedExecutionService | None = None,
     ) -> None:
         self._agent_registry = agent_registry
         self._agent_handler_registry = agent_handler_registry
@@ -279,6 +289,7 @@ class AgentSystemBuilder:
         )
         self._agent_plan_supervisor = agent_plan_supervisor
         self._agent_plan_replanner = agent_plan_replanner
+        self._agent_replanned_execution_service = agent_replanned_execution_service
 
     def build(
         self,
@@ -431,6 +442,17 @@ class AgentSystemBuilder:
                 agent_plan_supervisor=agent_plan_supervisor,
             )
         )
+        agent_replanned_execution_service = (
+            self._agent_replanned_execution_service
+            if self._agent_replanned_execution_service is not None
+            else build_core_agent_replanned_execution_service(
+                agent_registry=registry,
+                agent_resolver=resolver,
+                agent_cooperation_planner=agent_cooperation_planner,
+                agent_plan_supervisor=agent_plan_supervisor,
+                agent_plan_replanner=agent_plan_replanner,
+            )
+        )
         system = AgentSystem(
             agent_registry=registry,
             agent_handler_registry=handler_registry,
@@ -454,6 +476,7 @@ class AgentSystemBuilder:
             ),
             agent_plan_supervisor=agent_plan_supervisor,
             agent_plan_replanner=agent_plan_replanner,
+            agent_replanned_execution_service=agent_replanned_execution_service,
         )
 
         agent_snapshot = registry.list_agents()
