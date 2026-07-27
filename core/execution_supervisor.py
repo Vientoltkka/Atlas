@@ -32,6 +32,13 @@ _TERMINAL_STATES = frozenset(
         ExecutionState.CANCELLED,
     }
 )
+_ACTIVE_STATES = frozenset(
+    {
+        ExecutionState.PENDING,
+        ExecutionState.RUNNING,
+        ExecutionState.WAITING_CONFIRMATION,
+    }
+)
 
 
 class ExecutionSupervisorError(RuntimeError):
@@ -87,6 +94,65 @@ class ExecutionSession:
     def is_terminal(self) -> bool:
         """Return whether the session is in a terminal state."""
         return self.state in _TERMINAL_STATES
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOverview:
+    """Immutable aggregate snapshot of known supervised executions."""
+
+    total_sessions: int
+    pending_sessions: int
+    running_sessions: int
+    waiting_confirmation_sessions: int
+    completed_sessions: int
+    failed_sessions: int
+    cancelled_sessions: int
+    active_sessions: int
+    terminal_sessions: int
+    latest_session_id: str | None
+    generated_at: datetime
+
+    def __post_init__(self) -> None:
+        counters = (
+            self.total_sessions,
+            self.pending_sessions,
+            self.running_sessions,
+            self.waiting_confirmation_sessions,
+            self.completed_sessions,
+            self.failed_sessions,
+            self.cancelled_sessions,
+            self.active_sessions,
+            self.terminal_sessions,
+        )
+        if any(counter < 0 for counter in counters):
+            raise ValueError("Execution overview counters cannot be negative.")
+
+        state_total = (
+            self.pending_sessions
+            + self.running_sessions
+            + self.waiting_confirmation_sessions
+            + self.completed_sessions
+            + self.failed_sessions
+            + self.cancelled_sessions
+        )
+        if self.total_sessions != state_total:
+            raise ValueError("Execution overview total_sessions invariant failed.")
+
+        active_total = (
+            self.pending_sessions
+            + self.running_sessions
+            + self.waiting_confirmation_sessions
+        )
+        if self.active_sessions != active_total:
+            raise ValueError("Execution overview active_sessions invariant failed.")
+
+        terminal_total = (
+            self.completed_sessions
+            + self.failed_sessions
+            + self.cancelled_sessions
+        )
+        if self.terminal_sessions != terminal_total:
+            raise ValueError("Execution overview terminal_sessions invariant failed.")
 
 
 class ExecutionSupervisor:
@@ -155,6 +221,64 @@ class ExecutionSupervisor:
             raise ExecutionSessionNotFoundError(
                 f"Execution session '{session_id}' was not found."
             ) from exc
+
+    def get_overview(self) -> ExecutionOverview:
+        """Return an immutable aggregate snapshot of all known sessions."""
+        sessions = tuple(self._sessions.values())
+        counts = {state: 0 for state in ExecutionState}
+        for session in sessions:
+            counts[session.state] += 1
+
+        latest = self._latest_session(sessions)
+        return ExecutionOverview(
+            total_sessions=len(sessions),
+            pending_sessions=counts[ExecutionState.PENDING],
+            running_sessions=counts[ExecutionState.RUNNING],
+            waiting_confirmation_sessions=counts[
+                ExecutionState.WAITING_CONFIRMATION
+            ],
+            completed_sessions=counts[ExecutionState.COMPLETED],
+            failed_sessions=counts[ExecutionState.FAILED],
+            cancelled_sessions=counts[ExecutionState.CANCELLED],
+            active_sessions=sum(counts[state] for state in _ACTIVE_STATES),
+            terminal_sessions=sum(counts[state] for state in _TERMINAL_STATES),
+            latest_session_id=latest.session_id if latest is not None else None,
+            generated_at=self._clock(),
+        )
+
+    def list_sessions(
+        self,
+        *,
+        state: ExecutionState | None = None,
+        limit: int | None = None,
+        newest_first: bool = True,
+    ) -> tuple[ExecutionSession, ...]:
+        """Return immutable session snapshots, newest first by default.
+
+        ``limit=0`` is explicit and returns an empty tuple.
+        """
+        if state is not None and not isinstance(state, ExecutionState):
+            raise TypeError("state must be an ExecutionState or None.")
+        if limit is not None:
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise TypeError("limit must be an integer or None.")
+            if limit < 0:
+                raise ValueError("limit cannot be negative.")
+
+        sessions = tuple(self._sessions.values())
+        if state is not None:
+            sessions = tuple(session for session in sessions if session.state is state)
+
+        ordered = tuple(
+            sorted(
+                sessions,
+                key=self._session_sort_key,
+                reverse=newest_first,
+            )
+        )
+        if limit is None:
+            return ordered
+        return ordered[:limit]
 
     def mark_running(
         self,
@@ -313,3 +437,15 @@ class ExecutionSupervisor:
     def _error_message(error: object) -> str:
         message = str(error).strip()
         return message or type(error).__name__
+
+    @staticmethod
+    def _session_sort_key(session: ExecutionSession) -> tuple[datetime, str]:
+        return (session.started_at, session.session_id)
+
+    def _latest_session(
+        self,
+        sessions: tuple[ExecutionSession, ...],
+    ) -> ExecutionSession | None:
+        if not sessions:
+            return None
+        return max(sessions, key=self._session_sort_key)

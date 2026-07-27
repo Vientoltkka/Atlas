@@ -15,7 +15,12 @@ from core.execution_plan_executor import (
     PlanExecutionStatus,
     ResumableExecutionState,
 )
-from core.execution_supervisor import ExecutionSession, ExecutionSupervisor
+from core.execution_supervisor import (
+    ExecutionOverview,
+    ExecutionSession,
+    ExecutionState,
+    ExecutionSupervisor,
+)
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
@@ -283,6 +288,24 @@ class StructuredExecutionCoordinator:
         """Return a pending plan by token without exposing internal mutation."""
         pending = self._pending_plans.get(confirmation_token)
         return pending.execution.plan if pending is not None else None
+
+    def get_execution_overview(self) -> ExecutionOverview:
+        """Return the global supervised execution overview."""
+        return self._execution_supervisor.get_overview()
+
+    def list_execution_sessions(
+        self,
+        *,
+        state: ExecutionState | None = None,
+        limit: int | None = None,
+        newest_first: bool = True,
+    ) -> tuple[ExecutionSession, ...]:
+        """Return supervised execution session snapshots."""
+        return self._execution_supervisor.list_sessions(
+            state=state,
+            limit=limit,
+            newest_first=newest_first,
+        )
 
     def has_pending_execution(self) -> bool:
         """Return whether this coordinator has one active pending plan."""
