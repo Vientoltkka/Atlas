@@ -11,6 +11,7 @@ from core.agent_context import AgentContextBuilder
 from core.agent_delegation import AgentDelegationService
 from core.agent_delegation_chain import AgentDelegationChainService
 from core.agent_delegation_coordinator import AgentDelegationCoordinator
+from core.agent_plan_replanner import AgentPlanReplanner
 from core.agent_plan_supervisor import AgentPlanSupervisor
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutor, AgentHandlerRegistry
@@ -46,6 +47,7 @@ def build_core_agent_system(
     agent_cooperation_automatic_planner: AgentCooperationAutomaticPlanner | None = None,
     agent_cooperation_automatic_execution_service: AgentCooperationAutomaticExecutionService | None = None,
     agent_plan_supervisor: AgentPlanSupervisor | None = None,
+    agent_plan_replanner: AgentPlanReplanner | None = None,
 ) -> AgentSystemBuildResult:
     """Build a fully composed AgentSystem with explicit optional injections."""
 
@@ -71,4 +73,5 @@ def build_core_agent_system(
             agent_cooperation_automatic_execution_service
         ),
         agent_plan_supervisor=agent_plan_supervisor,
+        agent_plan_replanner=agent_plan_replanner,
     ).build(request)
