@@ -217,6 +217,7 @@ def test_empty_overview_has_zero_counts_and_no_latest_session() -> None:
         running_sessions=0,
         waiting_confirmation_sessions=0,
         replanning_sessions=0,
+        interrupted_sessions=0,
         completed_sessions=0,
         failed_sessions=0,
         cancelled_sessions=0,
@@ -342,6 +343,7 @@ def test_overview_counts_multiple_states_and_preserves_invariants() -> None:
         + overview.running_sessions
         + overview.waiting_confirmation_sessions
         + overview.replanning_sessions
+        + overview.interrupted_sessions
         + overview.completed_sessions
         + overview.failed_sessions
         + overview.cancelled_sessions
@@ -352,6 +354,7 @@ def test_overview_counts_multiple_states_and_preserves_invariants() -> None:
         + overview.running_sessions
         + overview.waiting_confirmation_sessions
         + overview.replanning_sessions
+        + overview.interrupted_sessions
     )
     assert (
         overview.terminal_sessions

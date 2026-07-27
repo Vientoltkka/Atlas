@@ -1173,6 +1173,9 @@ def plan_signature(
                 "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
                 "parallel_safe": bool(getattr(step, "parallel_safe", False)),
                 "resource_keys": list(getattr(step, "resource_keys", ())),
+                "idempotent": bool(getattr(step, "idempotent", False)),
+                "recovery_safe": bool(getattr(step, "recovery_safe", False)),
+                "side_effect_free": bool(getattr(step, "side_effect_free", False)),
             }
             for step in plan.ordered_steps
         ],
@@ -1237,6 +1240,9 @@ def _signature_safe_value(
                     "retry_policy": _signature_safe_value(getattr(step, "retry_policy", None)),
                     "parallel_safe": bool(getattr(step, "parallel_safe", False)),
                     "resource_keys": list(getattr(step, "resource_keys", ())),
+                    "idempotent": bool(getattr(step, "idempotent", False)),
+                    "recovery_safe": bool(getattr(step, "recovery_safe", False)),
+                    "side_effect_free": bool(getattr(step, "side_effect_free", False)),
                 }
                 for step in value.ordered_steps
             ],

@@ -24,6 +24,7 @@ class ExecutionState(str, Enum):
     RUNNING = "running"
     WAITING_CONFIRMATION = "waiting_confirmation"
     REPLANNING = "replanning"
+    INTERRUPTED = "interrupted"
     FAILED = "failed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -38,6 +39,7 @@ class StepExecutionState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    INTERRUPTED = "interrupted"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
@@ -55,6 +57,7 @@ _ACTIVE_STATES = frozenset(
         ExecutionState.RUNNING,
         ExecutionState.WAITING_CONFIRMATION,
         ExecutionState.REPLANNING,
+        ExecutionState.INTERRUPTED,
     }
 )
 
@@ -69,6 +72,10 @@ class ExecutionSessionNotFoundError(ExecutionSupervisorError):
 
 class InvalidExecutionTransitionError(ExecutionSupervisorError):
     """Raised when a lifecycle transition is not allowed."""
+
+
+class ExecutionSessionAlreadyExistsError(ExecutionSupervisorError):
+    """Raised when a restored session would overwrite a live session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +178,7 @@ class ExecutionOverview:
     running_sessions: int
     waiting_confirmation_sessions: int
     replanning_sessions: int
+    interrupted_sessions: int
     completed_sessions: int
     failed_sessions: int
     cancelled_sessions: int
@@ -186,6 +194,7 @@ class ExecutionOverview:
             self.running_sessions,
             self.waiting_confirmation_sessions,
             self.replanning_sessions,
+            self.interrupted_sessions,
             self.completed_sessions,
             self.failed_sessions,
             self.cancelled_sessions,
@@ -200,6 +209,7 @@ class ExecutionOverview:
             + self.running_sessions
             + self.waiting_confirmation_sessions
             + self.replanning_sessions
+            + self.interrupted_sessions
             + self.completed_sessions
             + self.failed_sessions
             + self.cancelled_sessions
@@ -212,6 +222,7 @@ class ExecutionOverview:
             + self.running_sessions
             + self.waiting_confirmation_sessions
             + self.replanning_sessions
+            + self.interrupted_sessions
         )
         if self.active_sessions != active_total:
             raise ValueError("Execution overview active_sessions invariant failed.")
@@ -229,11 +240,17 @@ class ExecutionSupervisor:
     """Supervise execution lifecycle transitions without executing tools."""
 
     _ALLOWED_TRANSITIONS: Mapping[ExecutionState, frozenset[ExecutionState]] = {
-        ExecutionState.PENDING: frozenset({ExecutionState.RUNNING}),
+        ExecutionState.PENDING: frozenset(
+            {
+                ExecutionState.RUNNING,
+                ExecutionState.INTERRUPTED,
+            }
+        ),
         ExecutionState.RUNNING: frozenset(
             {
                 ExecutionState.WAITING_CONFIRMATION,
                 ExecutionState.REPLANNING,
+                ExecutionState.INTERRUPTED,
                 ExecutionState.FAILED,
                 ExecutionState.COMPLETED,
                 ExecutionState.CANCELLED,
@@ -245,9 +262,18 @@ class ExecutionSupervisor:
                 ExecutionState.CANCELLED,
             }
         ),
+        ExecutionState.INTERRUPTED: frozenset(
+            {
+                ExecutionState.RUNNING,
+                ExecutionState.WAITING_CONFIRMATION,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            }
+        ),
         ExecutionState.REPLANNING: frozenset(
             {
                 ExecutionState.RUNNING,
+                ExecutionState.INTERRUPTED,
                 ExecutionState.FAILED,
                 ExecutionState.CANCELLED,
             }
@@ -262,6 +288,7 @@ class ExecutionSupervisor:
         *,
         clock: Callable[[], datetime] | None = None,
         session_id_prefix: str = "execution.session",
+        session_repository: Any | None = None,
     ) -> None:
         if not session_id_prefix.strip():
             raise ValueError("session_id_prefix must be a non-empty string.")
@@ -271,6 +298,7 @@ class ExecutionSupervisor:
         self._sessions: dict[str, ExecutionSession] = {}
         self._events: list[ExecutionSupervisorEvent] = []
         self._lock = RLock()
+        self._session_repository = session_repository
 
     def start(self, plan: Any) -> ExecutionSession:
         """Create a pending supervised session for an execution plan."""
@@ -292,7 +320,8 @@ class ExecutionSupervisor:
                 timestamp=started_at,
             )
             self._sessions[session_id] = session
-            return session
+        self._persist_session(session)
+        return session
 
     def get_session(self, session_id: str) -> ExecutionSession:
         """Return the current immutable snapshot for a session."""
@@ -321,6 +350,7 @@ class ExecutionSupervisor:
                 ExecutionState.WAITING_CONFIRMATION
             ],
             replanning_sessions=counts[ExecutionState.REPLANNING],
+            interrupted_sessions=counts[ExecutionState.INTERRUPTED],
             completed_sessions=counts[ExecutionState.COMPLETED],
             failed_sessions=counts[ExecutionState.FAILED],
             cancelled_sessions=counts[ExecutionState.CANCELLED],
@@ -497,6 +527,62 @@ class ExecutionSupervisor:
             dependency_ids=dependency_ids,
             error=self._error_message(error) if error is not None else None,
         )
+
+    def mark_step_interrupted(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+        error: object | None = None,
+    ) -> ExecutionSession:
+        """Record one ambiguous step after process recovery."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.INTERRUPTED,
+            event_type="step_interrupted",
+            dependency_ids=dependency_ids,
+            error=self._error_message(error) if error is not None else None,
+        )
+
+    def mark_interrupted(
+        self,
+        session_id: str,
+        *,
+        current_step: str | None = None,
+        error: object | None = None,
+    ) -> ExecutionSession:
+        """Move an active restored session into INTERRUPTED state."""
+        details = {"error": self._error_message(error)} if error is not None else None
+        return self._transition(
+            session_id,
+            ExecutionState.INTERRUPTED,
+            event_type="execution_interrupted_detected",
+            current_step=current_step,
+            details=details,
+        )
+
+    def restore_session(self, session: ExecutionSession) -> ExecutionSession:
+        """Register a validated restored session without normal execution events."""
+        if not isinstance(session, ExecutionSession):
+            raise TypeError("session must be an ExecutionSession.")
+        with self._lock:
+            if session.session_id in self._sessions:
+                raise ExecutionSessionAlreadyExistsError(
+                    f"Execution session '{session.session_id}' already exists."
+                )
+            restored = self._with_event(
+                session,
+                "execution_session_restored",
+                details={
+                    "restored_state": session.state.value,
+                    "schema_version": 1,
+                },
+            )
+            self._sessions[session.session_id] = restored
+        self._persist_session(restored)
+        return restored
 
     def record_dependency_graph_validated(
         self,
@@ -715,7 +801,8 @@ class ExecutionSupervisor:
                 },
             )
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def record_replan_event(
         self,
@@ -741,7 +828,8 @@ class ExecutionSupervisor:
                 details["error"] = error
             updated = self._with_event(session, event_type, details=details)
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def mark_failed(
         self,
@@ -833,7 +921,8 @@ class ExecutionSupervisor:
                 details=details,
             )
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def _with_event(
         self,
@@ -890,7 +979,8 @@ class ExecutionSupervisor:
                 details["error"] = error
             updated = self._with_event(updated, event_type, details=details)
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def _record_graph_event(
         self,
@@ -902,7 +992,8 @@ class ExecutionSupervisor:
             session = self.get_session(session_id)
             updated = self._with_event(session, event_type, details=details)
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def _record_batch_event(
         self,
@@ -933,7 +1024,8 @@ class ExecutionSupervisor:
             )
             updated = self._with_event(updated, event_type, details=details)
             self._sessions[session_id] = updated
-            return updated
+        self._persist_session(updated)
+        return updated
 
     def _initial_step_states(
         self,
@@ -968,3 +1060,10 @@ class ExecutionSupervisor:
         if not sessions:
             return None
         return max(sessions, key=self._session_sort_key)
+
+    def _persist_session(self, session: ExecutionSession) -> None:
+        if self._session_repository is None:
+            return
+        from core.execution_session_persistence import ExecutionSessionSnapshot
+
+        self._session_repository.save(ExecutionSessionSnapshot.from_session(session))

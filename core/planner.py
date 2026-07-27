@@ -67,6 +67,9 @@ class ExecutionStep:
     retry_policy: RetryPolicy | None = None
     parallel_safe: bool = False
     resource_keys: tuple[str, ...] = field(default_factory=tuple)
+    idempotent: bool = False
+    recovery_safe: bool = False
+    side_effect_free: bool = False
 
     def __init__(
         self,
@@ -87,9 +90,19 @@ class ExecutionStep:
         retry_policy: RetryPolicy | None = None,
         parallel_safe: bool = False,
         resource_keys: Sequence[str] = (),
+        idempotent: bool = False,
+        recovery_safe: bool = False,
+        side_effect_free: bool = False,
     ) -> None:
         if type(parallel_safe) is not bool:
             raise TypeError("parallel_safe must be a bool.")
+        for name, value in (
+            ("idempotent", idempotent),
+            ("recovery_safe", recovery_safe),
+            ("side_effect_free", side_effect_free),
+        ):
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be a bool.")
         dependencies_source = dependencies if depends_on is None else depends_on
         object.__setattr__(self, "id", id)
         object.__setattr__(self, "description", description)
@@ -127,6 +140,9 @@ class ExecutionStep:
             "resource_keys",
             _normalize_resource_keys(resource_keys),
         )
+        object.__setattr__(self, "idempotent", idempotent)
+        object.__setattr__(self, "recovery_safe", recovery_safe)
+        object.__setattr__(self, "side_effect_free", side_effect_free)
 
     @property
     def depends_on(self) -> tuple[str, ...]:

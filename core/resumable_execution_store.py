@@ -474,6 +474,11 @@ def _step_to_dict(
         "output_binding": _binding_to_json(step.output_binding),
         "condition": _condition_to_json(step.condition),
         "retry_policy": _retry_policy_to_json(step.retry_policy),
+        "parallel_safe": step.parallel_safe,
+        "resource_keys": list(step.resource_keys),
+        "idempotent": step.idempotent,
+        "recovery_safe": step.recovery_safe,
+        "side_effect_free": step.side_effect_free,
     }
 
 
@@ -560,6 +565,11 @@ def _dict_to_step(
         output_binding=_binding_from_json(payload.get("output_binding")),
         condition=_condition_from_json(payload.get("condition")),
         retry_policy=_retry_policy_from_json(payload.get("retry_policy")),
+        parallel_safe=_optional_bool(payload, "parallel_safe", default=False),
+        resource_keys=_optional_str_list(payload, "resource_keys", default=[]),
+        idempotent=_optional_bool(payload, "idempotent", default=False),
+        recovery_safe=_optional_bool(payload, "recovery_safe", default=False),
+        side_effect_free=_optional_bool(payload, "side_effect_free", default=False),
     )
 
 
@@ -1389,10 +1399,44 @@ def _required_bool(
     return value
 
 
+def _optional_bool(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if type(value) is not bool:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be a boolean.",
+        )
+    return value
+
+
 def _str_tuple(
     payload: dict[str, Any],
     key: str,
 ) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be a list of strings.",
+        )
+    return tuple(value)
+
+
+def _optional_str_list(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: list[str],
+) -> tuple[str, ...]:
+    if key not in payload:
+        return tuple(default)
     value = payload.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ResumableExecutionStoreError(

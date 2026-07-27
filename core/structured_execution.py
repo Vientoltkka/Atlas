@@ -31,13 +31,19 @@ from core.execution_supervisor import (
     ExecutionSession,
     ExecutionState,
     ExecutionSupervisor,
+    StepExecutionState,
 )
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
     plan_signature,
 )
-from core.planner import ExecutionPlan, PlanGenerationResult, Planner
+from core.execution_session_persistence import (
+    ExecutionRecoveryService,
+    RecoveryDecisionType,
+    RecoveryReport,
+)
+from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
 from core.resumable_execution_store import (
     ResumableExecutionStore,
     ResumableExecutionStoreError,
@@ -110,6 +116,7 @@ class StructuredExecutionCoordinator:
         dependency_resolver: ExecutionDependencyResolver | None = None,
         concurrency_policy: ExecutionConcurrencyPolicy | None = None,
         concurrent_step_executor: ConcurrentStepExecutor | None = None,
+        recovery_service: ExecutionRecoveryService | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -120,6 +127,7 @@ class StructuredExecutionCoordinator:
         self._dependency_resolver = dependency_resolver or ExecutionDependencyResolver()
         self._concurrency_policy = concurrency_policy or ExecutionConcurrencyPolicy()
         self._concurrent_step_executor = concurrent_step_executor
+        self._recovery_service = recovery_service
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -411,6 +419,143 @@ class StructuredExecutionCoordinator:
             status="resumable_execution_discarded",
             message="La ejecución pendiente fue descartada.",
             error_code=delete_error or "EXECUTION_STATE_DISCARDED",
+        )
+
+    def recover_execution_sessions(self) -> RecoveryReport | None:
+        """Restore persisted supervised sessions without executing them."""
+        if self._recovery_service is None:
+            return None
+        return self._recovery_service.recover()
+
+    def resume_recovered_session(
+        self,
+        session_id: str,
+        *,
+        control: ExecutionControl | None = None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
+    ) -> StructuredExecutionResponse:
+        """Resume one restored session only when recovery policy allows it."""
+        if self._recovery_service is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="recovery_not_configured",
+                message="La recuperacion de sesiones no esta configurada.",
+                error_code="RECOVERY_NOT_CONFIGURED",
+            )
+        decision = self._recovery_service.decision_for(session_id)
+        if decision is None:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="recovered_session_not_found",
+                message="La sesion recuperada no existe o no fue restaurada.",
+                error_code="RECOVERED_SESSION_NOT_FOUND",
+            )
+        if decision.decision is not RecoveryDecisionType.RESUME_AUTOMATICALLY:
+            return StructuredExecutionResponse(
+                handled=True,
+                status=decision.decision.value,
+                message=decision.reason,
+                error_code="RECOVERY_NOT_SAFE",
+                error=decision.reason,
+            )
+
+        session = self._execution_supervisor.get_session(session_id)
+        if session.state in {
+            ExecutionState.COMPLETED,
+            ExecutionState.FAILED,
+            ExecutionState.CANCELLED,
+            ExecutionState.WAITING_CONFIRMATION,
+        }:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="recovery_not_resumable",
+                message="La sesion recuperada no puede reanudarse en su estado actual.",
+                plan=session.active_plan,
+                error_code="RECOVERY_NOT_RESUMABLE",
+            )
+        execution_plan = self._remaining_recovery_plan(session)
+        validation = self._validator.validate(execution_plan)
+        if not validation.is_valid:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="validation_failed",
+                message=self._validation_failed_message(validation),
+                plan=execution_plan,
+                validation_result=validation,
+                error_code="INVALID_PLAN",
+                error="; ".join(validation.errors),
+            )
+        execution = self._execute_plan_under_supervision(
+            execution_plan,
+            validation,
+            confirmation_granted=False,
+            control=control,
+            on_progress=on_execution_progress,
+            session_id=session_id,
+        )
+        return self._execution_response(execution_plan, validation, execution)
+
+    def _remaining_recovery_plan(self, session: ExecutionSession) -> ExecutionPlan:
+        completed = {
+            step_id
+            for step_id, snapshot in session.step_states.items()
+            if snapshot.state is StepExecutionState.COMPLETED
+        }
+        if not completed:
+            return session.active_plan
+        remaining_steps = tuple(
+            self._copy_step_without_completed_dependencies(step, completed)
+            for step in session.active_plan.ordered_steps
+            if step.id not in completed
+        )
+        return ExecutionPlan(
+            goal=session.active_plan.goal,
+            ordered_steps=remaining_steps,
+            estimated_steps=len(remaining_steps),
+            required_tools=tuple(
+                dict.fromkeys(
+                    step.tool
+                    for step in remaining_steps
+                    if isinstance(step.tool, str)
+                )
+            ),
+            detected_risks=session.active_plan.detected_risks,
+            requires_confirmation=session.active_plan.requires_confirmation,
+            status=session.active_plan.status,
+            output=session.active_plan.output,
+            required_outputs=session.active_plan.required_outputs,
+            output_validators=session.active_plan.output_validators,
+            replanning_policy=session.active_plan.replanning_policy,
+        )
+
+    def _copy_step_without_completed_dependencies(
+        self,
+        step: ExecutionStep,
+        completed_step_ids: set[str],
+    ) -> ExecutionStep:
+        return ExecutionStep(
+            step.id,
+            step.description,
+            step.tool,
+            tuple(
+                dependency
+                for dependency in step.depends_on
+                if dependency not in completed_step_ids
+            ),
+            subplan=step.subplan,
+            subplan_ref=step.subplan_ref,
+            branch=step.branch,
+            loop=step.loop,
+            status=step.status,
+            arguments=step.arguments,
+            output_binding=step.output_binding,
+            condition=step.condition,
+            retry_policy=step.retry_policy,
+            parallel_safe=step.parallel_safe,
+            resource_keys=step.resource_keys,
+            idempotent=step.idempotent,
+            recovery_safe=step.recovery_safe,
+            side_effect_free=step.side_effect_free,
         )
 
     def resume_pending_execution(
