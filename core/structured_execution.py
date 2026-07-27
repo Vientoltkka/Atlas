@@ -595,6 +595,7 @@ class StructuredExecutionCoordinator:
             estimated_duration_seconds=step.estimated_duration_seconds,
             criticality=step.criticality,
             deadline=step.deadline,
+            resource_requirements=step.resource_requirements,
         )
 
     def resume_pending_execution(
@@ -884,8 +885,13 @@ class StructuredExecutionCoordinator:
     ) -> bool:
         return (
             self._concurrent_step_executor is not None
-            and self._concurrency_policy.enabled
-            and self._concurrency_policy.max_concurrency > 1
+            and (
+                (
+                    self._concurrency_policy.enabled
+                    and self._concurrency_policy.max_concurrency > 1
+                )
+                or self._resource_policy.enabled
+            )
             and not plan.requires_confirmation
             and not getattr(validation, "requires_confirmation", False)
         )
