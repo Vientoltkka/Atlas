@@ -59,6 +59,12 @@ class ReplanRequest:
     dependency_graph: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     batch_id: str | None = None
     errors_by_step: Mapping[str, str] = field(default_factory=dict)
+    priority_decision_id: str | None = None
+    ordered_ready_step_ids: tuple[str, ...] = ()
+    selected_step_ids: tuple[str, ...] = ()
+    priority_scores: Mapping[str, float] = field(default_factory=dict)
+    failed_step_priority: float | None = None
+    priority_rationale_summary: str | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -118,6 +124,26 @@ class ReplanRequest:
                 {
                     str(step_id): str(error)
                     for step_id, error in self.errors_by_step.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "ordered_ready_step_ids",
+            tuple(self.ordered_ready_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "selected_step_ids",
+            tuple(self.selected_step_ids),
+        )
+        object.__setattr__(
+            self,
+            "priority_scores",
+            MappingProxyType(
+                {
+                    str(step_id): float(score)
+                    for step_id, score in self.priority_scores.items()
                 }
             ),
         )

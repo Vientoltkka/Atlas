@@ -100,6 +100,7 @@ class StepExecutionSnapshot:
     state: StepExecutionState
     dependency_ids: tuple[str, ...] = ()
     error: str | None = None
+    ready_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.step_id.strip():
@@ -131,6 +132,9 @@ class ExecutionSession:
     active_step_ids: tuple[str, ...] = ()
     last_batch_result: Any | None = None
     batch_history: tuple[Any, ...] = ()
+    last_priority_decision: Any | None = None
+    priority_history: tuple[Any, ...] = ()
+    max_priority_history_entries: int = 100
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -156,6 +160,9 @@ class ExecutionSession:
         object.__setattr__(self, "replan_history", tuple(self.replan_history))
         object.__setattr__(self, "active_step_ids", tuple(self.active_step_ids))
         object.__setattr__(self, "batch_history", tuple(self.batch_history))
+        object.__setattr__(self, "priority_history", tuple(self.priority_history))
+        if self.max_priority_history_entries < 1:
+            raise ValueError("max_priority_history_entries must be greater than zero.")
         if self.replan_count < 0:
             raise ValueError("replan_count cannot be negative.")
         if self.replan_count != len(self.replan_history):
@@ -727,6 +734,64 @@ class ExecutionSupervisor:
             batch_id=batch_id,
         )
 
+    def record_priority_decision(
+        self,
+        session_id: str,
+        decision: Any,
+    ) -> ExecutionSession:
+        """Record a ready-step priority decision without computing it."""
+        ordered_step_ids = tuple(getattr(decision, "ordered_step_ids", ()))
+        selected_step_ids = tuple(getattr(decision, "selected_step_ids", ()))
+        scores = tuple(getattr(decision, "scores", ()))
+        details = {
+            "step_ids": list(ordered_step_ids),
+            "selected_step_ids": list(selected_step_ids),
+            "policy_name": getattr(decision, "policy_name", None),
+            "score": (
+                getattr(scores[0], "final_score", None)
+                if scores
+                else None
+            ),
+            "reason": getattr(decision, "rationale_summary", None),
+        }
+        event_type = (
+            "priority_policy_disabled"
+            if getattr(decision, "rationale_summary", None) == "priority policy disabled"
+            else "ready_steps_prioritized"
+        )
+        with self._lock:
+            session = self.get_session(session_id)
+            history = session.priority_history + (decision,)
+            history = history[-session.max_priority_history_entries :]
+            updated = replace(
+                session,
+                last_priority_decision=decision,
+                priority_history=history,
+            )
+            updated = self._with_event(updated, event_type, details=details)
+            if selected_step_ids:
+                updated = self._with_event(
+                    updated,
+                    "priority_step_selected"
+                    if len(selected_step_ids) == 1
+                    else "priority_batch_selected",
+                    details=details,
+                )
+            if getattr(decision, "tie_breaker_used", None):
+                updated = self._with_event(
+                    updated,
+                    "priority_tie_resolved",
+                    details={
+                        "step_ids": list(ordered_step_ids),
+                        "selected_step_ids": list(selected_step_ids),
+                        "policy_name": getattr(decision, "policy_name", None),
+                        "reason": getattr(decision, "tie_breaker_used", None),
+                    },
+                )
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
     def mark_completed(
         self,
         session_id: str,
@@ -960,7 +1025,14 @@ class ExecutionSupervisor:
                 state=state,
                 dependency_ids=dependency_ids,
                 error=error,
+                ready_since=(
+                    session.step_states.get(step_id).ready_since
+                    if step_id in session.step_states
+                    else None
+                ),
             )
+            if state is StepExecutionState.READY and snapshot.ready_since is None:
+                snapshot = replace(snapshot, ready_since=self._clock())
             step_states = dict(session.step_states)
             step_states[step_id] = snapshot
             updated = replace(

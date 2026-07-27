@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import Enum
+import math
 import json
 import re
 from types import MappingProxyType
@@ -70,6 +72,12 @@ class ExecutionStep:
     idempotent: bool = False
     recovery_safe: bool = False
     side_effect_free: bool = False
+    priority: int = 0
+    urgency: int = 0
+    estimated_cost: float | None = None
+    estimated_duration_seconds: float | None = None
+    criticality: int = 0
+    deadline: datetime | None = None
 
     def __init__(
         self,
@@ -93,6 +101,12 @@ class ExecutionStep:
         idempotent: bool = False,
         recovery_safe: bool = False,
         side_effect_free: bool = False,
+        priority: int = 0,
+        urgency: int = 0,
+        estimated_cost: float | None = None,
+        estimated_duration_seconds: float | None = None,
+        criticality: int = 0,
+        deadline: datetime | None = None,
     ) -> None:
         if type(parallel_safe) is not bool:
             raise TypeError("parallel_safe must be a bool.")
@@ -103,6 +117,25 @@ class ExecutionStep:
         ):
             if type(value) is not bool:
                 raise TypeError(f"{name} must be a bool.")
+        for name, value in (
+            ("priority", priority),
+            ("urgency", urgency),
+            ("criticality", criticality),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int.")
+        for name, value in (
+            ("estimated_cost", estimated_cost),
+            ("estimated_duration_seconds", estimated_duration_seconds),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a finite non-negative number or None.")
+            if not math.isfinite(float(value)) or float(value) < 0:
+                raise ValueError(f"{name} must be finite and non-negative.")
+        if deadline is not None and not isinstance(deadline, datetime):
+            raise TypeError("deadline must be a datetime or None.")
         dependencies_source = dependencies if depends_on is None else depends_on
         object.__setattr__(self, "id", id)
         object.__setattr__(self, "description", description)
@@ -143,6 +176,22 @@ class ExecutionStep:
         object.__setattr__(self, "idempotent", idempotent)
         object.__setattr__(self, "recovery_safe", recovery_safe)
         object.__setattr__(self, "side_effect_free", side_effect_free)
+        object.__setattr__(self, "priority", priority)
+        object.__setattr__(self, "urgency", urgency)
+        object.__setattr__(self, "criticality", criticality)
+        object.__setattr__(
+            self,
+            "estimated_cost",
+            None if estimated_cost is None else float(estimated_cost),
+        )
+        object.__setattr__(
+            self,
+            "estimated_duration_seconds",
+            None
+            if estimated_duration_seconds is None
+            else float(estimated_duration_seconds),
+        )
+        object.__setattr__(self, "deadline", deadline)
 
     @property
     def depends_on(self) -> tuple[str, ...]:
@@ -1021,6 +1070,12 @@ class Planner:
         tool = payload.get("tool")
         arguments = payload.get("arguments", {})
         dependencies = payload.get("dependencies", [])
+        priority = payload.get("priority", 0)
+        urgency = payload.get("urgency", 0)
+        criticality = payload.get("criticality", 0)
+        estimated_cost = payload.get("estimated_cost")
+        estimated_duration_seconds = payload.get("estimated_duration_seconds")
+        deadline = payload.get("deadline")
         if not isinstance(description, str) or not description.strip():
             raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' description must be a non-empty string.")
         if tool is not None and not isinstance(tool, str):
@@ -1038,6 +1093,14 @@ class Planner:
             ) from error
         if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
             raise PlannerPayloadError(PlannerErrorCode.INVALID_STEP_REFERENCE.value, f"Step '{step_id}' dependencies must be a list of strings.")
+        parsed_deadline = None
+        if deadline is not None:
+            if not isinstance(deadline, str):
+                raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' deadline must be a string or null.")
+            try:
+                parsed_deadline = datetime.fromisoformat(deadline)
+            except ValueError as error:
+                raise PlannerPayloadError(PlannerErrorCode.INVALID_PLAN_RESPONSE.value, f"Step '{step_id}' deadline must be a valid ISO timestamp.") from error
 
         return ExecutionStep(
             id=step_id,
@@ -1046,6 +1109,12 @@ class Planner:
             dependencies=tuple(dependencies),
             status="pending",
             arguments=normalized_arguments,
+            priority=priority,
+            urgency=urgency,
+            criticality=criticality,
+            estimated_cost=estimated_cost,
+            estimated_duration_seconds=estimated_duration_seconds,
+            deadline=parsed_deadline,
         )
 
     def _is_architecture_query(

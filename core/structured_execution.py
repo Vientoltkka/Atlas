@@ -38,6 +38,7 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_priority import ExecutionPriorityPolicy, ReadyStepPrioritizer
 from core.execution_session_persistence import (
     ExecutionRecoveryService,
     RecoveryDecisionType,
@@ -117,6 +118,9 @@ class StructuredExecutionCoordinator:
         concurrency_policy: ExecutionConcurrencyPolicy | None = None,
         concurrent_step_executor: ConcurrentStepExecutor | None = None,
         recovery_service: ExecutionRecoveryService | None = None,
+        priority_policy: ExecutionPriorityPolicy | None = None,
+        ready_step_prioritizer: ReadyStepPrioritizer | None = None,
+        priority_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -128,6 +132,12 @@ class StructuredExecutionCoordinator:
         self._concurrency_policy = concurrency_policy or ExecutionConcurrencyPolicy()
         self._concurrent_step_executor = concurrent_step_executor
         self._recovery_service = recovery_service
+        self._priority_policy = priority_policy or ExecutionPriorityPolicy()
+        self._ready_step_prioritizer = (
+            ready_step_prioritizer
+            or ReadyStepPrioritizer(self._priority_policy)
+        )
+        self._priority_clock = priority_clock or (lambda: datetime.now(timezone.utc))
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -556,6 +566,12 @@ class StructuredExecutionCoordinator:
             idempotent=step.idempotent,
             recovery_safe=step.recovery_safe,
             side_effect_free=step.side_effect_free,
+            priority=step.priority,
+            urgency=step.urgency,
+            estimated_cost=step.estimated_cost,
+            estimated_duration_seconds=step.estimated_duration_seconds,
+            criticality=step.criticality,
+            deadline=step.deadline,
         )
 
     def resume_pending_execution(
@@ -945,6 +961,14 @@ class StructuredExecutionCoordinator:
                     finished_at=_utc_iso(),
                 )
 
+            ready_steps = list(
+                self._prioritize_ready_steps(
+                    session_id,
+                    plan,
+                    tuple(ready_steps),
+                    completed_step_ids=tuple(completed),
+                )
+            )
             batch_number += 1
             batch = build_execution_batch(
                 ready_steps,
@@ -1125,6 +1149,47 @@ class StructuredExecutionCoordinator:
 
         self._finalize_supervised_session(session.session_id, execution)
         return execution
+
+    def _prioritize_ready_steps(
+        self,
+        session_id: str,
+        plan: ExecutionPlan,
+        ready_steps: tuple[ExecutionStep, ...],
+        *,
+        completed_step_ids: tuple[str, ...],
+    ) -> tuple[ExecutionStep, ...]:
+        session = self._execution_supervisor.get_session(session_id)
+        ready_since = {
+            step_id: snapshot.ready_since
+            for step_id, snapshot in session.step_states.items()
+            if snapshot.ready_since is not None
+        }
+        for step in ready_steps:
+            self._execution_supervisor.mark_step_ready(
+                session_id,
+                step.id,
+                dependency_ids=tuple(step.depends_on),
+            )
+        session = self._execution_supervisor.get_session(session_id)
+        ready_since = {
+            step_id: snapshot.ready_since
+            for step_id, snapshot in session.step_states.items()
+            if snapshot.ready_since is not None
+        }
+        decision = self._ready_step_prioritizer.prioritize(
+            ready_steps,
+            plan=plan,
+            completed_step_ids=completed_step_ids,
+            ready_since_by_step_id=ready_since,
+            now=self._priority_clock(),
+        )
+        self._execution_supervisor.record_priority_decision(session_id, decision)
+        return tuple(
+            step
+            for step_id in decision.ordered_step_ids
+            for step in ready_steps
+            if step.id == step_id
+        )
 
     def _record_dependency_graph_state(
         self,
@@ -1416,6 +1481,40 @@ class StructuredExecutionCoordinator:
             }
             if isinstance(execution.metadata.get("errors_by_step"), dict)
             else {},
+            priority_decision_id=(
+                f"{session.session_id}.priority.{len(session.priority_history):06d}"
+                if session.last_priority_decision is not None
+                else None
+            ),
+            ordered_ready_step_ids=tuple(
+                getattr(session.last_priority_decision, "ordered_step_ids", ())
+            ),
+            selected_step_ids=tuple(
+                getattr(session.last_priority_decision, "selected_step_ids", ())
+            ),
+            priority_scores={
+                score.step_id: float(score.final_score)
+                for score in getattr(session.last_priority_decision, "scores", ())
+            },
+            failed_step_priority=(
+                next(
+                    (
+                        float(score.final_score)
+                        for score in getattr(
+                            session.last_priority_decision,
+                            "scores",
+                            (),
+                        )
+                        if score.step_id == (execution.current_step or execution.failed_step)
+                    ),
+                    None,
+                )
+            ),
+            priority_rationale_summary=getattr(
+                session.last_priority_decision,
+                "rationale_summary",
+                None,
+            ),
             attempt_number=attempt_number,
             max_attempts=self._replan_policy.max_replans_per_session,
         )

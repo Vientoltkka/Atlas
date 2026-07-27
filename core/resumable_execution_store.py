@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Protocol
@@ -479,6 +480,12 @@ def _step_to_dict(
         "idempotent": step.idempotent,
         "recovery_safe": step.recovery_safe,
         "side_effect_free": step.side_effect_free,
+        "priority": step.priority,
+        "urgency": step.urgency,
+        "criticality": step.criticality,
+        "estimated_cost": step.estimated_cost,
+        "estimated_duration_seconds": step.estimated_duration_seconds,
+        "deadline": step.deadline.isoformat() if step.deadline is not None else None,
     }
 
 
@@ -570,6 +577,12 @@ def _dict_to_step(
         idempotent=_optional_bool(payload, "idempotent", default=False),
         recovery_safe=_optional_bool(payload, "recovery_safe", default=False),
         side_effect_free=_optional_bool(payload, "side_effect_free", default=False),
+        priority=_optional_int_with_default(payload, "priority", default=0),
+        urgency=_optional_int_with_default(payload, "urgency", default=0),
+        criticality=_optional_int_with_default(payload, "criticality", default=0),
+        estimated_cost=_optional_float(payload, "estimated_cost"),
+        estimated_duration_seconds=_optional_float(payload, "estimated_duration_seconds"),
+        deadline=_optional_datetime(payload, "deadline"),
     )
 
 
@@ -1384,6 +1397,65 @@ def _optional_int(
             f"Execution state field '{key}' must be an integer or null.",
         )
     return value
+
+
+def _optional_int_with_default(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be an integer.",
+        )
+    return value
+
+
+def _optional_float(
+    payload: dict[str, Any],
+    key: str,
+) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be a finite non-negative number or null.",
+        )
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be finite and non-negative.",
+        )
+    return result
+
+
+def _optional_datetime(
+    payload: dict[str, Any],
+    key: str,
+) -> datetime | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be a timestamp or null.",
+        )
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ResumableExecutionStoreError(
+            "EXECUTION_STATE_INVALID",
+            f"Execution state field '{key}' must be a valid timestamp.",
+        ) from error
 
 
 def _required_bool(

@@ -168,6 +168,7 @@ class ExecutionPlanValidator:
         self._validate_arguments(plan, errors)
         self._validate_tool_argument_schemas(plan, errors)
         self._validate_dependencies(plan, errors)
+        self._validate_priority_metadata(plan, errors)
         self._validate_topology(plan, errors)
         self._validate_plan_output(plan, errors)
         self._validate_goal_outputs(plan, errors)
@@ -850,6 +851,33 @@ class ExecutionPlanValidator:
         except ValueError as error:
             errors.append(f"ExecutionPlanTopologyError: {error}.")
 
+    def _validate_priority_metadata(
+        self,
+        plan: ExecutionPlan,
+        errors: list[str],
+    ) -> None:
+        for step in plan.ordered_steps:
+            for name in ("priority", "urgency", "criticality"):
+                value = getattr(step, name, 0)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    errors.append(f"Step '{step.id}' {name} must be an integer.")
+            for name in ("estimated_cost", "estimated_duration_seconds"):
+                value = getattr(step, name, None)
+                if value is None:
+                    continue
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or float(value) < 0
+                ):
+                    errors.append(
+                        f"Step '{step.id}' {name} must be finite and non-negative."
+                    )
+            deadline = getattr(step, "deadline", None)
+            if deadline is not None and not hasattr(deadline, "isoformat"):
+                errors.append(f"Step '{step.id}' deadline must be a datetime or None.")
+
     def _validate_confirmation(
         self,
         plan: ExecutionPlan,
@@ -1176,6 +1204,20 @@ def plan_signature(
                 "idempotent": bool(getattr(step, "idempotent", False)),
                 "recovery_safe": bool(getattr(step, "recovery_safe", False)),
                 "side_effect_free": bool(getattr(step, "side_effect_free", False)),
+                "priority": getattr(step, "priority", 0),
+                "urgency": getattr(step, "urgency", 0),
+                "criticality": getattr(step, "criticality", 0),
+                "estimated_cost": getattr(step, "estimated_cost", None),
+                "estimated_duration_seconds": getattr(
+                    step,
+                    "estimated_duration_seconds",
+                    None,
+                ),
+                "deadline": (
+                    step.deadline.isoformat()
+                    if getattr(step, "deadline", None) is not None
+                    else None
+                ),
             }
             for step in plan.ordered_steps
         ],
@@ -1243,6 +1285,20 @@ def _signature_safe_value(
                     "idempotent": bool(getattr(step, "idempotent", False)),
                     "recovery_safe": bool(getattr(step, "recovery_safe", False)),
                     "side_effect_free": bool(getattr(step, "side_effect_free", False)),
+                    "priority": getattr(step, "priority", 0),
+                    "urgency": getattr(step, "urgency", 0),
+                    "criticality": getattr(step, "criticality", 0),
+                    "estimated_cost": getattr(step, "estimated_cost", None),
+                    "estimated_duration_seconds": getattr(
+                        step,
+                        "estimated_duration_seconds",
+                        None,
+                    ),
+                    "deadline": (
+                        step.deadline.isoformat()
+                        if getattr(step, "deadline", None) is not None
+                        else None
+                    ),
                 }
                 for step in value.ordered_steps
             ],

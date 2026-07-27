@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,11 @@ from core.concurrent_step_executor import (
     ExecutionBatchResult,
 )
 from core.execution_dependency_resolver import ExecutionDependencyResolver
+from core.execution_priority import (
+    MAX_PRIORITY_HISTORY_ENTRIES,
+    PriorityDecision,
+    PriorityScore,
+)
 from core.execution_plan_topology import ExecutionPlanTopologyError
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.execution_supervisor import (
@@ -125,6 +131,8 @@ class ExecutionSessionSnapshot:
     active_batch_id: str | None
     active_step_ids: tuple[str, ...]
     batch_history: tuple[ExecutionBatchResult, ...]
+    last_priority_decision: PriorityDecision | None
+    priority_history: tuple[PriorityDecision, ...]
     created_at: datetime
     updated_at: datetime
     recovery_metadata: MappingProxyType
@@ -144,6 +152,7 @@ class ExecutionSessionSnapshot:
         )
         object.__setattr__(self, "active_step_ids", tuple(self.active_step_ids))
         object.__setattr__(self, "batch_history", tuple(self.batch_history))
+        object.__setattr__(self, "priority_history", tuple(self.priority_history))
         object.__setattr__(
             self,
             "recovery_metadata",
@@ -202,6 +211,16 @@ class ExecutionSessionSnapshot:
                 for item in session.batch_history
                 if isinstance(item, ExecutionBatchResult)
             ),
+            last_priority_decision=(
+                session.last_priority_decision
+                if isinstance(session.last_priority_decision, PriorityDecision)
+                else None
+            ),
+            priority_history=tuple(
+                item
+                for item in session.priority_history
+                if isinstance(item, PriorityDecision)
+            ),
             created_at=created_at or session.started_at,
             updated_at=now,
             recovery_metadata=recovery_metadata or {},
@@ -220,6 +239,7 @@ class ExecutionSessionSnapshot:
                         state=StepExecutionState.INTERRUPTED,
                         dependency_ids=snapshot.dependency_ids,
                         error=snapshot.error or "interrupted during recovery",
+                        ready_since=snapshot.ready_since,
                     )
                     if snapshot.state is StepExecutionState.RUNNING
                     else snapshot
@@ -243,6 +263,9 @@ class ExecutionSessionSnapshot:
             active_batch_id=self.active_batch_id,
             active_step_ids=self.active_step_ids,
             batch_history=self.batch_history,
+            last_priority_decision=self.last_priority_decision,
+            priority_history=self.priority_history,
+            max_priority_history_entries=MAX_PRIORITY_HISTORY_ENTRIES,
         )
 
 
@@ -580,6 +603,13 @@ def snapshot_to_dict(snapshot: ExecutionSessionSnapshot) -> dict[str, Any]:
         "active_batch_id": snapshot.active_batch_id,
         "active_step_ids": list(snapshot.active_step_ids),
         "batch_history": [_batch_result_to_json(item) for item in snapshot.batch_history],
+        "last_priority_decision": _priority_decision_to_json(
+            snapshot.last_priority_decision
+        ),
+        "priority_history": [
+            _priority_decision_to_json(item)
+            for item in snapshot.priority_history
+        ],
         "created_at": _datetime_to_json(snapshot.created_at),
         "updated_at": _datetime_to_json(snapshot.updated_at),
         "recovery_metadata": _safe_mapping(snapshot.recovery_metadata),
@@ -632,6 +662,17 @@ def snapshot_from_dict(payload: Any) -> ExecutionSessionSnapshot:
         batch_history=tuple(
             _batch_result_from_json(item)
             for item in _required_list(payload, "batch_history")
+        ),
+        last_priority_decision=_priority_decision_from_json(
+            payload.get("last_priority_decision")
+        ),
+        priority_history=tuple(
+            decision
+            for decision in (
+                _priority_decision_from_json(item)
+                for item in payload.get("priority_history", [])
+            )
+            if decision is not None
         ),
         created_at=_datetime_from_json(_required_str(payload, "created_at"), "created_at"),
         updated_at=_datetime_from_json(_required_str(payload, "updated_at"), "updated_at"),
@@ -758,6 +799,7 @@ def _step_state_to_json(snapshot: StepExecutionSnapshot) -> dict[str, Any]:
         "state": snapshot.state.value,
         "dependency_ids": list(snapshot.dependency_ids),
         "error": snapshot.error,
+        "ready_since": _datetime_to_json(snapshot.ready_since),
     }
 
 
@@ -773,6 +815,79 @@ def _step_state_from_json(payload: Any) -> StepExecutionSnapshot:
         ),
         dependency_ids=_str_tuple(payload, "dependency_ids"),
         error=_optional_str(payload, "error"),
+        ready_since=_optional_datetime(payload, "ready_since"),
+    )
+
+
+def _priority_decision_to_json(
+    decision: PriorityDecision | None,
+) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "ordered_step_ids": list(decision.ordered_step_ids),
+        "scores": [_priority_score_to_json(score) for score in decision.scores],
+        "selected_step_ids": list(decision.selected_step_ids),
+        "policy_name": decision.policy_name,
+        "generated_at": _datetime_to_json(decision.generated_at),
+        "tie_breaker_used": decision.tie_breaker_used,
+        "rationale_summary": decision.rationale_summary,
+    }
+
+
+def _priority_decision_from_json(payload: Any) -> PriorityDecision | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Priority decision must be an object.")
+    return PriorityDecision(
+        ordered_step_ids=_str_tuple(payload, "ordered_step_ids"),
+        scores=tuple(
+            _priority_score_from_json(item)
+            for item in _required_list(payload, "scores")
+        ),
+        selected_step_ids=_str_tuple(payload, "selected_step_ids"),
+        policy_name=_required_str(payload, "policy_name"),
+        generated_at=_datetime_from_json(
+            _required_str(payload, "generated_at"),
+            "generated_at",
+        ),
+        tie_breaker_used=_optional_str(payload, "tie_breaker_used"),
+        rationale_summary=_required_str(payload, "rationale_summary"),
+    )
+
+
+def _priority_score_to_json(score: PriorityScore) -> dict[str, Any]:
+    return {
+        "step_id": score.step_id,
+        "declared_priority": score.declared_priority,
+        "urgency_score": score.urgency_score,
+        "criticality_score": score.criticality_score,
+        "deadline_score": score.deadline_score,
+        "dependency_impact_score": score.dependency_impact_score,
+        "age_score": score.age_score,
+        "cost_penalty": score.cost_penalty,
+        "duration_penalty": score.duration_penalty,
+        "risk_penalty": score.risk_penalty,
+        "final_score": score.final_score,
+    }
+
+
+def _priority_score_from_json(payload: Any) -> PriorityScore:
+    if not isinstance(payload, dict):
+        raise ExecutionSnapshotCorruptedError("Priority score must be an object.")
+    return PriorityScore(
+        step_id=_required_str(payload, "step_id"),
+        declared_priority=_required_int(payload, "declared_priority"),
+        urgency_score=_required_number(payload, "urgency_score"),
+        criticality_score=_required_number(payload, "criticality_score"),
+        deadline_score=_required_number(payload, "deadline_score"),
+        dependency_impact_score=_required_number(payload, "dependency_impact_score"),
+        age_score=_required_number(payload, "age_score"),
+        cost_penalty=_required_number(payload, "cost_penalty"),
+        duration_penalty=_required_number(payload, "duration_penalty"),
+        risk_penalty=_required_number(payload, "risk_penalty"),
+        final_score=_required_number(payload, "final_score"),
     )
 
 
@@ -1014,6 +1129,16 @@ def _required_int(payload: dict[str, Any], key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ExecutionSnapshotCorruptedError(f"{key} must be an integer.")
     return value
+
+
+def _required_number(payload: dict[str, Any], key: str) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ExecutionSnapshotCorruptedError(f"{key} must be a number.")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ExecutionSnapshotCorruptedError(f"{key} must be finite.")
+    return result
 
 
 def _required_bool(payload: dict[str, Any], key: str) -> bool:
