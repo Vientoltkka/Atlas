@@ -15,6 +15,7 @@ from core.execution_plan_executor import (
     PlanExecutionStatus,
     ResumableExecutionState,
 )
+from core.execution_supervisor import ExecutionSession, ExecutionSupervisor
 from core.execution_plan_validator import (
     ExecutionPlanValidator,
     PlanValidationResult,
@@ -63,6 +64,7 @@ class PendingStructuredExecution:
 @dataclass(frozen=True, slots=True)
 class _PendingPlan:
     execution: PendingStructuredExecution
+    session_id: str | None = None
 
 
 class StructuredExecutionCoordinator:
@@ -74,10 +76,12 @@ class StructuredExecutionCoordinator:
         validator: ExecutionPlanValidator,
         executor: ExecutionPlanExecutor,
         resumable_store: ResumableExecutionStore | None = None,
+        execution_supervisor: ExecutionSupervisor | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
         self._executor = executor
+        self._execution_supervisor = execution_supervisor or ExecutionSupervisor()
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -141,7 +145,13 @@ class StructuredExecutionCoordinator:
             )
 
         if validation.requires_confirmation and not confirmation_granted:
-            token = self._store_pending_plan(objective, generation.plan, validation)
+            session = self._start_waiting_confirmation_session(generation.plan)
+            token = self._store_pending_plan(
+                objective,
+                generation.plan,
+                validation,
+                session.session_id,
+            )
             return StructuredExecutionResponse(
                 handled=True,
                 status="confirmation_required",
@@ -163,7 +173,7 @@ class StructuredExecutionCoordinator:
                 requires_confirmation=False,
             )
 
-        execution = self._executor.execute(
+        execution = self._execute_plan_under_supervision(
             generation.plan,
             validation,
             confirmation_granted=confirmation_granted,
@@ -207,6 +217,10 @@ class StructuredExecutionCoordinator:
             )
 
         if objective is not None and objective != pending.objective:
+            self._cancel_pending_session(
+                pending_record,
+                "objective changed after validation",
+            )
             self._discard_pending(confirmation_token)
             return StructuredExecutionResponse(
                 handled=True,
@@ -221,6 +235,10 @@ class StructuredExecutionCoordinator:
 
         current_signature = plan_signature(pending.plan)
         if current_signature != pending.validation_result.plan_signature:
+            self._cancel_pending_session(
+                pending_record,
+                "plan signature changed after validation",
+            )
             self._discard_pending(confirmation_token)
             return StructuredExecutionResponse(
                 handled=True,
@@ -234,12 +252,13 @@ class StructuredExecutionCoordinator:
             )
 
         self._discard_pending(confirmation_token)
-        execution = self._executor.execute(
+        execution = self._execute_plan_under_supervision(
             pending.plan,
             pending.validation_result,
             confirmation_granted=True,
             control=control,
             on_progress=on_execution_progress,
+            session_id=pending_record.session_id,
         )
 
         response = self._execution_response(
@@ -377,7 +396,7 @@ class StructuredExecutionCoordinator:
                 error="could not claim persisted resumable execution state",
             )
 
-        execution = self._executor.resume(
+        execution = self._resume_under_supervision(
             state,
             confirmation_granted=confirmation_granted,
             control=control,
@@ -437,9 +456,11 @@ class StructuredExecutionCoordinator:
                 error="no pending structured execution",
             )
 
+        pending_record = self._pending_plans.get(pending.confirmation_token)
         self._discard_pending(pending.confirmation_token)
         self._resumable_execution = None
         delete_error = self._delete_persisted_resumable_state()
+        self._cancel_pending_session(pending_record, "pending execution cancelled")
         return StructuredExecutionResponse(
             handled=True,
             status="pending_execution_cancelled",
@@ -515,9 +536,12 @@ class StructuredExecutionCoordinator:
         objective: str,
         plan: ExecutionPlan,
         validation: PlanValidationResult,
+        session_id: str | None = None,
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
         if self._active_confirmation_token is not None:
+            previous = self._pending_plans.get(self._active_confirmation_token)
+            self._cancel_pending_session(previous, "pending execution replaced")
             self._discard_pending(self._active_confirmation_token)
         summary = self._pending_summary(plan)
         self._pending_plans[token] = _PendingPlan(
@@ -530,7 +554,8 @@ class StructuredExecutionCoordinator:
                 summary=summary,
                 risks=list(plan.detected_risks),
                 required_tools=list(plan.required_tools),
-            )
+            ),
+            session_id=session_id,
         )
         self._active_confirmation_token = token
         return token
@@ -542,6 +567,135 @@ class StructuredExecutionCoordinator:
         self._pending_plans.pop(confirmation_token, None)
         if self._active_confirmation_token == confirmation_token:
             self._active_confirmation_token = None
+
+    def _start_waiting_confirmation_session(
+        self,
+        plan: ExecutionPlan,
+    ) -> ExecutionSession:
+        session = self._execution_supervisor.start(plan)
+        session = self._execution_supervisor.mark_running(session.session_id)
+        return self._execution_supervisor.mark_waiting_confirmation(session.session_id)
+
+    def _execute_plan_under_supervision(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        *,
+        confirmation_granted: bool,
+        control: ExecutionControl | None = None,
+        on_progress: Callable[[ExecutionProgress], None] | None = None,
+        session_id: str | None = None,
+    ) -> PlanExecutionResult:
+        session = (
+            self._execution_supervisor.get_session(session_id)
+            if session_id is not None
+            else self._execution_supervisor.start(plan)
+        )
+        session = self._execution_supervisor.mark_running(session.session_id)
+        try:
+            execution = self._executor.execute(
+                plan,
+                validation,
+                confirmation_granted=confirmation_granted,
+                control=control,
+                on_progress=on_progress,
+            )
+        except Exception as error:
+            self._execution_supervisor.mark_failed(session.session_id, error)
+            raise
+
+        self._finalize_supervised_session(session.session_id, execution)
+        return execution
+
+    def _resume_under_supervision(
+        self,
+        state: ResumableExecutionState,
+        *,
+        confirmation_granted: bool,
+        control: ExecutionControl | None = None,
+        on_progress: Callable[[ExecutionProgress], None] | None = None,
+    ) -> PlanExecutionResult:
+        session = self._execution_supervisor.start(state.original_plan)
+        session = self._execution_supervisor.mark_running(session.session_id)
+        try:
+            execution = self._executor.resume(
+                state,
+                confirmation_granted=confirmation_granted,
+                control=control,
+                on_progress=on_progress,
+            )
+        except Exception as error:
+            self._execution_supervisor.mark_failed(session.session_id, error)
+            raise
+
+        self._finalize_supervised_session(session.session_id, execution)
+        return execution
+
+    def _finalize_supervised_session(
+        self,
+        session_id: str,
+        execution: PlanExecutionResult,
+    ) -> None:
+        current_step = execution.current_step or execution.failed_step
+        results = self._supervisor_results(execution)
+        if execution.success:
+            self._execution_supervisor.mark_completed(
+                session_id,
+                current_step=current_step,
+                results=results,
+            )
+            return
+
+        if execution.plan_status == PlanExecutionStatus.CANCELLED.value:
+            self._execution_supervisor.mark_cancelled(
+                session_id,
+                error=execution.interruption_reason or execution.error,
+                current_step=current_step,
+                results=results,
+            )
+            return
+
+        if execution.plan_status == PlanExecutionStatus.BLOCKED_CONFIRMATION.value:
+            self._execution_supervisor.mark_waiting_confirmation(
+                session_id,
+                current_step=current_step,
+            )
+            return
+
+        self._execution_supervisor.mark_failed(
+            session_id,
+            execution.error
+            or execution.failure_reason
+            or execution.error_code
+            or execution.plan_status,
+            current_step=current_step,
+            results=results,
+        )
+
+    def _cancel_pending_session(
+        self,
+        pending_record: _PendingPlan | None,
+        reason: str,
+    ) -> None:
+        if pending_record is None or pending_record.session_id is None:
+            return
+        self._execution_supervisor.mark_cancelled(
+            pending_record.session_id,
+            error=reason,
+        )
+
+    def _supervisor_results(
+        self,
+        execution: PlanExecutionResult,
+    ) -> dict[str, object]:
+        return {
+            "plan_status": execution.plan_status,
+            "completed_steps": tuple(execution.completed_steps),
+            "failed_steps": tuple(execution.failed_steps),
+            "blocked_steps": tuple(execution.blocked_steps),
+            "skipped_steps": tuple(execution.skipped_steps),
+            "error_code": execution.error_code,
+        }
 
     def _execution_response(
         self,
