@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+import inspect
 import re
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -23,7 +24,21 @@ from core.operational_request_router import (
     RouteDecision,
     SystemCommand,
 )
+from core.operational_context import (
+    OperationalContext,
+    OperationalContextBuilder,
+    OperationalContextError,
+)
+from core.execution_memory_recorder import ExecutionMemoryRecorder
 from core.request_gateway import AtlasRequest, RequestSource
+from memory.operational import (
+    AmbiguousMemoryMatchError,
+    InvalidMemoryEntryError,
+    MemoryCategory,
+    MemoryEntry,
+    MemoryEntryNotFoundError,
+    SensitiveMemoryRejectedError,
+)
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from tools.single_tool_runner import SingleToolRunner, ToolRunResult
@@ -192,6 +207,7 @@ class AgentDelegationRequest:
     attachments: tuple[Mapping[str, Any], ...]
     locale: str
     safety_context: Mapping[str, Any]
+    operational_context: OperationalContext | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _freeze_mapping(self.context))
@@ -340,6 +356,14 @@ class DirectResponseRouteHandler(_BaseRouteHandler):
         self._responder = responder
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
+        return self.execute_with_context(request, decision, None)
+
+    def execute_with_context(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        context: OperationalContext | None,
+    ) -> RouteExecutionResult:
         started = self._clock()
         if self._responder is None:
             error = RouteHandlerNotConfiguredError(
@@ -359,7 +383,7 @@ class DirectResponseRouteHandler(_BaseRouteHandler):
                 action="route_execution_failed",
             )
         try:
-            output = self._responder(request)
+            output = _invoke_contextual_callable(self._responder, request, context)
         except Exception as cause:
             return self._failure(request, decision, started, "direct_response", cause)
         return self._result(
@@ -410,6 +434,15 @@ class MemoryRouteHandler(_BaseRouteHandler):
         self._memory = memory
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
+        return self.execute_with_context(request, decision, None)
+
+    def execute_with_context(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        context: OperationalContext | None,
+    ) -> RouteExecutionResult:
+        del context
         started = self._clock()
         operation = decision.memory_operation
         if operation is None:
@@ -424,10 +457,32 @@ class MemoryRouteHandler(_BaseRouteHandler):
         if self._memory is None:
             return self._unsupported(request, decision, started, operation)
         if operation is MemoryOperation.STORE:
-            add_user = getattr(self._memory, "add_user", None)
+            store_entry = getattr(self._memory, "store_entry", None)
             content = _memory_content(request)
-            if not callable(add_user):
-                return self._unsupported(request, decision, started, operation)
+            if not callable(store_entry):
+                add_user = getattr(self._memory, "add_user", None)
+                if not callable(add_user):
+                    return self._unsupported(request, decision, started, operation)
+                if not content:
+                    return _clarification_result(
+                        self,
+                        request,
+                        decision,
+                        started,
+                        "Que informacion quieres que recuerde?",
+                        ("memory_content",),
+                    )
+                add_user(content)
+                return self._result(
+                    request,
+                    decision,
+                    started_at=started,
+                    status=RouteExecutionStatus.COMPLETED,
+                    output={"operation": operation.value, "stored": True},
+                    side_effects_performed=True,
+                    target=operation.value,
+                    action="route_execution_completed",
+                )
             if not content:
                 return _clarification_result(
                     self,
@@ -437,31 +492,295 @@ class MemoryRouteHandler(_BaseRouteHandler):
                     "Que informacion quieres que recuerde?",
                     ("memory_content",),
                 )
-            add_user(content)
+            try:
+                entry = store_entry(
+                    content,
+                    category=_memory_category(request),
+                    source_request_id=request.request_id,
+                    user_id=request.user_id,
+                    conversation_id=request.conversation_id,
+                    importance=_memory_importance(request),
+                    tags=_memory_tags(request),
+                    sensitive=bool(request.metadata.get("sensitive", False)),
+                    expires_at=_memory_expires_at(request),
+                    metadata=_memory_safe_metadata(request),
+                )
+            except (InvalidMemoryEntryError, SensitiveMemoryRejectedError) as cause:
+                return self._memory_failure(
+                    request,
+                    decision,
+                    started,
+                    operation,
+                    cause,
+                    recoverable=True,
+                )
             return self._result(
                 request,
                 decision,
                 started_at=started,
                 status=RouteExecutionStatus.COMPLETED,
-                output={"operation": operation.value, "stored": True},
+                output={
+                    "operation": operation.value,
+                    "stored": True,
+                    "memory_id": entry.memory_id,
+                    "entry": _memory_entry_view(entry),
+                },
                 side_effects_performed=True,
                 target=operation.value,
                 action="route_execution_completed",
             )
-        if operation in {MemoryOperation.RETRIEVE, MemoryOperation.LIST}:
-            history = getattr(self._memory, "history", None)
-            if not callable(history):
-                return self._unsupported(request, decision, started, operation)
+        if operation is MemoryOperation.RETRIEVE:
+            retrieve_entries = getattr(self._memory, "retrieve_entries", None)
+            if not callable(retrieve_entries):
+                history = getattr(self._memory, "history", None)
+                if not callable(history):
+                    return self._unsupported(request, decision, started, operation)
+                items = history()
+                return self._result(
+                    request,
+                    decision,
+                    started_at=started,
+                    status=RouteExecutionStatus.COMPLETED,
+                    output={
+                        "operation": operation.value,
+                        "items": items,
+                        "count": len(items),
+                    },
+                    target=operation.value,
+                    action="route_execution_completed",
+                )
+            entries = retrieve_entries(
+                _memory_query(request),
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                tags=_memory_tags(request),
+                categories=_memory_categories_filter(request),
+                include_sensitive=False,
+                limit=_memory_limit(request),
+            )
             return self._result(
                 request,
                 decision,
                 started_at=started,
                 status=RouteExecutionStatus.COMPLETED,
-                output={"operation": operation.value, "items": history()},
+                output={
+                    "operation": operation.value,
+                    "items": tuple(_memory_entry_view(entry) for entry in entries),
+                    "count": len(entries),
+                },
                 target=operation.value,
                 action="route_execution_completed",
             )
+        if operation is MemoryOperation.LIST:
+            list_entries = getattr(self._memory, "list_entries", None)
+            if not callable(list_entries):
+                history = getattr(self._memory, "history", None)
+                if not callable(history):
+                    return self._unsupported(request, decision, started, operation)
+                items = history()
+                return self._result(
+                    request,
+                    decision,
+                    started_at=started,
+                    status=RouteExecutionStatus.COMPLETED,
+                    output={
+                        "operation": operation.value,
+                        "items": items,
+                        "count": len(items),
+                    },
+                    target=operation.value,
+                    action="route_execution_completed",
+                )
+            entries = list_entries(
+                active_only=True,
+                include_expired=False,
+                include_sensitive=False,
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                tags=_memory_tags(request),
+                categories=_memory_categories_filter(request),
+                limit=_memory_limit(request),
+            )
+            return self._result(
+                request,
+                decision,
+                started_at=started,
+                status=RouteExecutionStatus.COMPLETED,
+                output={
+                    "operation": operation.value,
+                    "items": tuple(_memory_entry_view(entry) for entry in entries),
+                    "count": len(entries),
+                },
+                target=operation.value,
+                action="route_execution_completed",
+            )
+        if operation is MemoryOperation.FORGET:
+            return self._forget(request, decision, started)
+        if operation is MemoryOperation.UPDATE:
+            return self._update(request, decision, started)
         return self._unsupported(request, decision, started, operation)
+
+    def _forget(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        started: datetime,
+    ) -> RouteExecutionResult:
+        forget_entry = getattr(self._memory, "forget_entry", None)
+        if not callable(forget_entry):
+            return self._unsupported(request, decision, started, MemoryOperation.FORGET)
+        memory_id, ambiguity = _resolve_memory_id(self._memory, request)
+        if ambiguity:
+            return _clarification_result(
+                self,
+                request,
+                decision,
+                started,
+                "Hay varias entradas coincidentes. Indica el memory_id exacto.",
+                ("memory_id",),
+                target=MemoryOperation.FORGET.value,
+            )
+        if not memory_id:
+            return _clarification_result(
+                self,
+                request,
+                decision,
+                started,
+                "Que entrada quieres olvidar? Indica el memory_id.",
+                ("memory_id",),
+                target=MemoryOperation.FORGET.value,
+            )
+        try:
+            entry = forget_entry(memory_id, source_request_id=request.request_id)
+        except MemoryEntryNotFoundError as cause:
+            return self._memory_failure(
+                request,
+                decision,
+                started,
+                MemoryOperation.FORGET,
+                cause,
+                recoverable=True,
+            )
+        return self._result(
+            request,
+            decision,
+            started_at=started,
+            status=RouteExecutionStatus.COMPLETED,
+            output={
+                "operation": MemoryOperation.FORGET.value,
+                "memory_id": entry.memory_id,
+                "forgotten": not entry.active,
+            },
+            side_effects_performed=True,
+            target=MemoryOperation.FORGET.value,
+            action="route_execution_completed",
+        )
+
+    def _update(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        started: datetime,
+    ) -> RouteExecutionResult:
+        update_entry = getattr(self._memory, "update_entry", None)
+        if not callable(update_entry):
+            return self._unsupported(request, decision, started, MemoryOperation.UPDATE)
+        memory_id, ambiguity = _resolve_memory_id(self._memory, request)
+        if ambiguity or not memory_id:
+            return _clarification_result(
+                self,
+                request,
+                decision,
+                started,
+                (
+                    "Hay varias entradas coincidentes. Indica el memory_id exacto."
+                    if ambiguity
+                    else "Que entrada quieres actualizar? Indica el memory_id."
+                ),
+                ("memory_id",),
+                target=MemoryOperation.UPDATE.value,
+            )
+        content = _memory_update_content(request, memory_id)
+        if not content:
+            return _clarification_result(
+                self,
+                request,
+                decision,
+                started,
+                "Cual es el nuevo contenido de la entrada?",
+                ("memory_content",),
+                target=MemoryOperation.UPDATE.value,
+            )
+        try:
+            entry = update_entry(
+                memory_id,
+                content=content,
+                category=_memory_optional_category(request),
+                importance=_memory_optional_importance(request),
+                tags=_memory_optional_tags(request),
+                sensitive=_memory_optional_sensitive(request),
+                source_request_id=request.request_id,
+            )
+        except (
+            MemoryEntryNotFoundError,
+            InvalidMemoryEntryError,
+            SensitiveMemoryRejectedError,
+        ) as cause:
+            return self._memory_failure(
+                request,
+                decision,
+                started,
+                MemoryOperation.UPDATE,
+                cause,
+                recoverable=True,
+            )
+        return self._result(
+            request,
+            decision,
+            started_at=started,
+            status=RouteExecutionStatus.COMPLETED,
+            output={
+                "operation": MemoryOperation.UPDATE.value,
+                "memory_id": entry.memory_id,
+                "updated": True,
+                "entry": _memory_entry_view(entry),
+            },
+            side_effects_performed=True,
+            target=MemoryOperation.UPDATE.value,
+            action="route_execution_completed",
+        )
+
+    def _memory_failure(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        started: datetime,
+        operation: MemoryOperation,
+        cause: Exception,
+        *,
+        recoverable: bool,
+    ) -> RouteExecutionResult:
+        error = OperationalRouteExecutionError(
+            request_id=request.request_id,
+            route=decision.route,
+            target=operation.value,
+            summary=_safe_memory_error_summary(cause, operation),
+            recoverable=recoverable,
+            safe_cause=getattr(cause, "code", type(cause).__name__),
+        )
+        return self._result(
+            request,
+            decision,
+            started_at=started,
+            status=(
+                RouteExecutionStatus.REJECTED
+                if isinstance(cause, SensitiveMemoryRejectedError)
+                else RouteExecutionStatus.FAILED
+            ),
+            error=error,
+            target=operation.value,
+            action="route_execution_failed",
+        )
 
     def _unsupported(
         self,
@@ -655,6 +974,14 @@ class AgentDelegationRouteHandler(_BaseRouteHandler):
         self._model_selector = model_selector
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
+        return self.execute_with_context(request, decision, None)
+
+    def execute_with_context(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        context: OperationalContext | None,
+    ) -> RouteExecutionResult:
         started = self._clock()
         agent_name = decision.target_agent_name
         agent = self._agent_registry.get(agent_name) if self._agent_registry and agent_name else None
@@ -686,8 +1013,10 @@ class AgentDelegationRouteHandler(_BaseRouteHandler):
             attachments=tuple(asdict(item) for item in request.attachments),
             locale=request.locale,
             safety_context=asdict(request.safety_context),
+            operational_context=context,
         )
-        messages = [{"role": "user", "content": delegation.objective}]
+        messages = _context_messages(context)
+        messages.append({"role": "user", "content": delegation.objective})
         try:
             model = self._model_selector(agent_name) if self._model_selector else ""
             output = agent.run(model=model, messages=messages)
@@ -716,7 +1045,16 @@ class AgentDelegationRouteHandler(_BaseRouteHandler):
             status=RouteExecutionStatus.COMPLETED,
             output=output,
             target=agent_name,
-            metadata={"delegation": delegation},
+            metadata={
+                "delegation": {
+                    "request_id": delegation.request_id,
+                    "agent_name": delegation.agent_name,
+                    "locale": delegation.locale,
+                },
+                "operational_context": (
+                    context.safe_summary() if context is not None else {}
+                ),
+            },
             action="route_execution_completed",
         )
 
@@ -732,6 +1070,14 @@ class AutonomousExecutionRouteHandler(_BaseRouteHandler):
         self._orchestrator = orchestrator
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
+        return self.execute_with_context(request, decision, None)
+
+    def execute_with_context(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        context: OperationalContext | None,
+    ) -> RouteExecutionResult:
         started = self._clock()
         if self._orchestrator is None:
             error = RouteHandlerNotConfiguredError(
@@ -750,19 +1096,20 @@ class AutonomousExecutionRouteHandler(_BaseRouteHandler):
                 target="autonomous_execution",
                 action="route_execution_failed",
             )
-        context = request.execution_context
+        operational_context = context
+        request_context = request.execution_context
         options = AutonomousExecutionOptions(
             max_wall_time_seconds=(
-                context.requested_timeout
-                if context and context.requested_timeout is not None
+                request_context.requested_timeout
+                if request_context and request_context.requested_timeout is not None
                 else 300.0
             ),
             max_total_cost=(
-                context.requested_budget
-                if context and context.requested_budget is not None
+                request_context.requested_budget
+                if request_context and request_context.requested_budget is not None
                 else None
             ),
-            dry_run=bool(context and context.dry_run),
+            dry_run=bool(request_context and request_context.dry_run),
         )
         try:
             autonomous = self._orchestrator.execute_objective(
@@ -771,6 +1118,21 @@ class AutonomousExecutionRouteHandler(_BaseRouteHandler):
                     "request_id": request.request_id,
                     "locale": request.locale,
                     "source": request.source.value,
+                    "relevant_context": (
+                        operational_context.prompt_context()
+                        if operational_context is not None
+                        else ""
+                    ),
+                    "selected_memory_ids": (
+                        operational_context.selected_memory_ids
+                        if operational_context is not None
+                        else ()
+                    ),
+                    "execution_context": (
+                        operational_context.execution_context
+                        if operational_context is not None
+                        else {}
+                    ),
                 },
                 execution_options=options,
             )
@@ -1082,11 +1444,15 @@ class OperationalRouteExecutor:
         *,
         enabled_routes: frozenset[RequestRoute] | None = None,
         ledger: RequestExecutionLedger | None = None,
+        context_builder: OperationalContextBuilder | None = None,
+        execution_memory_recorder: ExecutionMemoryRecorder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._clock = clock or _utc_now
         self._enabled_routes = enabled_routes or frozenset(RequestRoute)
         self._ledger = ledger or RequestExecutionLedger()
+        self._context_builder = context_builder
+        self._execution_memory_recorder = execution_memory_recorder
         self._handlers: dict[RequestRoute, RouteHandler] = {}
         self._events: list[RouteExecutionEvent] = []
         for route, handler in handlers.items():
@@ -1141,6 +1507,11 @@ class OperationalRouteExecutor:
                     error_code=DuplicateRouteExecutionError.code,
                 )
                 return previous
+            context = (
+                self._context_builder.build(request, decision)
+                if self._context_builder is not None
+                else _empty_operational_context(request, self._clock())
+            )
             handler = self._handlers.get(decision.route)
             if handler is None:
                 raise RouteHandlerNotConfiguredError(
@@ -1174,7 +1545,19 @@ class OperationalRouteExecutor:
                     summary="Route execution timed out before it started.",
                     recoverable=True,
                 )
-            result = handler.execute(request, decision)
+            execute_with_context = getattr(handler, "execute_with_context", None)
+            result = (
+                execute_with_context(request, decision, context)
+                if callable(execute_with_context)
+                else handler.execute(request, decision)
+            )
+            result = replace(
+                result,
+                metadata={
+                    **dict(result.metadata),
+                    "operational_context": context.safe_summary(),
+                },
+            )
             elapsed = max(0.0, (self._clock() - started).total_seconds())
             if timeout is not None and elapsed > timeout:
                 error = RouteExecutionTimeoutError(
@@ -1187,6 +1570,21 @@ class OperationalRouteExecutor:
                 result = _failure_result(request, decision, started, self._clock(), error)
             if _requires_idempotency(decision):
                 self._ledger.record(result)
+            if self._execution_memory_recorder is not None:
+                self._execution_memory_recorder.record(result, request=request)
+            self._record_result(result, handler_name, target)
+            return result
+        except OperationalContextError as cause:
+            error = OperationalRouteExecutionError(
+                request_id=request.request_id,
+                route=decision.route,
+                target=target,
+                summary="Operational context could not be built.",
+                recoverable=True,
+                safe_cause=cause.code,
+            )
+            finished = self._clock()
+            result = _failure_result(request, decision, started, finished, error)
             self._record_result(result, handler_name, target)
             return result
         except OperationalRouteExecutionError as error:
@@ -1832,6 +2230,226 @@ def _memory_content(request: AtlasRequest) -> str:
     return normalized.strip()
 
 
+def _memory_query(request: AtlasRequest) -> str:
+    explicit = request.metadata.get("memory_query")
+    if isinstance(explicit, str):
+        return explicit.strip()
+    return re.sub(
+        r"^\s*(?:que\s+recuerdas(?:\s+de)?|recupera|busca\s+en\s+memoria|memoria)\s*",
+        "",
+        request.content,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _memory_category(request: AtlasRequest) -> MemoryCategory:
+    explicit = request.metadata.get("memory_category")
+    if isinstance(explicit, str):
+        return MemoryCategory(explicit)
+    normalized = request.content.casefold()
+    if "prefiero" in normalized or "preferencia" in normalized:
+        return MemoryCategory.USER_PREFERENCE
+    if "proyecto" in normalized:
+        return MemoryCategory.PROJECT_FACT
+    if "decid" in normalized:
+        return MemoryCategory.DECISION
+    return MemoryCategory.CONVERSATION_NOTE
+
+
+def _memory_optional_category(request: AtlasRequest) -> MemoryCategory | None:
+    explicit = request.metadata.get("memory_category")
+    return MemoryCategory(explicit) if isinstance(explicit, str) else None
+
+
+def _memory_importance(request: AtlasRequest) -> float:
+    value = request.metadata.get("importance", 0.5)
+    return float(value)
+
+
+def _memory_optional_importance(request: AtlasRequest) -> float | None:
+    value = request.metadata.get("importance")
+    return float(value) if value is not None else None
+
+
+def _memory_tags(request: AtlasRequest) -> tuple[str, ...]:
+    value = request.metadata.get("tags", ())
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (tuple, list)):
+        return tuple(str(item) for item in value)
+    return ()
+
+
+def _memory_optional_tags(request: AtlasRequest) -> tuple[str, ...] | None:
+    return _memory_tags(request) if "tags" in request.metadata else None
+
+
+def _memory_optional_sensitive(request: AtlasRequest) -> bool | None:
+    value = request.metadata.get("sensitive")
+    return bool(value) if value is not None else None
+
+
+def _memory_expires_at(request: AtlasRequest) -> datetime | None:
+    value = request.metadata.get("expires_at")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise InvalidMemoryEntryError("expires_at must be timezone-aware.")
+    return parsed
+
+
+def _memory_safe_metadata(request: AtlasRequest) -> Mapping[str, Any]:
+    value = request.metadata.get("memory_metadata")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _memory_categories_filter(request: AtlasRequest) -> tuple[MemoryCategory, ...]:
+    value = request.metadata.get("memory_categories", ())
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (tuple, list)):
+        values = tuple(str(item) for item in value)
+    else:
+        values = ()
+    return tuple(MemoryCategory(item) for item in values)
+
+
+def _memory_limit(request: AtlasRequest) -> int | None:
+    value = request.metadata.get("limit")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise InvalidMemoryEntryError("Memory query limit must be a positive integer.")
+    return value
+
+
+def _resolve_memory_id(
+    memory: object,
+    request: AtlasRequest,
+) -> tuple[str | None, bool]:
+    explicit = request.metadata.get("memory_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip(), False
+    match = re.search(r"\bmemory-\d{6}\b", request.content, re.IGNORECASE)
+    if match:
+        return match.group(0).lower(), False
+    retrieve_entries = getattr(memory, "retrieve_entries", None)
+    if not callable(retrieve_entries):
+        return None, False
+    query = re.sub(
+        r"^\s*(?:olvida|forget|actualiza|update)\s*",
+        "",
+        request.content,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not query:
+        return None, False
+    matches = retrieve_entries(query, include_sensitive=False)
+    if len(matches) == 1:
+        return matches[0].memory_id, False
+    return None, len(matches) > 1
+
+
+def _memory_update_content(request: AtlasRequest, memory_id: str) -> str:
+    explicit = request.metadata.get("memory_content")
+    if isinstance(explicit, str):
+        return explicit.strip()
+    without_prefix = re.sub(
+        r"^\s*(?:actualiza|update)\s*",
+        "",
+        request.content,
+        flags=re.IGNORECASE,
+    )
+    without_id = re.sub(re.escape(memory_id), "", without_prefix, flags=re.IGNORECASE)
+    return re.sub(r"^\s*(?:a|con|to)\s*", "", without_id, flags=re.IGNORECASE).strip()
+
+
+def _memory_entry_view(entry: MemoryEntry) -> Mapping[str, Any]:
+    return {
+        "memory_id": entry.memory_id,
+        "content": entry.content,
+        "category": entry.category.value,
+        "created_at": entry.created_at.isoformat(),
+        "updated_at": entry.updated_at.isoformat(),
+        "importance": entry.importance,
+        "tags": entry.tags,
+        "active": entry.active,
+        "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
+    }
+
+
+def _safe_memory_error_summary(
+    cause: Exception,
+    operation: MemoryOperation,
+) -> str:
+    if isinstance(cause, SensitiveMemoryRejectedError):
+        return "Sensitive memory content was rejected by policy."
+    if isinstance(cause, MemoryEntryNotFoundError):
+        return "The requested memory entry was not found."
+    if isinstance(cause, InvalidMemoryEntryError):
+        return f"Memory {operation.value} request is invalid."
+    return f"Memory {operation.value} failed."
+
+
+def _invoke_contextual_callable(
+    function: Callable[..., Any],
+    request: AtlasRequest,
+    context: OperationalContext | None,
+) -> Any:
+    try:
+        inspect.signature(function).bind(request, context)
+    except (TypeError, ValueError):
+        return function(request)
+    return function(request, context)
+
+
+def _context_messages(
+    context: OperationalContext | None,
+) -> list[dict[str, str]]:
+    if context is None:
+        return []
+    messages = [
+        {
+            "role": str(message["role"]),
+            "content": str(message["content"]),
+        }
+        for message in context.recent_messages
+    ]
+    prompt_context = context.prompt_context()
+    if prompt_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Contexto operativo limitado:\n" + prompt_context,
+            }
+        )
+    return messages
+
+
+def _empty_operational_context(
+    request: AtlasRequest,
+    generated_at: datetime,
+) -> OperationalContext:
+    return OperationalContext(
+        request_id=request.request_id,
+        conversation_id=request.conversation_id,
+        recent_messages=(),
+        relevant_memories=(),
+        user_preferences=(),
+        project_context=(),
+        execution_context=(
+            asdict(request.execution_context)
+            if request.execution_context is not None
+            else {}
+        ),
+        selected_memory_ids=(),
+        total_characters=0,
+        truncated=False,
+        generated_at=generated_at,
+    )
+
+
 def _decision_missing_information(decision: RouteDecision) -> tuple[str, ...]:
     for rule in decision.matched_rules:
         if "missing_session" in rule:
@@ -1933,8 +2551,22 @@ def _present_output(output: Any) -> str:
         summary = output.get("summary")
         if isinstance(summary, str) and summary:
             return summary
-        if "operation" in output:
-            return f"Operacion de memoria {output['operation']} completada."
+        operation = output.get("operation")
+        if operation == MemoryOperation.STORE.value:
+            return f"Memoria guardada con id {output.get('memory_id', 'desconocido')}."
+        if operation == MemoryOperation.RETRIEVE.value:
+            count = int(output.get("count", 0))
+            return (
+                f"Se recuperaron {count} entradas de memoria."
+                if count
+                else "No se encontraron recuerdos coincidentes."
+            )
+        if operation == MemoryOperation.LIST.value:
+            return f"Hay {int(output.get('count', 0))} entradas de memoria activas."
+        if operation == MemoryOperation.FORGET.value:
+            return f"Entrada {output.get('memory_id', '')} olvidada.".strip()
+        if operation == MemoryOperation.UPDATE.value:
+            return f"Entrada {output.get('memory_id', '')} actualizada.".strip()
         if "signal" in output:
             return str(output["signal"])
     return "Operacion completada." if output is not None else ""

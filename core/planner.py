@@ -553,10 +553,13 @@ class Planner:
         self,
         prompt: str,
         *,
+        planning_context: Mapping[str, Any] | None = None,
         on_planning_progress: Callable[[Any], None] | None = None,
         planning_control: Any | None = None,
     ) -> PlanGenerationResult:
         """Create a structured execution plan with generation diagnostics."""
+        if planning_context is not None and not isinstance(planning_context, Mapping):
+            raise TypeError("planning_context must be a mapping or None.")
         goal = prompt.strip()
         if not goal:
             plan = self._direct_response_plan("", "Empty objective cannot be planned.")

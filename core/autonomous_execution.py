@@ -323,8 +323,19 @@ class AutonomousExecutionOrchestrator:
         planning_context: object | None = None,
         execution_options: AutonomousExecutionOptions | None = None,
     ) -> AutonomousExecutionResult:
-        del planning_context
         options = execution_options or AutonomousExecutionOptions()
+        if planning_context is not None:
+            generation = self._planner.generate_execution_plan(
+                objective,
+                planning_context=planning_context,
+            )
+            if generation.plan is None or not generation.success:
+                return self._invalid_planning_result(objective, generation)
+            return self.execute_plan(
+                generation.plan,
+                execution_options=options,
+                objective=objective,
+            )
         if options.dry_run:
             generation = self._planner.generate_execution_plan(objective)
             if generation.plan is None:

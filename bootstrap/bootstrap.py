@@ -30,6 +30,8 @@ from core.operational_route_executor import (
     RouteExecutionPresenter,
     build_default_route_handlers,
 )
+from core.operational_context import OperationalContextBuilder
+from core.execution_memory_recorder import ExecutionMemoryRecorder
 from core.autonomous_execution import AutonomousExecutionOrchestrator
 from core.execution_supervisor import ExecutionSupervisor
 from core.planner import Planner
@@ -48,6 +50,7 @@ from core.resumable_execution_store import JsonResumableExecutionStore
 from core.structured_execution import StructuredExecutionCoordinator
 
 from memory.conversation import ConversationMemory
+from memory.operational import MemoryPolicy
 
 from models.prompt_client import PromptClient
 
@@ -746,7 +749,8 @@ class Bootstrap:
             structured_plan_provider=structured_plan_provider,
         )
         router = Router()
-        memory = ConversationMemory()
+        memory_policy = MemoryPolicy()
+        memory = ConversationMemory(policy=memory_policy)
 
         # -----------------------
         # Tools
@@ -973,11 +977,25 @@ class Bootstrap:
                 agent_registry=registry,
             )
         )
-        def direct_responder(request):
+        def direct_responder(request, context):
             chat_agent = registry.get("chat")
             if chat_agent is None:
                 raise RuntimeError("Agent 'chat' is not registered.")
-            messages = memory.history()
+            messages = [
+                {
+                    "role": str(message["role"]),
+                    "content": str(message["content"]),
+                }
+                for message in context.recent_messages
+            ]
+            prompt_context = context.prompt_context()
+            if prompt_context:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "Contexto operativo limitado:\n" + prompt_context,
+                    }
+                )
             messages.append({"role": "user", "content": request.content})
             return chat_agent.run(
                 model=model_manager.choose_model("chat"),
@@ -1000,7 +1018,15 @@ class Bootstrap:
                     "agent_count": len(registry.list()),
                     "execution_count": len(execution_supervisor.list_sessions()),
                 },
-            )
+            ),
+            context_builder=OperationalContextBuilder(
+                memory,
+                policy=memory_policy,
+            ),
+            execution_memory_recorder=ExecutionMemoryRecorder(
+                memory,
+                policy=memory_policy,
+            ),
         )
 
         # -----------------------
