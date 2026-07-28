@@ -12,6 +12,7 @@ from core.concurrent_step_executor import (
 )
 from core.execution_plan_executor import PlanExecutionResult, PlanExecutionStatus
 from core.execution_plan_executor import StepExecutionResult
+from core.execution_report import OperationalExecutionStatus
 from core.execution_plan_validator import PlanValidationResult, plan_signature
 from core.execution_retry import RetryPolicy
 from core.execution_supervisor import (
@@ -352,6 +353,13 @@ def test_coordinator_records_executor_retry_metadata_in_supervisor() -> None:
     assert session.step_states["step_1"].attempt_count == 2
     assert session.step_states["step_1"].state is StepExecutionState.COMPLETED
     assert "step_retrying" in [event.event_type for event in session.events]
+    assert response.operational_report is not None
+    assert response.operational_report.status is OperationalExecutionStatus.COMPLETED
+    assert response.operational_report.retry_count == 1
+    assert (
+        coordinator.get_execution_report(session.session_id).to_dict()
+        == response.operational_report.to_dict()
+    )
 
 
 def test_empty_overview_has_zero_counts_and_no_latest_session() -> None:

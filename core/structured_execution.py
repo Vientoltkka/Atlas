@@ -13,6 +13,10 @@ from core.concurrent_step_executor import (
     build_execution_batch,
 )
 from core.execution_context import ExecutionContext
+from core.execution_report import (
+    ExecutionReportGenerator,
+    OperationalExecutionReport,
+)
 from core.execution_dependency_resolver import ExecutionDependencyResolver
 from core.execution_plan_executor import (
     ExecutionControl,
@@ -94,6 +98,7 @@ class StructuredExecutionResponse:
     error: str | None = None
     resumable_state: ResumableExecutionState | None = None
     partial_state: PartialExecutionState | None = None
+    operational_report: OperationalExecutionReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +144,7 @@ class StructuredExecutionCoordinator:
         resource_catalog: ExecutionResourceCatalog | None = None,
         resource_optimizer: ExecutionResourceOptimizer | None = None,
         budget_manager: ExecutionBudgetManager | None = None,
+        execution_report_generator: ExecutionReportGenerator | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -163,6 +169,9 @@ class StructuredExecutionCoordinator:
             or ExecutionResourceOptimizer(self._resource_policy)
         )
         self._budget_manager = budget_manager
+        self._execution_report_generator = (
+            execution_report_generator or ExecutionReportGenerator()
+        )
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -242,6 +251,7 @@ class StructuredExecutionCoordinator:
                 requires_confirmation=True,
                 confirmation_token=token,
                 error_code="CONFIRMATION_REQUIRED",
+                operational_report=self.get_execution_report(session.session_id),
             )
 
         if not execute_after_planning:
@@ -368,6 +378,15 @@ class StructuredExecutionCoordinator:
     def get_execution_overview(self) -> ExecutionOverview:
         """Return the global supervised execution overview."""
         return self._execution_supervisor.get_overview()
+
+    def get_execution_report(
+        self,
+        session_id: str,
+    ) -> OperationalExecutionReport:
+        """Build a user-facing report from current or restored session data."""
+        session = self._execution_supervisor.get_session(session_id)
+        summary = self._execution_supervisor.get_summary(session_id)
+        return self._execution_report_generator.generate(session, summary)
 
     def list_execution_sessions(
         self,
@@ -868,10 +887,16 @@ class StructuredExecutionCoordinator:
                     self._execution_supervisor.get_session(session.session_id).state
                     is ExecutionState.CANCELLED
                 ):
-                    return execution
+                    return self._with_execution_session_id(
+                        execution,
+                        session.session_id,
+                    )
                 if self._execution_can_finish_without_replan(execution):
                     self._finalize_supervised_session(session.session_id, execution)
-                    return execution
+                    return self._with_execution_session_id(
+                        execution,
+                        session.session_id,
+                    )
 
                 replanned = self._attempt_replan(
                     session.session_id,
@@ -884,24 +909,30 @@ class StructuredExecutionCoordinator:
                         is ExecutionState.COMPLETED
                     ):
                         omitted_step = execution.current_step or execution.failed_step
-                        return replace(
-                            execution,
-                            plan_status=PlanExecutionStatus.COMPLETED.value,
-                            success=True,
-                            completed=True,
-                            failed=False,
-                            failed_step=None,
-                            failed_steps=[],
-                            skipped_steps=list(
-                                dict.fromkeys(
-                                    execution.skipped_steps
-                                    + ([omitted_step] if omitted_step else [])
-                                )
+                        return self._with_execution_session_id(
+                            replace(
+                                execution,
+                                plan_status=PlanExecutionStatus.COMPLETED.value,
+                                success=True,
+                                completed=True,
+                                failed=False,
+                                failed_step=None,
+                                failed_steps=[],
+                                skipped_steps=list(
+                                    dict.fromkeys(
+                                        execution.skipped_steps
+                                        + ([omitted_step] if omitted_step else [])
+                                    )
+                                ),
+                                error=None,
+                                error_code=None,
                             ),
-                            error=None,
-                            error_code=None,
+                            session.session_id,
                         )
-                    return execution
+                    return self._with_execution_session_id(
+                        execution,
+                        session.session_id,
+                    )
                 active_plan, active_validation = replanned
                 if (
                     self._execution_supervisor.get_session(session.session_id).state
@@ -2174,6 +2205,7 @@ class StructuredExecutionCoordinator:
         *,
         confirmation_token: str | None = None,
     ) -> StructuredExecutionResponse:
+        report = self._report_for_execution(execution)
         if execution.success:
             return StructuredExecutionResponse(
                 handled=True,
@@ -2186,6 +2218,7 @@ class StructuredExecutionCoordinator:
                 confirmation_token=confirmation_token,
                 resumable_state=None,
                 partial_state=execution.partial_state,
+                operational_report=report,
             )
 
         return StructuredExecutionResponse(
@@ -2201,6 +2234,29 @@ class StructuredExecutionCoordinator:
             error=execution.error,
             resumable_state=None,
             partial_state=execution.partial_state,
+            operational_report=report,
+        )
+
+    def _report_for_execution(
+        self,
+        execution: PlanExecutionResult,
+    ) -> OperationalExecutionReport | None:
+        session_id = execution.metadata.get("execution_session_id")
+        if not isinstance(session_id, str):
+            return None
+        return self.get_execution_report(session_id)
+
+    @staticmethod
+    def _with_execution_session_id(
+        execution: PlanExecutionResult,
+        session_id: str,
+    ) -> PlanExecutionResult:
+        return replace(
+            execution,
+            metadata={
+                **execution.metadata,
+                "execution_session_id": session_id,
+            },
         )
 
     def _sync_resumable_state(

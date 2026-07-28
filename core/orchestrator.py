@@ -1325,4 +1325,5 @@ def _with_message_prefix(
         error=response.error,
         resumable_state=response.resumable_state,
         partial_state=response.partial_state,
+        operational_report=response.operational_report,
     )
