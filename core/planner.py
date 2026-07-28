@@ -73,6 +73,7 @@ class ExecutionStep:
     idempotent: bool = False
     recovery_safe: bool = False
     side_effect_free: bool = False
+    optional: bool = False
     priority: int = 0
     urgency: int = 0
     estimated_cost: float | None = None
@@ -105,6 +106,7 @@ class ExecutionStep:
         idempotent: bool = False,
         recovery_safe: bool = False,
         side_effect_free: bool = False,
+        optional: bool = False,
         priority: int = 0,
         urgency: int = 0,
         estimated_cost: float | None = None,
@@ -119,6 +121,7 @@ class ExecutionStep:
             ("idempotent", idempotent),
             ("recovery_safe", recovery_safe),
             ("side_effect_free", side_effect_free),
+            ("optional", optional),
         ):
             if type(value) is not bool:
                 raise TypeError(f"{name} must be a bool.")
@@ -188,6 +191,7 @@ class ExecutionStep:
         object.__setattr__(self, "idempotent", idempotent)
         object.__setattr__(self, "recovery_safe", recovery_safe)
         object.__setattr__(self, "side_effect_free", side_effect_free)
+        object.__setattr__(self, "optional", optional)
         object.__setattr__(self, "priority", priority)
         object.__setattr__(self, "urgency", urgency)
         object.__setattr__(self, "criticality", criticality)
@@ -1093,6 +1097,7 @@ class Planner:
         priority = payload.get("priority", 0)
         urgency = payload.get("urgency", 0)
         criticality = payload.get("criticality", 0)
+        optional = payload.get("optional", False)
         estimated_cost = payload.get("estimated_cost")
         estimated_duration_seconds = payload.get("estimated_duration_seconds")
         deadline = payload.get("deadline")
@@ -1166,6 +1171,7 @@ class Planner:
             priority=priority,
             urgency=urgency,
             criticality=criticality,
+            optional=optional,
             estimated_cost=estimated_cost,
             estimated_duration_seconds=estimated_duration_seconds,
             deadline=parsed_deadline,

@@ -1234,6 +1234,11 @@ def plan_signature(
                 "idempotent": bool(getattr(step, "idempotent", False)),
                 "recovery_safe": bool(getattr(step, "recovery_safe", False)),
                 "side_effect_free": bool(getattr(step, "side_effect_free", False)),
+                **(
+                    {"optional": True}
+                    if bool(getattr(step, "optional", False))
+                    else {}
+                ),
                 "priority": getattr(step, "priority", 0),
                 "urgency": getattr(step, "urgency", 0),
                 "criticality": getattr(step, "criticality", 0),
@@ -1318,6 +1323,11 @@ def _signature_safe_value(
                     "idempotent": bool(getattr(step, "idempotent", False)),
                     "recovery_safe": bool(getattr(step, "recovery_safe", False)),
                     "side_effect_free": bool(getattr(step, "side_effect_free", False)),
+                    **(
+                        {"optional": True}
+                        if bool(getattr(step, "optional", False))
+                        else {}
+                    ),
                     "priority": getattr(step, "priority", 0),
                     "urgency": getattr(step, "urgency", 0),
                     "criticality": getattr(step, "criticality", 0),

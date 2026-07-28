@@ -48,6 +48,7 @@ from core.hybrid_execution_planner import (
 )
 from core.resumable_execution_store import JsonResumableExecutionStore
 from core.structured_execution import StructuredExecutionCoordinator
+from core.structured_plan_replanner import ExecutionReplanner, ReplanPolicy
 
 from memory.conversation import ConversationMemory
 from memory.operational import MemoryPolicy
@@ -791,6 +792,8 @@ class Bootstrap:
             validator=execution_plan_validator,
             executor=execution_plan_executor,
             execution_supervisor=execution_supervisor,
+            execution_replanner=ExecutionReplanner(planner),
+            replan_policy=ReplanPolicy(max_replans_per_session=1),
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled

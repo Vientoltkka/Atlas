@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from core.concurrent_step_executor import (
     ConcurrentStepExecutor,
@@ -63,7 +63,9 @@ from core.resumable_execution_store import (
 )
 from core.structured_plan_replanner import (
     ExecutionReplanner as StructuredExecutionReplanner,
+    ReplanFailureClassification,
     ReplanPolicy,
+    ReplanReason,
     ReplanRequest,
     ReplanResult,
     ReplanResultStatus,
@@ -143,7 +145,7 @@ class StructuredExecutionCoordinator:
         self._executor = executor
         self._execution_supervisor = execution_supervisor or ExecutionSupervisor()
         self._execution_replanner = execution_replanner
-        self._replan_policy = replan_policy or ReplanPolicy(max_replans_per_session=0)
+        self._replan_policy = replan_policy or ReplanPolicy()
         self._dependency_resolver = dependency_resolver or ExecutionDependencyResolver()
         self._concurrency_policy = concurrency_policy or ExecutionConcurrencyPolicy()
         self._concurrent_step_executor = concurrent_step_executor
@@ -589,6 +591,7 @@ class StructuredExecutionCoordinator:
             idempotent=step.idempotent,
             recovery_safe=step.recovery_safe,
             side_effect_free=step.side_effect_free,
+            optional=step.optional,
             priority=step.priority,
             urgency=step.urgency,
             estimated_cost=step.estimated_cost,
@@ -876,9 +879,35 @@ class StructuredExecutionCoordinator:
                     execution,
                 )
                 if replanned is None:
+                    if (
+                        self._execution_supervisor.get_session(session.session_id).state
+                        is ExecutionState.COMPLETED
+                    ):
+                        omitted_step = execution.current_step or execution.failed_step
+                        return replace(
+                            execution,
+                            plan_status=PlanExecutionStatus.COMPLETED.value,
+                            success=True,
+                            completed=True,
+                            failed=False,
+                            failed_step=None,
+                            failed_steps=[],
+                            skipped_steps=list(
+                                dict.fromkeys(
+                                    execution.skipped_steps
+                                    + ([omitted_step] if omitted_step else [])
+                                )
+                            ),
+                            error=None,
+                            error_code=None,
+                        )
                     return execution
                 active_plan, active_validation = replanned
-                self._execution_supervisor.mark_running(session.session_id)
+                if (
+                    self._execution_supervisor.get_session(session.session_id).state
+                    is not ExecutionState.RUNNING
+                ):
+                    self._execution_supervisor.mark_running(session.session_id)
         except Exception as error:
             self._execution_supervisor.mark_failed(session.session_id, error)
             raise
@@ -1519,6 +1548,22 @@ class StructuredExecutionCoordinator:
     ) -> tuple[ExecutionPlan, PlanValidationResult] | None:
         session = self._execution_supervisor.get_session(session_id)
         current_step = execution.current_step or execution.failed_step
+        failed_step = next(
+            (step for step in failed_plan.ordered_steps if step.id == current_step),
+            None,
+        )
+        classification = self._replan_policy.classify(
+            error_code=execution.error_code,
+            critical=bool(failed_step is not None and failed_step.criticality > 0),
+            optional=bool(failed_step is not None and failed_step.optional),
+        )
+        if classification is ReplanFailureClassification.OPTIONAL:
+            return self._continue_after_optional_failure(
+                session_id,
+                failed_plan,
+                execution,
+                failed_step,
+            )
         results = self._supervisor_results(execution)
         error = (
             execution.error
@@ -1526,6 +1571,27 @@ class StructuredExecutionCoordinator:
             or execution.error_code
             or execution.plan_status
         )
+        if (
+            classification is ReplanFailureClassification.CRITICAL
+            and failed_step is not None
+            and failed_step.criticality > 0
+        ):
+            self._execution_supervisor.record_replan_event(
+                session_id,
+                "replan_rejected",
+                attempt_number=session.replan_count + 1,
+                failed_step=current_step,
+                reason=ReplanReason.NON_RECOVERABLE_FAILURE.value,
+                error="critical failure cannot be replanned",
+                details={"classification": classification.value},
+            )
+            self._execution_supervisor.mark_cancelled(
+                session_id,
+                error=error,
+                current_step=current_step,
+                results=results,
+            )
+            return None
         failed = self._execution_supervisor.mark_failed(
             session_id,
             error,
@@ -1538,6 +1604,7 @@ class StructuredExecutionCoordinator:
             failed_plan,
             execution,
             attempt_number=attempt_number,
+            classification=classification,
         )
         self._execution_supervisor.record_replan_event(
             session_id,
@@ -1545,6 +1612,11 @@ class StructuredExecutionCoordinator:
             attempt_number=attempt_number,
             failed_step=request.failed_step,
             reason="execution_failed",
+            details={
+                "plan_id": request.plan_id or "",
+                "attempts_performed": request.attempts_performed,
+                "classification": request.classification.value,
+            },
         )
 
         policy_decision = self._replan_policy.evaluate(
@@ -1562,9 +1634,14 @@ class StructuredExecutionCoordinator:
             )
             return None
         if not policy_decision.accepted:
+            event_type = (
+                "replan_no_safe_alternative"
+                if policy_decision.status is ReplanResultStatus.NO_SAFE_ALTERNATIVE
+                else "replan_rejected"
+            )
             self._execution_supervisor.record_replan_event(
                 session_id,
-                "replan_rejected",
+                event_type,
                 attempt_number=attempt_number,
                 failed_step=request.failed_step,
                 reason=policy_decision.reason.value,
@@ -1584,28 +1661,72 @@ class StructuredExecutionCoordinator:
             self._record_replan_failure(session_id, request, replan_result)
             return None
 
-        revised_validation = self._validator.validate(replan_result.revised_plan)
+        fragment = replan_result.revised_plan
+        fragment_error = self._replacement_fragment_error(fragment, request)
+        if fragment_error is not None:
+            self._reject_replan_validation(
+                session_id,
+                request,
+                fragment_error,
+                results,
+            )
+            return None
+        fragment_validation = self._validator.validate(fragment)
+        if not fragment_validation.is_valid:
+            self._reject_replan_validation(
+                session_id,
+                request,
+                "; ".join(fragment_validation.errors),
+                results,
+            )
+            return None
+
+        revised_plan = self._compose_recovery_plan(
+            failed_plan,
+            fragment,
+            request,
+        )
+        revised_validation = self._validator.validate(revised_plan)
         if not revised_validation.is_valid:
+            self._reject_replan_validation(
+                session_id,
+                request,
+                "; ".join(revised_validation.errors),
+                results,
+            )
+            return None
+        attempted_signatures = {
+            plan_signature(failed_plan),
+            *(
+                plan_signature(record.revised_plan)
+                for record in failed.replan_history
+            ),
+        }
+        if plan_signature(revised_plan) in attempted_signatures:
             self._execution_supervisor.record_replan_event(
                 session_id,
-                "replan_failed",
+                "replan_no_safe_alternative",
                 attempt_number=attempt_number,
                 failed_step=request.failed_step,
-                reason="validation_error",
-                error="; ".join(revised_validation.errors),
+                reason=ReplanReason.NO_SAFE_ALTERNATIVE.value,
+                error="replacement would repeat an already attempted plan",
             )
             self._execution_supervisor.mark_failed(
                 session_id,
-                "replanned plan validation failed",
+                "no safe alternative plan",
                 current_step=request.failed_step,
                 results=results,
             )
             return None
 
+        replacement_step_ids = tuple(step.id for step in fragment.ordered_steps)
+        accepted_result = replace(replan_result, revised_plan=revised_plan)
         record = replan_record(
             request,
-            replan_result,
+            accepted_result,
             previous_plan=failed_plan,
+            replacement_step_ids=replacement_step_ids,
+            validation_status=revised_validation.status,
         )
         self._execution_supervisor.record_replan(session_id, record)
         self._execution_supervisor.record_replan_event(
@@ -1614,8 +1735,12 @@ class StructuredExecutionCoordinator:
             attempt_number=attempt_number,
             failed_step=request.failed_step,
             reason=replan_result.reason.value,
+            details={
+                "replacement_step_ids": list(replacement_step_ids),
+                "validation_status": revised_validation.status,
+            },
         )
-        return replan_result.revised_plan, revised_validation
+        return revised_plan, revised_validation
 
     def _record_replan_failure(
         self,
@@ -1642,6 +1767,150 @@ class StructuredExecutionCoordinator:
             current_step=request.failed_step,
         )
 
+    def _continue_after_optional_failure(
+        self,
+        session_id: str,
+        failed_plan: ExecutionPlan,
+        execution: PlanExecutionResult,
+        failed_step: ExecutionStep | None,
+    ) -> tuple[ExecutionPlan, PlanValidationResult] | None:
+        if failed_step is None:
+            return None
+        completed = set(execution.completed_steps)
+        omitted = completed | {failed_step.id}
+        remaining_steps = tuple(
+            self._copy_step_without_completed_dependencies(step, omitted)
+            for step in failed_plan.ordered_steps
+            if step.id not in omitted
+        )
+        self._execution_supervisor.mark_step_skipped(
+            session_id,
+            failed_step.id,
+            dependency_ids=tuple(failed_step.depends_on),
+        )
+        self._execution_supervisor.record_replan_event(
+            session_id,
+            "optional_step_omitted",
+            attempt_number=1,
+            failed_step=failed_step.id,
+            reason=ReplanReason.OPTIONAL_STEP_OMITTED.value,
+        )
+        if not remaining_steps:
+            self._execution_supervisor.mark_completed(
+                session_id,
+                current_step=failed_step.id,
+                results=self._supervisor_results(execution),
+            )
+            return None
+        continuation = self._execution_plan_from_steps(failed_plan, remaining_steps)
+        validation = self._validator.validate(continuation)
+        if not validation.is_valid:
+            self._execution_supervisor.mark_failed(
+                session_id,
+                "optional-step continuation validation failed",
+                current_step=failed_step.id,
+                results=self._supervisor_results(execution),
+            )
+            return None
+        return continuation, validation
+
+    def _replacement_fragment_error(
+        self,
+        fragment: ExecutionPlan,
+        request: ReplanRequest,
+    ) -> str | None:
+        if not fragment.ordered_steps:
+            return "replacement fragment cannot be empty"
+        if request.failed_step is None:
+            return "replacement fragment requires a known failed step"
+        if (
+            request.pending_step_ids
+            and fragment.ordered_steps[-1].id != request.failed_step
+        ):
+            return (
+                "replacement fragment final step must reuse failed step ID "
+                f"'{request.failed_step}'"
+            )
+        completed = set(request.completed_step_ids)
+        duplicate_completed = completed.intersection(
+            step.id for step in fragment.ordered_steps
+        )
+        if duplicate_completed:
+            return "replacement fragment repeats completed steps"
+        pending = set(request.pending_step_ids)
+        duplicate_pending = pending.intersection(
+            step.id for step in fragment.ordered_steps
+        )
+        if duplicate_pending:
+            return "replacement fragment repeats pending steps"
+        return None
+
+    def _compose_recovery_plan(
+        self,
+        failed_plan: ExecutionPlan,
+        fragment: ExecutionPlan,
+        request: ReplanRequest,
+    ) -> ExecutionPlan:
+        if not request.pending_step_ids:
+            return fragment
+        completed = set(request.completed_step_ids)
+        excluded = completed | {request.failed_step}
+        pending_steps = tuple(
+            self._copy_step_without_completed_dependencies(step, completed)
+            for step in failed_plan.ordered_steps
+            if step.id not in excluded
+        )
+        return self._execution_plan_from_steps(
+            failed_plan,
+            fragment.ordered_steps + pending_steps,
+        )
+
+    @staticmethod
+    def _execution_plan_from_steps(
+        base_plan: ExecutionPlan,
+        steps: tuple[ExecutionStep, ...],
+    ) -> ExecutionPlan:
+        return ExecutionPlan(
+            goal=base_plan.goal,
+            ordered_steps=steps,
+            estimated_steps=len(steps),
+            required_tools=tuple(
+                dict.fromkeys(
+                    step.tool for step in steps if isinstance(step.tool, str)
+                )
+            ),
+            detected_risks=base_plan.detected_risks,
+            requires_confirmation=base_plan.requires_confirmation,
+            status=base_plan.status,
+            output=base_plan.output,
+            required_outputs=base_plan.required_outputs,
+            output_validators=base_plan.output_validators,
+            replanning_policy=base_plan.replanning_policy,
+        )
+
+    def _reject_replan_validation(
+        self,
+        session_id: str,
+        request: ReplanRequest,
+        error: str,
+        results: Mapping[str, object],
+    ) -> None:
+        self._execution_supervisor.record_replan_event(
+            session_id,
+            "replan_validation_rejected",
+            attempt_number=request.attempt_number,
+            failed_step=request.failed_step,
+            reason=ReplanReason.VALIDATION_ERROR.value,
+            error=error,
+            details={"validation_status": "invalid"},
+        )
+        self._execution_supervisor.mark_failed(
+            session_id,
+            "replanned fragment validation failed",
+            current_step=request.failed_step,
+            results=results,
+        )
+
     def _replan_request(
         self,
         session: ExecutionSession,
@@ -1649,7 +1918,59 @@ class StructuredExecutionCoordinator:
         execution: PlanExecutionResult,
         *,
         attempt_number: int,
+        classification: ReplanFailureClassification,
     ) -> ReplanRequest:
+        failed_step_id = execution.current_step or execution.failed_step
+        step_result = next(
+            (
+                result
+                for result in execution.step_results
+                if result.step_id == failed_step_id
+            ),
+            None,
+        )
+        attempts_performed = (
+            step_result.metadata.get("attempt_number", 1)
+            if step_result is not None
+            else 1
+        )
+        if isinstance(attempts_performed, bool) or not isinstance(
+            attempts_performed,
+            int,
+        ):
+            attempts_performed = 1
+        max_execution_attempts = (
+            step_result.metadata.get("max_attempts", attempts_performed)
+            if step_result is not None
+            else attempts_performed
+        )
+        retries_exhausted = not bool(
+            step_result is not None
+            and step_result.metadata.get("retry_scheduled") is True
+        ) and (
+            step_result is None
+            or step_result.metadata.get("retry_exhausted") is True
+            or (
+                isinstance(max_execution_attempts, int)
+                and not isinstance(max_execution_attempts, bool)
+                and attempts_performed >= max_execution_attempts
+            )
+        )
+        completed_ids = tuple(execution.completed_steps)
+        failed_ids = tuple(execution.failed_steps)
+        unavailable_ids = set(completed_ids) | set(failed_ids) | set(
+            execution.blocked_steps
+        )
+        pending_ids = tuple(
+            dict.fromkeys(
+                tuple(execution.pending_steps)
+                + tuple(
+                    step.id
+                    for step in failed_plan.ordered_steps
+                    if step.id not in unavailable_ids
+                )
+            )
+        )
         return ReplanRequest(
             session_id=session.session_id,
             original_plan=session.original_plan,
@@ -1663,14 +1984,14 @@ class StructuredExecutionCoordinator:
             ),
             error_code=execution.error_code,
             partial_results=self._partial_results(execution),
-            completed_step_ids=tuple(execution.completed_steps),
-            failed_step_ids=tuple(execution.failed_steps),
+            completed_step_ids=completed_ids,
+            failed_step_ids=failed_ids,
             cancelled_step_ids=tuple(
                 item
                 for item in execution.metadata.get("cancelled_step_ids", ())
                 if isinstance(item, str)
             ),
-            pending_step_ids=tuple(execution.pending_steps),
+            pending_step_ids=pending_ids,
             blocked_step_ids=tuple(execution.blocked_steps),
             dependency_graph={
                 step.id: tuple(step.depends_on)
@@ -1763,6 +2084,10 @@ class StructuredExecutionCoordinator:
             ),
             attempt_number=attempt_number,
             max_attempts=self._replan_policy.max_replans_per_session,
+            plan_id=plan_signature(failed_plan),
+            attempts_performed=attempts_performed,
+            retries_exhausted=retries_exhausted,
+            classification=classification,
         )
 
     def _partial_results(

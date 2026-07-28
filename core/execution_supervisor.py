@@ -298,6 +298,18 @@ class ExecutionOverview:
             raise ValueError("Execution overview terminal_sessions invariant failed.")
 
 
+class ReplanRecoveryStatus(str, Enum):
+    """Closed summary outcomes for controlled execution recovery."""
+
+    NOT_NEEDED = "not_needed"
+    SUCCEEDED = "succeeded"
+    VALIDATION_REJECTED = "validation_rejected"
+    LIMIT_REACHED = "limit_reached"
+    NO_SAFE_ALTERNATIVE = "no_safe_alternative"
+    FAILED = "failed"
+    IN_PROGRESS = "in_progress"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionSummary:
     """Final or live aggregate for one supervised execution."""
@@ -319,12 +331,16 @@ class ExecutionSummary:
     duration_seconds: float
     errors: Mapping[str, str] = field(default_factory=dict)
     critical_failure_step: str | None = None
+    replan_status: ReplanRecoveryStatus = ReplanRecoveryStatus.NOT_NEEDED
+    replan_count: int = 0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.progress <= 1.0:
             raise ValueError("progress must be between zero and one.")
         if self.duration_seconds < 0:
             raise ValueError("duration_seconds cannot be negative.")
+        if self.replan_count < 0:
+            raise ValueError("replan_count cannot be negative.")
         object.__setattr__(self, "errors", MappingProxyType(dict(self.errors)))
 
 
@@ -703,6 +719,25 @@ class ExecutionSupervisor:
             ),
             None,
         )
+        event_types = tuple(event.event_type for event in session.events)
+        if "replan_recovery_succeeded" in event_types:
+            replan_status = ReplanRecoveryStatus.SUCCEEDED
+        elif "replan_validation_rejected" in event_types:
+            replan_status = ReplanRecoveryStatus.VALIDATION_REJECTED
+        elif "replan_limit_reached" in event_types:
+            replan_status = ReplanRecoveryStatus.LIMIT_REACHED
+        elif (
+            "replan_no_safe_alternative" in event_types
+            or "replan_rejected" in event_types
+            or "replan_failed" in event_types
+        ):
+            replan_status = ReplanRecoveryStatus.NO_SAFE_ALTERNATIVE
+        elif "replan_recovery_failed" in event_types:
+            replan_status = ReplanRecoveryStatus.FAILED
+        elif "replan_produced" in event_types or "replan_started" in event_types:
+            replan_status = ReplanRecoveryStatus.IN_PROGRESS
+        else:
+            replan_status = ReplanRecoveryStatus.NOT_NEEDED
         return ExecutionSummary(
             session_id=session.session_id,
             state=session.state,
@@ -726,6 +761,8 @@ class ExecutionSupervisor:
             duration_seconds=max(0.0, (end - session.started_at).total_seconds()),
             errors=errors,
             critical_failure_step=critical_failure,
+            replan_status=replan_status,
+            replan_count=session.replan_count,
         )
 
     def generate_summary(self, session_id: str) -> ExecutionSummary:
@@ -1068,7 +1105,7 @@ class ExecutionSupervisor:
         current_step: str | None = None,
     ) -> ExecutionSession:
         """Move a running session into COMPLETED state."""
-        return self._transition(
+        completed = self._transition(
             session_id,
             ExecutionState.COMPLETED,
             event_type="execution_completed",
@@ -1076,6 +1113,9 @@ class ExecutionSupervisor:
             results=results,
             finished_at=self._clock(),
         )
+        if completed.replan_history:
+            return self.record_replan_recovery_result(session_id, "succeeded")
+        return completed
 
     def mark_replanning(
         self,
@@ -1131,6 +1171,8 @@ class ExecutionSupervisor:
                     "reason": record.reason.value,
                     "previous_plan": f"attempt.{record.attempt_number - 1}",
                     "revised_plan": f"attempt.{record.attempt_number}",
+                    "replacement_step_ids": list(record.replacement_step_ids),
+                    "validation_status": record.validation_status,
                 },
             )
             self._sessions[session_id] = updated
@@ -1146,20 +1188,51 @@ class ExecutionSupervisor:
         failed_step: str | None = None,
         reason: str | None = None,
         error: str | None = None,
+        details: Mapping[str, object] | None = None,
     ) -> ExecutionSession:
         """Append a structured replanning event without changing state."""
         if attempt_number < 1:
             raise ValueError("attempt_number must be greater than zero.")
         with self._lock:
             session = self.get_session(session_id)
-            details: dict[str, object] = {"attempt_number": attempt_number}
+            event_details: dict[str, object] = {"attempt_number": attempt_number}
             if failed_step is not None:
-                details["failed_step"] = failed_step
+                event_details["failed_step"] = failed_step
             if reason is not None:
-                details["reason"] = reason
+                event_details["reason"] = reason
             if error is not None:
-                details["error"] = error
-            updated = self._with_event(session, event_type, details=details)
+                event_details["error"] = error
+            if details is not None:
+                event_details.update(details)
+            updated = self._with_event(session, event_type, details=event_details)
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
+    def record_replan_recovery_result(
+        self,
+        session_id: str,
+        result: str,
+    ) -> ExecutionSession:
+        """Finalize the latest accepted replanning record."""
+        if result not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("unsupported replanning recovery result.")
+        with self._lock:
+            session = self.get_session(session_id)
+            if not session.replan_history:
+                return session
+            history = list(session.replan_history)
+            history[-1] = replace(history[-1], recovery_result=result)
+            updated = replace(session, replan_history=tuple(history))
+            updated = self._with_event(
+                updated,
+                f"replan_recovery_{result}",
+                details={
+                    "attempt_number": history[-1].attempt_number,
+                    "failed_step": history[-1].failed_step,
+                    "replacement_step_ids": list(history[-1].replacement_step_ids),
+                },
+            )
             self._sessions[session_id] = updated
         self._persist_session(updated)
         return updated
@@ -1174,7 +1247,7 @@ class ExecutionSupervisor:
     ) -> ExecutionSession:
         """Move a running session into FAILED state and store the error."""
         error_message = self._error_message(error)
-        return self._transition(
+        failed = self._transition(
             session_id,
             ExecutionState.FAILED,
             event_type="execution_failed",
@@ -1184,6 +1257,9 @@ class ExecutionSupervisor:
             finished_at=self._clock(),
             details={"error": error_message},
         )
+        if failed.replan_history and failed.replan_history[-1].recovery_result == "pending":
+            return self.record_replan_recovery_result(session_id, "failed")
+        return failed
 
     def mark_cancelled(
         self,

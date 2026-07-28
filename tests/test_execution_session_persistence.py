@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from threading import Barrier, Thread
 
 import pytest
@@ -27,6 +28,7 @@ from core.execution_supervisor import (
 )
 from core.planner import ExecutionPlan, ExecutionStep
 from core.structured_execution import StructuredExecutionCoordinator
+from core.structured_plan_replanner import ReplanReason, ReplanRecord
 
 
 def _plan(*, recovery_safe: bool = False, requires_confirmation: bool = False) -> ExecutionPlan:
@@ -105,6 +107,64 @@ def test_snapshot_reader_defaults_new_supervision_fields_for_legacy_payload() ->
     assert step.attempt_count == 0
     assert step.max_attempts == 1
     assert step.is_critical is False
+
+
+def test_replanning_record_round_trip_and_legacy_defaults() -> None:
+    original = _plan()
+    replacement = ExecutionPlan(
+        goal="replacement",
+        ordered_steps=(ExecutionStep("step_1", "alternative", "read_file"),),
+        estimated_steps=1,
+        required_tools=("read_file",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    supervisor = ExecutionSupervisor()
+    session = supervisor.start(original)
+    supervisor.mark_running(session.session_id)
+    supervisor.mark_failed(session.session_id, "failed", current_step="step_1")
+    supervisor.mark_replanning(
+        session.session_id,
+        attempt_number=1,
+        current_step="step_1",
+    )
+    supervisor.record_replan(
+        session.session_id,
+        ReplanRecord(
+            attempt_number=1,
+            previous_plan=original,
+            revised_plan=replacement,
+            reason=ReplanReason.RECOVERABLE_FAILURE,
+            failed_step="step_1",
+            error="failed",
+            created_at=datetime.now(timezone.utc),
+            replacement_step_ids=("step_1",),
+            validation_status="valid",
+            recovery_result="pending",
+        ),
+    )
+    payload = snapshot_to_dict(
+        ExecutionSessionSnapshot.from_session(
+            supervisor.get_session(session.session_id)
+        )
+    )
+
+    loaded = snapshot_from_dict(payload)
+    record = loaded.replan_history[0]
+
+    assert record.replacement_step_ids == ("step_1",)
+    assert record.validation_status == "valid"
+    assert record.recovery_result == "pending"
+
+    legacy_record = payload["replan_history"][0]
+    legacy_record.pop("replacement_step_ids")
+    legacy_record.pop("validation_status")
+    legacy_record.pop("recovery_result")
+    legacy = snapshot_from_dict(payload).replan_history[0]
+
+    assert legacy.replacement_step_ids == ()
+    assert legacy.validation_status == "valid"
+    assert legacy.recovery_result == "pending"
 
 
 def test_repository_save_load_exists_delete_and_path_traversal(tmp_path) -> None:

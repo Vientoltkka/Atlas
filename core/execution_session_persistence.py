@@ -1235,6 +1235,9 @@ def _replan_to_json(record: ReplanRecord) -> dict[str, Any]:
         "failed_step": record.failed_step,
         "error": record.error[:500],
         "created_at": _datetime_to_json(record.created_at),
+        "replacement_step_ids": list(record.replacement_step_ids),
+        "validation_status": record.validation_status,
+        "recovery_result": record.recovery_result,
     }
 
 
@@ -1255,6 +1258,21 @@ def _replan_from_json(payload: Any) -> ReplanRecord:
         created_at=_datetime_from_json(
             _required_str(payload, "created_at"),
             "created_at",
+        ),
+        replacement_step_ids=(
+            _str_tuple(payload, "replacement_step_ids")
+            if "replacement_step_ids" in payload
+            else ()
+        ),
+        validation_status=(
+            _required_str(payload, "validation_status")
+            if "validation_status" in payload
+            else "valid"
+        ),
+        recovery_result=(
+            _required_str(payload, "recovery_result")
+            if "recovery_result" in payload
+            else "pending"
         ),
     )
 

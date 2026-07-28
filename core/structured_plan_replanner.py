@@ -9,6 +9,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from core.planner import ExecutionPlan, PlanGenerationResult, Planner
+from core.execution_plan_validator import plan_signature
 
 
 def _utc_now() -> datetime:
@@ -26,6 +27,16 @@ class ReplanReason(str, Enum):
     VALIDATION_ERROR = "validation_error"
     PLANNER_ERROR = "planner_error"
     REJECTED = "rejected"
+    OPTIONAL_STEP_OMITTED = "optional_step_omitted"
+    NO_SAFE_ALTERNATIVE = "no_safe_alternative"
+
+
+class ReplanFailureClassification(str, Enum):
+    """Closed failure classes used before invoking the planner."""
+
+    RECOVERABLE = "recoverable"
+    CRITICAL = "critical"
+    OPTIONAL = "optional"
 
 
 class ReplanResultStatus(str, Enum):
@@ -36,6 +47,7 @@ class ReplanResultStatus(str, Enum):
     NOT_RECOVERABLE = "not_recoverable"
     PLANNER_ERROR = "planner_error"
     LIMIT_REACHED = "limit_reached"
+    NO_SAFE_ALTERNATIVE = "no_safe_alternative"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +84,10 @@ class ReplanRequest:
     previous_resource_id: str | None = None
     optimization_goal: str | None = None
     degradation_applied: bool = False
+    plan_id: str | None = None
+    attempts_performed: int = 1
+    retries_exhausted: bool = True
+    classification: ReplanFailureClassification = ReplanFailureClassification.RECOVERABLE
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -84,6 +100,21 @@ class ReplanRequest:
             raise ValueError("attempt_number must be greater than zero.")
         if self.max_attempts < 0:
             raise ValueError("max_attempts cannot be negative.")
+        if self.attempts_performed < 1:
+            raise ValueError("attempts_performed must be greater than zero.")
+        if type(self.retries_exhausted) is not bool:
+            raise TypeError("retries_exhausted must be a bool.")
+        if not isinstance(self.classification, ReplanFailureClassification):
+            object.__setattr__(
+                self,
+                "classification",
+                ReplanFailureClassification(self.classification),
+            )
+        object.__setattr__(
+            self,
+            "plan_id",
+            self.plan_id or plan_signature(self.active_plan or self.original_plan),
+        )
         object.__setattr__(
             self,
             "partial_results",
@@ -201,6 +232,9 @@ class ReplanRecord:
     failed_step: str | None
     error: str
     created_at: datetime
+    replacement_step_ids: tuple[str, ...] = ()
+    validation_status: str = "valid"
+    recovery_result: str = "pending"
 
     def __post_init__(self) -> None:
         if self.attempt_number < 1:
@@ -211,6 +245,7 @@ class ReplanRecord:
             raise TypeError("revised_plan must be an ExecutionPlan.")
         if not isinstance(self.reason, ReplanReason):
             raise TypeError("reason must be a ReplanReason.")
+        object.__setattr__(self, "replacement_step_ids", tuple(self.replacement_step_ids))
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +300,24 @@ class ReplanPolicy:
         current_replan_count: int,
     ) -> ReplanResult:
         """Return a policy-only decision without invoking a planner."""
+        if request.classification is ReplanFailureClassification.CRITICAL:
+            return ReplanResult(
+                status=ReplanResultStatus.NOT_RECOVERABLE,
+                reason=ReplanReason.NON_RECOVERABLE_FAILURE,
+                error="critical failure cannot be replanned",
+            )
+        if request.classification is ReplanFailureClassification.OPTIONAL:
+            return ReplanResult(
+                status=ReplanResultStatus.NOT_RECOVERABLE,
+                reason=ReplanReason.OPTIONAL_STEP_OMITTED,
+                error="optional step must be omitted instead of replanned",
+            )
+        if not request.retries_exhausted:
+            return ReplanResult(
+                status=ReplanResultStatus.NOT_RECOVERABLE,
+                reason=ReplanReason.NON_RECOVERABLE_FAILURE,
+                error="normal retries are not exhausted",
+            )
         if current_replan_count >= self.max_replans_per_session:
             return ReplanResult(
                 status=ReplanResultStatus.LIMIT_REACHED,
@@ -288,6 +341,20 @@ class ReplanPolicy:
             revised_plan=request.active_plan or request.original_plan,
             reason=ReplanReason.RECOVERABLE_FAILURE,
         )
+
+    def classify(
+        self,
+        *,
+        error_code: str | None,
+        critical: bool,
+        optional: bool,
+    ) -> ReplanFailureClassification:
+        """Classify a failed step without invoking a planner."""
+        if critical or error_code in self.non_recoverable_error_codes:
+            return ReplanFailureClassification.CRITICAL
+        if optional:
+            return ReplanFailureClassification.OPTIONAL
+        return ReplanFailureClassification.RECOVERABLE
 
 
 class ExecutionReplanner:
@@ -328,7 +395,10 @@ class ExecutionReplanner:
         completed = ", ".join(sorted(request.partial_results)) or "none"
         return "\n".join(
             [
-                "Revise the structured execution plan after a recoverable failure.",
+                "Generate only a safe replacement fragment for one failed step.",
+                "Do not include completed or unrelated pending steps.",
+                "The fragment must be self-contained and its final step must reuse the failed step ID.",
+                f"Plan ID: {request.plan_id}",
                 f"Original objective: {request.original_plan.goal}",
                 f"Failed step: {request.failed_step or 'unknown'}",
                 f"Error: {request.error}",
@@ -336,6 +406,7 @@ class ExecutionReplanner:
                 f"Pending steps: {', '.join(request.pending_step_ids) or 'none'}",
                 f"Blocked steps: {', '.join(request.blocked_step_ids) or 'none'}",
                 f"Replan attempt: {request.attempt_number} of {request.max_attempts}",
+                f"Execution attempts already performed: {request.attempts_performed}",
             ]
         )
 
@@ -345,6 +416,8 @@ def replan_record(
     result: ReplanResult,
     *,
     previous_plan: ExecutionPlan,
+    replacement_step_ids: tuple[str, ...] = (),
+    validation_status: str = "valid",
     created_at: datetime | None = None,
 ) -> ReplanRecord:
     """Build a trace record for an accepted replanning result."""
@@ -358,4 +431,6 @@ def replan_record(
         failed_step=request.failed_step,
         error=request.error,
         created_at=created_at or _utc_now(),
+        replacement_step_ids=replacement_step_ids,
+        validation_status=validation_status,
     )
