@@ -13,7 +13,9 @@ from core.concurrent_step_executor import (
 from core.execution_plan_executor import PlanExecutionResult, PlanExecutionStatus
 from core.execution_plan_executor import StepExecutionResult
 from core.execution_plan_validator import PlanValidationResult, plan_signature
+from core.execution_retry import RetryPolicy
 from core.execution_supervisor import (
+    ExecutionSummary,
     ExecutionOverview,
     ExecutionSessionNotFoundError,
     ExecutionState,
@@ -204,6 +206,137 @@ def test_start_creates_pending_session_with_initial_event() -> None:
     assert session.results == {}
     assert session.step_states["step_1"].state is StepExecutionState.PENDING
     assert [event.event_type for event in session.events] == ["execution_started"]
+
+
+def test_supervisor_tracks_timing_retry_progress_and_final_summary() -> None:
+    clock = _Clock()
+    plan = ExecutionPlan(
+        goal="retry one step",
+        ordered_steps=(
+            ExecutionStep(
+                "step_1",
+                "read",
+                "read_file",
+                retry_policy=RetryPolicy(max_attempts=3),
+            ),
+            ExecutionStep("step_2", "optional", "read_file"),
+        ),
+        estimated_steps=2,
+        required_tools=("read_file",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    supervisor = ExecutionSupervisor(clock=clock)
+    session = supervisor.start(plan)
+    supervisor.mark_running(session.session_id)
+
+    supervisor.mark_step_started(session.session_id, "step_1")
+    supervisor.mark_step_retrying(
+        session.session_id,
+        "step_1",
+        attempt_number=2,
+        max_attempts=3,
+        error="temporary failure",
+    )
+    supervisor.mark_step_completed(session.session_id, "step_1")
+    supervisor.mark_step_skipped(session.session_id, "step_2")
+    supervisor.mark_completed(session.session_id)
+
+    finished = supervisor.get_session(session.session_id)
+    snapshot = finished.step_states["step_1"]
+    summary = supervisor.generate_summary(session.session_id)
+
+    assert StepExecutionState.SUCCESS is StepExecutionState.COMPLETED
+    assert snapshot.started_at is not None
+    assert snapshot.finished_at is not None
+    assert snapshot.finished_at >= snapshot.started_at
+    assert snapshot.attempt_count == 2
+    assert snapshot.max_attempts == 3
+    assert finished.progress == 1.0
+    assert isinstance(summary, ExecutionSummary)
+    assert summary.successful_steps == 1
+    assert summary.skipped_steps == 1
+    assert summary.retry_count == 1
+    assert summary.progress == 1.0
+    assert summary.finished_at is not None
+    assert summary.duration_seconds >= 0
+    assert "step_retrying" in [event.event_type for event in finished.events]
+
+
+def test_critical_step_failure_cancels_session_and_pending_steps() -> None:
+    plan = ExecutionPlan(
+        goal="critical plan",
+        ordered_steps=(
+            ExecutionStep("critical", "critical", "tool", criticality=1),
+            ExecutionStep("remaining", "remaining", "tool"),
+        ),
+        estimated_steps=2,
+        required_tools=("tool",),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    session = supervisor.start(plan)
+    supervisor.mark_running(session.session_id)
+    supervisor.mark_step_started(session.session_id, "critical")
+
+    cancelled = supervisor.mark_step_failed(
+        session.session_id,
+        "critical",
+        "irrecoverable",
+    )
+    summary = supervisor.get_summary(session.session_id)
+
+    assert cancelled.state is ExecutionState.CANCELLED
+    assert cancelled.finished_at is not None
+    assert cancelled.step_states["critical"].state is StepExecutionState.FAILED
+    assert cancelled.step_states["remaining"].state is StepExecutionState.CANCELLED
+    assert summary.critical_failure_step == "critical"
+    assert summary.failed_steps == 1
+    assert summary.cancelled_steps == 1
+    assert summary.errors["critical"] == "irrecoverable"
+    assert cancelled.events[-1].event_type == "execution_cancelled_critical_step"
+
+
+def test_coordinator_records_executor_retry_metadata_in_supervisor() -> None:
+    plan = _plan()
+    result = PlanExecutionResult(
+        plan_status=PlanExecutionStatus.COMPLETED.value,
+        success=True,
+        completed=True,
+        completed_steps=["step_1"],
+        step_results=[
+            StepExecutionResult(
+                step_id="step_1",
+                status="completed",
+                success=True,
+                tool_name="read_file",
+                output="ok",
+                metadata={
+                    "attempt_number": 2,
+                    "max_attempts": 2,
+                    "retry_history": [
+                        {"error_code": "TEMPORARY_UNAVAILABLE", "error": "retry me"}
+                    ],
+                },
+            )
+        ],
+    )
+    supervisor = ExecutionSupervisor(clock=_Clock())
+    coordinator = StructuredExecutionCoordinator(
+        planner=_FixedPlanner(plan),  # type: ignore[arg-type]
+        validator=_FixedValidator(),  # type: ignore[arg-type]
+        executor=_FixedExecutor(result),  # type: ignore[arg-type]
+        execution_supervisor=supervisor,
+    )
+
+    response = coordinator.handle("run")
+    session = supervisor.get_session("execution.session.000001")
+
+    assert response.status == "completed"
+    assert session.step_states["step_1"].attempt_count == 2
+    assert session.step_states["step_1"].state is StepExecutionState.COMPLETED
+    assert "step_retrying" in [event.event_type for event in session.events]
 
 
 def test_empty_overview_has_zero_counts_and_no_latest_session() -> None:

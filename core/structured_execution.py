@@ -861,6 +861,11 @@ class StructuredExecutionCoordinator:
                     active_plan,
                     execution,
                 )
+                if (
+                    self._execution_supervisor.get_session(session.session_id).state
+                    is ExecutionState.CANCELLED
+                ):
+                    return execution
                 if self._execution_can_finish_without_replan(execution):
                     self._finalize_supervised_session(session.session_id, execution)
                     return execution
@@ -1406,6 +1411,30 @@ class StructuredExecutionCoordinator:
         for step_result in execution.step_results:
             step = step_by_id.get(step_result.step_id)
             dependency_ids = tuple(step.depends_on) if step is not None else ()
+            attempt_number = step_result.metadata.get("attempt_number")
+            max_attempts = step_result.metadata.get("max_attempts")
+            retry_history = step_result.metadata.get("retry_history")
+            if (
+                isinstance(attempt_number, int)
+                and not isinstance(attempt_number, bool)
+                and attempt_number > 1
+                and isinstance(max_attempts, int)
+                and not isinstance(max_attempts, bool)
+                and max_attempts >= attempt_number
+            ):
+                retry_error = None
+                if isinstance(retry_history, (list, tuple)) and retry_history:
+                    last_retry = retry_history[-1]
+                    if isinstance(last_retry, dict):
+                        retry_error = last_retry.get("error") or last_retry.get("error_code")
+                self._execution_supervisor.mark_step_retrying(
+                    session_id,
+                    step_result.step_id,
+                    attempt_number=attempt_number,
+                    max_attempts=max_attempts,
+                    dependency_ids=dependency_ids,
+                    error=retry_error,
+                )
             if step_result.status in {"completed", "failed", "blocked"}:
                 self._execution_supervisor.mark_step_started(
                     session_id,
@@ -1438,6 +1467,12 @@ class StructuredExecutionCoordinator:
                     step_result.step_id,
                     dependency_ids=dependency_ids,
                     error=step_result.error,
+                )
+            elif step_result.status == "skipped":
+                self._execution_supervisor.mark_step_skipped(
+                    session_id,
+                    step_result.step_id,
+                    dependency_ids=dependency_ids,
                 )
 
         for step_id in execution.completed_steps:

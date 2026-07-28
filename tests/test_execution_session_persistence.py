@@ -78,8 +78,33 @@ def test_snapshot_serialization_round_trip_rebuilds_types() -> None:
     assert loaded.session_id == snapshot.session_id
     assert loaded.state is ExecutionState.RUNNING
     assert loaded.step_states["step_1"].state is StepExecutionState.RUNNING
+    assert loaded.step_states["step_1"].started_at is not None
+    assert loaded.step_states["step_1"].attempt_count == 1
+    assert loaded.step_states["step_1"].max_attempts == 1
     assert loaded.active_plan.ordered_steps[0].recovery_safe is True
     assert loaded.recovery_metadata == {"note": "safe"}
+
+
+def test_snapshot_reader_defaults_new_supervision_fields_for_legacy_payload() -> None:
+    payload = snapshot_to_dict(_running_snapshot())
+    step_payload = payload["step_states"]["step_1"]
+    for key in (
+        "started_at",
+        "finished_at",
+        "attempt_count",
+        "max_attempts",
+        "is_critical",
+    ):
+        step_payload.pop(key)
+
+    loaded = snapshot_from_dict(payload)
+    step = loaded.step_states["step_1"]
+
+    assert step.started_at is None
+    assert step.finished_at is None
+    assert step.attempt_count == 0
+    assert step.max_attempts == 1
+    assert step.is_critical is False
 
 
 def test_repository_save_load_exists_delete_and_path_traversal(tmp_path) -> None:

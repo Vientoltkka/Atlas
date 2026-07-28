@@ -36,7 +36,9 @@ class StepExecutionState(str, Enum):
     PENDING = "pending"
     READY = "ready"
     RUNNING = "running"
+    RETRYING = "retrying"
     COMPLETED = "completed"
+    SUCCESS = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
     INTERRUPTED = "interrupted"
@@ -101,12 +103,29 @@ class StepExecutionSnapshot:
     dependency_ids: tuple[str, ...] = ()
     error: str | None = None
     ready_since: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    attempt_count: int = 0
+    max_attempts: int = 1
+    is_critical: bool = False
 
     def __post_init__(self) -> None:
         if not self.step_id.strip():
             raise ValueError("step_id must be a non-empty string.")
         if not isinstance(self.state, StepExecutionState):
             raise TypeError("state must be a StepExecutionState.")
+        if self.attempt_count < 0:
+            raise ValueError("attempt_count cannot be negative.")
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be greater than zero.")
+        if self.finished_at is not None and self.started_at is None:
+            raise ValueError("finished_at requires started_at.")
+        if (
+            self.started_at is not None
+            and self.finished_at is not None
+            and self.finished_at < self.started_at
+        ):
+            raise ValueError("finished_at cannot be earlier than started_at.")
         object.__setattr__(self, "dependency_ids", tuple(self.dependency_ids))
 
 
@@ -193,6 +212,24 @@ class ExecutionSession:
         """Return whether the session is in a terminal state."""
         return self.state in _TERMINAL_STATES
 
+    @property
+    def progress(self) -> float:
+        """Return deterministic completion progress in the inclusive range 0..1."""
+        if not self.step_states:
+            return 1.0 if self.is_terminal else 0.0
+        terminal = {
+            StepExecutionState.COMPLETED,
+            StepExecutionState.FAILED,
+            StepExecutionState.BLOCKED,
+            StepExecutionState.INTERRUPTED,
+            StepExecutionState.SKIPPED,
+            StepExecutionState.CANCELLED,
+        }
+        completed = sum(
+            1 for snapshot in self.step_states.values() if snapshot.state in terminal
+        )
+        return completed / len(self.step_states)
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionOverview:
@@ -259,6 +296,36 @@ class ExecutionOverview:
         )
         if self.terminal_sessions != terminal_total:
             raise ValueError("Execution overview terminal_sessions invariant failed.")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSummary:
+    """Final or live aggregate for one supervised execution."""
+
+    session_id: str
+    state: ExecutionState
+    total_steps: int
+    pending_steps: int
+    running_steps: int
+    successful_steps: int
+    failed_steps: int
+    retrying_steps: int
+    cancelled_steps: int
+    skipped_steps: int
+    progress: float
+    retry_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    duration_seconds: float
+    errors: Mapping[str, str] = field(default_factory=dict)
+    critical_failure_step: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.progress <= 1.0:
+            raise ValueError("progress must be between zero and one.")
+        if self.duration_seconds < 0:
+            raise ValueError("duration_seconds cannot be negative.")
+        object.__setattr__(self, "errors", MappingProxyType(dict(self.errors)))
 
 
 class ExecutionSupervisor:
@@ -481,6 +548,33 @@ class ExecutionSupervisor:
             current_step=step_id,
         )
 
+    def mark_step_retrying(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        attempt_number: int,
+        max_attempts: int,
+        dependency_ids: tuple[str, ...] = (),
+        error: object | None = None,
+    ) -> ExecutionSession:
+        """Record an automatic retry already scheduled by the execution engine."""
+        if attempt_number < 2:
+            raise ValueError("attempt_number must be at least two for a retry.")
+        if max_attempts < attempt_number:
+            raise ValueError("max_attempts cannot be lower than attempt_number.")
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.RETRYING,
+            event_type="step_retrying",
+            dependency_ids=dependency_ids,
+            current_step=step_id,
+            error=self._error_message(error) if error is not None else None,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+        )
+
     def mark_step_completed(
         self,
         session_id: str,
@@ -570,6 +664,73 @@ class ExecutionSupervisor:
             dependency_ids=dependency_ids,
             error=self._error_message(error) if error is not None else None,
         )
+
+    def mark_step_skipped(
+        self,
+        session_id: str,
+        step_id: str,
+        *,
+        dependency_ids: tuple[str, ...] = (),
+    ) -> ExecutionSession:
+        """Record one conditionally omitted step."""
+        return self._mark_step_state(
+            session_id,
+            step_id,
+            StepExecutionState.SKIPPED,
+            event_type="step_skipped",
+            dependency_ids=dependency_ids,
+        )
+
+    def get_summary(self, session_id: str) -> ExecutionSummary:
+        """Return a deterministic live or final summary for one session."""
+        session = self.get_session(session_id)
+        snapshots = tuple(session.step_states.values())
+        counts = {state: 0 for state in StepExecutionState}
+        for snapshot in snapshots:
+            counts[snapshot.state] += 1
+        end = session.finished_at or self._clock()
+        errors = {
+            snapshot.step_id: snapshot.error
+            for snapshot in snapshots
+            if snapshot.error is not None
+        }
+        critical_failure = next(
+            (
+                snapshot.step_id
+                for snapshot in snapshots
+                if snapshot.is_critical
+                and snapshot.state is StepExecutionState.FAILED
+            ),
+            None,
+        )
+        return ExecutionSummary(
+            session_id=session.session_id,
+            state=session.state,
+            total_steps=len(snapshots),
+            pending_steps=counts[StepExecutionState.PENDING]
+            + counts[StepExecutionState.READY],
+            running_steps=counts[StepExecutionState.RUNNING],
+            successful_steps=counts[StepExecutionState.COMPLETED],
+            failed_steps=counts[StepExecutionState.FAILED]
+            + counts[StepExecutionState.BLOCKED]
+            + counts[StepExecutionState.INTERRUPTED],
+            retrying_steps=counts[StepExecutionState.RETRYING],
+            cancelled_steps=counts[StepExecutionState.CANCELLED],
+            skipped_steps=counts[StepExecutionState.SKIPPED],
+            progress=session.progress,
+            retry_count=sum(
+                max(0, snapshot.attempt_count - 1) for snapshot in snapshots
+            ),
+            started_at=session.started_at,
+            finished_at=session.finished_at,
+            duration_seconds=max(0.0, (end - session.started_at).total_seconds()),
+            errors=errors,
+            critical_failure_step=critical_failure,
+        )
+
+    def generate_summary(self, session_id: str) -> ExecutionSummary:
+        """Compatibility-friendly verb for callers generating a final report."""
+        return self.get_summary(session_id)
 
     def mark_interrupted(
         self,
@@ -1124,29 +1285,82 @@ class ExecutionSupervisor:
         dependency_ids: tuple[str, ...] = (),
         current_step: str | None = None,
         error: str | None = None,
+        attempt_number: int | None = None,
+        max_attempts: int | None = None,
     ) -> ExecutionSession:
         with self._lock:
             session = self.get_session(session_id)
+            previous = session.step_states.get(step_id)
+            timestamp = self._clock()
+            started_at = previous.started_at if previous is not None else None
+            finished_at = previous.finished_at if previous is not None else None
+            attempts = previous.attempt_count if previous is not None else 0
+            configured_attempts = previous.max_attempts if previous is not None else 1
+            if state is StepExecutionState.RUNNING:
+                started_at = started_at or timestamp
+                finished_at = None
+                attempts = max(1, attempts)
+            elif state is StepExecutionState.RETRYING:
+                started_at = started_at or timestamp
+                finished_at = None
+                attempts = attempt_number or max(2, attempts + 1)
+                configured_attempts = max_attempts or max(configured_attempts, attempts)
+            elif state in {
+                StepExecutionState.COMPLETED,
+                StepExecutionState.FAILED,
+                StepExecutionState.BLOCKED,
+                StepExecutionState.INTERRUPTED,
+                StepExecutionState.SKIPPED,
+                StepExecutionState.CANCELLED,
+            }:
+                started_at = started_at or timestamp
+                finished_at = timestamp
             snapshot = StepExecutionSnapshot(
                 step_id=step_id,
                 state=state,
                 dependency_ids=dependency_ids,
                 error=error,
                 ready_since=(
-                    session.step_states.get(step_id).ready_since
-                    if step_id in session.step_states
+                    previous.ready_since
+                    if previous is not None
                     else None
                 ),
+                started_at=started_at,
+                finished_at=finished_at,
+                attempt_count=attempts,
+                max_attempts=configured_attempts,
+                is_critical=previous.is_critical if previous is not None else False,
             )
             if state is StepExecutionState.READY and snapshot.ready_since is None:
-                snapshot = replace(snapshot, ready_since=self._clock())
+                snapshot = replace(snapshot, ready_since=timestamp)
             step_states = dict(session.step_states)
             step_states[step_id] = snapshot
+            critical_failure = (
+                state is StepExecutionState.FAILED and snapshot.is_critical
+            )
+            if critical_failure:
+                for pending_id, pending in tuple(step_states.items()):
+                    if pending_id == step_id or pending.state not in {
+                        StepExecutionState.PENDING,
+                        StepExecutionState.READY,
+                        StepExecutionState.RETRYING,
+                    }:
+                        continue
+                    step_states[pending_id] = replace(
+                        pending,
+                        state=StepExecutionState.CANCELLED,
+                        started_at=pending.started_at or timestamp,
+                        finished_at=timestamp,
+                        error=f"cancelled after critical step '{step_id}' failed",
+                    )
             updated = replace(
                 session,
+                state=ExecutionState.CANCELLED if critical_failure else session.state,
                 current_step=current_step
                 if current_step is not None
                 else session.current_step,
+                finished_at=timestamp if critical_failure else session.finished_at,
+                last_error=error if critical_failure else session.last_error,
                 step_states=step_states,
             )
             details: dict[str, object] = {
@@ -1156,7 +1370,23 @@ class ExecutionSupervisor:
             }
             if error is not None:
                 details["error"] = error
-            updated = self._with_event(updated, event_type, details=details)
+            if attempt_number is not None:
+                details["attempt_number"] = attempt_number
+            if max_attempts is not None:
+                details["max_attempts"] = max_attempts
+            updated = self._with_event(
+                updated,
+                event_type,
+                timestamp=timestamp,
+                details=details,
+            )
+            if critical_failure:
+                updated = self._with_event(
+                    updated,
+                    "execution_cancelled_critical_step",
+                    timestamp=timestamp,
+                    details={"step_id": step_id, "error": error or "critical failure"},
+                )
             self._sessions[session_id] = updated
         self._persist_session(updated)
         return updated
@@ -1220,6 +1450,12 @@ class ExecutionSupervisor:
                 step_id=step_id,
                 state=StepExecutionState.PENDING,
                 dependency_ids=tuple(getattr(step, "depends_on", ())),
+                max_attempts=getattr(
+                    getattr(step, "retry_policy", None),
+                    "max_attempts",
+                    1,
+                ),
+                is_critical=getattr(step, "criticality", 0) > 0,
             )
         return snapshots
 

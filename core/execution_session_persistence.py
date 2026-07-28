@@ -286,6 +286,11 @@ class ExecutionSessionSnapshot:
                         dependency_ids=snapshot.dependency_ids,
                         error=snapshot.error or "interrupted during recovery",
                         ready_since=snapshot.ready_since,
+                        started_at=snapshot.started_at,
+                        finished_at=snapshot.finished_at,
+                        attempt_count=snapshot.attempt_count,
+                        max_attempts=snapshot.max_attempts,
+                        is_critical=snapshot.is_critical,
                     )
                     if snapshot.state is StepExecutionState.RUNNING
                     else snapshot
@@ -881,6 +886,11 @@ def _step_state_to_json(snapshot: StepExecutionSnapshot) -> dict[str, Any]:
         "dependency_ids": list(snapshot.dependency_ids),
         "error": snapshot.error,
         "ready_since": _datetime_to_json(snapshot.ready_since),
+        "started_at": _datetime_to_json(snapshot.started_at),
+        "finished_at": _datetime_to_json(snapshot.finished_at),
+        "attempt_count": snapshot.attempt_count,
+        "max_attempts": snapshot.max_attempts,
+        "is_critical": snapshot.is_critical,
     }
 
 
@@ -897,6 +907,11 @@ def _step_state_from_json(payload: Any) -> StepExecutionSnapshot:
         dependency_ids=_str_tuple(payload, "dependency_ids"),
         error=_optional_str(payload, "error"),
         ready_since=_optional_datetime(payload, "ready_since"),
+        started_at=_optional_datetime(payload, "started_at"),
+        finished_at=_optional_datetime(payload, "finished_at"),
+        attempt_count=_optional_int_with_default(payload, "attempt_count", default=0),
+        max_attempts=_optional_int_with_default(payload, "max_attempts", default=1),
+        is_critical=_optional_bool_with_default(payload, "is_critical", default=False),
     )
 
 
@@ -1364,6 +1379,30 @@ def _required_int(payload: dict[str, Any], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ExecutionSnapshotCorruptedError(f"{key} must be an integer.")
+    return value
+
+
+def _optional_int_with_default(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = payload.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ExecutionSnapshotCorruptedError(f"'{key}' must be an integer.")
+    return value
+
+
+def _optional_bool_with_default(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ExecutionSnapshotCorruptedError(f"'{key}' must be a boolean.")
     return value
 
 
