@@ -42,6 +42,11 @@ from core.request_gateway import (
     RequestGateway,
 )
 from core.operational_request_router import RouteDecision
+from core.operational_route_executor import (
+    OperationalRouteExecutor,
+    RouteExecutionPresenter,
+    RouteExecutionResult,
+)
 from core.capability_execution_service import (
     CapabilityExecutionRequest,
     CapabilityExecutionResult,
@@ -93,6 +98,8 @@ class AtlasOrchestrator:
         atlas_request_classifier: AtlasRequestClassifier | None = None,
         atlas_request_normalizer: AtlasRequestNormalizer | None = None,
         request_gateway: RequestGateway | None = None,
+        operational_route_executor: OperationalRouteExecutor | None = None,
+        route_execution_presenter: RouteExecutionPresenter | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -122,6 +129,10 @@ class AtlasOrchestrator:
         self._atlas_request_classifier = atlas_request_classifier
         self._atlas_request_normalizer = atlas_request_normalizer
         self._request_gateway = request_gateway or RequestGateway(router=router)
+        self._operational_route_executor = operational_route_executor
+        self._route_execution_presenter = (
+            route_execution_presenter or RouteExecutionPresenter()
+        )
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -301,6 +312,42 @@ class AtlasOrchestrator:
         if not callable(classify_request):
             raise RuntimeError("Router does not support request classification.")
         return classify_request(request)
+
+    def process_request(
+        self,
+        request: AtlasRequest,
+    ) -> RouteExecutionResult:
+        """Classify and execute one existing AtlasRequest without recreating it."""
+        if not isinstance(request, AtlasRequest):
+            raise TypeError("request must be an AtlasRequest.")
+        if self._operational_route_executor is None:
+            raise RuntimeError("OperationalRouteExecutor is not configured.")
+        decision = self.classify_request(request)
+        return self._operational_route_executor.execute(request, decision)
+
+    def process_prompt_result(
+        self,
+        prompt: str,
+    ) -> RouteExecutionResult:
+        """Process text through Gateway, operational routing and route execution."""
+        return self.process_request(self._request_gateway.from_text(prompt))
+
+    def process_voice_prompt_result(
+        self,
+        prompt: str,
+        **voice_metadata,
+    ) -> RouteExecutionResult:
+        """Process non-empty voice transcription through the same operational flow."""
+        return self.process_request(
+            self._request_gateway.from_voice(prompt, **voice_metadata)
+        )
+
+    def present_route_execution(
+        self,
+        result: RouteExecutionResult,
+    ) -> str:
+        """Convert one operational result to safe temporary visible text."""
+        return self._route_execution_presenter.present(result)
 
     def route_request(
         self,

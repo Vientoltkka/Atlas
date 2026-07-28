@@ -139,6 +139,25 @@ class SingleToolRunner:
         """Return one pending confirmation by id without exposing storage."""
         return self._pending_confirmations.get(confirmation_id)
 
+    def run_registered_tool(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> ToolRunResult | None:
+        """Run one exact registered tool through an existing intent mapping.
+
+        Returning ``None`` means this runner has no current intent mapping for
+        that tool; callers must not select a different tool as a fallback.
+        """
+        for action in self._selector.supported_intents():
+            try:
+                selection = self._selector.select(ToolIntent(action))
+            except (ToolIntentNotSupportedError, ToolNotRegisteredError):
+                continue
+            if selection.tool_name == tool_name:
+                return self.run(ToolIntent(action, dict(arguments)))
+        return None
+
     def cancel_pending_confirmation(
         self,
         confirmation_id: str,

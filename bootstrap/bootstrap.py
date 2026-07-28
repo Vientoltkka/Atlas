@@ -25,6 +25,13 @@ from core.model_manager import ModelManager
 from core.multi_capability_planner import MultiCapabilityPlanner
 from core.orchestrator import AtlasOrchestrator
 from core.operational_request_router import OperationalRequestRouter
+from core.operational_route_executor import (
+    OperationalRouteExecutor,
+    RouteExecutionPresenter,
+    build_default_route_handlers,
+)
+from core.autonomous_execution import AutonomousExecutionOrchestrator
+from core.execution_supervisor import ExecutionSupervisor
 from core.planner import Planner
 from core.router import Router
 from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
@@ -573,6 +580,7 @@ class Bootstrap:
         schema_registry: ArgumentSchemaRegistry | None = None,
         validator: ArgumentValidator | None = None,
         executor: ToolExecutor | None = None,
+        single_tool_runner: SingleToolRunner | None = None,
     ) -> ExecutionCoordinator:
         """Build the coordinator for decision, proposal and runner execution."""
         registry = tool_registry or Bootstrap.build_tool_registry()
@@ -582,7 +590,7 @@ class Bootstrap:
             active_schema_registry
         )
         active_executor = executor or ToolExecutor(registry)
-        single_runner = Bootstrap.build_single_tool_runner(
+        single_runner = single_tool_runner or Bootstrap.build_single_tool_runner(
             registry,
             active_selector,
             active_validator,
@@ -773,15 +781,23 @@ class Bootstrap:
         atlas_request_classifier = build_core_atlas_request_classifier()
         atlas_request_normalizer = build_core_atlas_request_normalizer()
 
+        execution_supervisor = ExecutionSupervisor()
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=execution_plan_validator,
             executor=execution_plan_executor,
+            execution_supervisor=execution_supervisor,
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
                 else None
             ),
+        )
+        autonomous_execution = AutonomousExecutionOrchestrator(
+            planner=planner,
+            validator=execution_plan_validator,
+            executor=execution_plan_executor,
+            supervisor=execution_supervisor,
         )
 
         # -----------------------
@@ -904,10 +920,19 @@ class Bootstrap:
             restart_application=restart_application,
             create_verified_text_file=create_verified_text_file,
         )
+        single_tool_runner = Bootstrap.build_single_tool_runner(
+            tool_registry,
+            tool_selector,
+            argument_validator,
+            tool_executor,
+        )
         execution_conversation = ExecutionConversationController(
             Bootstrap.build_execution_coordinator(
                 tool_registry=tool_registry,
                 executor=tool_executor,
+                selector=tool_selector,
+                validator=argument_validator,
+                single_tool_runner=single_tool_runner,
             )
         )
 
@@ -948,6 +973,35 @@ class Bootstrap:
                 agent_registry=registry,
             )
         )
+        def direct_responder(request):
+            chat_agent = registry.get("chat")
+            if chat_agent is None:
+                raise RuntimeError("Agent 'chat' is not registered.")
+            messages = memory.history()
+            messages.append({"role": "user", "content": request.content})
+            return chat_agent.run(
+                model=model_manager.choose_model("chat"),
+                messages=messages,
+            )
+
+        operational_route_executor = OperationalRouteExecutor(
+            build_default_route_handlers(
+                direct_responder=direct_responder,
+                memory=memory,
+                tool_registry=tool_registry,
+                tool_executor=tool_executor,
+                single_tool_runner=single_tool_runner,
+                agent_registry=registry,
+                model_selector=model_manager.choose_model,
+                autonomous_orchestrator=autonomous_execution,
+                execution_supervisor=execution_supervisor,
+                diagnostics=lambda: {
+                    "tool_count": len(tool_registry.list()),
+                    "agent_count": len(registry.list()),
+                    "execution_count": len(execution_supervisor.list_sessions()),
+                },
+            )
+        )
 
         # -----------------------
         # Orchestrator
@@ -974,6 +1028,8 @@ class Bootstrap:
             atlas_request_adapter=atlas_request_adapter,
             atlas_request_classifier=atlas_request_classifier,
             atlas_request_normalizer=atlas_request_normalizer,
+            operational_route_executor=operational_route_executor,
+            route_execution_presenter=RouteExecutionPresenter(),
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
