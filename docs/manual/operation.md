@@ -2,27 +2,63 @@
 
 manual-id: operation
 
-Propósito: listar comandos reales de arranque, pruebas, validación y uso local.
+Propósito: listar el comando oficial de arranque, requisitos y uso local.
 
-## Activar entorno en PowerShell
+## Requisitos mínimos
+
+- Windows con PowerShell.
+- Python y las dependencias de `requirements.txt`.
+- Ejecutar desde la raíz del repositorio.
+
+La planificación híbrida determinista, la ejecución estructurada y la
+persistencia están activadas de forma predeterminada. Sus variables
+`ATLAS_HYBRID_PLANNING_ENABLED`,
+`ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED` y
+`ATLAS_EXECUTION_PERSISTENCE_ENABLED` pueden establecerse en `false` como
+opt-out de desarrollo.
+
+## Comando oficial
 
 ```powershell
-.\.venv\Scripts\activate
+python main.py
 ```
 
-## Arrancar Atlas
+`python -B main.py` es una variante de desarrollo que evita generar bytecode,
+pero no es un segundo punto de entrada.
 
-```powershell
-python -B main.py
+## Escenario seguro verificado
+
+```text
+Tú: Lee README.md
 ```
+
+La petición se clasifica como `SINGLE_TOOL`, selecciona `read_file`, genera y
+valida un plan, selecciona estrategia, autoriza un único despacho, ejecuta la
+lectura y presenta el informe operativo con el resultado real.
+
+## Persistencia e informe
+
+Las sesiones se guardan de forma predeterminada en:
+
+```text
+.atlas/execution_sessions/
+```
+
+La API interna `ExecutionSessionHistory.latest_execution()` devuelve la última
+ejecución terminal. El informe se obtiene desde
+`StructuredExecutionCoordinator.get_execution_report(session_id)` o desde
+`AtlasOrchestrator.last_structured_execution_response.operational_report`
+después de una petición estructurada.
 
 ## Salir
 
-Dentro de Atlas:
+Dentro del bucle de texto:
 
 ```text
 salir
 ```
+
+También se aceptan `exit` y `quit`.
 
 ## Tests
 
@@ -36,7 +72,8 @@ python -B -m pytest -q
 git status
 ```
 
-Los comandos Git deben ejecutarse fuera de Atlas, en PowerShell. Si Atlas está esperando una confirmación, primero responde o cancela.
+Los comandos Git deben ejecutarse fuera de Atlas, en PowerShell. Si Atlas está
+esperando una confirmación, primero responde o cancela.
 
 ## Manual
 

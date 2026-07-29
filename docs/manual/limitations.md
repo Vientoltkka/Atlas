@@ -4,29 +4,37 @@ manual-id: limitations
 
 Propósito: registrar límites actuales para evitar sobreprometer capacidades.
 
-## Límites de 5.5A
+## Límites operativos actuales
 
-- El manual no está conectado al bucle conversacional principal.
-- No hay RAG, embeddings ni búsqueda semántica.
-- No hay LLM leyendo el manual.
-- La búsqueda del CLI es determinista por título, resumen, id o tag.
-- La validación no ejecuta herramientas.
-
-## Límites de ejecución
-
-- Solo se soportan intents registrados.
-- Las cadenas son lineales.
-- No hay rollback automático.
-- No hay paralelismo.
-- Las confirmaciones pendientes bloquean el siguiente turno.
+- La planificación estructurada local es determinista; el proveedor de planes
+  basado en modelo continúa siendo opcional.
+- Los ajustes históricos están limitados por políticas explícitas y no
+  constituyen aprendizaje automático.
+- La idempotencia del dispatcher es local al proceso y al permiso de ejecución;
+  no existe coordinación distribuida.
+- Una confirmación pendiente debe confirmarse o cancelarse antes de iniciar
+  otro plan estructurado.
+- No hay rollback general automático para efectos externos.
+- La concurrencia solo se activa cuando una política y un ejecutor concurrente
+  compatibles se inyectan explícitamente.
+- Los fallos de planificación que no producen ningún `ExecutionPlan` no crean
+  una `ExecutionSession`; sí devuelven un error estructurado controlado.
 
 ## Límites de herramientas
 
-- Muchas herramientas de escritorio están registradas pero no tienen intent conversacional ni schema.
+- Muchas herramientas de escritorio están registradas, pero no todas tienen un
+  intent conversacional o schema completo.
 - No hay herramienta web registrada.
-- No hay herramienta de hora/fecha registrada.
 - No hay herramienta de eliminación de archivos registrada.
 
-## Límites de documentación heredada
+## Voz
 
-`ROADMAP.md`, `TASKS.md` y `docs/ARCHITECTURE.md` contienen objetivos o aspiraciones que no siempre reflejan el estado real. Este manual debe actuar como capa de estado actual y enlazar esos documentos sin convertirlos automáticamente en verdad operativa.
+La voz conserva sus rutas actuales y solo se considera smoke-tested en esta
+fase. La optimización profunda de captura, wake word y latencia queda fuera del
+alcance de la integración operativa por texto.
+
+## Documentación heredada
+
+`ROADMAP.md`, `TASKS.md` y `docs/ARCHITECTURE.md` contienen objetivos o
+aspiraciones que no siempre reflejan el estado real. Este manual actúa como
+capa de estado operativo validado.

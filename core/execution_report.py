@@ -53,6 +53,7 @@ class OperationalStepReport:
     attempts: int
     duration_seconds: float | None
     error: str | None
+    result: str | None = None
     replaced: bool = False
     omitted: bool = False
     cancelled: bool = False
@@ -65,6 +66,7 @@ class OperationalStepReport:
             "attempts": self.attempts,
             "duration_seconds": self.duration_seconds,
             "error": self.error,
+            "result": self.result,
             "replaced": self.replaced,
             "omitted": self.omitted,
             "cancelled": self.cancelled,
@@ -222,7 +224,7 @@ class OperationalExecutionReport:
                 + ", ".join(self.strategy_controls)
                 + "."
             )
-        lines.append("AutorizaciÃ³n:")
+        lines.append("Autorización:")
         lines.append(f"- Estado: {self.authorization_status}.")
         if self.authorized_strategy is not None:
             lines.append(f"- Estrategia: {self.authorized_strategy}.")
@@ -269,6 +271,8 @@ class ExecutionReportGenerator:
                 for step in session.active_plan.ordered_steps
             }
         )
+        raw_outputs = session.results.get("step_outputs")
+        step_outputs = raw_outputs if isinstance(raw_outputs, Mapping) else {}
         replaced_ids = {
             record.failed_step
             for record in session.replan_history
@@ -278,6 +282,7 @@ class ExecutionReportGenerator:
             self._step_report(
                 snapshot,
                 descriptions.get(step_id, step_id),
+                result=step_outputs.get(step_id),
                 replaced=step_id in replaced_ids,
             )
             for step_id, snapshot in session.step_states.items()
@@ -327,6 +332,7 @@ class ExecutionReportGenerator:
         snapshot: StepExecutionSnapshot,
         description: str,
         *,
+        result: object | None,
         replaced: bool,
     ) -> OperationalStepReport:
         duration = None
@@ -345,6 +351,7 @@ class ExecutionReportGenerator:
             attempts=snapshot.attempt_count,
             duration_seconds=duration,
             error=_safe_text(snapshot.error) if snapshot.error is not None else None,
+            result=_safe_text(result) if result is not None else None,
             replaced=replaced,
             omitted=snapshot.state is StepExecutionState.SKIPPED,
             cancelled=snapshot.state is StepExecutionState.CANCELLED,
@@ -401,8 +408,19 @@ class ExecutionReportGenerator:
         actions: list[str] = []
         error_code = str(session.results.get("error_code") or "").upper()
         event_types = {event.event_type for event in session.events}
+        authorization = session.execution_authorization or {}
+        manual_review = (
+            authorization.get("decision") == "MANUAL_REVIEW_PENDING"
+        )
+        if manual_review:
+            actions.append(
+                "Completa la revisión manual antes de solicitar la ejecución."
+            )
         if (
-            session.state is ExecutionState.WAITING_CONFIRMATION
+            (
+                session.state is ExecutionState.WAITING_CONFIRMATION
+                and not manual_review
+            )
             or error_code == "CONFIRMATION_REQUIRED"
         ):
             actions.append("Confirma o cancela el plan pendiente.")
@@ -454,10 +472,13 @@ def _step_line(step: OperationalStepReport) -> str:
         else ""
     )
     error = f" — {step.error}" if step.error is not None else ""
-    return (
+    line = (
         f"{marker} {step.step_id}: {step.description} "
         f"({attempts}{duration}){suffix}{error}"
     )
+    if step.result is not None:
+        line += f"\n  Resultado: {step.result}"
+    return line
 
 
 def _retry_text(report: OperationalExecutionReport) -> str:
@@ -617,7 +638,7 @@ def _final_message(
 
 
 def _safe_text(value: object) -> str:
-    text = " ".join(str(value).split())
+    text = " ".join(str(value).replace("\ufeff", "").split())
     lowered = text.lower()
     if any(marker in lowered for marker in _SENSITIVE_MARKERS):
         return "[redacted]"

@@ -689,6 +689,8 @@ def test_validator_invalid_prevents_executor_call() -> None:
 
     assert response.status == "validation_failed"
     assert response.execution_result is None
+    assert response.operational_report is not None
+    assert response.operational_report.status.value == "FAILED"
 
 
 def test_unknown_tool_from_structured_provider_is_not_executed() -> None:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import re
+import sys
 import time
 import unicodedata
 
@@ -153,6 +155,9 @@ class AtlasOrchestrator:
         self._execution_strategy_selector = execution_strategy_selector
         self._execution_authorization_gate = execution_authorization_gate
         self._execution_dispatcher = execution_dispatcher
+        self._last_structured_execution_response: (
+            StructuredExecutionResponse | None
+        ) = None
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -199,6 +204,13 @@ class AtlasOrchestrator:
         """Expose one-shot dispatch records without granting execution."""
         return self._execution_dispatcher
 
+    @property
+    def last_structured_execution_response(
+        self,
+    ) -> StructuredExecutionResponse | None:
+        """Return the latest high-level structured result for observability."""
+        return self._last_structured_execution_response
+
     def start(self) -> None:
 
         print("Atlas iniciado correctamente.")
@@ -215,9 +227,15 @@ class AtlasOrchestrator:
                 print("\nHasta pronto.")
                 break
 
-            structured_response = self._handle_structured_execution(prompt)
+            request = self._request_gateway.from_text(prompt)
+            structured_response = self._handle_structured_execution(
+                request.content,
+                request=request,
+            )
             if structured_response is not None:
-                self._print_atlas(structured_response.message)
+                self._print_atlas(
+                    self._present_structured_execution(structured_response)
+                )
                 continue
 
             if self._execution_conversation is not None:
@@ -320,9 +338,12 @@ class AtlasOrchestrator:
     ) -> str:
         """Process text through the normal Atlas flow."""
         request = self._request_gateway.from_text(prompt)
-        structured_response = self._handle_structured_execution(request.content)
+        structured_response = self._handle_structured_execution(
+            request.content,
+            request=request,
+        )
         if structured_response is not None:
-            return structured_response.message
+            return self._present_structured_execution(structured_response)
 
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
@@ -600,6 +621,30 @@ class AtlasOrchestrator:
     def _handle_structured_execution(
         self,
         prompt: str,
+        *,
+        request: AtlasRequest | None = None,
+    ) -> StructuredExecutionResponse | None:
+        request = request or self._request_gateway.from_text(prompt)
+        route_decision = self._structured_route_decision(request)
+        response = self._handle_structured_execution_core(
+            prompt,
+            request_id=request.request_id,
+        )
+        if response is None or not response.handled:
+            return response
+        response = replace(
+            response,
+            original_request=request.content,
+            route_decision=route_decision,
+        )
+        self._last_structured_execution_response = response
+        return response
+
+    def _handle_structured_execution_core(
+        self,
+        prompt: str,
+        *,
+        request_id: str | None = None,
     ) -> StructuredExecutionResponse | None:
         if self._structured_execution_coordinator is None:
             return None
@@ -658,6 +703,7 @@ class AtlasOrchestrator:
                     self.on_execution_progress if execute_plan else None
                 ),
                 execute_after_planning=execute_plan,
+                request_id=request_id,
             )
         except KeyboardInterrupt:
             self._execution_cancel_requested = True
@@ -682,6 +728,28 @@ class AtlasOrchestrator:
             return None
 
         return response
+
+    def _structured_route_decision(
+        self,
+        request: AtlasRequest,
+    ) -> RouteDecision | None:
+        """Classify once before structured planning when the router supports it."""
+        try:
+            return self.classify_request(request)
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _present_structured_execution(
+        response: StructuredExecutionResponse,
+    ) -> str:
+        if response.operational_report is not None:
+            return (
+                response.message
+                + "\n\n"
+                + response.operational_report.to_text()
+            )
+        return response.message
 
     def _load_persisted_structured_execution(self) -> StructuredExecutionResponse | None:
         if (
@@ -925,9 +993,15 @@ class AtlasOrchestrator:
         self,
         response: str,
     ) -> None:
+        text = str(response).replace("\ufeff", "")
+        encoding = sys.stdout.encoding or "utf-8"
+        text = text.encode(encoding, errors="replace").decode(
+            encoding,
+            errors="replace",
+        )
         print()
         print("Atlas:")
-        print(response)
+        print(text)
         print()
 
     def _read_typed_exit_command(self) -> str | None:

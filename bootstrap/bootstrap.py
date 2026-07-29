@@ -683,7 +683,7 @@ class Bootstrap:
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
         model_manager = ModelManager()
         prompt_client = PromptClient()
-        hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", False)
+        hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", True)
         provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
         structured_plan_streaming_enabled = _read_bool(
             "ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED",
@@ -691,11 +691,11 @@ class Bootstrap:
         )
         structured_plan_execution_enabled = _read_bool(
             "ATLAS_STRUCTURED_PLAN_EXECUTION_ENABLED",
-            False,
+            True,
         )
         execution_persistence_enabled = _read_bool(
             "ATLAS_EXECUTION_PERSISTENCE_ENABLED",
-            False,
+            True,
         )
         execution_retry_enabled = _read_bool(
             "ATLAS_EXECUTION_RETRY_ENABLED",
@@ -827,6 +827,8 @@ class Bootstrap:
             execution_strategy_selector=execution_strategy_selector,
             execution_authorization_gate=execution_authorization_gate,
             execution_dispatcher=execution_dispatcher,
+            execution_history_advisor=execution_history_advisor,
+            historical_plan_adjuster=historical_plan_adjuster,
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
@@ -841,6 +843,8 @@ class Bootstrap:
             execution_strategy_selector=execution_strategy_selector,
             execution_authorization_gate=execution_authorization_gate,
             execution_dispatcher=execution_dispatcher,
+            execution_history_advisor=execution_history_advisor,
+            historical_plan_adjuster=historical_plan_adjuster,
         )
 
         # -----------------------

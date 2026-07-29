@@ -458,7 +458,10 @@ class OperationalRequestRouter:
                 )
             return ()
         ordered = sorted(matches, key=lambda item: item.name)
-        best_score = _tool_match_score(ordered[0], normalized, action)
+        best_score = max(
+            _tool_match_score(descriptor, normalized, action)
+            for descriptor in ordered
+        )
         tied = tuple(
             descriptor
             for descriptor in ordered
@@ -477,7 +480,7 @@ class OperationalRequestRouter:
                     clarification_question="Que herramienta quieres usar?",
                 ),
             )
-        descriptor = ordered[0]
+        descriptor = tied[0]
         flags = _safety_flags_for_tool(descriptor, request)
         return (
             RouteCandidate(
@@ -909,7 +912,12 @@ def _tool_matches(
         set(haystack.split())
         | set(haystack.replace(".", " ").replace("_", " ").split())
     )
-    meaningful = request_tokens - {"abre", "abrir", "lee", "leer", "el", "la", "los", "las", "de", "un", "una"}
+    meaningful = {
+        token
+        for token in request_tokens
+        - {"abre", "abrir", "lee", "leer", "el", "la", "los", "las", "de", "un", "una"}
+        if not _looks_like_tool_argument(token)
+    }
     if "aplicacion" in meaningful and "application" in tool_tokens:
         meaningful = set(meaningful)
         meaningful.remove("aplicacion")
@@ -917,6 +925,11 @@ def _tool_matches(
         if not any(token in haystack for token in meaningful):
             return False
     return True
+
+
+def _looks_like_tool_argument(token: str) -> bool:
+    """Keep concrete file/path arguments out of semantic tool matching."""
+    return "." in token or "/" in token or "\\" in token
 
 
 def _tool_match_score(descriptor: ToolDescriptor, text: str, action: str) -> float:
@@ -927,6 +940,13 @@ def _tool_match_score(descriptor: ToolDescriptor, text: str, action: str) -> flo
         )
     )
     score = 0.7 + min(0.2, overlap * 0.05)
+    preferred_tool = {
+        "read": "read_file",
+        "write": "write_file",
+        "list": "list_directory",
+    }.get(action)
+    if descriptor.name == preferred_tool:
+        score += 0.15
     if descriptor.requires_confirmation:
         score -= 0.02
     return round(max(0.0, min(1.0, score)), 3)

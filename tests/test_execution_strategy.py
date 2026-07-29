@@ -490,4 +490,9 @@ def test_coordinator_blocks_manual_strategy_before_executor() -> None:
     assert response.strategy_selection.strategy.type is (
         ExecutionStrategyType.MANUAL_REVIEW_REQUIRED
     )
+    assert response.operational_report is not None
+    assert response.operational_report.authorization_manual_review_pending is True
+    assert response.operational_report.pending_user_actions == (
+        "Completa la revisión manual antes de solicitar la ejecución.",
+    )
     assert executor.calls == 0

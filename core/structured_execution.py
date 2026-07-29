@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from core.concurrent_step_executor import (
     ConcurrentStepExecutor,
@@ -66,8 +67,15 @@ from core.execution_strategy import (
     GlobalExecutionSafetyPolicy,
     build_strategy_request,
 )
-from core.execution_history_advisor import HistoricalPlanningContext
-from core.historical_plan_adjustment import HistoricalPlanAdjustmentResult
+from core.execution_history_advisor import (
+    ExecutionHistoryAdvisor,
+    HistoricalPlanningContext,
+)
+from core.historical_plan_adjustment import (
+    HistoricalAdjustmentRequest,
+    HistoricalPlanAdjuster,
+    HistoricalPlanAdjustmentResult,
+)
 from core.execution_authorization import (
     DispatchStatus,
     ExecutionAuthorizationDecision,
@@ -122,6 +130,10 @@ class StructuredExecutionResponse:
     strategy_selection: ExecutionStrategySelectionResult | None = None
     authorization_result: ExecutionAuthorizationResult | None = None
     dispatch_result: ExecutionDispatchResult | None = None
+    original_request: str | None = None
+    route_decision: object | None = None
+    historical_context: HistoricalPlanningContext | None = None
+    historical_adjustment: HistoricalPlanAdjustmentResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +151,7 @@ class PendingStructuredExecution:
     strategy_selection: ExecutionStrategySelectionResult | None = None
     authorization_result: ExecutionAuthorizationResult | None = None
     confirmation_references: tuple[ExecutionConfirmationReference, ...] = ()
+    authorization_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +188,8 @@ class StructuredExecutionCoordinator:
         execution_safety_policy: GlobalExecutionSafetyPolicy | None = None,
         execution_authorization_gate: ExecutionAuthorizationGate | None = None,
         execution_dispatcher: ExecutionDispatcher | None = None,
+        execution_history_advisor: ExecutionHistoryAdvisor | None = None,
+        historical_plan_adjuster: HistoricalPlanAdjuster | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -207,6 +222,8 @@ class StructuredExecutionCoordinator:
             execution_safety_policy or GlobalExecutionSafetyPolicy()
         )
         self._execution_dispatcher = execution_dispatcher or ExecutionDispatcher()
+        self._execution_history_advisor = execution_history_advisor
+        self._historical_plan_adjuster = historical_plan_adjuster
         self._execution_authorization_gate = (
             execution_authorization_gate
             or ExecutionAuthorizationGate(
@@ -233,8 +250,10 @@ class StructuredExecutionCoordinator:
         execute_after_planning: bool = True,
         historical_adjustment: HistoricalPlanAdjustmentResult | None = None,
         historical_context: HistoricalPlanningContext | None = None,
+        request_id: str | None = None,
     ) -> StructuredExecutionResponse:
         """Generate, validate and optionally execute one structured plan."""
+        authorization_scope = request_id or f"execution-request.{uuid4().hex}"
         generation = self._planner.generate_execution_plan(
             objective,
             on_planning_progress=on_planning_progress,
@@ -268,20 +287,48 @@ class StructuredExecutionCoordinator:
                 error="; ".join(generation.errors) if generation.errors else None,
             )
 
-        validation = self._validator.validate(generation.plan)
+        active_plan = generation.plan
+        validation = self._validator.validate(active_plan)
         if not validation.is_valid:
+            session = self._record_pre_execution_failure(
+                active_plan,
+                "Plan validation failed: " + "; ".join(validation.errors),
+                results={
+                    "plan_status": "validation_failed",
+                    "validation_errors": tuple(validation.errors),
+                },
+            )
             return StructuredExecutionResponse(
                 handled=True,
                 status="validation_failed",
                 message=self._validation_failed_message(validation),
-                plan=generation.plan,
+                plan=active_plan,
                 validation_result=validation,
                 error_code="INVALID_PLAN",
                 error="; ".join(validation.errors),
+                operational_report=self.get_execution_report(session.session_id),
             )
 
+        if historical_context is None and self._execution_history_advisor is not None:
+            historical_context = self._execution_history_advisor.build_planning_context(
+                objective
+            )
+        if (
+            historical_adjustment is None
+            and historical_context is not None
+            and self._historical_plan_adjuster is not None
+        ):
+            historical_adjustment = self._historical_plan_adjuster.adjust(
+                HistoricalAdjustmentRequest(
+                    plan=active_plan,
+                    historical_context=historical_context,
+                )
+            )
+            active_plan = historical_adjustment.selected_plan
+            validation = historical_adjustment.final_validation
+
         strategy_selection = self._select_execution_strategy(
-            generation.plan,
+            active_plan,
             validation,
             historical_adjustment=historical_adjustment,
             historical_context=historical_context,
@@ -294,7 +341,7 @@ class StructuredExecutionCoordinator:
             ] = ()
         else:
             confirmation_references = self._confirmation_references(
-                generation.plan,
+                active_plan,
                 validation,
                 strategy_selection,
             )
@@ -307,12 +354,15 @@ class StructuredExecutionCoordinator:
                 else ()
             )
             authorization = self._authorize_execution(
-                generation.plan,
+                active_plan,
                 validation,
                 strategy_selection,
                 required_confirmations=confirmation_references,
                 granted_confirmations=granted_references,
-                source="StructuredExecutionCoordinator.handle",
+                source=(
+                    "StructuredExecutionCoordinator.handle:"
+                    + authorization_scope
+                ),
             )
 
         if (
@@ -320,15 +370,23 @@ class StructuredExecutionCoordinator:
             and authorization.decision
             is ExecutionAuthorizationDecision.MANUAL_REVIEW_PENDING
         ):
+            session = self._start_waiting_confirmation_session(
+                active_plan,
+                strategy_selection,
+                authorization,
+            )
             return StructuredExecutionResponse(
                 handled=True,
                 status="strategy_blocked",
                 message=authorization.reason,
-                plan=generation.plan,
+                plan=active_plan,
                 validation_result=validation,
                 error_code="EXECUTION_STRATEGY_BLOCKED",
+                operational_report=self.get_execution_report(session.session_id),
                 strategy_selection=strategy_selection,
                 authorization_result=authorization,
+                historical_context=historical_context,
+                historical_adjustment=historical_adjustment,
             )
 
         if (
@@ -340,16 +398,35 @@ class StructuredExecutionCoordinator:
                 ExecutionAuthorizationDecision.ALREADY_DISPATCHED,
             }
         ):
+            report = None
+            if (
+                authorization.decision
+                is not ExecutionAuthorizationDecision.ALREADY_DISPATCHED
+            ):
+                session = self._record_pre_execution_failure(
+                    active_plan,
+                    authorization.reason,
+                    strategy_selection=strategy_selection,
+                    authorization_result=authorization,
+                    results={
+                        "plan_status": authorization.decision.value.lower(),
+                        "authorization_error": authorization.reason,
+                    },
+                )
+                report = self.get_execution_report(session.session_id)
             return StructuredExecutionResponse(
                 handled=True,
                 status=authorization.decision.value.lower(),
                 message=authorization.reason,
-                plan=generation.plan,
+                plan=active_plan,
                 validation_result=validation,
                 error_code=f"EXECUTION_AUTHORIZATION_{authorization.decision.value}",
                 error=authorization.reason,
+                operational_report=report,
                 strategy_selection=strategy_selection,
                 authorization_result=authorization,
+                historical_context=historical_context,
+                historical_adjustment=historical_adjustment,
             )
 
         if (
@@ -365,24 +442,25 @@ class StructuredExecutionCoordinator:
             )
         ):
             session = self._start_waiting_confirmation_session(
-                generation.plan,
+                active_plan,
                 strategy_selection,
                 authorization,
             )
             token = self._store_pending_plan(
                 objective,
-                generation.plan,
+                active_plan,
                 validation,
                 session.session_id,
                 strategy_selection,
                 authorization,
                 confirmation_references,
+                authorization_scope,
             )
             return StructuredExecutionResponse(
                 handled=True,
                 status="confirmation_required",
-                message=self._confirmation_message(generation.plan, validation, token),
-                plan=generation.plan,
+                message=self._confirmation_message(active_plan, validation, token),
+                plan=active_plan,
                 validation_result=validation,
                 requires_confirmation=True,
                 confirmation_token=token,
@@ -390,23 +468,27 @@ class StructuredExecutionCoordinator:
                 operational_report=self.get_execution_report(session.session_id),
                 strategy_selection=strategy_selection,
                 authorization_result=authorization,
+                historical_context=historical_context,
+                historical_adjustment=historical_adjustment,
             )
 
         if not execute_after_planning:
             return StructuredExecutionResponse(
                 handled=True,
                 status="planned",
-                message=self._planned_message(generation.plan, validation),
-                plan=generation.plan,
+                message=self._planned_message(active_plan, validation),
+                plan=active_plan,
                 validation_result=validation,
                 requires_confirmation=False,
                 strategy_selection=strategy_selection,
                 authorization_result=authorization,
+                historical_context=historical_context,
+                historical_adjustment=historical_adjustment,
             )
 
         if authorization is None:
             execution = self._execute_plan_under_supervision(
-                generation.plan,
+                active_plan,
                 validation,
                 confirmation_granted=confirmation_granted,
                 control=control,
@@ -434,18 +516,20 @@ class StructuredExecutionCoordinator:
                     handled=True,
                     status="dispatch_failed",
                     message=dispatch.reason,
-                    plan=generation.plan,
+                    plan=active_plan,
                     validation_result=validation,
                     error_code=dispatch.status.value,
                     error=dispatch.error or dispatch.reason,
                     strategy_selection=strategy_selection,
                     authorization_result=authorization,
                     dispatch_result=dispatch,
+                    historical_context=historical_context,
+                    historical_adjustment=historical_adjustment,
                 )
             execution = dispatch.execution_result
             self._record_dispatch_authorization(authorization, dispatch)
         response = self._execution_response(
-            generation.plan,
+            active_plan,
             validation,
             execution,
         )
@@ -461,12 +545,16 @@ class StructuredExecutionCoordinator:
                 strategy_selection=strategy_selection,
                 authorization_result=authorization,
                 dispatch_result=dispatch,
+                historical_context=historical_context,
+                historical_adjustment=historical_adjustment,
             )
         return replace(
             response,
             strategy_selection=strategy_selection,
             authorization_result=authorization,
             dispatch_result=dispatch,
+            historical_context=historical_context,
+            historical_adjustment=historical_adjustment,
         )
 
     def confirm(
@@ -550,7 +638,13 @@ class StructuredExecutionCoordinator:
                     for reference in pending.confirmation_references
                 ),
                 session_state="waiting_confirmation",
-                source="StructuredExecutionCoordinator.confirm",
+                source=(
+                    "StructuredExecutionCoordinator.handle:"
+                    + (
+                        pending.authorization_scope
+                        or pending.confirmation_token
+                    )
+                ),
             )
             if (
                 authorization.decision
@@ -1070,6 +1164,7 @@ class StructuredExecutionCoordinator:
             ExecutionConfirmationReference,
             ...,
         ] = (),
+        authorization_scope: str | None = None,
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
         if self._active_confirmation_token is not None:
@@ -1090,6 +1185,7 @@ class StructuredExecutionCoordinator:
                 strategy_selection=strategy_selection,
                 authorization_result=authorization_result,
                 confirmation_references=confirmation_references,
+                authorization_scope=authorization_scope,
             ),
             session_id=session_id,
         )
@@ -1201,6 +1297,36 @@ class StructuredExecutionCoordinator:
         )
         session = self._execution_supervisor.mark_running(session.session_id)
         return self._execution_supervisor.mark_waiting_confirmation(session.session_id)
+
+    def _record_pre_execution_failure(
+        self,
+        plan: ExecutionPlan,
+        error: object,
+        *,
+        strategy_selection: ExecutionStrategySelectionResult | None = None,
+        authorization_result: ExecutionAuthorizationResult | None = None,
+        results: Mapping[str, object] | None = None,
+    ) -> ExecutionSession:
+        """Persist a controlled failure that occurs before Executor delivery."""
+        session = self._execution_supervisor.start(
+            plan,
+            execution_strategy=(
+                None
+                if strategy_selection is None
+                else strategy_selection.persisted_snapshot()
+            ),
+            execution_authorization=(
+                None
+                if authorization_result is None
+                else authorization_result.persisted_snapshot()
+            ),
+        )
+        self._execution_supervisor.mark_running(session.session_id)
+        return self._execution_supervisor.mark_failed(
+            session.session_id,
+            error,
+            results=results,
+        )
 
     def _execute_plan_under_supervision(
         self,
@@ -2596,6 +2722,11 @@ class StructuredExecutionCoordinator:
             "blocked_steps": tuple(execution.blocked_steps),
             "skipped_steps": tuple(execution.skipped_steps),
             "error_code": execution.error_code,
+            "step_outputs": {
+                result.step_id: result.output
+                for result in execution.step_results
+                if result.success and result.status == "completed"
+            },
         }
 
     def _execution_response(

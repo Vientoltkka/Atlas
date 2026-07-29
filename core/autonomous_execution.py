@@ -30,6 +30,8 @@ from core.execution_strategy import (
     ExecutionStrategySelector,
     GlobalExecutionSafetyPolicy,
 )
+from core.execution_history_advisor import ExecutionHistoryAdvisor
+from core.historical_plan_adjustment import HistoricalPlanAdjuster
 from core.execution_authorization import (
     ExecutionAuthorizationGate,
     ExecutionDispatcher,
@@ -314,6 +316,8 @@ class AutonomousExecutionOrchestrator:
         execution_safety_policy: GlobalExecutionSafetyPolicy | None = None,
         execution_authorization_gate: ExecutionAuthorizationGate | None = None,
         execution_dispatcher: ExecutionDispatcher | None = None,
+        execution_history_advisor: ExecutionHistoryAdvisor | None = None,
+        historical_plan_adjuster: HistoricalPlanAdjuster | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._planner = planner
@@ -330,6 +334,8 @@ class AutonomousExecutionOrchestrator:
         )
         self._execution_dispatcher = execution_dispatcher
         self._execution_authorization_gate = execution_authorization_gate
+        self._execution_history_advisor = execution_history_advisor
+        self._historical_plan_adjuster = historical_plan_adjuster
         self._clock = clock or _utc_now
         self._last_results: dict[str, AutonomousExecutionResult] = {}
         self._coordinators: dict[str, StructuredExecutionCoordinator] = {}
@@ -593,6 +599,8 @@ class AutonomousExecutionOrchestrator:
             execution_safety_policy=self._execution_safety_policy,
             execution_authorization_gate=self._execution_authorization_gate,
             execution_dispatcher=self._execution_dispatcher,
+            execution_history_advisor=self._execution_history_advisor,
+            historical_plan_adjuster=self._historical_plan_adjuster,
         )
 
     def _budget_for_options(

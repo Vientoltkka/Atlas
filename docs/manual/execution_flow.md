@@ -2,35 +2,41 @@
 
 manual-id: execution_flow
 
-Propósito: describir cómo Atlas decide, propone, confirma, ejecuta y presenta herramientas.
+Propósito: describir el recorrido operativo principal de una petición de texto.
 
-## Modos
+## Recorrido principal
 
-- `DIRECT_RESPONSE`: no se usa herramienta registrada y el turno vuelve al flujo conversacional.
-- `SINGLE_TOOL`: una intención registrada puede resolver la petición.
-- `TOOL_CHAIN`: varias intenciones registradas se ejecutan en orden lineal.
+1. `main.py` crea `Atlas`.
+2. `Atlas.start()` abre el bucle de texto de `AtlasOrchestrator`.
+3. `RequestGateway` crea una `AtlasRequest`.
+4. `Router.classify_request()` produce una `RouteDecision`.
+5. `StructuredExecutionCoordinator` solicita el `ExecutionPlan` al `Planner`.
+6. `ExecutionPlanValidator` valida el plan.
+7. `ExecutionHistoryAdvisor` consulta experiencia previa y
+   `HistoricalPlanAdjuster` aplica únicamente ajustes permitidos.
+8. `ExecutionStrategySelector` selecciona y valida la estrategia.
+9. `ExecutionAuthorizationGate` autoriza, bloquea o deja confirmaciones
+   pendientes.
+10. `ExecutionDispatcher` consume el permiso una sola vez.
+11. `ExecutionSupervisor` crea y actualiza la `ExecutionSession`.
+12. `ExecutionPlanExecutor` ejecuta los pasos mediante herramientas registradas.
+13. La sesión se persiste y `ExecutionReportGenerator` deriva el informe.
+14. `AtlasOrchestrator` presenta el mensaje contractual y el informe operativo.
 
-## Herramienta única
+Las peticiones no aplicables al planificador estructurado continúan por los
+flujos conversacionales existentes. Las APIs internas de bajo nivel se
+conservan para composición y compatibilidad, pero no son el comando principal.
 
-1. `ExecutionDecisionEngine` detecta candidato.
-2. `ToolProposalBuilder` extrae argumentos.
-3. `ArgumentValidator` valida schema.
-4. `SingleToolRunner` comprueba si requiere confirmación.
-5. Si no requiere confirmación, ejecuta mediante `ToolExecutor`.
-6. `ExecutionResultPresenter` presenta el resultado.
+## Confirmaciones y bloqueos
 
-## Cadena lineal
+- Una confirmación pendiente crea sesión e informe, pero no llega al Executor.
+- La revisión manual impide el despacho automático.
+- Una autorización consumida no puede despacharse otra vez.
+- Dos peticiones nuevas equivalentes reciben permisos distintos; la
+  idempotencia se limita a cada solicitud de ejecución.
 
-1. `ToolChainProposalBuilder` crea pasos ordenados.
-2. Las referencias usan `${steps.<id>.output}` o campos soportados.
-3. `ToolChainRunner` ejecuta desde el primer paso.
-4. Si un paso requiere confirmación, la cadena queda pausada.
-5. Al confirmar, continúa desde el paso pendiente sin repetir pasos previos.
+## Errores
 
-## Estados de coordinación
-
-`DIRECT_RESPONSE_REQUIRED`, `INFORMATION_REQUIRED`, `AMBIGUOUS_REQUEST`, `UNSUPPORTED`, `VALIDATION_FAILED`, `CONFIRMATION_REQUIRED`, `EXECUTED`, `CANCELLED`, `FAILED`.
-
-## Límites
-
-No hay loops, ramas, paralelismo, retries, rollback ni ejecución autónoma. Las cadenas son deterministas y finitas.
+Los errores de herramienta se registran en la sesión y aparecen en el informe.
+Los reintentos respetan la política del plan y `NO_RETRY` permanece en un solo
+intento. Un fallo controlado no cierra el bucle de texto.
