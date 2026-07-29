@@ -402,3 +402,21 @@ def test_history_path_is_compatible_with_execution_persistence_configuration(
     configured = tmp_path / "history"
     monkeypatch.setenv("ATLAS_EXECUTION_HISTORY_PATH", str(configured))
     assert _execution_history_path() == configured
+
+
+def test_corrupt_persisted_session_is_skipped_when_other_history_is_usable(
+    tmp_path,
+) -> None:
+    repository = FileExecutionSessionRepository(tmp_path)
+    valid = _session(
+        "execution.valid",
+        state=ExecutionState.COMPLETED,
+    )
+    repository.save(ExecutionSessionSnapshot.from_session(valid))
+    (tmp_path / "execution.corrupt.json").write_text("{bad", encoding="utf-8")
+
+    records = ExecutionSessionHistory(
+        session_repository=repository
+    ).latest_executions(10)
+
+    assert tuple(record.id for record in records) == ("execution.valid",)

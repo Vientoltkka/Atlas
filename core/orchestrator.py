@@ -55,6 +55,7 @@ from core.capability_execution_service import (
 )
 from core.execution_plan_executor import ExecutionControl, ExecutionProgress
 from core.execution_history import ExecutionSessionHistory
+from core.execution_history_advisor import ExecutionHistoryAdvisor
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
@@ -102,6 +103,7 @@ class AtlasOrchestrator:
         operational_route_executor: OperationalRouteExecutor | None = None,
         route_execution_presenter: RouteExecutionPresenter | None = None,
         execution_history: ExecutionSessionHistory | None = None,
+        execution_history_advisor: ExecutionHistoryAdvisor | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -136,6 +138,7 @@ class AtlasOrchestrator:
             route_execution_presenter or RouteExecutionPresenter()
         )
         self._execution_history = execution_history
+        self._execution_history_advisor = execution_history_advisor
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -156,6 +159,11 @@ class AtlasOrchestrator:
     def execution_history(self) -> ExecutionSessionHistory | None:
         """Expose the read-only internal execution-history query API."""
         return self._execution_history
+
+    @property
+    def execution_history_advisor(self) -> ExecutionHistoryAdvisor | None:
+        """Expose consultation-only recommendations for planning callers."""
+        return self._execution_history_advisor
 
     def start(self) -> None:
 

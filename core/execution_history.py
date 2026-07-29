@@ -16,6 +16,7 @@ from core.execution_report import (
     OperationalExecutionStatus,
 )
 from core.execution_session_persistence import ExecutionSessionRepository
+from core.execution_session_persistence import ExecutionPersistenceError
 from core.execution_supervisor import (
     ExecutionSession,
     ExecutionState,
@@ -222,6 +223,16 @@ class ExecutionHistoryRecord:
     operational_report: OperationalExecutionReport
     recovery_types: tuple[str, ...]
     state: ExecutionState
+    tool_names: tuple[str, ...] = ()
+    tools_by_step: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tool_names", tuple(self.tool_names))
+        object.__setattr__(
+            self,
+            "tools_by_step",
+            MappingProxyType(dict(self.tools_by_step)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,7 +393,10 @@ class ExecutionSessionHistory:
         by_id: dict[str, ExecutionSession] = {}
         if self._session_repository is not None:
             for session_id in self._session_repository.list():
-                snapshot = self._session_repository.load(session_id)
+                try:
+                    snapshot = self._session_repository.load(session_id)
+                except ExecutionPersistenceError:
+                    continue
                 if snapshot is not None:
                     by_id[session_id] = snapshot.to_session()
         if self._session_source is not None:
@@ -412,6 +426,17 @@ class ExecutionSessionHistory:
         )
         replanned = _replanned_step_ids(session)
         recovery_types = _recovery_types(session, summary.retry_count)
+        tools_by_step = {
+            step.id: step.tool
+            for plan in (session.original_plan, session.active_plan)
+            for step in plan.ordered_steps
+            if step.tool is not None
+        }
+        tool_names = _unique(
+            tuple(session.original_plan.required_tools)
+            + tuple(session.active_plan.required_tools)
+            + tuple(tools_by_step.values())
+        )
         failure_reason = session.last_error
         if failure_reason is None and summary.errors:
             failure_reason = next(iter(summary.errors.values()))
@@ -432,6 +457,8 @@ class ExecutionSessionHistory:
             operational_report=report,
             recovery_types=recovery_types,
             state=session.state,
+            tool_names=tool_names,
+            tools_by_step=tools_by_step,
         )
 
 
