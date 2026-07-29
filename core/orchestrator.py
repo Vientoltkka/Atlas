@@ -58,6 +58,10 @@ from core.execution_history import ExecutionSessionHistory
 from core.execution_history_advisor import ExecutionHistoryAdvisor
 from core.historical_plan_adjustment import HistoricalPlanAdjuster
 from core.execution_strategy import ExecutionStrategySelector
+from core.execution_authorization import (
+    ExecutionAuthorizationGate,
+    ExecutionDispatcher,
+)
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
@@ -108,6 +112,8 @@ class AtlasOrchestrator:
         execution_history_advisor: ExecutionHistoryAdvisor | None = None,
         historical_plan_adjuster: HistoricalPlanAdjuster | None = None,
         execution_strategy_selector: ExecutionStrategySelector | None = None,
+        execution_authorization_gate: ExecutionAuthorizationGate | None = None,
+        execution_dispatcher: ExecutionDispatcher | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -145,6 +151,8 @@ class AtlasOrchestrator:
         self._execution_history_advisor = execution_history_advisor
         self._historical_plan_adjuster = historical_plan_adjuster
         self._execution_strategy_selector = execution_strategy_selector
+        self._execution_authorization_gate = execution_authorization_gate
+        self._execution_dispatcher = execution_dispatcher
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -180,6 +188,16 @@ class AtlasOrchestrator:
     def execution_strategy_selector(self) -> ExecutionStrategySelector | None:
         """Expose deterministic strategy selection after plan validation."""
         return self._execution_strategy_selector
+
+    @property
+    def execution_authorization_gate(self) -> ExecutionAuthorizationGate | None:
+        """Expose the deterministic pre-dispatch authorization boundary."""
+        return self._execution_authorization_gate
+
+    @property
+    def execution_dispatcher(self) -> ExecutionDispatcher | None:
+        """Expose one-shot dispatch records without granting execution."""
+        return self._execution_dispatcher
 
     def start(self) -> None:
 

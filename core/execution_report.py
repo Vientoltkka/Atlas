@@ -102,6 +102,14 @@ class OperationalExecutionReport:
     strategy_required_confirmation: bool = False
     strategy_allowed_recovery: bool = False
     strategy_reinforced_supervision: bool = False
+    authorization_status: str = "LEGACY_NOT_RECORDED"
+    authorization_ready: bool = False
+    authorization_pending_confirmations: tuple[str, ...] = ()
+    authorization_manual_review_pending: bool = False
+    authorization_block_reason: str | None = None
+    authorized_strategy: str | None = None
+    dispatch_completed: bool = False
+    authorization_session_id: str | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.progress_percent <= 100.0:
@@ -121,6 +129,17 @@ class OperationalExecutionReport:
             "strategy_controls",
             tuple(self.strategy_controls),
         )
+        object.__setattr__(
+            self,
+            "authorization_pending_confirmations",
+            tuple(self.authorization_pending_confirmations),
+        )
+        if self.authorization_block_reason is not None:
+            object.__setattr__(
+                self,
+                "authorization_block_reason",
+                _safe_text(self.authorization_block_reason),
+            )
         object.__setattr__(
             self,
             "strategy_reason",
@@ -160,6 +179,18 @@ class OperationalExecutionReport:
             "strategy_reinforced_supervision": (
                 self.strategy_reinforced_supervision
             ),
+            "authorization_status": self.authorization_status,
+            "authorization_ready": self.authorization_ready,
+            "authorization_pending_confirmations": list(
+                self.authorization_pending_confirmations
+            ),
+            "authorization_manual_review_pending": (
+                self.authorization_manual_review_pending
+            ),
+            "authorization_block_reason": self.authorization_block_reason,
+            "authorized_strategy": self.authorized_strategy,
+            "dispatch_completed": self.dispatch_completed,
+            "authorization_session_id": self.authorization_session_id,
         }
 
     def to_text(self) -> str:
@@ -191,6 +222,22 @@ class OperationalExecutionReport:
                 + ", ".join(self.strategy_controls)
                 + "."
             )
+        lines.append("AutorizaciÃ³n:")
+        lines.append(f"- Estado: {self.authorization_status}.")
+        if self.authorized_strategy is not None:
+            lines.append(f"- Estrategia: {self.authorized_strategy}.")
+        if self.authorization_pending_confirmations:
+            lines.append(
+                "- Confirmaciones pendientes: "
+                + ", ".join(self.authorization_pending_confirmations)
+                + "."
+            )
+        if self.authorization_block_reason is not None:
+            lines.append(f"- Motivo: {self.authorization_block_reason}")
+        lines.append(
+            "- Despacho: "
+            + ("completado." if self.dispatch_completed else "no realizado.")
+        )
         if self.warnings:
             lines.append("Advertencias:")
             lines.extend(f"- {warning}" for warning in self.warnings)
@@ -244,6 +291,9 @@ class ExecutionReportGenerator:
             step.step_id for step in steps if step.attempts > 1
         )
         strategy = _strategy_report_fields(session.execution_strategy)
+        authorization = _authorization_report_fields(
+            session.execution_authorization
+        )
         return OperationalExecutionReport(
             session_id=session.session_id,
             objective=_safe_text(session.original_plan.goal),
@@ -269,6 +319,7 @@ class ExecutionReportGenerator:
                 "deterministic": True,
             },
             **strategy,
+            **authorization,
         )
 
     @staticmethod
@@ -469,6 +520,60 @@ def _strategy_report_fields(
             safe_configuration.get("allow_replanning") is True
         ),
         "strategy_reinforced_supervision": supervision_mode == "REINFORCED",
+    }
+
+
+def _authorization_report_fields(
+    snapshot: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if snapshot is None:
+        return {
+            "authorization_status": "LEGACY_NOT_RECORDED",
+            "authorization_ready": False,
+            "authorization_block_reason": (
+                "An explicit dispatch permit was not recorded for this legacy session."
+            ),
+        }
+    decision = _safe_text(snapshot.get("decision", "UNKNOWN"))
+    pending = snapshot.get("pending_confirmation_ids", ())
+    pending_ids = (
+        tuple(_safe_text(value) for value in pending[:20])
+        if isinstance(pending, (tuple, list))
+        else ()
+    )
+    dispatch = snapshot.get("dispatch")
+    safe_dispatch = dispatch if isinstance(dispatch, Mapping) else {}
+    dispatch_completed = safe_dispatch.get("dispatched") is True
+    reason = _safe_text(snapshot.get("reason", ""))
+    blocked = decision in {
+        "BLOCKED",
+        "REJECTED",
+        "MANUAL_REVIEW_PENDING",
+        "CONFIRMATION_PENDING",
+    }
+    return {
+        "authorization_status": decision,
+        "authorization_ready": (
+            decision == "AUTHORIZED"
+            and snapshot.get("dispatch_allowed") is True
+            and snapshot.get("consumed") is not True
+        ),
+        "authorization_pending_confirmations": pending_ids,
+        "authorization_manual_review_pending": (
+            decision == "MANUAL_REVIEW_PENDING"
+        ),
+        "authorization_block_reason": reason if blocked else None,
+        "authorized_strategy": (
+            _safe_text(snapshot.get("strategy"))
+            if snapshot.get("strategy") is not None
+            else None
+        ),
+        "dispatch_completed": dispatch_completed,
+        "authorization_session_id": (
+            _safe_text(snapshot.get("session_id"))
+            if snapshot.get("session_id") is not None
+            else None
+        ),
     }
 
 

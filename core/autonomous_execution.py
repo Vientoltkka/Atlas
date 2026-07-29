@@ -26,6 +26,14 @@ from core.execution_plan_validator import (
     PlanValidationResult,
     plan_signature,
 )
+from core.execution_strategy import (
+    ExecutionStrategySelector,
+    GlobalExecutionSafetyPolicy,
+)
+from core.execution_authorization import (
+    ExecutionAuthorizationGate,
+    ExecutionDispatcher,
+)
 from core.execution_priority import ExecutionPriorityPolicy, ReadyStepPrioritizer
 from core.execution_resources import (
     ExecutionBudget,
@@ -302,6 +310,10 @@ class AutonomousExecutionOrchestrator:
         concurrent_step_executor: ConcurrentStepExecutor | None = None,
         resource_catalog: ExecutionResourceCatalog | None = None,
         recovery_service: ExecutionRecoveryService | None = None,
+        execution_strategy_selector: ExecutionStrategySelector | None = None,
+        execution_safety_policy: GlobalExecutionSafetyPolicy | None = None,
+        execution_authorization_gate: ExecutionAuthorizationGate | None = None,
+        execution_dispatcher: ExecutionDispatcher | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._planner = planner
@@ -312,6 +324,12 @@ class AutonomousExecutionOrchestrator:
         self._concurrent_step_executor = concurrent_step_executor
         self._resource_catalog = resource_catalog or ExecutionResourceCatalog()
         self._recovery_service = recovery_service
+        self._execution_strategy_selector = execution_strategy_selector
+        self._execution_safety_policy = (
+            execution_safety_policy or GlobalExecutionSafetyPolicy()
+        )
+        self._execution_dispatcher = execution_dispatcher
+        self._execution_authorization_gate = execution_authorization_gate
         self._clock = clock or _utc_now
         self._last_results: dict[str, AutonomousExecutionResult] = {}
         self._coordinators: dict[str, StructuredExecutionCoordinator] = {}
@@ -571,6 +589,10 @@ class AutonomousExecutionOrchestrator:
             resource_policy=options.resource_policy,
             resource_catalog=self._resource_catalog,
             budget_manager=ExecutionBudgetManager(budget) if budget is not None else None,
+            execution_strategy_selector=self._execution_strategy_selector,
+            execution_safety_policy=self._execution_safety_policy,
+            execution_authorization_gate=self._execution_authorization_gate,
+            execution_dispatcher=self._execution_dispatcher,
         )
 
     def _budget_for_options(

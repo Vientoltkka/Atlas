@@ -36,6 +36,10 @@ from core.execution_history import ExecutionSessionHistory
 from core.execution_history_advisor import ExecutionHistoryAdvisor
 from core.historical_plan_adjustment import HistoricalPlanAdjuster
 from core.execution_strategy import ExecutionStrategySelector
+from core.execution_authorization import (
+    ExecutionAuthorizationGate,
+    ExecutionDispatcher,
+)
 from core.execution_session_persistence import FileExecutionSessionRepository
 from core.autonomous_execution import AutonomousExecutionOrchestrator
 from core.execution_supervisor import ExecutionSupervisor
@@ -808,6 +812,11 @@ class Bootstrap:
             execution_plan_validator,
         )
         execution_strategy_selector = ExecutionStrategySelector()
+        execution_dispatcher = ExecutionDispatcher()
+        execution_authorization_gate = ExecutionAuthorizationGate(
+            already_dispatched=execution_dispatcher.has_dispatched,
+            confirmation_consumed=execution_dispatcher.confirmation_consumed,
+        )
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=execution_plan_validator,
@@ -816,6 +825,8 @@ class Bootstrap:
             execution_replanner=ExecutionReplanner(planner),
             replan_policy=ReplanPolicy(max_replans_per_session=1),
             execution_strategy_selector=execution_strategy_selector,
+            execution_authorization_gate=execution_authorization_gate,
+            execution_dispatcher=execution_dispatcher,
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
@@ -827,6 +838,9 @@ class Bootstrap:
             validator=execution_plan_validator,
             executor=execution_plan_executor,
             supervisor=execution_supervisor,
+            execution_strategy_selector=execution_strategy_selector,
+            execution_authorization_gate=execution_authorization_gate,
+            execution_dispatcher=execution_dispatcher,
         )
 
         # -----------------------
@@ -1085,6 +1099,8 @@ class Bootstrap:
             execution_history_advisor=execution_history_advisor,
             historical_plan_adjuster=historical_plan_adjuster,
             execution_strategy_selector=execution_strategy_selector,
+            execution_authorization_gate=execution_authorization_gate,
+            execution_dispatcher=execution_dispatcher,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

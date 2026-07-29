@@ -68,6 +68,18 @@ from core.execution_strategy import (
 )
 from core.execution_history_advisor import HistoricalPlanningContext
 from core.historical_plan_adjustment import HistoricalPlanAdjustmentResult
+from core.execution_authorization import (
+    DispatchStatus,
+    ExecutionAuthorizationDecision,
+    ExecutionAuthorizationGate,
+    ExecutionAuthorizationRequest,
+    ExecutionAuthorizationResult,
+    ExecutionConfirmationReference,
+    ExecutionDispatchResult,
+    ExecutionDispatcher,
+    authorization_with_dispatch,
+    build_confirmation_references,
+)
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
 from core.resumable_execution_store import (
     ResumableExecutionStore,
@@ -108,6 +120,8 @@ class StructuredExecutionResponse:
     partial_state: PartialExecutionState | None = None
     operational_report: OperationalExecutionReport | None = None
     strategy_selection: ExecutionStrategySelectionResult | None = None
+    authorization_result: ExecutionAuthorizationResult | None = None
+    dispatch_result: ExecutionDispatchResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +137,8 @@ class PendingStructuredExecution:
     risks: list[str]
     required_tools: list[str]
     strategy_selection: ExecutionStrategySelectionResult | None = None
+    authorization_result: ExecutionAuthorizationResult | None = None
+    confirmation_references: tuple[ExecutionConfirmationReference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +173,8 @@ class StructuredExecutionCoordinator:
         execution_report_generator: ExecutionReportGenerator | None = None,
         execution_strategy_selector: ExecutionStrategySelector | None = None,
         execution_safety_policy: GlobalExecutionSafetyPolicy | None = None,
+        execution_authorization_gate: ExecutionAuthorizationGate | None = None,
+        execution_dispatcher: ExecutionDispatcher | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -187,6 +205,16 @@ class StructuredExecutionCoordinator:
         self._execution_strategy_selector = execution_strategy_selector
         self._execution_safety_policy = (
             execution_safety_policy or GlobalExecutionSafetyPolicy()
+        )
+        self._execution_dispatcher = execution_dispatcher or ExecutionDispatcher()
+        self._execution_authorization_gate = (
+            execution_authorization_gate
+            or ExecutionAuthorizationGate(
+                already_dispatched=self._execution_dispatcher.has_dispatched,
+                confirmation_consumed=(
+                    self._execution_dispatcher.confirmation_consumed
+                ),
+            )
         )
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
@@ -258,22 +286,88 @@ class StructuredExecutionCoordinator:
             historical_adjustment=historical_adjustment,
             historical_context=historical_context,
         )
-        if strategy_selection is not None and not strategy_selection.executable:
+        if strategy_selection is None:
+            authorization = None
+            confirmation_references: tuple[
+                ExecutionConfirmationReference,
+                ...,
+            ] = ()
+        else:
+            confirmation_references = self._confirmation_references(
+                generation.plan,
+                validation,
+                strategy_selection,
+            )
+            granted_references = (
+                tuple(
+                    reference.granted_copy()
+                    for reference in confirmation_references
+                )
+                if confirmation_granted
+                else ()
+            )
+            authorization = self._authorize_execution(
+                generation.plan,
+                validation,
+                strategy_selection,
+                required_confirmations=confirmation_references,
+                granted_confirmations=granted_references,
+                source="StructuredExecutionCoordinator.handle",
+            )
+
+        if (
+            authorization is not None
+            and authorization.decision
+            is ExecutionAuthorizationDecision.MANUAL_REVIEW_PENDING
+        ):
             return StructuredExecutionResponse(
                 handled=True,
                 status="strategy_blocked",
-                message=strategy_selection.summary,
+                message=authorization.reason,
                 plan=generation.plan,
                 validation_result=validation,
                 error_code="EXECUTION_STRATEGY_BLOCKED",
-                error="; ".join(strategy_selection.validation.errors) or None,
                 strategy_selection=strategy_selection,
+                authorization_result=authorization,
             )
 
-        if validation.requires_confirmation and not confirmation_granted:
+        if (
+            authorization is not None
+            and authorization.decision
+            in {
+                ExecutionAuthorizationDecision.BLOCKED,
+                ExecutionAuthorizationDecision.REJECTED,
+                ExecutionAuthorizationDecision.ALREADY_DISPATCHED,
+            }
+        ):
+            return StructuredExecutionResponse(
+                handled=True,
+                status=authorization.decision.value.lower(),
+                message=authorization.reason,
+                plan=generation.plan,
+                validation_result=validation,
+                error_code=f"EXECUTION_AUTHORIZATION_{authorization.decision.value}",
+                error=authorization.reason,
+                strategy_selection=strategy_selection,
+                authorization_result=authorization,
+            )
+
+        if (
+            (
+                authorization is not None
+                and authorization.decision
+                is ExecutionAuthorizationDecision.CONFIRMATION_PENDING
+            )
+            or (
+                authorization is None
+                and validation.requires_confirmation
+                and not confirmation_granted
+            )
+        ):
             session = self._start_waiting_confirmation_session(
                 generation.plan,
                 strategy_selection,
+                authorization,
             )
             token = self._store_pending_plan(
                 objective,
@@ -281,6 +375,8 @@ class StructuredExecutionCoordinator:
                 validation,
                 session.session_id,
                 strategy_selection,
+                authorization,
+                confirmation_references,
             )
             return StructuredExecutionResponse(
                 handled=True,
@@ -293,6 +389,7 @@ class StructuredExecutionCoordinator:
                 error_code="CONFIRMATION_REQUIRED",
                 operational_report=self.get_execution_report(session.session_id),
                 strategy_selection=strategy_selection,
+                authorization_result=authorization,
             )
 
         if not execute_after_planning:
@@ -304,16 +401,49 @@ class StructuredExecutionCoordinator:
                 validation_result=validation,
                 requires_confirmation=False,
                 strategy_selection=strategy_selection,
+                authorization_result=authorization,
             )
 
-        execution = self._execute_plan_under_supervision(
-            generation.plan,
-            validation,
-            confirmation_granted=confirmation_granted,
-            control=control,
-            on_progress=on_execution_progress,
-            strategy_selection=strategy_selection,
-        )
+        if authorization is None:
+            execution = self._execute_plan_under_supervision(
+                generation.plan,
+                validation,
+                confirmation_granted=confirmation_granted,
+                control=control,
+                on_progress=on_execution_progress,
+                strategy_selection=strategy_selection,
+            )
+            dispatch = None
+        else:
+            dispatch = self._execution_dispatcher.dispatch(
+                authorization,
+                lambda plan, validated, selected: (
+                    self._execute_plan_under_supervision(
+                        plan,
+                        validated,
+                        confirmation_granted=confirmation_granted,
+                        control=control,
+                        on_progress=on_execution_progress,
+                        strategy_selection=selected,
+                        authorization_result=authorization,
+                    )
+                ),
+            )
+            if dispatch.execution_result is None:
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="dispatch_failed",
+                    message=dispatch.reason,
+                    plan=generation.plan,
+                    validation_result=validation,
+                    error_code=dispatch.status.value,
+                    error=dispatch.error or dispatch.reason,
+                    strategy_selection=strategy_selection,
+                    authorization_result=authorization,
+                    dispatch_result=dispatch,
+                )
+            execution = dispatch.execution_result
+            self._record_dispatch_authorization(authorization, dispatch)
         response = self._execution_response(
             generation.plan,
             validation,
@@ -329,8 +459,15 @@ class StructuredExecutionCoordinator:
                 response,
                 error_code=persistence_error,
                 strategy_selection=strategy_selection,
+                authorization_result=authorization,
+                dispatch_result=dispatch,
             )
-        return replace(response, strategy_selection=strategy_selection)
+        return replace(
+            response,
+            strategy_selection=strategy_selection,
+            authorization_result=authorization,
+            dispatch_result=dispatch,
+        )
 
     def confirm(
         self,
@@ -389,16 +526,84 @@ class StructuredExecutionCoordinator:
                 error="plan signature changed after validation",
             )
 
-        self._discard_pending(confirmation_token)
-        execution = self._execute_plan_under_supervision(
-            pending.plan,
-            pending.validation_result,
-            confirmation_granted=True,
-            control=control,
-            on_progress=on_execution_progress,
-            session_id=pending_record.session_id,
-            strategy_selection=pending.strategy_selection,
-        )
+        if pending.strategy_selection is None:
+            self._discard_pending(confirmation_token)
+            execution = self._execute_plan_under_supervision(
+                pending.plan,
+                pending.validation_result,
+                confirmation_granted=True,
+                control=control,
+                on_progress=on_execution_progress,
+                session_id=pending_record.session_id,
+                strategy_selection=None,
+            )
+            authorization = None
+            dispatch = None
+        else:
+            authorization = self._authorize_execution(
+                pending.plan,
+                pending.validation_result,
+                pending.strategy_selection,
+                required_confirmations=pending.confirmation_references,
+                granted_confirmations=tuple(
+                    reference.granted_copy()
+                    for reference in pending.confirmation_references
+                ),
+                session_state="waiting_confirmation",
+                source="StructuredExecutionCoordinator.confirm",
+            )
+            if (
+                authorization.decision
+                is not ExecutionAuthorizationDecision.AUTHORIZED
+            ):
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status=authorization.decision.value.lower(),
+                    message=authorization.reason,
+                    plan=pending.plan,
+                    validation_result=pending.validation_result,
+                    requires_confirmation=True,
+                    confirmation_token=confirmation_token,
+                    error_code=(
+                        f"EXECUTION_AUTHORIZATION_{authorization.decision.value}"
+                    ),
+                    error=authorization.reason,
+                    strategy_selection=pending.strategy_selection,
+                    authorization_result=authorization,
+                )
+            dispatch = self._execution_dispatcher.dispatch(
+                authorization,
+                lambda plan, validated, selected: (
+                    self._execute_plan_under_supervision(
+                        plan,
+                        validated,
+                        confirmation_granted=True,
+                        control=control,
+                        on_progress=on_execution_progress,
+                        session_id=pending_record.session_id,
+                        strategy_selection=selected,
+                        authorization_result=authorization,
+                    )
+                ),
+            )
+            if dispatch.execution_result is None:
+                return StructuredExecutionResponse(
+                    handled=True,
+                    status="dispatch_failed",
+                    message=dispatch.reason,
+                    plan=pending.plan,
+                    validation_result=pending.validation_result,
+                    requires_confirmation=True,
+                    confirmation_token=confirmation_token,
+                    error_code=dispatch.status.value,
+                    error=dispatch.error or dispatch.reason,
+                    strategy_selection=pending.strategy_selection,
+                    authorization_result=authorization,
+                    dispatch_result=dispatch,
+                )
+            self._discard_pending(confirmation_token)
+            execution = dispatch.execution_result
+            self._record_dispatch_authorization(authorization, dispatch)
 
         response = self._execution_response(
             pending.plan,
@@ -416,8 +621,15 @@ class StructuredExecutionCoordinator:
                 response,
                 error_code=persistence_error,
                 strategy_selection=pending.strategy_selection,
+                authorization_result=authorization,
+                dispatch_result=dispatch,
             )
-        return replace(response, strategy_selection=pending.strategy_selection)
+        return replace(
+            response,
+            strategy_selection=pending.strategy_selection,
+            authorization_result=authorization,
+            dispatch_result=dispatch,
+        )
 
     def pending_plan(
         self,
@@ -853,6 +1065,11 @@ class StructuredExecutionCoordinator:
         validation: PlanValidationResult,
         session_id: str | None = None,
         strategy_selection: ExecutionStrategySelectionResult | None = None,
+        authorization_result: ExecutionAuthorizationResult | None = None,
+        confirmation_references: tuple[
+            ExecutionConfirmationReference,
+            ...,
+        ] = (),
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
         if self._active_confirmation_token is not None:
@@ -871,6 +1088,8 @@ class StructuredExecutionCoordinator:
                 risks=list(plan.detected_risks),
                 required_tools=list(plan.required_tools),
                 strategy_selection=strategy_selection,
+                authorization_result=authorization_result,
+                confirmation_references=confirmation_references,
             ),
             session_id=session_id,
         )
@@ -908,10 +1127,64 @@ class StructuredExecutionCoordinator:
         )
         return self._execution_strategy_selector.select(request)
 
+    def _confirmation_references(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        strategy_selection: ExecutionStrategySelectionResult,
+    ) -> tuple[ExecutionConfirmationReference, ...]:
+        if not strategy_selection.strategy.configuration.requires_confirmation:
+            return ()
+        token = validation.plan_signature or plan_signature(plan)
+        return build_confirmation_references(
+            plan,
+            strategy_selection,
+            confirmation_id=token,
+        )
+
+    def _authorize_execution(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        strategy_selection: ExecutionStrategySelectionResult,
+        *,
+        required_confirmations: tuple[
+            ExecutionConfirmationReference,
+            ...,
+        ] = (),
+        granted_confirmations: tuple[
+            ExecutionConfirmationReference,
+            ...,
+        ] = (),
+        session_state: str | None = None,
+        source: str,
+    ) -> ExecutionAuthorizationResult:
+        return self._execution_authorization_gate.authorize(
+            ExecutionAuthorizationRequest(
+                plan=plan,
+                plan_validation=validation,
+                strategy_selection=strategy_selection,
+                plan_state=plan.status,
+                session_state=session_state,
+                required_confirmations=required_confirmations,
+                granted_confirmations=granted_confirmations,
+                protected_step_ids=(
+                    strategy_selection.strategy.configuration.confirmation_step_ids
+                ),
+                required_capabilities=plan.required_tools,
+                executor_available=self._executor is not None,
+                supervisor_available=self._execution_supervisor is not None,
+                replanner_available=self._execution_replanner is not None,
+                source=source,
+                safety_policy=self._execution_safety_policy,
+            )
+        )
+
     def _start_waiting_confirmation_session(
         self,
         plan: ExecutionPlan,
         strategy_selection: ExecutionStrategySelectionResult | None = None,
+        authorization_result: ExecutionAuthorizationResult | None = None,
     ) -> ExecutionSession:
         session = self._execution_supervisor.start(
             plan,
@@ -919,6 +1192,11 @@ class StructuredExecutionCoordinator:
                 None
                 if strategy_selection is None
                 else strategy_selection.persisted_snapshot()
+            ),
+            execution_authorization=(
+                None
+                if authorization_result is None
+                else authorization_result.persisted_snapshot()
             ),
         )
         session = self._execution_supervisor.mark_running(session.session_id)
@@ -934,6 +1212,7 @@ class StructuredExecutionCoordinator:
         on_progress: Callable[[ExecutionProgress], None] | None = None,
         session_id: str | None = None,
         strategy_selection: ExecutionStrategySelectionResult | None = None,
+        authorization_result: ExecutionAuthorizationResult | None = None,
     ) -> PlanExecutionResult:
         session = (
             self._execution_supervisor.get_session(session_id)
@@ -944,6 +1223,11 @@ class StructuredExecutionCoordinator:
                     None
                     if strategy_selection is None
                     else strategy_selection.persisted_snapshot()
+                ),
+                execution_authorization=(
+                    None
+                    if authorization_result is None
+                    else authorization_result.persisted_snapshot()
                 ),
             )
         )
@@ -1047,6 +1331,18 @@ class StructuredExecutionCoordinator:
         except Exception as error:
             self._execution_supervisor.mark_failed(session.session_id, error)
             raise
+
+    def _record_dispatch_authorization(
+        self,
+        authorization: ExecutionAuthorizationResult,
+        dispatch: ExecutionDispatchResult,
+    ) -> None:
+        if dispatch.session_id is None:
+            return
+        self._execution_supervisor.record_execution_authorization(
+            dispatch.session_id,
+            authorization_with_dispatch(authorization, dispatch),
+        )
 
     def _can_use_concurrent_execution(
         self,

@@ -151,6 +151,7 @@ class ExecutionSessionSnapshot:
     recovery_metadata: MappingProxyType
     events: tuple[ExecutionSupervisorEvent, ...] = ()
     execution_strategy: MappingProxyType | None = None
+    execution_authorization: MappingProxyType | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -190,6 +191,15 @@ class ExecutionSessionSnapshot:
                 None
                 if self.execution_strategy is None
                 else MappingProxyType(dict(self.execution_strategy))
+            ),
+        )
+        object.__setattr__(
+            self,
+            "execution_authorization",
+            (
+                None
+                if self.execution_authorization is None
+                else MappingProxyType(dict(self.execution_authorization))
             ),
         )
         if self.replan_count != len(self.replan_history):
@@ -286,6 +296,13 @@ class ExecutionSessionSnapshot:
                 if session.execution_strategy is None
                 else MappingProxyType(_safe_mapping(session.execution_strategy))
             ),
+            execution_authorization=(
+                None
+                if session.execution_authorization is None
+                else MappingProxyType(
+                    _safe_mapping(session.execution_authorization)
+                )
+            ),
         )
 
     def to_session(self) -> ExecutionSession:
@@ -339,6 +356,7 @@ class ExecutionSessionSnapshot:
             selected_resources_by_step=self.selected_resources_by_step,
             events=self.events,
             execution_strategy=self.execution_strategy,
+            execution_authorization=self.execution_authorization,
         )
 
 
@@ -702,6 +720,11 @@ def snapshot_to_dict(snapshot: ExecutionSessionSnapshot) -> dict[str, Any]:
             if snapshot.execution_strategy is None
             else _safe_mapping(snapshot.execution_strategy)
         ),
+        "execution_authorization": (
+            None
+            if snapshot.execution_authorization is None
+            else _safe_mapping(snapshot.execution_authorization)
+        ),
         "completed_step_ids": list(snapshot.completed_step_ids),
         "failed_step_ids": list(snapshot.failed_step_ids),
         "blocked_step_ids": list(snapshot.blocked_step_ids),
@@ -793,6 +816,15 @@ def snapshot_from_dict(payload: Any) -> ExecutionSessionSnapshot:
             if payload.get("execution_strategy") is None
             else MappingProxyType(
                 _safe_mapping(_required_dict(payload, "execution_strategy"))
+            )
+        ),
+        execution_authorization=(
+            None
+            if payload.get("execution_authorization") is None
+            else MappingProxyType(
+                _safe_mapping(
+                    _required_dict(payload, "execution_authorization")
+                )
             )
         ),
     )

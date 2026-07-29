@@ -161,6 +161,7 @@ class ExecutionSession:
     selected_resources_by_step: Mapping[str, str] = field(default_factory=dict)
     max_resource_decision_history_entries: int = 100
     execution_strategy: Mapping[str, object] | None = None
+    execution_authorization: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -204,6 +205,15 @@ class ExecutionSession:
                 None
                 if self.execution_strategy is None
                 else MappingProxyType(dict(self.execution_strategy))
+            ),
+        )
+        object.__setattr__(
+            self,
+            "execution_authorization",
+            (
+                None
+                if self.execution_authorization is None
+                else MappingProxyType(dict(self.execution_authorization))
             ),
         )
         if self.max_priority_history_entries < 1:
@@ -423,6 +433,7 @@ class ExecutionSupervisor:
         plan: Any,
         *,
         execution_strategy: Mapping[str, object] | None = None,
+        execution_authorization: Mapping[str, object] | None = None,
     ) -> ExecutionSession:
         """Create a pending supervised session for an execution plan."""
         with self._lock:
@@ -437,6 +448,7 @@ class ExecutionSupervisor:
                 started_at=started_at,
                 step_states=self._initial_step_states(plan),
                 execution_strategy=execution_strategy,
+                execution_authorization=execution_authorization,
             )
             session = self._with_event(
                 session,
@@ -1047,6 +1059,33 @@ class ExecutionSupervisor:
                     "estimated_tokens": getattr(budget_usage, "estimated_tokens", None),
                     "actual_tokens": getattr(budget_usage, "actual_tokens", None),
                     "remaining_budget": getattr(budget_usage, "remaining_cost", None),
+                },
+            )
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
+    def record_execution_authorization(
+        self,
+        session_id: str,
+        authorization: Mapping[str, object],
+    ) -> ExecutionSession:
+        """Attach an already-resolved authorization snapshot to one session."""
+        safe_snapshot = MappingProxyType(dict(authorization))
+        with self._lock:
+            session = self.get_session(session_id)
+            updated = replace(
+                session,
+                execution_authorization=safe_snapshot,
+            )
+            updated = self._with_event(
+                updated,
+                "execution_authorization_recorded",
+                details={
+                    "authorization_id": safe_snapshot.get("authorization_id"),
+                    "decision": safe_snapshot.get("decision"),
+                    "consumed": safe_snapshot.get("consumed"),
+                    "session_id": safe_snapshot.get("session_id"),
                 },
             )
             self._sessions[session_id] = updated
