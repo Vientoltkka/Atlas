@@ -160,6 +160,7 @@ class ExecutionSession:
     resource_decision_history: tuple[Any, ...] = ()
     selected_resources_by_step: Mapping[str, str] = field(default_factory=dict)
     max_resource_decision_history_entries: int = 100
+    execution_strategy: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -195,6 +196,15 @@ class ExecutionSession:
             self,
             "selected_resources_by_step",
             MappingProxyType(dict(self.selected_resources_by_step)),
+        )
+        object.__setattr__(
+            self,
+            "execution_strategy",
+            (
+                None
+                if self.execution_strategy is None
+                else MappingProxyType(dict(self.execution_strategy))
+            ),
         )
         if self.max_priority_history_entries < 1:
             raise ValueError("max_priority_history_entries must be greater than zero.")
@@ -408,7 +418,12 @@ class ExecutionSupervisor:
         self._lock = RLock()
         self._session_repository = session_repository
 
-    def start(self, plan: Any) -> ExecutionSession:
+    def start(
+        self,
+        plan: Any,
+        *,
+        execution_strategy: Mapping[str, object] | None = None,
+    ) -> ExecutionSession:
         """Create a pending supervised session for an execution plan."""
         with self._lock:
             self._counter += 1
@@ -421,6 +436,7 @@ class ExecutionSupervisor:
                 current_step=None,
                 started_at=started_at,
                 step_states=self._initial_step_states(plan),
+                execution_strategy=execution_strategy,
             )
             session = self._with_event(
                 session,

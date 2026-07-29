@@ -35,6 +35,7 @@ from core.execution_memory_recorder import ExecutionMemoryRecorder
 from core.execution_history import ExecutionSessionHistory
 from core.execution_history_advisor import ExecutionHistoryAdvisor
 from core.historical_plan_adjustment import HistoricalPlanAdjuster
+from core.execution_strategy import ExecutionStrategySelector
 from core.execution_session_persistence import FileExecutionSessionRepository
 from core.autonomous_execution import AutonomousExecutionOrchestrator
 from core.execution_supervisor import ExecutionSupervisor
@@ -806,6 +807,7 @@ class Bootstrap:
         historical_plan_adjuster = HistoricalPlanAdjuster(
             execution_plan_validator,
         )
+        execution_strategy_selector = ExecutionStrategySelector()
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=execution_plan_validator,
@@ -813,6 +815,7 @@ class Bootstrap:
             execution_supervisor=execution_supervisor,
             execution_replanner=ExecutionReplanner(planner),
             replan_policy=ReplanPolicy(max_replans_per_session=1),
+            execution_strategy_selector=execution_strategy_selector,
             resumable_store=(
                 JsonResumableExecutionStore(_execution_state_path())
                 if execution_persistence_enabled
@@ -1081,6 +1084,7 @@ class Bootstrap:
             execution_history=execution_history,
             execution_history_advisor=execution_history_advisor,
             historical_plan_adjuster=historical_plan_adjuster,
+            execution_strategy_selector=execution_strategy_selector,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

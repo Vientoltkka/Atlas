@@ -398,8 +398,23 @@ class ExecutionPlanExecutor:
         execution_context: ExecutionContext | None = None,
         subplan_depth: int = 0,
         plan_stack: tuple[int, ...] = (),
+        operational_config: object | None = None,
     ) -> PlanExecutionResult:
         """Execute a previously validated plan in dependency order."""
+        if operational_config is not None:
+            from core.execution_strategy import ExecutionStrategyConfiguration
+
+            if not isinstance(
+                operational_config,
+                ExecutionStrategyConfiguration,
+            ):
+                raise TypeError(
+                    "operational_config must be ExecutionStrategyConfiguration or None."
+                )
+            if not operational_config.execution_allowed:
+                raise ValueError("Blocking operational configuration cannot execute.")
+            if len(plan.ordered_steps) > operational_config.max_steps:
+                raise ValueError("Plan exceeds the resolved operational step limit.")
         return self._execute_from_checkpoint(
             plan,
             validation_result,

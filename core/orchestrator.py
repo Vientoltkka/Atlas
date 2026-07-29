@@ -57,6 +57,7 @@ from core.execution_plan_executor import ExecutionControl, ExecutionProgress
 from core.execution_history import ExecutionSessionHistory
 from core.execution_history_advisor import ExecutionHistoryAdvisor
 from core.historical_plan_adjustment import HistoricalPlanAdjuster
+from core.execution_strategy import ExecutionStrategySelector
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
@@ -106,6 +107,7 @@ class AtlasOrchestrator:
         execution_history: ExecutionSessionHistory | None = None,
         execution_history_advisor: ExecutionHistoryAdvisor | None = None,
         historical_plan_adjuster: HistoricalPlanAdjuster | None = None,
+        execution_strategy_selector: ExecutionStrategySelector | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -142,6 +144,7 @@ class AtlasOrchestrator:
         self._execution_history = execution_history
         self._execution_history_advisor = execution_history_advisor
         self._historical_plan_adjuster = historical_plan_adjuster
+        self._execution_strategy_selector = execution_strategy_selector
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -172,6 +175,11 @@ class AtlasOrchestrator:
     def historical_plan_adjuster(self) -> HistoricalPlanAdjuster | None:
         """Expose the validated post-planning historical adjustment stage."""
         return self._historical_plan_adjuster
+
+    @property
+    def execution_strategy_selector(self) -> ExecutionStrategySelector | None:
+        """Expose deterministic strategy selection after plan validation."""
+        return self._execution_strategy_selector
 
     def start(self) -> None:
 

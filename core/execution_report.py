@@ -95,6 +95,13 @@ class OperationalExecutionReport:
     steps: tuple[OperationalStepReport, ...]
     final_message: str
     metadata: Mapping[str, object] = field(default_factory=dict)
+    execution_strategy: str = "STANDARD"
+    strategy_reason: str = "Previous execution behavior applies."
+    strategy_controls: tuple[str, ...] = ()
+    strategy_blocked_execution: bool = False
+    strategy_required_confirmation: bool = False
+    strategy_allowed_recovery: bool = False
+    strategy_reinforced_supervision: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.progress_percent <= 100.0:
@@ -109,6 +116,16 @@ class OperationalExecutionReport:
             tuple(self.pending_user_actions),
         )
         object.__setattr__(self, "steps", tuple(self.steps))
+        object.__setattr__(
+            self,
+            "strategy_controls",
+            tuple(self.strategy_controls),
+        )
+        object.__setattr__(
+            self,
+            "strategy_reason",
+            _safe_text(self.strategy_reason),
+        )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     def to_dict(self) -> dict[str, object]:
@@ -134,6 +151,15 @@ class OperationalExecutionReport:
             "steps": [step.to_dict() for step in self.steps],
             "final_message": self.final_message,
             "metadata": dict(self.metadata),
+            "execution_strategy": self.execution_strategy,
+            "strategy_reason": self.strategy_reason,
+            "strategy_controls": list(self.strategy_controls),
+            "strategy_blocked_execution": self.strategy_blocked_execution,
+            "strategy_required_confirmation": self.strategy_required_confirmation,
+            "strategy_allowed_recovery": self.strategy_allowed_recovery,
+            "strategy_reinforced_supervision": (
+                self.strategy_reinforced_supervision
+            ),
         }
 
     def to_text(self) -> str:
@@ -157,6 +183,14 @@ class OperationalExecutionReport:
         lines.extend(_step_line(step) for step in self.steps)
         lines.append(_retry_text(self))
         lines.append(_replan_text(self))
+        lines.append(f"Estrategia: {self.execution_strategy}.")
+        lines.append(f"Motivo de estrategia: {self.strategy_reason}")
+        if self.strategy_controls:
+            lines.append(
+                "Controles de estrategia: "
+                + ", ".join(self.strategy_controls)
+                + "."
+            )
         if self.warnings:
             lines.append("Advertencias:")
             lines.extend(f"- {warning}" for warning in self.warnings)
@@ -209,6 +243,7 @@ class ExecutionReportGenerator:
         retried_step_ids = tuple(
             step.step_id for step in steps if step.attempts > 1
         )
+        strategy = _strategy_report_fields(session.execution_strategy)
         return OperationalExecutionReport(
             session_id=session.session_id,
             objective=_safe_text(session.original_plan.goal),
@@ -233,6 +268,7 @@ class ExecutionReportGenerator:
                 "source": "execution_session",
                 "deterministic": True,
             },
+            **strategy,
         )
 
     @staticmethod
@@ -391,6 +427,49 @@ def _replan_text(report: OperationalExecutionReport) -> str:
         ReplanRecoveryStatus.IN_PROGRESS.value: "en curso.",
     }
     return f"Replanificación: {messages.get(report.replan_status, report.replan_status)}"
+
+
+def _strategy_report_fields(
+    snapshot: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if snapshot is None:
+        return {
+            "execution_strategy": "STANDARD",
+            "strategy_reason": (
+                "Strategy was not recorded; previous execution behavior applies."
+            ),
+        }
+    configuration = snapshot.get("configuration")
+    safe_configuration = (
+        configuration if isinstance(configuration, Mapping) else {}
+    )
+    controls = []
+    if safe_configuration.get("progress_required") is True:
+        controls.append("progress_required")
+    if safe_configuration.get("record_all_transitions") is True:
+        controls.append("transition_trace")
+    if safe_configuration.get("cancel_on_critical_failure") is True:
+        controls.append("critical_failure_stop")
+    supervision_mode = _safe_text(
+        safe_configuration.get("supervision_mode", "NORMAL")
+    )
+    return {
+        "execution_strategy": _safe_text(snapshot.get("strategy", "STANDARD")),
+        "strategy_reason": _safe_text(
+            snapshot.get("reason", "Previous execution behavior applies.")
+        ),
+        "strategy_controls": tuple(controls),
+        "strategy_blocked_execution": (
+            safe_configuration.get("execution_allowed") is False
+        ),
+        "strategy_required_confirmation": (
+            safe_configuration.get("requires_confirmation") is True
+        ),
+        "strategy_allowed_recovery": (
+            safe_configuration.get("allow_replanning") is True
+        ),
+        "strategy_reinforced_supervision": supervision_mode == "REINFORCED",
+    }
 
 
 def _title(status: OperationalExecutionStatus) -> str:

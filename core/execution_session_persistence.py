@@ -150,6 +150,7 @@ class ExecutionSessionSnapshot:
     updated_at: datetime
     recovery_metadata: MappingProxyType
     events: tuple[ExecutionSupervisorEvent, ...] = ()
+    execution_strategy: MappingProxyType | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -182,6 +183,15 @@ class ExecutionSessionSnapshot:
             MappingProxyType(dict(self.recovery_metadata)),
         )
         object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(
+            self,
+            "execution_strategy",
+            (
+                None
+                if self.execution_strategy is None
+                else MappingProxyType(dict(self.execution_strategy))
+            ),
+        )
         if self.replan_count != len(self.replan_history):
             raise ExecutionSnapshotCorruptedError(
                 "replan_count must match replan_history length."
@@ -271,6 +281,11 @@ class ExecutionSessionSnapshot:
             updated_at=now,
             recovery_metadata=recovery_metadata or {},
             events=session.events,
+            execution_strategy=(
+                None
+                if session.execution_strategy is None
+                else MappingProxyType(_safe_mapping(session.execution_strategy))
+            ),
         )
 
     def to_session(self) -> ExecutionSession:
@@ -323,6 +338,7 @@ class ExecutionSessionSnapshot:
             resource_decision_history=self.resource_decision_history,
             selected_resources_by_step=self.selected_resources_by_step,
             events=self.events,
+            execution_strategy=self.execution_strategy,
         )
 
 
@@ -681,6 +697,11 @@ def snapshot_to_dict(snapshot: ExecutionSessionSnapshot) -> dict[str, Any]:
         "updated_at": _datetime_to_json(snapshot.updated_at),
         "recovery_metadata": _safe_mapping(snapshot.recovery_metadata),
         "events": [_event_to_json(event) for event in snapshot.events],
+        "execution_strategy": (
+            None
+            if snapshot.execution_strategy is None
+            else _safe_mapping(snapshot.execution_strategy)
+        ),
         "completed_step_ids": list(snapshot.completed_step_ids),
         "failed_step_ids": list(snapshot.failed_step_ids),
         "blocked_step_ids": list(snapshot.blocked_step_ids),
@@ -767,6 +788,13 @@ def snapshot_from_dict(payload: Any) -> ExecutionSessionSnapshot:
             _safe_mapping(_required_dict(payload, "recovery_metadata"))
         ),
         events=tuple(_event_from_json(item) for item in payload.get("events", [])),
+        execution_strategy=(
+            None
+            if payload.get("execution_strategy") is None
+            else MappingProxyType(
+                _safe_mapping(_required_dict(payload, "execution_strategy"))
+            )
+        ),
     )
 
 

@@ -60,6 +60,14 @@ from core.execution_session_persistence import (
     RecoveryDecisionType,
     RecoveryReport,
 )
+from core.execution_strategy import (
+    ExecutionStrategySelectionResult,
+    ExecutionStrategySelector,
+    GlobalExecutionSafetyPolicy,
+    build_strategy_request,
+)
+from core.execution_history_advisor import HistoricalPlanningContext
+from core.historical_plan_adjustment import HistoricalPlanAdjustmentResult
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
 from core.resumable_execution_store import (
     ResumableExecutionStore,
@@ -99,6 +107,7 @@ class StructuredExecutionResponse:
     resumable_state: ResumableExecutionState | None = None
     partial_state: PartialExecutionState | None = None
     operational_report: OperationalExecutionReport | None = None
+    strategy_selection: ExecutionStrategySelectionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +122,7 @@ class PendingStructuredExecution:
     summary: str
     risks: list[str]
     required_tools: list[str]
+    strategy_selection: ExecutionStrategySelectionResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +155,8 @@ class StructuredExecutionCoordinator:
         resource_optimizer: ExecutionResourceOptimizer | None = None,
         budget_manager: ExecutionBudgetManager | None = None,
         execution_report_generator: ExecutionReportGenerator | None = None,
+        execution_strategy_selector: ExecutionStrategySelector | None = None,
+        execution_safety_policy: GlobalExecutionSafetyPolicy | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -172,6 +184,10 @@ class StructuredExecutionCoordinator:
         self._execution_report_generator = (
             execution_report_generator or ExecutionReportGenerator()
         )
+        self._execution_strategy_selector = execution_strategy_selector
+        self._execution_safety_policy = (
+            execution_safety_policy or GlobalExecutionSafetyPolicy()
+        )
         self._pending_plans: dict[str, _PendingPlan] = {}
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
@@ -187,6 +203,8 @@ class StructuredExecutionCoordinator:
         planning_control: Any | None = None,
         on_execution_progress: Callable[[ExecutionProgress], None] | None = None,
         execute_after_planning: bool = True,
+        historical_adjustment: HistoricalPlanAdjustmentResult | None = None,
+        historical_context: HistoricalPlanningContext | None = None,
     ) -> StructuredExecutionResponse:
         """Generate, validate and optionally execute one structured plan."""
         generation = self._planner.generate_execution_plan(
@@ -234,13 +252,35 @@ class StructuredExecutionCoordinator:
                 error="; ".join(validation.errors),
             )
 
+        strategy_selection = self._select_execution_strategy(
+            generation.plan,
+            validation,
+            historical_adjustment=historical_adjustment,
+            historical_context=historical_context,
+        )
+        if strategy_selection is not None and not strategy_selection.executable:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="strategy_blocked",
+                message=strategy_selection.summary,
+                plan=generation.plan,
+                validation_result=validation,
+                error_code="EXECUTION_STRATEGY_BLOCKED",
+                error="; ".join(strategy_selection.validation.errors) or None,
+                strategy_selection=strategy_selection,
+            )
+
         if validation.requires_confirmation and not confirmation_granted:
-            session = self._start_waiting_confirmation_session(generation.plan)
+            session = self._start_waiting_confirmation_session(
+                generation.plan,
+                strategy_selection,
+            )
             token = self._store_pending_plan(
                 objective,
                 generation.plan,
                 validation,
                 session.session_id,
+                strategy_selection,
             )
             return StructuredExecutionResponse(
                 handled=True,
@@ -252,6 +292,7 @@ class StructuredExecutionCoordinator:
                 confirmation_token=token,
                 error_code="CONFIRMATION_REQUIRED",
                 operational_report=self.get_execution_report(session.session_id),
+                strategy_selection=strategy_selection,
             )
 
         if not execute_after_planning:
@@ -262,6 +303,7 @@ class StructuredExecutionCoordinator:
                 plan=generation.plan,
                 validation_result=validation,
                 requires_confirmation=False,
+                strategy_selection=strategy_selection,
             )
 
         execution = self._execute_plan_under_supervision(
@@ -270,6 +312,7 @@ class StructuredExecutionCoordinator:
             confirmation_granted=confirmation_granted,
             control=control,
             on_progress=on_execution_progress,
+            strategy_selection=strategy_selection,
         )
         response = self._execution_response(
             generation.plan,
@@ -282,8 +325,12 @@ class StructuredExecutionCoordinator:
             confirmation_granted=confirmation_granted,
         )
         if persistence_error is not None:
-            return replace(response, error_code=persistence_error)
-        return response
+            return replace(
+                response,
+                error_code=persistence_error,
+                strategy_selection=strategy_selection,
+            )
+        return replace(response, strategy_selection=strategy_selection)
 
     def confirm(
         self,
@@ -350,6 +397,7 @@ class StructuredExecutionCoordinator:
             control=control,
             on_progress=on_execution_progress,
             session_id=pending_record.session_id,
+            strategy_selection=pending.strategy_selection,
         )
 
         response = self._execution_response(
@@ -364,8 +412,12 @@ class StructuredExecutionCoordinator:
             confirmation_granted=True,
         )
         if persistence_error is not None:
-            return replace(response, error_code=persistence_error)
-        return response
+            return replace(
+                response,
+                error_code=persistence_error,
+                strategy_selection=pending.strategy_selection,
+            )
+        return replace(response, strategy_selection=pending.strategy_selection)
 
     def pending_plan(
         self,
@@ -800,6 +852,7 @@ class StructuredExecutionCoordinator:
         plan: ExecutionPlan,
         validation: PlanValidationResult,
         session_id: str | None = None,
+        strategy_selection: ExecutionStrategySelectionResult | None = None,
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
         if self._active_confirmation_token is not None:
@@ -817,6 +870,7 @@ class StructuredExecutionCoordinator:
                 summary=summary,
                 risks=list(plan.detected_risks),
                 required_tools=list(plan.required_tools),
+                strategy_selection=strategy_selection,
             ),
             session_id=session_id,
         )
@@ -831,11 +885,42 @@ class StructuredExecutionCoordinator:
         if self._active_confirmation_token == confirmation_token:
             self._active_confirmation_token = None
 
+    def _select_execution_strategy(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        *,
+        historical_adjustment: HistoricalPlanAdjustmentResult | None = None,
+        historical_context: HistoricalPlanningContext | None = None,
+    ) -> ExecutionStrategySelectionResult | None:
+        """Resolve operational controls outside Planner, Executor and Supervisor."""
+        if self._execution_strategy_selector is None:
+            return None
+        request = build_strategy_request(
+            plan,
+            validation,
+            historical_adjustment=historical_adjustment,
+            historical_context=historical_context,
+            supervisor_available=self._execution_supervisor is not None,
+            replanner_available=self._execution_replanner is not None,
+            confirmation_available=True,
+            safety_policy=self._execution_safety_policy,
+        )
+        return self._execution_strategy_selector.select(request)
+
     def _start_waiting_confirmation_session(
         self,
         plan: ExecutionPlan,
+        strategy_selection: ExecutionStrategySelectionResult | None = None,
     ) -> ExecutionSession:
-        session = self._execution_supervisor.start(plan)
+        session = self._execution_supervisor.start(
+            plan,
+            execution_strategy=(
+                None
+                if strategy_selection is None
+                else strategy_selection.persisted_snapshot()
+            ),
+        )
         session = self._execution_supervisor.mark_running(session.session_id)
         return self._execution_supervisor.mark_waiting_confirmation(session.session_id)
 
@@ -848,11 +933,19 @@ class StructuredExecutionCoordinator:
         control: ExecutionControl | None = None,
         on_progress: Callable[[ExecutionProgress], None] | None = None,
         session_id: str | None = None,
+        strategy_selection: ExecutionStrategySelectionResult | None = None,
     ) -> PlanExecutionResult:
         session = (
             self._execution_supervisor.get_session(session_id)
             if session_id is not None
-            else self._execution_supervisor.start(plan)
+            else self._execution_supervisor.start(
+                plan,
+                execution_strategy=(
+                    None
+                    if strategy_selection is None
+                    else strategy_selection.persisted_snapshot()
+                ),
+            )
         )
         self._execution_supervisor.mark_running(session.session_id)
         active_plan = plan
@@ -877,6 +970,11 @@ class StructuredExecutionCoordinator:
                         confirmation_granted=confirmation_granted,
                         control=control,
                         on_progress=on_progress,
+                        operational_config=(
+                            None
+                            if strategy_selection is None
+                            else strategy_selection.strategy.configuration
+                        ),
                     )
                 self._record_step_states_from_execution(
                     session.session_id,
@@ -891,7 +989,14 @@ class StructuredExecutionCoordinator:
                         execution,
                         session.session_id,
                     )
-                if self._execution_can_finish_without_replan(execution):
+                strategy_allows_replanning = (
+                    strategy_selection is None
+                    or strategy_selection.strategy.configuration.allow_replanning
+                )
+                if (
+                    self._execution_can_finish_without_replan(execution)
+                    or not strategy_allows_replanning
+                ):
                     self._finalize_supervised_session(session.session_id, execution)
                     return self._with_execution_session_id(
                         execution,
