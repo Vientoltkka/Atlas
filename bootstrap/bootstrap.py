@@ -32,6 +32,8 @@ from core.operational_route_executor import (
 )
 from core.operational_context import OperationalContextBuilder
 from core.execution_memory_recorder import ExecutionMemoryRecorder
+from core.execution_history import ExecutionSessionHistory
+from core.execution_session_persistence import FileExecutionSessionRepository
 from core.autonomous_execution import AutonomousExecutionOrchestrator
 from core.execution_supervisor import ExecutionSupervisor
 from core.planner import Planner
@@ -786,7 +788,18 @@ class Bootstrap:
         atlas_request_classifier = build_core_atlas_request_classifier()
         atlas_request_normalizer = build_core_atlas_request_normalizer()
 
-        execution_supervisor = ExecutionSupervisor()
+        execution_session_repository = (
+            FileExecutionSessionRepository(_execution_history_path())
+            if execution_persistence_enabled
+            else None
+        )
+        execution_supervisor = ExecutionSupervisor(
+            session_repository=execution_session_repository,
+        )
+        execution_history = ExecutionSessionHistory(
+            session_source=execution_supervisor,
+            session_repository=execution_session_repository,
+        )
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=execution_plan_validator,
@@ -1059,6 +1072,7 @@ class Bootstrap:
             atlas_request_normalizer=atlas_request_normalizer,
             operational_route_executor=operational_route_executor,
             route_execution_presenter=RouteExecutionPresenter(),
+            execution_history=execution_history,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
@@ -1122,6 +1136,14 @@ def _execution_state_path() -> Path:
         return Path(configured).expanduser()
 
     return Path(".atlas") / "execution_state.json"
+
+
+def _execution_history_path() -> Path:
+    configured = _read_text("ATLAS_EXECUTION_HISTORY_PATH")
+    if configured is not None:
+        return Path(configured).expanduser()
+
+    return _execution_state_path().parent / "execution_sessions"
 
 
 def _assistant_wake_word_engine(

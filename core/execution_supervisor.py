@@ -700,69 +700,9 @@ class ExecutionSupervisor:
     def get_summary(self, session_id: str) -> ExecutionSummary:
         """Return a deterministic live or final summary for one session."""
         session = self.get_session(session_id)
-        snapshots = tuple(session.step_states.values())
-        counts = {state: 0 for state in StepExecutionState}
-        for snapshot in snapshots:
-            counts[snapshot.state] += 1
-        end = session.finished_at or self._clock()
-        errors = {
-            snapshot.step_id: snapshot.error
-            for snapshot in snapshots
-            if snapshot.error is not None
-        }
-        critical_failure = next(
-            (
-                snapshot.step_id
-                for snapshot in snapshots
-                if snapshot.is_critical
-                and snapshot.state is StepExecutionState.FAILED
-            ),
-            None,
-        )
-        event_types = tuple(event.event_type for event in session.events)
-        if "replan_recovery_succeeded" in event_types:
-            replan_status = ReplanRecoveryStatus.SUCCEEDED
-        elif "replan_validation_rejected" in event_types:
-            replan_status = ReplanRecoveryStatus.VALIDATION_REJECTED
-        elif "replan_limit_reached" in event_types:
-            replan_status = ReplanRecoveryStatus.LIMIT_REACHED
-        elif (
-            "replan_no_safe_alternative" in event_types
-            or "replan_rejected" in event_types
-            or "replan_failed" in event_types
-        ):
-            replan_status = ReplanRecoveryStatus.NO_SAFE_ALTERNATIVE
-        elif "replan_recovery_failed" in event_types:
-            replan_status = ReplanRecoveryStatus.FAILED
-        elif "replan_produced" in event_types or "replan_started" in event_types:
-            replan_status = ReplanRecoveryStatus.IN_PROGRESS
-        else:
-            replan_status = ReplanRecoveryStatus.NOT_NEEDED
-        return ExecutionSummary(
-            session_id=session.session_id,
-            state=session.state,
-            total_steps=len(snapshots),
-            pending_steps=counts[StepExecutionState.PENDING]
-            + counts[StepExecutionState.READY],
-            running_steps=counts[StepExecutionState.RUNNING],
-            successful_steps=counts[StepExecutionState.COMPLETED],
-            failed_steps=counts[StepExecutionState.FAILED]
-            + counts[StepExecutionState.BLOCKED]
-            + counts[StepExecutionState.INTERRUPTED],
-            retrying_steps=counts[StepExecutionState.RETRYING],
-            cancelled_steps=counts[StepExecutionState.CANCELLED],
-            skipped_steps=counts[StepExecutionState.SKIPPED],
-            progress=session.progress,
-            retry_count=sum(
-                max(0, snapshot.attempt_count - 1) for snapshot in snapshots
-            ),
-            started_at=session.started_at,
-            finished_at=session.finished_at,
-            duration_seconds=max(0.0, (end - session.started_at).total_seconds()),
-            errors=errors,
-            critical_failure_step=critical_failure,
-            replan_status=replan_status,
-            replan_count=session.replan_count,
+        return summarize_execution_session(
+            session,
+            now=self._clock(),
         )
 
     def generate_summary(self, session_id: str) -> ExecutionSummary:
@@ -1558,3 +1498,77 @@ class ExecutionSupervisor:
         from core.execution_session_persistence import ExecutionSessionSnapshot
 
         self._session_repository.save(ExecutionSessionSnapshot.from_session(session))
+
+
+def summarize_execution_session(
+    session: ExecutionSession,
+    *,
+    now: datetime | None = None,
+) -> ExecutionSummary:
+    """Derive the existing summary model from an immutable session snapshot."""
+    if not isinstance(session, ExecutionSession):
+        raise TypeError("session must be an ExecutionSession.")
+    snapshots = tuple(session.step_states.values())
+    counts = {state: 0 for state in StepExecutionState}
+    for snapshot in snapshots:
+        counts[snapshot.state] += 1
+    end = session.finished_at or now or _utc_now()
+    errors = {
+        snapshot.step_id: snapshot.error
+        for snapshot in snapshots
+        if snapshot.error is not None
+    }
+    critical_failure = next(
+        (
+            snapshot.step_id
+            for snapshot in snapshots
+            if snapshot.is_critical
+            and snapshot.state is StepExecutionState.FAILED
+        ),
+        None,
+    )
+    event_types = tuple(event.event_type for event in session.events)
+    if "replan_recovery_succeeded" in event_types:
+        replan_status = ReplanRecoveryStatus.SUCCEEDED
+    elif "replan_validation_rejected" in event_types:
+        replan_status = ReplanRecoveryStatus.VALIDATION_REJECTED
+    elif "replan_limit_reached" in event_types:
+        replan_status = ReplanRecoveryStatus.LIMIT_REACHED
+    elif (
+        "replan_no_safe_alternative" in event_types
+        or "replan_rejected" in event_types
+        or "replan_failed" in event_types
+    ):
+        replan_status = ReplanRecoveryStatus.NO_SAFE_ALTERNATIVE
+    elif "replan_recovery_failed" in event_types:
+        replan_status = ReplanRecoveryStatus.FAILED
+    elif "replan_produced" in event_types or "replan_started" in event_types:
+        replan_status = ReplanRecoveryStatus.IN_PROGRESS
+    else:
+        replan_status = ReplanRecoveryStatus.NOT_NEEDED
+    return ExecutionSummary(
+        session_id=session.session_id,
+        state=session.state,
+        total_steps=len(snapshots),
+        pending_steps=counts[StepExecutionState.PENDING]
+        + counts[StepExecutionState.READY],
+        running_steps=counts[StepExecutionState.RUNNING],
+        successful_steps=counts[StepExecutionState.COMPLETED],
+        failed_steps=counts[StepExecutionState.FAILED]
+        + counts[StepExecutionState.BLOCKED]
+        + counts[StepExecutionState.INTERRUPTED],
+        retrying_steps=counts[StepExecutionState.RETRYING],
+        cancelled_steps=counts[StepExecutionState.CANCELLED],
+        skipped_steps=counts[StepExecutionState.SKIPPED],
+        progress=session.progress,
+        retry_count=sum(
+            max(0, snapshot.attempt_count - 1) for snapshot in snapshots
+        ),
+        started_at=session.started_at,
+        finished_at=session.finished_at,
+        duration_seconds=max(0.0, (end - session.started_at).total_seconds()),
+        errors=errors,
+        critical_failure_step=critical_failure,
+        replan_status=replan_status,
+        replan_count=session.replan_count,
+    )

@@ -54,6 +54,7 @@ from core.capability_execution_service import (
     unavailable_capability_execution_result,
 )
 from core.execution_plan_executor import ExecutionControl, ExecutionProgress
+from core.execution_history import ExecutionSessionHistory
 from core.hybrid_execution_planner import StructuredPlanningProgress
 from core.structured_execution import (
     StructuredExecutionCoordinator,
@@ -100,6 +101,7 @@ class AtlasOrchestrator:
         request_gateway: RequestGateway | None = None,
         operational_route_executor: OperationalRouteExecutor | None = None,
         route_execution_presenter: RouteExecutionPresenter | None = None,
+        execution_history: ExecutionSessionHistory | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -133,6 +135,7 @@ class AtlasOrchestrator:
         self._route_execution_presenter = (
             route_execution_presenter or RouteExecutionPresenter()
         )
+        self._execution_history = execution_history
         self._structured_execution_enabled = structured_execution_enabled
         self._structured_plan_streaming_enabled = structured_plan_streaming_enabled
         self._structured_plan_execution_enabled = structured_plan_execution_enabled
@@ -148,6 +151,11 @@ class AtlasOrchestrator:
         )
         self._project_root = project_root or Path(".")
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
+
+    @property
+    def execution_history(self) -> ExecutionSessionHistory | None:
+        """Expose the read-only internal execution-history query API."""
+        return self._execution_history
 
     def start(self) -> None:
 

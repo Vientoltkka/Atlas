@@ -322,6 +322,7 @@ class ExecutionSessionSnapshot:
             last_resource_decision=self.last_resource_decision,
             resource_decision_history=self.resource_decision_history,
             selected_resources_by_step=self.selected_resources_by_step,
+            events=self.events,
         )
 
 
