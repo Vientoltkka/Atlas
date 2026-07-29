@@ -679,6 +679,22 @@ def _frequent_failure(
 def _retry_risk(
     records: tuple[ExecutionHistoryRecord, ...],
 ) -> HistoricalRecommendation:
+    retried_steps = Counter(
+        step_id
+        for record in records
+        for step_id in set(record.operational_report.retried_step_ids)
+    )
+    related_step = next(
+        (
+            step_id
+            for step_id, count in sorted(
+                retried_steps.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+            if count >= 2
+        ),
+        None,
+    )
     return _recommendation(
         HistoricalRecommendationType.RETRY_RISK,
         HistoricalRecommendationSeverity.CAUTION,
@@ -686,6 +702,7 @@ def _retry_risk(
         records,
         fact="Uso repetido de reintentos.",
         observed_values=tuple(str(record.retry_count) for record in records),
+        related_step=related_step,
     )
 
 

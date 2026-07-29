@@ -34,6 +34,7 @@ from core.operational_context import OperationalContextBuilder
 from core.execution_memory_recorder import ExecutionMemoryRecorder
 from core.execution_history import ExecutionSessionHistory
 from core.execution_history_advisor import ExecutionHistoryAdvisor
+from core.historical_plan_adjustment import HistoricalPlanAdjuster
 from core.execution_session_persistence import FileExecutionSessionRepository
 from core.autonomous_execution import AutonomousExecutionOrchestrator
 from core.execution_supervisor import ExecutionSupervisor
@@ -802,6 +803,9 @@ class Bootstrap:
             session_repository=execution_session_repository,
         )
         execution_history_advisor = ExecutionHistoryAdvisor(execution_history)
+        historical_plan_adjuster = HistoricalPlanAdjuster(
+            execution_plan_validator,
+        )
         structured_execution = StructuredExecutionCoordinator(
             planner=planner,
             validator=execution_plan_validator,
@@ -1076,6 +1080,7 @@ class Bootstrap:
             route_execution_presenter=RouteExecutionPresenter(),
             execution_history=execution_history,
             execution_history_advisor=execution_history_advisor,
+            historical_plan_adjuster=historical_plan_adjuster,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

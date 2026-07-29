@@ -219,4 +219,5 @@ def copy_retry_policy(
         max_attempts=policy.max_attempts,
         strategy=policy.strategy,
         classifier=policy.classifier,
+        delay_ms=policy.delay_ms,
     )
