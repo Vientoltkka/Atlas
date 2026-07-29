@@ -8,6 +8,10 @@ import re
 from typing import Callable
 import unicodedata
 
+from core.acceptance_criteria import (
+    AcceptanceCriterion,
+    AcceptanceCriterionKind,
+)
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.planner import ExecutionPlan, ExecutionStep
 from core.step_output_reference import StepOutputReference
@@ -218,7 +222,8 @@ class DeterministicMultiToolPlanner:
                 },
             ),
         ]
-        if _requests_written_content_verification(objective):
+        verification_requested = _requests_written_content_verification(objective)
+        if verification_requested:
             steps.append(
                 ExecutionStep(
                     id="step_3",
@@ -237,6 +242,11 @@ class DeterministicMultiToolPlanner:
             detected_risks=_plan_risks(catalog, availability.tools, pattern),
             requires_confirmation=_requires_confirmation(catalog, availability.tools),
             status="planned",
+            acceptance_criteria=(
+                _read_write_acceptance_criteria(paths.paths[1])
+                if verification_requested
+                else ()
+            ),
         )
         return self._validated_result(objective, pattern, availability.tools, plan, selector_check.warnings, 0.92)
 
@@ -568,6 +578,79 @@ def _requests_written_content_verification(objective: str) -> bool:
             r"\b(?:comprueba|comprobar|verifica|verificar|confirma|confirmar)\b",
             normalized,
         )
+    )
+
+
+def _read_write_acceptance_criteria(
+    resource_path: str,
+) -> tuple[AcceptanceCriterion, ...]:
+    return (
+        AcceptanceCriterion(
+            "expected_step_count",
+            AcceptanceCriterionKind.EXPECTED_STEP_COUNT,
+            "The expected three-step chain completed.",
+            expected_count=3,
+        ),
+        AcceptanceCriterion(
+            "source_read_tool_used",
+            AcceptanceCriterionKind.EXPECTED_TOOL_USED,
+            "The source was read with read_file.",
+            source_step_id="step_1",
+            tool_name="read_file",
+        ),
+        AcceptanceCriterion(
+            "write_tool_used",
+            AcceptanceCriterionKind.EXPECTED_TOOL_USED,
+            "The destination was written with write_file.",
+            source_step_id="step_2",
+            tool_name="write_file",
+        ),
+        AcceptanceCriterion(
+            "verification_read_tool_used",
+            AcceptanceCriterionKind.EXPECTED_TOOL_USED,
+            "The produced resource was reopened with read_file.",
+            source_step_id="step_3",
+            tool_name="read_file",
+        ),
+        AcceptanceCriterion(
+            "resource_exists",
+            AcceptanceCriterionKind.RESOURCE_EXISTS,
+            "The declared destination file exists.",
+            source_step_id="step_2",
+            resource_path=resource_path,
+        ),
+        AcceptanceCriterion(
+            "resource_readable",
+            AcceptanceCriterionKind.RESOURCE_READABLE,
+            "The declared destination file is readable.",
+            source_step_id="step_3",
+            resource_path=resource_path,
+        ),
+        AcceptanceCriterion(
+            "resource_content_equals_source",
+            AcceptanceCriterionKind.RESOURCE_CONTENT_EQUALS,
+            "The destination content equals the source output.",
+            source_step_id="step_3",
+            comparison_step_id="step_1",
+            resource_path=resource_path,
+        ),
+        AcceptanceCriterion(
+            "verification_output_equals_source",
+            AcceptanceCriterionKind.OUTPUT_EQUALS,
+            "The verification read equals the source read.",
+            source_step_id="step_3",
+            comparison_step_id="step_1",
+        ),
+        AcceptanceCriterion(
+            "no_pending_confirmations",
+            AcceptanceCriterionKind.NO_PENDING_CONFIRMATIONS,
+            "No required confirmation remains pending.",
+        ),
+        AcceptanceCriterion(
+            "no_critical_failures",
+            AcceptanceCriterionKind.NO_CRITICAL_FAILURES,
+            "No critical execution failure occurred.",
+        ),
     )
 
 

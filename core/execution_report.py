@@ -8,6 +8,10 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from core.goal_verifier import (
+    GoalVerificationStatus,
+    goal_verification_result_from_dict,
+)
 from core.planner import ExecutionStep
 from core.execution_supervisor import (
     ExecutionSession,
@@ -119,6 +123,17 @@ class OperationalExecutionReport:
     authorized_strategy: str | None = None
     dispatch_completed: bool = False
     authorization_session_id: str | None = None
+    goal_verification_status: str = "NOT_APPLICABLE"
+    goal_verification_satisfied_criteria: int = 0
+    goal_verification_total_criteria: int = 0
+    goal_verification_failed_criteria: int = 0
+    goal_verification_unevaluable_criteria: int = 0
+    goal_verification_evidence: tuple[str, ...] = ()
+    goal_verification_resources: tuple[str, ...] = ()
+    goal_verification_action: str | None = None
+    goal_verification_message: str = (
+        "No hay verificación del objetivo registrada."
+    )
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.progress_percent <= 100.0:
@@ -142,6 +157,16 @@ class OperationalExecutionReport:
             self,
             "authorization_pending_confirmations",
             tuple(self.authorization_pending_confirmations),
+        )
+        object.__setattr__(
+            self,
+            "goal_verification_evidence",
+            tuple(self.goal_verification_evidence),
+        )
+        object.__setattr__(
+            self,
+            "goal_verification_resources",
+            tuple(self.goal_verification_resources),
         )
         if self.authorization_block_reason is not None:
             object.__setattr__(
@@ -200,6 +225,27 @@ class OperationalExecutionReport:
             "authorized_strategy": self.authorized_strategy,
             "dispatch_completed": self.dispatch_completed,
             "authorization_session_id": self.authorization_session_id,
+            "goal_verification_status": self.goal_verification_status,
+            "goal_verification_satisfied_criteria": (
+                self.goal_verification_satisfied_criteria
+            ),
+            "goal_verification_total_criteria": (
+                self.goal_verification_total_criteria
+            ),
+            "goal_verification_failed_criteria": (
+                self.goal_verification_failed_criteria
+            ),
+            "goal_verification_unevaluable_criteria": (
+                self.goal_verification_unevaluable_criteria
+            ),
+            "goal_verification_evidence": list(
+                self.goal_verification_evidence
+            ),
+            "goal_verification_resources": list(
+                self.goal_verification_resources
+            ),
+            "goal_verification_action": self.goal_verification_action,
+            "goal_verification_message": self.goal_verification_message,
         }
 
     def to_text(self) -> str:
@@ -253,6 +299,28 @@ class OperationalExecutionReport:
         if self.pending_user_actions:
             lines.append("Acción necesaria:")
             lines.extend(f"- {action}" for action in self.pending_user_actions)
+        lines.append("Verificación del objetivo:")
+        lines.append(f"- Estado: {self.goal_verification_status}.")
+        lines.append(
+            "- Criterios satisfechos: "
+            f"{self.goal_verification_satisfied_criteria}/"
+            f"{self.goal_verification_total_criteria}."
+        )
+        if self.goal_verification_failed_criteria:
+            lines.append(
+                "- Criterios fallidos: "
+                f"{self.goal_verification_failed_criteria}."
+            )
+        if self.goal_verification_unevaluable_criteria:
+            lines.append(
+                "- Criterios no evaluables: "
+                f"{self.goal_verification_unevaluable_criteria}."
+            )
+        for resource in self.goal_verification_resources:
+            lines.append(f"- Recurso comprobado: {resource}")
+        lines.append(f"- Resultado: {self.goal_verification_message}")
+        if self.goal_verification_action is not None:
+            lines.append(f"- Acción recomendada: {self.goal_verification_action}")
         lines.append(f"Mensaje final: {self.final_message}")
         return "\n".join(lines)
 
@@ -318,6 +386,19 @@ class ExecutionReportGenerator:
         authorization = _authorization_report_fields(
             session.execution_authorization
         )
+        verification = _verification_report_fields(session)
+        if (
+            status
+            in {
+                OperationalExecutionStatus.COMPLETED,
+                OperationalExecutionStatus.COMPLETED_WITH_RECOVERY,
+            }
+            and verification["goal_verification_status"]
+            != GoalVerificationStatus.NOT_APPLICABLE.value
+        ):
+            final_message = str(
+                verification["goal_verification_message"]
+            )
         return OperationalExecutionReport(
             session_id=session.session_id,
             objective=_safe_text(session.original_plan.goal),
@@ -344,6 +425,7 @@ class ExecutionReportGenerator:
             },
             **strategy,
             **authorization,
+            **verification,
         )
 
     @staticmethod
@@ -565,6 +647,66 @@ def _replan_text(report: OperationalExecutionReport) -> str:
         ReplanRecoveryStatus.IN_PROGRESS.value: "en curso.",
     }
     return f"Replanificación: {messages.get(report.replan_status, report.replan_status)}"
+
+
+def _verification_report_fields(
+    session: ExecutionSession,
+) -> dict[str, object]:
+    raw = session.results.get("goal_verification")
+    verification = None
+    if isinstance(raw, Mapping):
+        try:
+            verification = goal_verification_result_from_dict(raw)
+        except (TypeError, ValueError):
+            verification = None
+    if verification is not None:
+        return {
+            "goal_verification_status": verification.verification_status.value,
+            "goal_verification_satisfied_criteria": (
+                verification.satisfied_criteria
+            ),
+            "goal_verification_total_criteria": len(verification.criteria),
+            "goal_verification_failed_criteria": verification.failed_criteria,
+            "goal_verification_unevaluable_criteria": (
+                verification.unevaluable_criteria
+            ),
+            "goal_verification_evidence": tuple(
+                _safe_text(item)
+                for item in verification.evidence
+            ),
+            "goal_verification_resources": tuple(
+                _safe_text(item)
+                for item in verification.resources_checked
+            ),
+            "goal_verification_action": (
+                None
+                if verification.required_action is None
+                else _safe_text(verification.required_action)
+            ),
+            "goal_verification_message": _safe_text(
+                verification.message
+                or "No hay una conclusión de verificación disponible."
+            ),
+        }
+    if session.state is ExecutionState.WAITING_CONFIRMATION:
+        return {
+            "goal_verification_status": (
+                GoalVerificationStatus.USER_ACTION_REQUIRED.value
+            ),
+            "goal_verification_action": (
+                "Confirma o cancela el plan pendiente."
+            ),
+            "goal_verification_message": (
+                "El objetivo no se ha verificado porque la ejecución "
+                "requiere confirmación."
+            ),
+        }
+    return {
+        "goal_verification_status": GoalVerificationStatus.NOT_APPLICABLE.value,
+        "goal_verification_message": (
+            "La sesión no contiene una verificación del objetivo registrada."
+        ),
+    }
 
 
 def _strategy_report_fields(

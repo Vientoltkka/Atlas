@@ -228,6 +228,21 @@ def test_read_write_verify_builds_three_dependent_steps() -> None:
         "C:/Temp/copia.txt"
     )
     assert result.plan.estimated_steps == 3
+    assert [
+        criterion.criterion_id
+        for criterion in result.plan.acceptance_criteria
+    ] == [
+        "expected_step_count",
+        "source_read_tool_used",
+        "write_tool_used",
+        "verification_read_tool_used",
+        "resource_exists",
+        "resource_readable",
+        "resource_content_equals_source",
+        "verification_output_equals_source",
+        "no_pending_confirmations",
+        "no_critical_failures",
+    ]
     assert ExecutionPlanValidator().validate(result.plan).is_valid is True
 
 

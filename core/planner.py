@@ -12,6 +12,10 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 import unicodedata
 
+from core.acceptance_criteria import (
+    AcceptanceCriterion,
+    normalize_acceptance_criteria,
+)
 from core.execution_arguments import ExecutionArguments, InvalidExecutionArgumentError
 from core.execution_condition import ExecutionConditionNode, copy_execution_condition
 from core.execution_plan_output import (
@@ -260,6 +264,7 @@ class ExecutionPlan:
     output: ExecutionPlanOutput | object | None = None
     required_outputs: tuple[str, ...] = ()
     output_validators: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    acceptance_criteria: tuple[AcceptanceCriterion, ...] = ()
     replanning_policy: ReplanningPolicy | None = None
 
     def __post_init__(self) -> None:
@@ -277,6 +282,11 @@ class ExecutionPlan:
             self,
             "output_validators",
             MappingProxyType(_normalize_output_validators(self.output_validators)),
+        )
+        object.__setattr__(
+            self,
+            "acceptance_criteria",
+            normalize_acceptance_criteria(self.acceptance_criteria),
         )
         object.__setattr__(
             self,

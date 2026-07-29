@@ -31,7 +31,11 @@ from core.capability_planner import (
 from core.capability_resolver import CapabilityResolver, CapabilityType
 from core.execution_plan_executor import ExecutionControl, ExecutionPlanExecutor
 from core.execution_replanner import ReplanningPolicy, ReplanningStrategy
-from core.goal_verifier import GoalVerificationReason, OutputValidatorKind
+from core.goal_verifier import (
+    GoalVerificationReason,
+    GoalVerificationStatus,
+    OutputValidatorKind,
+)
 from core.goal_driven_execution import GoalDrivenExecutionPolicy
 from core.execution_plan_library import ExecutionPlanLibrary, WorkflowDefinition
 from core.execution_plan_registry import ExecutionPlanReference
@@ -224,7 +228,11 @@ def test_service_executes_valid_request_with_real_chain_and_safe_output() -> Non
     assert result.execution_id
     assert result.execution_status == "completed"
     assert result.goal_verification_result is not None
-    assert result.goal_verification_result.satisfied is True
+    assert result.goal_verification_result.satisfied is False
+    assert (
+        result.goal_verification_result.verification_status
+        is GoalVerificationStatus.INCONCLUSIVE
+    )
     assert result.output == {"public": "done", "api_token": "[redacted]"}
     assert tool.calls == 1
     assert tool.contexts[0].parameters == {}

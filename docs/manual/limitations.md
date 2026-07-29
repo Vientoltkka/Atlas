@@ -8,6 +8,9 @@ Propósito: registrar límites actuales para evitar sobreprometer capacidades.
 
 - La planificación estructurada local es determinista; el proveedor de planes
   basado en modelo continúa siendo opcional.
+- Atlas no infiere criterios de aceptación semánticos. Cuando el plan no
+  declara evidencia determinista suficiente, el objetivo queda `INCONCLUSIVE`
+  aunque la ejecución técnica haya terminado.
 - Los ajustes históricos están limitados por políticas explícitas y no
   constituyen aprendizaje automático.
 - La idempotencia del dispatcher es local al proceso y al permiso de ejecución;

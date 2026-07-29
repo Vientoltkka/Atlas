@@ -23,6 +23,14 @@ from core.execution_supervisor import (
     StepExecutionSnapshot,
     StepExecutionState,
 )
+from core.goal_verifier import (
+    CriterionEvaluation,
+    CriterionEvaluationStatus,
+    GoalVerificationReason,
+    GoalVerificationResult,
+    GoalVerificationStatus,
+    goal_verification_result_to_dict,
+)
 from core.planner import ExecutionPlan, ExecutionStep
 from core.structured_plan_replanner import ReplanReason, ReplanRecord
 
@@ -182,6 +190,54 @@ def _report(
         session,
         _summary(session, replan_status=replan_status),
     )
+
+
+def test_completed_execution_report_can_show_not_verified_objective() -> None:
+    verification = GoalVerificationResult(
+        satisfied=False,
+        reason=GoalVerificationReason.OUTPUT_VALIDATION_FAILED,
+        verification_status=GoalVerificationStatus.NOT_VERIFIED,
+        criteria=(
+            CriterionEvaluation(
+                criterion_id="content_matches",
+                kind="OUTPUT_EQUALS",
+                description="Produced content matches.",
+                source="step:step_2.output",
+                expected_value="<text length=4>",
+                observed_value="<text length=7>",
+                required=True,
+                status=CriterionEvaluationStatus.FAILED,
+                reason="El contenido producido no coincide.",
+            ),
+        ),
+        message=(
+            "La ejecución terminó, pero el objetivo no quedó verificado."
+        ),
+        required_action="Revisa el archivo generado.",
+    )
+    session = _session(
+        {
+            "step_1": _step("step_1", StepExecutionState.COMPLETED),
+            "step_2": _step("step_2", StepExecutionState.COMPLETED),
+        },
+        state=ExecutionState.COMPLETED,
+        results={
+            "goal_verification": goal_verification_result_to_dict(
+                verification
+            )
+        },
+    )
+
+    report = _report(session)
+    visible = report.to_text()
+
+    assert report.status is OperationalExecutionStatus.COMPLETED
+    assert report.goal_verification_status == "NOT_VERIFIED"
+    assert report.goal_verification_failed_criteria == 1
+    assert "Resultado: Ejecución completada" in visible
+    assert "Estado: NOT_VERIFIED." in visible
+    assert "el objetivo no quedó verificado" in visible
+    assert "Revisa el archivo generado." in visible
 
 
 def test_completed_report_has_real_counts_duration_and_no_actions() -> None:

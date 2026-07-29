@@ -46,7 +46,10 @@ Tú: confirmo
 Atlas genera una cadena `read_file` → `write_file` → `read_file`. El contenido
 del primer paso llega al segundo mediante una referencia estructurada, no por
 interpolación de texto. El informe identifica la herramienta usada, la
-referencia resuelta y el recurso producido.
+referencia resuelta y el recurso producido. Además, la sección
+`Verificación del objetivo` comprueba el número de pasos, las herramientas, la
+existencia y lectura del recurso, la igualdad del contenido, la confirmación y
+la ausencia de fallos críticos. Solo entonces muestra `VERIFIED`.
 
 ## Persistencia e informe
 

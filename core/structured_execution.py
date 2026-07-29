@@ -71,6 +71,11 @@ from core.execution_history_advisor import (
     ExecutionHistoryAdvisor,
     HistoricalPlanningContext,
 )
+from core.goal_verifier import (
+    GoalVerificationStatus,
+    GoalVerifier,
+    goal_verification_result_to_dict,
+)
 from core.historical_plan_adjustment import (
     HistoricalAdjustmentRequest,
     HistoricalPlanAdjuster,
@@ -1386,6 +1391,26 @@ class StructuredExecutionCoordinator:
                             else strategy_selection.strategy.configuration
                         ),
                     )
+                if execution.goal_verification_result is None:
+                    execution = replace(
+                        execution,
+                        metadata={
+                            **execution.metadata,
+                            "plan_signature": active_validation.plan_signature,
+                            "confirmation_granted": confirmation_granted,
+                        },
+                    )
+                    execution = replace(
+                        execution,
+                        goal_verification_result=GoalVerifier().verify(
+                            active_plan,
+                            execution,
+                        ),
+                    )
+                execution = self._with_execution_session_id(
+                    execution,
+                    session.session_id,
+                )
                 self._record_step_states_from_execution(
                     session.session_id,
                     active_plan,
@@ -2722,6 +2747,9 @@ class StructuredExecutionCoordinator:
             "blocked_steps": tuple(execution.blocked_steps),
             "skipped_steps": tuple(execution.skipped_steps),
             "error_code": execution.error_code,
+            "goal_verification": goal_verification_result_to_dict(
+                execution.goal_verification_result
+            ),
             "step_outputs": {
                 result.step_id: result.output
                 for result in execution.step_results
@@ -2817,12 +2845,18 @@ class StructuredExecutionCoordinator:
         execution: PlanExecutionResult,
         session_id: str,
     ) -> PlanExecutionResult:
+        verification = execution.goal_verification_result
         return replace(
             execution,
             metadata={
                 **execution.metadata,
                 "execution_session_id": session_id,
             },
+            goal_verification_result=(
+                None
+                if verification is None
+                else replace(verification, session_id=session_id)
+            ),
         )
 
     def _sync_resumable_state(
@@ -3065,9 +3099,18 @@ class StructuredExecutionCoordinator:
         self,
         execution: PlanExecutionResult,
     ) -> str:
-        return (
+        verification = execution.goal_verification_result
+        technical = (
             "Ejecucion estructurada completada. "
             f"Pasos completados: {', '.join(execution.completed_steps)}."
+        )
+        if verification is None:
+            return technical + " El cumplimiento del objetivo no fue evaluado."
+        if verification.verification_status is GoalVerificationStatus.VERIFIED:
+            return technical + " Objetivo verificado."
+        return technical + " " + (
+            verification.message
+            or "El objetivo no quedó verificado."
         )
 
     def _failed_message(

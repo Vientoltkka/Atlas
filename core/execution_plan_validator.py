@@ -9,6 +9,10 @@ import math
 import re
 from typing import Any, Mapping
 
+from core.acceptance_criteria import (
+    AcceptanceCriterionKind,
+    acceptance_criterion_to_dict,
+)
 from core.execution_arguments import (
     ExecutionArguments,
     InvalidExecutionArgumentError,
@@ -1152,6 +1156,52 @@ class ExecutionPlanValidator:
                         "ExecutionPlan output validator is unsupported: "
                         f"{validator}."
                     )
+        step_by_id = {step.id: step for step in plan.ordered_steps}
+        declared_write_paths = {
+            path
+            for step in plan.ordered_steps
+            if step.tool == "write_file"
+            for path in (step.arguments.get("path"),)
+            if isinstance(path, str)
+        }
+        for criterion in plan.acceptance_criteria:
+            for step_id in (
+                criterion.source_step_id,
+                criterion.comparison_step_id,
+            ):
+                if step_id is not None and step_id not in step_by_id:
+                    errors.append(
+                        "ExecutionPlan acceptance criterion "
+                        f"'{criterion.criterion_id}' references unknown step "
+                        f"'{step_id}'."
+                    )
+            if (
+                criterion.resource_path is not None
+                and criterion.resource_path not in declared_write_paths
+            ):
+                errors.append(
+                    "ExecutionPlan acceptance criterion "
+                    f"'{criterion.criterion_id}' references an undeclared resource."
+                )
+            if (
+                criterion.kind is AcceptanceCriterionKind.EXPECTED_TOOL_USED
+                and criterion.source_step_id in step_by_id
+                and criterion.tool_name
+                != step_by_id[criterion.source_step_id].tool
+            ):
+                errors.append(
+                    "ExecutionPlan acceptance criterion "
+                    f"'{criterion.criterion_id}' expects a tool not declared "
+                    "by its source step."
+                )
+            if (
+                criterion.kind is AcceptanceCriterionKind.EXPECTED_STEP_COUNT
+                and criterion.expected_count is None
+            ):
+                errors.append(
+                    "ExecutionPlan EXPECTED_STEP_COUNT criterion requires "
+                    "expected_count."
+                )
 
     def _validate_replanning_policy(
         self,
@@ -1271,6 +1321,10 @@ def plan_signature(
         ),
         "required_outputs": list(plan.required_outputs),
         "output_validators": _signature_safe_value(dict(plan.output_validators)),
+        "acceptance_criteria": [
+            acceptance_criterion_to_dict(criterion)
+            for criterion in plan.acceptance_criteria
+        ],
         "replanning_policy": _signature_safe_value(getattr(plan, "replanning_policy", None)),
     }
     encoded = json.dumps(

@@ -936,6 +936,7 @@ class ExecutionPlanExecutor:
             metadata={
                 "plan_signature": validation_result.plan_signature,
                 "execution_context_snapshot": active_context.snapshot(),
+                "confirmation_granted": confirmation_granted,
             },
             ),
             trace=trace,

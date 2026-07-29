@@ -29,7 +29,10 @@ from core.execution_plan_executor import (
     PlanExecutionResult,
 )
 from core.execution_context import ExecutionContext
-from core.goal_verifier import GoalVerificationResult
+from core.goal_verifier import (
+    GoalVerificationResult,
+    GoalVerificationStatus,
+)
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.execution_plan_validator import plan_signature
 from core.execution_replanner import (
@@ -664,7 +667,21 @@ class CapabilityOrchestrator:
             )
 
         goal_verification = execution.goal_verification_result
-        if goal_verification is None or not goal_verification.satisfied:
+        legacy_inconclusive = (
+            goal_verification is not None
+            and goal_verification.verification_status
+            is GoalVerificationStatus.INCONCLUSIVE
+            and not plan.acceptance_criteria
+            and not plan.required_outputs
+            and not plan.output_validators
+        )
+        if (
+            goal_verification is None
+            or (
+                not goal_verification.satisfied
+                and not legacy_inconclusive
+            )
+        ):
             _record(
                 events,
                 self._observer,

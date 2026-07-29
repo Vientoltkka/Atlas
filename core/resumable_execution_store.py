@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
+from core.acceptance_criteria import (
+    acceptance_criterion_from_dict,
+    acceptance_criterion_to_dict,
+)
 from core.execution_context import ExecutionContextSnapshot
 from core.goal_verifier import (
     goal_verification_result_from_dict,
@@ -455,6 +459,10 @@ def _plan_to_dict(
         "output": _output_to_json(plan.output),
         "required_outputs": list(plan.required_outputs),
         "output_validators": _output_validators_to_json(plan.output_validators),
+        "acceptance_criteria": [
+            acceptance_criterion_to_dict(criterion)
+            for criterion in plan.acceptance_criteria
+        ],
         "replanning_policy": replanning_policy_to_dict(plan.replanning_policy),
     }
 
@@ -519,6 +527,10 @@ def _dict_to_plan(
             _output_validators_from_json(payload.get("output_validators"))
             if "output_validators" in payload
             else {}
+        ),
+        acceptance_criteria=tuple(
+            acceptance_criterion_from_dict(item)
+            for item in payload.get("acceptance_criteria", [])
         ),
         replanning_policy=(
             _replanning_policy_from_json(payload.get("replanning_policy"))

@@ -9,6 +9,7 @@ from core.execution_authorization import (
 )
 from core.execution_session_persistence import FileExecutionSessionRepository
 from core.execution_supervisor import ExecutionState
+from core.goal_verifier import GoalVerificationStatus
 from core.step_output_reference import StepOutputReference
 
 
@@ -63,6 +64,10 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
     assert destination.exists() is False
     assert pending.operational_report is not None
     assert pending.operational_report.steps[1].produced_resource is None
+    assert (
+        pending.operational_report.goal_verification_status
+        == GoalVerificationStatus.USER_ACTION_REQUIRED.value
+    )
 
     visible = orchestrator.process_prompt(
         "confirmo",
@@ -91,6 +96,11 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
     assert detail.execution_result.step_results[0].output == expected
     assert detail.execution_result.step_results[2].output == expected
     assert destination.read_text(encoding="utf-8") == expected
+    assert detail.execution_result.goal_verification_result is not None
+    assert (
+        detail.execution_result.goal_verification_result.verification_status
+        is GoalVerificationStatus.VERIFIED
+    )
 
     write_metadata = detail.execution_result.step_results[1].metadata
     assert write_metadata["parameter_resolution_status"] == "resolved"
@@ -109,6 +119,9 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
     assert "[write_file]" in visible
     assert "Referencias resueltas: steps.step_1.output" in visible
     assert f"Recurso producido: {destination}" in visible
+    assert "Verificación del objetivo:" in visible
+    assert "Estado: VERIFIED." in visible
+    assert "Criterios satisfechos: 10/10." in visible
 
     session_id = detail.execution_result.metadata["execution_session_id"]
     restored_snapshot = FileExecutionSessionRepository(history_path).load(
@@ -126,6 +139,10 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
     assert restored.results["step_resolution"]["step_2"]["references"] == [
         "steps.step_1.output"
     ]
+    assert (
+        restored.results["goal_verification"]["verification_status"]
+        == GoalVerificationStatus.VERIFIED.value
+    )
 
     history = orchestrator.execution_history
     assert history is not None

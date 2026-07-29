@@ -1405,7 +1405,7 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
         "STEP_FINISHED",
         "execution_context_snapshot_created",
         "goal_verification_started",
-        "goal_verification_succeeded",
+        "goal_verification_inconclusive",
     ]
     assert result.trace.events[1].status == TraceEventStatus.STARTED.value
     assert result.trace.events[2].status == TraceEventStatus.FINISHED.value
@@ -1419,7 +1419,7 @@ def test_executor_creates_trace_and_records_successful_step_events() -> None:
     assert result.metrics.failed_steps == 0
     assert result.metrics.success_rate == 1.0
     assert result.metrics.goals_verified == 1
-    assert result.metrics.goals_satisfied == 1
+    assert result.metrics.goals_satisfied == 0
 
 
 def test_executor_trace_records_failed_step_event() -> None:

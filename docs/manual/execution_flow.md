@@ -20,8 +20,11 @@ Propósito: describir el recorrido operativo principal de una petición de texto
 10. `ExecutionDispatcher` consume el permiso una sola vez.
 11. `ExecutionSupervisor` crea y actualiza la `ExecutionSession`.
 12. `ExecutionPlanExecutor` ejecuta los pasos mediante herramientas registradas.
-13. La sesión se persiste y `ExecutionReportGenerator` deriva el informe.
-14. `AtlasOrchestrator` presenta el mensaje contractual y el informe operativo.
+13. `GoalVerifier` separa el estado técnico del cumplimiento del objetivo y
+    evalúa únicamente criterios declarados con resultados y contexto reales.
+14. La sesión persiste el resultado sanitizado y `ExecutionReportGenerator`
+    deriva el informe.
+15. `AtlasOrchestrator` presenta el mensaje contractual y el informe operativo.
 
 Las peticiones no aplicables al planificador estructurado continúan por los
 flujos conversacionales existentes. Las APIs internas de bajo nivel se
@@ -39,6 +42,18 @@ sin ejecutar código dinámico.
 El resultado resuelto se conserva solo durante la ejecución. La sesión y el
 informe registran las claves de argumentos y los identificadores de referencia,
 pero no duplican sus valores, para evitar exponer contenido o secretos.
+
+## Verificación del objetivo
+
+Un estado técnico `completed` no implica por sí solo que el objetivo esté
+cumplido. Los planes pueden declarar criterios deterministas sobre pasos,
+salidas, herramientas, confirmaciones y recursos producidos. El resultado usa
+los estados `VERIFIED`, `PARTIALLY_VERIFIED`, `NOT_VERIFIED`, `INCONCLUSIVE`,
+`USER_ACTION_REQUIRED` y `NOT_APPLICABLE`.
+
+Los planes antiguos sin criterios continúan ejecutándose, pero su objetivo se
+clasifica como `INCONCLUSIVE`; Atlas no inventa evidencia ni los presenta como
+verificados.
 
 ## Confirmaciones y bloqueos
 
