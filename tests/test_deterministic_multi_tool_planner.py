@@ -9,6 +9,7 @@ from core.deterministic_multi_tool_planner import (
 from core.execution_plan_executor import ExecutionPlanExecutor
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.planner import Planner
+from core.step_output_reference import StepOutputReference
 from tools.argument_schema import ArgumentField, ArgumentSchema, ArgumentSchemaRegistry
 from tools.base_tool import BaseTool
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
@@ -191,10 +192,42 @@ def test_read_then_write_complete_pattern_builds_valid_plan() -> None:
     assert [step.id for step in result.plan.ordered_steps] == ["step_1", "step_2"]
     assert [step.tool for step in result.plan.ordered_steps] == ["read_file", "write_file"]
     assert result.plan.ordered_steps[1].dependencies == ("step_1",)
-    assert dict(result.plan.ordered_steps[1].arguments)["content"] == {"$ref": "steps.step_1.output"}
+    assert dict(result.plan.ordered_steps[1].arguments)["content"] == (
+        StepOutputReference("step_1")
+    )
     assert result.plan.required_tools == ("read_file", "write_file")
     assert result.plan.estimated_steps == 2
     assert result.plan.requires_confirmation is True
+    assert ExecutionPlanValidator().validate(result.plan).is_valid is True
+
+
+def test_read_write_verify_builds_three_dependent_steps() -> None:
+    _registry, selector = _registry_and_selector()
+    result = _planner().plan(
+        (
+            "lee C:/Temp/origen.txt, guarda el contenido en "
+            "C:/Temp/copia.txt y comprueba que se escribió"
+        ),
+        _catalog(),
+        selector,
+    )
+
+    assert result.success is True
+    assert result.plan is not None
+    assert [step.tool for step in result.plan.ordered_steps] == [
+        "read_file",
+        "write_file",
+        "read_file",
+    ]
+    assert result.plan.ordered_steps[1].dependencies == ("step_1",)
+    assert result.plan.ordered_steps[2].dependencies == ("step_2",)
+    assert result.plan.ordered_steps[1].arguments["content"] == (
+        StepOutputReference("step_1")
+    )
+    assert result.plan.ordered_steps[2].arguments["path"] == (
+        "C:/Temp/copia.txt"
+    )
+    assert result.plan.estimated_steps == 3
     assert ExecutionPlanValidator().validate(result.plan).is_valid is True
 
 
@@ -299,7 +332,9 @@ def test_generated_ids_dependencies_ref_required_tools_and_estimated_steps() -> 
     assert result.plan is not None
     assert [step.id for step in result.plan.ordered_steps] == ["step_1", "step_2"]
     assert result.plan.ordered_steps[1].dependencies == ("step_1",)
-    assert dict(result.plan.ordered_steps[1].arguments)["content"] == {"$ref": "steps.step_1.output"}
+    assert dict(result.plan.ordered_steps[1].arguments)["content"] == (
+        StepOutputReference("step_1")
+    )
     assert result.plan.required_tools == ("read_file", "write_file")
     assert result.plan.estimated_steps == 2
 
@@ -459,4 +494,3 @@ def test_planner_falls_back_when_multi_tool_pattern_not_handled() -> None:
 
     assert result.plan is not None
     assert result.plan.required_tools == ("read_file",)
-

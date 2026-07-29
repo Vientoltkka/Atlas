@@ -2727,6 +2727,40 @@ class StructuredExecutionCoordinator:
                 for result in execution.step_results
                 if result.success and result.status == "completed"
             },
+            "step_tools": {
+                result.step_id: result.tool_name
+                for result in execution.step_results
+                if result.tool_name is not None
+            },
+            "step_resolution": {
+                result.step_id: {
+                    "status": result.metadata.get(
+                        "parameter_resolution_status",
+                        (
+                            "failed"
+                            if result.metadata.get(
+                                "parameter_resolution_error_code"
+                            )
+                            else "not_required"
+                        ),
+                    ),
+                    "argument_keys": tuple(
+                        str(value)
+                        for value in result.metadata.get(
+                            "resolved_argument_keys",
+                            (),
+                        )
+                    ),
+                    "references": tuple(
+                        str(value)
+                        for value in result.metadata.get(
+                            "used_references",
+                            (),
+                        )
+                    ),
+                }
+                for result in execution.step_results
+            },
         }
 
     def _execution_response(

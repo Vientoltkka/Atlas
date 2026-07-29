@@ -36,6 +36,18 @@ La petición se clasifica como `SINGLE_TOOL`, selecciona `read_file`, genera y
 valida un plan, selecciona estrategia, autoriza un único despacho, ejecuta la
 lectura y presenta el informe operativo con el resultado real.
 
+Un objetivo de varios pasos puede solicitar una copia verificable:
+
+```text
+Tú: Lee README.md, guarda el contenido en .atlas/copia.txt y comprueba que se escribió correctamente.
+Tú: confirmo
+```
+
+Atlas genera una cadena `read_file` → `write_file` → `read_file`. El contenido
+del primer paso llega al segundo mediante una referencia estructurada, no por
+interpolación de texto. El informe identifica la herramienta usada, la
+referencia resuelta y el recurso producido.
+
 ## Persistencia e informe
 
 Las sesiones se guardan de forma predeterminada en:
@@ -49,6 +61,10 @@ ejecución terminal. El informe se obtiene desde
 `StructuredExecutionCoordinator.get_execution_report(session_id)` o desde
 `AtlasOrchestrator.last_structured_execution_response.operational_report`
 después de una petición estructurada.
+
+Una sesión interrumpida conserva el plan, el contexto y los resultados
+completados. Al reanudar, esos pasos no se repiten y las referencias posteriores
+se resuelven desde el contexto restaurado.
 
 ## Salir
 

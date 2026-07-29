@@ -1436,18 +1436,4 @@ def _with_message_prefix(
     response: StructuredExecutionResponse,
     prefix: str,
 ) -> StructuredExecutionResponse:
-    return StructuredExecutionResponse(
-        handled=response.handled,
-        status=response.status,
-        message=prefix + response.message,
-        plan=response.plan,
-        validation_result=response.validation_result,
-        execution_result=response.execution_result,
-        requires_confirmation=response.requires_confirmation,
-        confirmation_token=response.confirmation_token,
-        error_code=response.error_code,
-        error=response.error,
-        resumable_state=response.resumable_state,
-        partial_state=response.partial_state,
-        operational_report=response.operational_report,
-    )
+    return replace(response, message=prefix + response.message)

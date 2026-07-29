@@ -8,6 +8,7 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from core.planner import ExecutionStep
 from core.execution_supervisor import (
     ExecutionSession,
     ExecutionState,
@@ -54,6 +55,9 @@ class OperationalStepReport:
     duration_seconds: float | None
     error: str | None
     result: str | None = None
+    tool_name: str | None = None
+    resolved_references: tuple[str, ...] = ()
+    produced_resource: str | None = None
     replaced: bool = False
     omitted: bool = False
     cancelled: bool = False
@@ -67,6 +71,9 @@ class OperationalStepReport:
             "duration_seconds": self.duration_seconds,
             "error": self.error,
             "result": self.result,
+            "tool_name": self.tool_name,
+            "resolved_references": list(self.resolved_references),
+            "produced_resource": self.produced_resource,
             "replaced": self.replaced,
             "omitted": self.omitted,
             "cancelled": self.cancelled,
@@ -271,8 +278,18 @@ class ExecutionReportGenerator:
                 for step in session.active_plan.ordered_steps
             }
         )
+        active_steps = {
+            step.id: step
+            for step in session.active_plan.ordered_steps
+        }
         raw_outputs = session.results.get("step_outputs")
         step_outputs = raw_outputs if isinstance(raw_outputs, Mapping) else {}
+        raw_resolution = session.results.get("step_resolution")
+        step_resolution = (
+            raw_resolution
+            if isinstance(raw_resolution, Mapping)
+            else {}
+        )
         replaced_ids = {
             record.failed_step
             for record in session.replan_history
@@ -283,6 +300,8 @@ class ExecutionReportGenerator:
                 snapshot,
                 descriptions.get(step_id, step_id),
                 result=step_outputs.get(step_id),
+                step=active_steps.get(step_id),
+                resolution=step_resolution.get(step_id),
                 replaced=step_id in replaced_ids,
             )
             for step_id, snapshot in session.step_states.items()
@@ -333,6 +352,8 @@ class ExecutionReportGenerator:
         description: str,
         *,
         result: object | None,
+        step: ExecutionStep | None,
+        resolution: object | None,
         replaced: bool,
     ) -> OperationalStepReport:
         duration = None
@@ -344,6 +365,21 @@ class ExecutionReportGenerator:
                 ),
                 3,
             )
+        resolution_mapping = (
+            resolution
+            if isinstance(resolution, Mapping)
+            else {}
+        )
+        raw_references = resolution_mapping.get("references", ())
+        references = (
+            tuple(
+                _safe_text(reference)
+                for reference in raw_references
+                if isinstance(reference, str)
+            )
+            if isinstance(raw_references, (list, tuple))
+            else ()
+        )
         return OperationalStepReport(
             step_id=_safe_text(snapshot.step_id),
             description=description,
@@ -352,6 +388,16 @@ class ExecutionReportGenerator:
             duration_seconds=duration,
             error=_safe_text(snapshot.error) if snapshot.error is not None else None,
             result=_safe_text(result) if result is not None else None,
+            tool_name=(
+                _safe_text(step.tool)
+                if step is not None and step.tool is not None
+                else None
+            ),
+            resolved_references=references,
+            produced_resource=_produced_resource(
+                step,
+                completed=snapshot.state is StepExecutionState.COMPLETED,
+            ),
             replaced=replaced,
             omitted=snapshot.state is StepExecutionState.SKIPPED,
             cancelled=snapshot.state is StepExecutionState.CANCELLED,
@@ -472,13 +518,33 @@ def _step_line(step: OperationalStepReport) -> str:
         else ""
     )
     error = f" — {step.error}" if step.error is not None else ""
+    tool = f" [{step.tool_name}]" if step.tool_name is not None else ""
     line = (
-        f"{marker} {step.step_id}: {step.description} "
+        f"{marker} {step.step_id}: {step.description}{tool} "
         f"({attempts}{duration}){suffix}{error}"
     )
     if step.result is not None:
         line += f"\n  Resultado: {step.result}"
+    if step.resolved_references:
+        line += "\n  Referencias resueltas: " + ", ".join(
+            step.resolved_references
+        )
+    if step.produced_resource is not None:
+        line += f"\n  Recurso producido: {step.produced_resource}"
     return line
+
+
+def _produced_resource(
+    step: ExecutionStep | None,
+    *,
+    completed: bool,
+) -> str | None:
+    if not completed or step is None or step.tool != "write_file":
+        return None
+    path = step.arguments.get("path")
+    if not isinstance(path, str):
+        return None
+    return _safe_text(path)
 
 
 def _retry_text(report: OperationalExecutionReport) -> str:

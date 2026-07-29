@@ -26,6 +26,9 @@ Propósito: registrar límites actuales para evitar sobreprometer capacidades.
   intent conversacional o schema completo.
 - No hay herramienta web registrada.
 - No hay herramienta de eliminación de archivos registrada.
+- `read_file` y `write_file` operan como texto UTF-8. Conservan el contenido
+  lógico, pero no garantizan una copia binaria idéntica cuando el origen mezcla
+  convenciones de saltos de línea.
 
 ## Voz
 

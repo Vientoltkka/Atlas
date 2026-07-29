@@ -27,6 +27,19 @@ Las peticiones no aplicables al planificador estructurado continúan por los
 flujos conversacionales existentes. Las APIs internas de bajo nivel se
 conservan para composición y compatibilidad, pero no son el comando principal.
 
+## Datos entre pasos
+
+Cada `ExecutionStep` conserva sus argumentos en `ExecutionArguments`. Los
+valores literales se mantienen sin cambios y una `StepOutputReference` permite
+que un paso posterior consuma la salida de otro paso ya completado. Antes de
+invocar la herramienta, `ParameterResolver` resuelve esas referencias contra
+el `ExecutionContext`; una referencia inexistente, futura o circular se rechaza
+sin ejecutar código dinámico.
+
+El resultado resuelto se conserva solo durante la ejecución. La sesión y el
+informe registran las claves de argumentos y los identificadores de referencia,
+pero no duplican sus valores, para evitar exponer contenido o secretos.
+
 ## Confirmaciones y bloqueos
 
 - Una confirmación pendiente crea sesión e informe, pero no llega al Executor.

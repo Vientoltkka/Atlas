@@ -10,6 +10,7 @@ import unicodedata
 
 from core.execution_plan_validator import ExecutionPlanValidator
 from core.planner import ExecutionPlan, ExecutionStep
+from core.step_output_reference import StepOutputReference
 from tools.intent_selector import ToolSelector
 from tools.semantic_catalog import SemanticToolCatalog, SemanticToolDescriptor
 
@@ -199,27 +200,39 @@ class DeterministicMultiToolPlanner:
             return _missing_information_result(objective, pattern, availability.tools, missing)
 
         assert len(paths.paths) >= 2
+        steps = [
+            ExecutionStep(
+                id="step_1",
+                description="Read source file content.",
+                tool=availability.tools[0],
+                arguments={"path": paths.paths[0]},
+            ),
+            ExecutionStep(
+                id="step_2",
+                description="Write source content to destination file.",
+                tool=availability.tools[1],
+                dependencies=("step_1",),
+                arguments={
+                    "path": paths.paths[1],
+                    "content": StepOutputReference("step_1"),
+                },
+            ),
+        ]
+        if _requests_written_content_verification(objective):
+            steps.append(
+                ExecutionStep(
+                    id="step_3",
+                    description="Read destination file to verify written content.",
+                    tool=availability.tools[0],
+                    dependencies=("step_2",),
+                    arguments={"path": paths.paths[1]},
+                )
+            )
+
         plan = ExecutionPlan(
             goal=objective.strip(),
-            ordered_steps=(
-                ExecutionStep(
-                    id="step_1",
-                    description="Read source file content.",
-                    tool=availability.tools[0],
-                    arguments={"path": paths.paths[0]},
-                ),
-                ExecutionStep(
-                    id="step_2",
-                    description="Write source content to destination file.",
-                    tool=availability.tools[1],
-                    dependencies=("step_1",),
-                    arguments={
-                        "path": paths.paths[1],
-                        "content": {"$ref": "steps.step_1.output"},
-                    },
-                ),
-            ),
-            estimated_steps=2,
+            ordered_steps=tuple(steps),
+            estimated_steps=len(steps),
             required_tools=availability.tools,
             detected_risks=_plan_risks(catalog, availability.tools, pattern),
             requires_confirmation=_requires_confirmation(catalog, availability.tools),
@@ -546,6 +559,16 @@ def _matches_read_then_write(normalized: str) -> bool:
         or "guardala" in normalized
     )
     return has_read and has_write and has_content
+
+
+def _requests_written_content_verification(objective: str) -> bool:
+    normalized = _normalize(objective)
+    return bool(
+        re.search(
+            r"\b(?:comprueba|comprobar|verifica|verificar|confirma|confirmar)\b",
+            normalized,
+        )
+    )
 
 
 def _matches_list_then_read(normalized: str) -> bool:

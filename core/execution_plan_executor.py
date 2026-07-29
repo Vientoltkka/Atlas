@@ -2170,6 +2170,21 @@ class ExecutionPlanExecutor:
                 subplan_depth=subplan_depth,
                 plan_stack=plan_stack,
             )
+            outcome = replace(
+                outcome,
+                metadata={
+                    **dict(outcome.metadata),
+                    "parameter_resolution_status": "resolved",
+                    "resolved_argument_keys": tuple(
+                        sorted(resolution.resolved_arguments.keys())
+                    ),
+                    "used_step_ids": tuple(resolution.used_step_ids),
+                    "used_variable_names": tuple(
+                        resolution.used_variable_names
+                    ),
+                    "used_references": tuple(resolution.used_references),
+                },
+            )
 
             if outcome.status == StepExecutionStatus.SKIPPED.value:
                 return outcome
