@@ -167,9 +167,10 @@ def _validate_kind_fields(criterion: AcceptanceCriterion) -> None:
     if (
         criterion.kind is AcceptanceCriterionKind.RESOURCE_CONTENT_EQUALS
         and criterion.comparison_step_id is None
+        and criterion.expected_value is None
     ):
         raise ValueError(
-            "RESOURCE_CONTENT_EQUALS requires comparison_step_id."
+            "RESOURCE_CONTENT_EQUALS requires comparison_step_id or expected_value."
         )
     if (
         criterion.kind is AcceptanceCriterionKind.EXPECTED_TOOL_USED

@@ -22,6 +22,13 @@ Propósito: registrar límites actuales para evitar sobreprometer capacidades.
   compatibles se inyectan explícitamente.
 - Los fallos de planificación que no producen ningún `ExecutionPlan` no crean
   una `ExecutionSession`; sí devuelven un error estructurado controlado.
+- La corrección del objetivo no es semántica ni general. En esta fase solo
+  repara de forma determinista un único `RESOURCE_CONTENT_EQUALS` cuando el
+  valor correcto ya existe en el contexto de ejecución.
+- No hay corrección recursiva: el límite predeterminado es un ciclo, tres
+  pasos, un recurso, una confirmación nueva y una reverificación.
+- `INCONCLUSIVE`, recursos no declarados, valores ausentes, cambios de objetivo
+  y herramientas no autorizadas nunca inician una corrección automática.
 
 ## Límites de herramientas
 

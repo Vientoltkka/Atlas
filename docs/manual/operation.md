@@ -69,6 +69,17 @@ Una sesión interrumpida conserva el plan, el contexto y los resultados
 completados. Al reanudar, esos pasos no se repiten y las referencias posteriores
 se resuelven desde el contexto restaurado.
 
+## Confirmar una corrección
+
+Una ejecución técnicamente completada puede devolver una segunda confirmación
+si el objetivo no se verificó y existe una corrección determinista. Esa
+confirmación autoriza solo el fragmento correctivo mostrado; la confirmación
+del plan original ya consumida no se reutiliza.
+
+El límite predeterminado es un ciclo, tres pasos, un recurso, una confirmación
+nueva y una verificación final. Si no existe un valor esperado demostrado,
+Atlas informa `INSUFFICIENT_EVIDENCE` y no escribe.
+
 ## Salir
 
 Dentro del bucle de texto:

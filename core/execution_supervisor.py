@@ -1204,6 +1204,36 @@ class ExecutionSupervisor:
         self._persist_session(updated)
         return updated
 
+    def record_objective_correction(
+        self,
+        session_id: str,
+        snapshot: Mapping[str, object],
+        *,
+        event_type: str = "objective_correction_updated",
+    ) -> ExecutionSession:
+        """Persist a safe correction snapshot without changing lifecycle state."""
+
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("snapshot must be a mapping.")
+        with self._lock:
+            session = self.get_session(session_id)
+            results = dict(session.results)
+            results["objective_correction"] = dict(snapshot)
+            updated = replace(session, results=results)
+            updated = self._with_event(
+                updated,
+                event_type,
+                details={
+                    "correction_request_id": snapshot.get("correction_request_id"),
+                    "classification": snapshot.get("classification"),
+                    "status": snapshot.get("status"),
+                    "cycle": snapshot.get("cycle"),
+                },
+            )
+            self._sessions[session_id] = updated
+        self._persist_session(updated)
+        return updated
+
     def record_replan_recovery_result(
         self,
         session_id: str,

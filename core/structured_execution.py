@@ -13,7 +13,7 @@ from core.concurrent_step_executor import (
     ExecutionConcurrencyPolicy,
     build_execution_batch,
 )
-from core.execution_context import ExecutionContext
+from core.execution_context import ExecutionContext, ExecutionContextSnapshot
 from core.execution_report import (
     ExecutionReportGenerator,
     OperationalExecutionReport,
@@ -72,8 +72,10 @@ from core.execution_history_advisor import (
     HistoricalPlanningContext,
 )
 from core.goal_verifier import (
+    GoalVerificationResult,
     GoalVerificationStatus,
     GoalVerifier,
+    goal_verification_result_from_dict,
     goal_verification_result_to_dict,
 )
 from core.historical_plan_adjustment import (
@@ -94,6 +96,14 @@ from core.execution_authorization import (
     build_confirmation_references,
 )
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
+from core.objective_correction import (
+    CorrectionClassification,
+    CorrectionLifecycleStatus,
+    ObjectiveCorrectionDecision,
+    ObjectiveCorrectionPolicy,
+    correction_fragment_fingerprint,
+    merge_corrective_execution,
+)
 from core.resumable_execution_store import (
     ResumableExecutionStore,
     ResumableExecutionStoreError,
@@ -139,6 +149,8 @@ class StructuredExecutionResponse:
     route_decision: object | None = None
     historical_context: HistoricalPlanningContext | None = None
     historical_adjustment: HistoricalPlanAdjustmentResult | None = None
+    objective_correction: ObjectiveCorrectionDecision | None = None
+    corrected_verification: GoalVerificationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +175,10 @@ class PendingStructuredExecution:
 class _PendingPlan:
     execution: PendingStructuredExecution
     session_id: str | None = None
+    correction_decision: ObjectiveCorrectionDecision | None = None
+    original_plan: ExecutionPlan | None = None
+    original_execution: PlanExecutionResult | None = None
+    original_session_id: str | None = None
 
 
 class StructuredExecutionCoordinator:
@@ -195,6 +211,7 @@ class StructuredExecutionCoordinator:
         execution_dispatcher: ExecutionDispatcher | None = None,
         execution_history_advisor: ExecutionHistoryAdvisor | None = None,
         historical_plan_adjuster: HistoricalPlanAdjuster | None = None,
+        objective_correction_policy: ObjectiveCorrectionPolicy | None = None,
     ) -> None:
         self._planner = planner
         self._validator = validator
@@ -229,6 +246,9 @@ class StructuredExecutionCoordinator:
         self._execution_dispatcher = execution_dispatcher or ExecutionDispatcher()
         self._execution_history_advisor = execution_history_advisor
         self._historical_plan_adjuster = historical_plan_adjuster
+        self._objective_correction_policy = (
+            objective_correction_policy or ObjectiveCorrectionPolicy()
+        )
         self._execution_authorization_gate = (
             execution_authorization_gate
             or ExecutionAuthorizationGate(
@@ -242,6 +262,7 @@ class StructuredExecutionCoordinator:
         self._active_confirmation_token: str | None = None
         self._resumable_execution: ResumableExecutionState | None = None
         self._resumable_store = resumable_store
+        self._correction_fingerprints: set[str] = set()
 
     def handle(
         self,
@@ -619,6 +640,14 @@ class StructuredExecutionCoordinator:
                 error="plan signature changed after validation",
             )
 
+        if pending_record.correction_decision is not None:
+            return self._confirm_objective_correction(
+                confirmation_token,
+                pending_record,
+                control=control,
+                on_execution_progress=on_execution_progress,
+            )
+
         if pending.strategy_selection is None:
             self._discard_pending(confirmation_token)
             execution = self._execute_plan_under_supervision(
@@ -710,6 +739,8 @@ class StructuredExecutionCoordinator:
             execution,
             confirmation_token=confirmation_token,
         )
+        if response.objective_correction is not None:
+            return response
         persistence_error = self._sync_resumable_state(
             response,
             objective=pending.objective,
@@ -728,6 +759,290 @@ class StructuredExecutionCoordinator:
             strategy_selection=pending.strategy_selection,
             authorization_result=authorization,
             dispatch_result=dispatch,
+        )
+
+    def _confirm_objective_correction(
+        self,
+        confirmation_token: str,
+        pending_record: _PendingPlan,
+        *,
+        control: ExecutionControl | None,
+        on_execution_progress: Callable[[ExecutionProgress], None] | None,
+    ) -> StructuredExecutionResponse:
+        """Authorize, dispatch and reverify one already prepared correction."""
+
+        pending = pending_record.execution
+        decision = pending_record.correction_decision
+        original_plan = pending_record.original_plan
+        original_execution = pending_record.original_execution
+        original_session_id = pending_record.original_session_id
+        if (
+            decision is None
+            or original_plan is None
+            or original_execution is None
+            or original_session_id is None
+            or pending.strategy_selection is None
+        ):
+            self._discard_pending(confirmation_token)
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_rejected",
+                message="La corrección pendiente perdió su trazabilidad.",
+                error_code="CORRECTION_CONTEXT_MISSING",
+            )
+
+        authorization = self._authorize_execution(
+            pending.plan,
+            pending.validation_result,
+            pending.strategy_selection,
+            required_confirmations=pending.confirmation_references,
+            granted_confirmations=tuple(
+                reference.granted_copy()
+                for reference in pending.confirmation_references
+            ),
+            session_state="waiting_confirmation",
+            source=(
+                "StructuredExecutionCoordinator.objective_correction:"
+                + decision.request.correction_request_id
+            ),
+        )
+        if authorization.decision is not ExecutionAuthorizationDecision.AUTHORIZED:
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.REJECTED,
+                    ),
+                    "authorization": authorization.persisted_snapshot(),
+                    "rejection_reason": authorization.reason,
+                },
+                event_type="objective_correction_authorization_rejected",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status=authorization.decision.value.lower(),
+                message=authorization.reason,
+                plan=original_plan,
+                execution_result=original_execution,
+                requires_confirmation=True,
+                confirmation_token=confirmation_token,
+                error_code=f"CORRECTION_AUTHORIZATION_{authorization.decision.value}",
+                error=authorization.reason,
+                strategy_selection=pending.strategy_selection,
+                authorization_result=authorization,
+                objective_correction=decision,
+            )
+
+        dispatch = self._execution_dispatcher.dispatch(
+            authorization,
+            lambda plan, validated, selected: self._execute_plan_under_supervision(
+                plan,
+                validated,
+                confirmation_granted=True,
+                control=control,
+                on_progress=on_execution_progress,
+                session_id=pending_record.session_id,
+                strategy_selection=selected,
+                authorization_result=authorization,
+                execution_context=ExecutionContext(
+                    initial_variables=decision.expected_context
+                ),
+            ),
+        )
+        if dispatch.execution_result is None:
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.FAILED,
+                    ),
+                    "authorization": authorization.persisted_snapshot(),
+                    "dispatch": dispatch.persisted_snapshot(),
+                    "failure_reason": dispatch.error or dispatch.reason,
+                },
+                event_type="objective_correction_dispatch_failed",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_dispatch_failed",
+                message=dispatch.reason,
+                plan=original_plan,
+                execution_result=original_execution,
+                requires_confirmation=False,
+                confirmation_token=confirmation_token,
+                error_code=dispatch.status.value,
+                error=dispatch.error or dispatch.reason,
+                strategy_selection=pending.strategy_selection,
+                authorization_result=authorization,
+                dispatch_result=dispatch,
+                objective_correction=decision,
+            )
+
+        correction_execution = dispatch.execution_result
+        self._record_dispatch_authorization(authorization, dispatch)
+        if correction_execution.interrupted and correction_execution.resumable:
+            state = self._build_resumable_state(
+                objective=original_plan.goal,
+                plan=pending.plan,
+                validation=pending.validation_result,
+                execution=correction_execution,
+                confirmation_granted=True,
+            )
+            state = replace(
+                state,
+                metadata={
+                    **state.metadata,
+                    "objective_correction_resume": {
+                        "original_session_id": original_session_id,
+                        "correction_request_id": (
+                            decision.request.correction_request_id
+                        ),
+                        "fragment_signature": decision.fragment_signature,
+                        "affected_criteria": list(
+                            decision.affected_criterion_ids
+                        ),
+                    },
+                },
+            )
+            self._resumable_execution = state
+            persistence_error = self._save_resumable_state(state)
+            self._discard_pending(confirmation_token)
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.RUNNING,
+                    ),
+                    "authorization": authorization.persisted_snapshot(),
+                    "dispatch": dispatch.persisted_snapshot(),
+                    "correction_result": "interrupted",
+                    "completed_corrective_steps": list(
+                        correction_execution.completed_steps
+                    ),
+                },
+                event_type="objective_correction_interrupted",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_interrupted",
+                message=(
+                    "La corrección se interrumpió de forma reanudable; "
+                    "los pasos correctivos completados no se repetirán."
+                ),
+                plan=original_plan,
+                execution_result=correction_execution,
+                resumable_state=state,
+                error_code=persistence_error
+                or correction_execution.error_code,
+                error=correction_execution.error,
+                operational_report=self.get_execution_report(original_session_id),
+                strategy_selection=pending.strategy_selection,
+                authorization_result=authorization,
+                dispatch_result=dispatch,
+                objective_correction=decision,
+            )
+
+        self._discard_pending(confirmation_token)
+        if not correction_execution.success:
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.FAILED,
+                    ),
+                    "authorization": authorization.persisted_snapshot(),
+                    "dispatch": dispatch.persisted_snapshot(),
+                    "correction_result": correction_execution.plan_status,
+                    "failure_reason": (
+                        correction_execution.error
+                        or correction_execution.failure_reason
+                        or correction_execution.error_code
+                    ),
+                },
+                event_type="objective_correction_failed",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_failed",
+                message=(
+                    "La corrección falló y no se inició otro ciclo. "
+                    + self._failed_message(correction_execution)
+                ),
+                plan=original_plan,
+                execution_result=correction_execution,
+                error_code=correction_execution.error_code,
+                error=correction_execution.error,
+                operational_report=self.get_execution_report(original_session_id),
+                strategy_selection=pending.strategy_selection,
+                authorization_result=authorization,
+                dispatch_result=dispatch,
+                objective_correction=decision,
+            )
+
+        merged = merge_corrective_execution(
+            original_plan,
+            original_execution,
+            correction_execution,
+            decision,
+        )
+        verification = GoalVerifier().verify(original_plan, merged)
+        verification = replace(
+            verification,
+            session_id=original_session_id,
+        )
+        merged = replace(merged, goal_verification_result=verification)
+        lifecycle_status = (
+            CorrectionLifecycleStatus.VERIFIED_AFTER_CORRECTION
+            if verification.verification_status is GoalVerificationStatus.VERIFIED
+            else CorrectionLifecycleStatus.LIMIT_REACHED
+        )
+        self._execution_supervisor.record_objective_correction(
+            original_session_id,
+            {
+                **self._correction_snapshot(
+                    decision,
+                    status=lifecycle_status,
+                ),
+                "authorization": authorization.persisted_snapshot(),
+                "dispatch": dispatch.persisted_snapshot(),
+                "correction_result": correction_execution.plan_status,
+                "final_verification": goal_verification_result_to_dict(verification),
+                "final_verification_status": verification.verification_status.value,
+                "confirmation": "granted",
+            },
+            event_type="objective_correction_reverified",
+        )
+        message = (
+            "El objetivo no se verificó en el primer intento. Atlas corrigió "
+            "el recurso, lo volvió a comprobar y ahora el objetivo está verificado."
+            if verification.verification_status is GoalVerificationStatus.VERIFIED
+            else (
+                "La corrección terminó, pero el objetivo sigue sin verificarse. "
+                "Se alcanzó el límite de un ciclo correctivo."
+            )
+        )
+        return StructuredExecutionResponse(
+            handled=True,
+            status=(
+                "verified_after_correction"
+                if verification.verification_status is GoalVerificationStatus.VERIFIED
+                else "correction_limit_reached"
+            ),
+            message=message,
+            plan=original_plan,
+            execution_result=merged,
+            requires_confirmation=False,
+            confirmation_token=confirmation_token,
+            operational_report=self.get_execution_report(original_session_id),
+            strategy_selection=pending.strategy_selection,
+            authorization_result=authorization,
+            dispatch_result=dispatch,
+            objective_correction=decision,
+            corrected_verification=verification,
         )
 
     def pending_plan(
@@ -1028,11 +1343,20 @@ class StructuredExecutionCoordinator:
             control=control,
             on_progress=on_execution_progress,
         )
-        response = self._execution_response(
-            state.original_plan,
-            state.validation_result,
-            execution,
-        )
+        if isinstance(
+            state.metadata.get("objective_correction_resume"),
+            Mapping,
+        ):
+            response = self._finalize_resumed_objective_correction(
+                state,
+                execution,
+            )
+        else:
+            response = self._execution_response(
+                state.original_plan,
+                state.validation_result,
+                execution,
+            )
         persistence_error = self._sync_resumable_state(
             response,
             objective=state.objective,
@@ -1041,6 +1365,235 @@ class StructuredExecutionCoordinator:
         if persistence_error is not None:
             return replace(response, error_code=persistence_error)
         return response
+
+    def _finalize_resumed_objective_correction(
+        self,
+        state: ResumableExecutionState,
+        correction_execution: PlanExecutionResult,
+    ) -> StructuredExecutionResponse:
+        """Finish a persisted correction without repeating completed steps."""
+
+        marker = state.metadata.get("objective_correction_resume")
+        if not isinstance(marker, Mapping):
+            raise ValueError("objective correction resume marker is required.")
+        original_session_id = marker.get("original_session_id")
+        if not isinstance(original_session_id, str):
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_resume_failed",
+                message="La corrección reanudada perdió la sesión original.",
+                error_code="CORRECTION_ORIGINAL_SESSION_MISSING",
+                execution_result=correction_execution,
+            )
+        try:
+            original_session = self._execution_supervisor.get_session(
+                original_session_id
+            )
+        except Exception as error:
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_resume_failed",
+                message="No se pudo restaurar la sesión original de la corrección.",
+                error_code="CORRECTION_ORIGINAL_SESSION_NOT_FOUND",
+                error=str(error),
+                execution_result=correction_execution,
+            )
+        original_execution = self._execution_from_supervisor_session(
+            original_session
+        )
+        verification = original_execution.goal_verification_result
+        corrective_builder = getattr(
+            self._execution_replanner,
+            "corrective_fragment",
+            None,
+        )
+        if verification is None or not callable(corrective_builder):
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_resume_failed",
+                message="No existe evidencia original suficiente para reverificar.",
+                error_code="CORRECTION_EVIDENCE_MISSING",
+                execution_result=correction_execution,
+            )
+        decision = corrective_builder(
+            original_session.original_plan,
+            original_execution,
+            verification,
+            session_id=original_session_id,
+            previous_attempts=0,
+            policy=self._objective_correction_policy,
+        )
+        request_id = marker.get("correction_request_id")
+        if isinstance(request_id, str):
+            decision = replace(
+                decision,
+                request=replace(
+                    decision.request,
+                    correction_request_id=request_id,
+                ),
+            )
+
+        if correction_execution.interrupted and correction_execution.resumable:
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.RUNNING,
+                    ),
+                    "correction_result": "interrupted",
+                    "completed_corrective_steps": list(
+                        correction_execution.completed_steps
+                    ),
+                },
+                event_type="objective_correction_reinterrupted",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_interrupted",
+                message="La corrección continúa siendo reanudable.",
+                plan=state.original_plan,
+                validation_result=state.validation_result,
+                execution_result=correction_execution,
+                resumable_state=state,
+                objective_correction=decision,
+            )
+        if not correction_execution.success:
+            self._execution_supervisor.record_objective_correction(
+                original_session_id,
+                {
+                    **self._correction_snapshot(
+                        decision,
+                        status=CorrectionLifecycleStatus.FAILED,
+                    ),
+                    "correction_result": correction_execution.plan_status,
+                    "failure_reason": (
+                        correction_execution.error
+                        or correction_execution.failure_reason
+                        or correction_execution.error_code
+                    ),
+                },
+                event_type="objective_correction_resume_failed",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_failed",
+                message="La corrección reanudada falló; no se inició otro ciclo.",
+                plan=original_session.original_plan,
+                execution_result=correction_execution,
+                error_code=correction_execution.error_code,
+                error=correction_execution.error,
+                operational_report=self.get_execution_report(original_session_id),
+                objective_correction=decision,
+            )
+
+        merged = merge_corrective_execution(
+            original_session.original_plan,
+            original_execution,
+            correction_execution,
+            decision,
+        )
+        final_verification = GoalVerifier().verify(
+            original_session.original_plan,
+            merged,
+        )
+        final_verification = replace(
+            final_verification,
+            session_id=original_session_id,
+        )
+        merged = replace(
+            merged,
+            goal_verification_result=final_verification,
+        )
+        lifecycle = (
+            CorrectionLifecycleStatus.VERIFIED_AFTER_CORRECTION
+            if final_verification.verification_status
+            is GoalVerificationStatus.VERIFIED
+            else CorrectionLifecycleStatus.LIMIT_REACHED
+        )
+        self._execution_supervisor.record_objective_correction(
+            original_session_id,
+            {
+                **self._correction_snapshot(decision, status=lifecycle),
+                "correction_result": correction_execution.plan_status,
+                "final_verification": goal_verification_result_to_dict(
+                    final_verification
+                ),
+                "final_verification_status": (
+                    final_verification.verification_status.value
+                ),
+                "confirmation": "granted",
+                "resumed": True,
+            },
+            event_type="objective_correction_resumed_and_reverified",
+        )
+        return StructuredExecutionResponse(
+            handled=True,
+            status=(
+                "verified_after_correction"
+                if final_verification.verification_status
+                is GoalVerificationStatus.VERIFIED
+                else "correction_limit_reached"
+            ),
+            message=(
+                "La corrección se reanudó sin repetir pasos completados y "
+                "el objetivo quedó verificado."
+                if final_verification.verification_status
+                is GoalVerificationStatus.VERIFIED
+                else (
+                    "La corrección se reanudó, pero el objetivo sigue sin "
+                    "verificarse y se alcanzó el límite."
+                )
+            ),
+            plan=original_session.original_plan,
+            execution_result=merged,
+            operational_report=self.get_execution_report(original_session_id),
+            objective_correction=decision,
+            corrected_verification=final_verification,
+        )
+
+    @staticmethod
+    def _execution_from_supervisor_session(
+        session: ExecutionSession,
+    ) -> PlanExecutionResult:
+        outputs = session.results.get("step_outputs")
+        tools = session.results.get("step_tools")
+        completed = tuple(session.results.get("completed_steps", ()))
+        step_results = [
+            StepExecutionResult(
+                step_id=step_id,
+                status=StepExecutionStatus.COMPLETED.value,
+                success=True,
+                tool_name=(
+                    tools.get(step_id)
+                    if isinstance(tools, Mapping)
+                    and isinstance(tools.get(step_id), str)
+                    else None
+                ),
+                output=output,
+            )
+            for step_id, output in (
+                outputs.items() if isinstance(outputs, Mapping) else ()
+            )
+        ]
+        raw_verification = session.results.get("goal_verification")
+        verification = (
+            goal_verification_result_from_dict(raw_verification)
+            if isinstance(raw_verification, Mapping)
+            else None
+        )
+        return PlanExecutionResult(
+            plan_status=PlanExecutionStatus.COMPLETED.value,
+            success=True,
+            completed=True,
+            completed_steps=list(completed),
+            step_results=step_results,
+            metadata={
+                "execution_session_id": session.session_id,
+                "confirmation_granted": True,
+            },
+            goal_verification_result=verification,
+        )
 
     def confirm_pending(
         self,
@@ -1170,6 +1723,10 @@ class StructuredExecutionCoordinator:
             ...,
         ] = (),
         authorization_scope: str | None = None,
+        correction_decision: ObjectiveCorrectionDecision | None = None,
+        original_plan: ExecutionPlan | None = None,
+        original_execution: PlanExecutionResult | None = None,
+        original_session_id: str | None = None,
     ) -> str:
         token = validation.plan_signature or plan_signature(plan)
         if self._active_confirmation_token is not None:
@@ -1193,6 +1750,10 @@ class StructuredExecutionCoordinator:
                 authorization_scope=authorization_scope,
             ),
             session_id=session_id,
+            correction_decision=correction_decision,
+            original_plan=original_plan,
+            original_execution=original_execution,
+            original_session_id=original_session_id,
         )
         self._active_confirmation_token = token
         return token
@@ -1344,6 +1905,7 @@ class StructuredExecutionCoordinator:
         session_id: str | None = None,
         strategy_selection: ExecutionStrategySelectionResult | None = None,
         authorization_result: ExecutionAuthorizationResult | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> PlanExecutionResult:
         session = (
             self._execution_supervisor.get_session(session_id)
@@ -1390,6 +1952,7 @@ class StructuredExecutionCoordinator:
                             if strategy_selection is None
                             else strategy_selection.strategy.configuration
                         ),
+                        execution_context=execution_context,
                     )
                 if execution.goal_verification_result is None:
                     execution = replace(
@@ -2791,6 +3354,322 @@ class StructuredExecutionCoordinator:
             },
         }
 
+    def _prepare_objective_correction(
+        self,
+        plan: ExecutionPlan,
+        validation: PlanValidationResult,
+        execution: PlanExecutionResult,
+    ) -> StructuredExecutionResponse | None:
+        """Classify and stage one bounded correction after technical completion."""
+
+        verification = execution.goal_verification_result
+        session_id = execution.metadata.get("execution_session_id")
+        corrective_builder = getattr(
+            self._execution_replanner,
+            "corrective_fragment",
+            None,
+        )
+        if (
+            plan.status == "corrective"
+            or not execution.success
+            or verification is None
+            or verification.verification_status
+            not in {
+                GoalVerificationStatus.NOT_VERIFIED,
+                GoalVerificationStatus.PARTIALLY_VERIFIED,
+                GoalVerificationStatus.INCONCLUSIVE,
+                GoalVerificationStatus.USER_ACTION_REQUIRED,
+            }
+            or not isinstance(session_id, str)
+            or not callable(corrective_builder)
+        ):
+            return None
+
+        decision = corrective_builder(
+            plan,
+            execution,
+            verification,
+            session_id=session_id,
+            previous_attempts=0,
+            policy=self._objective_correction_policy,
+        )
+        base_snapshot = self._correction_snapshot(
+            decision,
+            status=CorrectionLifecycleStatus.NOT_STARTED,
+        )
+        if decision.classification is not CorrectionClassification.CORRECTABLE:
+            status = (
+                CorrectionLifecycleStatus.LIMIT_REACHED
+                if decision.classification is CorrectionClassification.LIMIT_REACHED
+                else CorrectionLifecycleStatus.REJECTED
+            )
+            self._execution_supervisor.record_objective_correction(
+                session_id,
+                {**base_snapshot, "status": status.value},
+                event_type="objective_correction_not_started",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="completed_objective_not_verified",
+                message=(
+                    self._completed_message(execution)
+                    + " No se inició una corrección: "
+                    + decision.reason
+                ),
+                plan=plan,
+                validation_result=validation,
+                execution_result=execution,
+                operational_report=self.get_execution_report(session_id),
+                objective_correction=decision,
+            )
+
+        fragment = decision.fragment
+        if fragment is None:
+            return None
+        fragment_validation = self._validator.validate(fragment)
+        safety_error = self._corrective_fragment_error(plan, execution, decision)
+        fingerprint = (
+            session_id
+            + ":"
+            + correction_fragment_fingerprint(
+                decision.request.correction_request_id,
+                fragment,
+            )
+        )
+        if fingerprint in self._correction_fingerprints:
+            safety_error = "The same corrective fragment was already prepared."
+        if not fragment_validation.is_valid or safety_error is not None:
+            reason = safety_error or "; ".join(fragment_validation.errors)
+            self._execution_supervisor.record_objective_correction(
+                session_id,
+                {
+                    **base_snapshot,
+                    "status": CorrectionLifecycleStatus.REJECTED.value,
+                    "validation_status": "invalid",
+                    "rejection_reason": reason,
+                },
+                event_type="objective_correction_rejected",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_rejected",
+                message="La corrección propuesta fue rechazada: " + reason,
+                plan=plan,
+                validation_result=validation,
+                execution_result=execution,
+                error_code="CORRECTION_VALIDATION_FAILED",
+                error=reason,
+                operational_report=self.get_execution_report(session_id),
+                objective_correction=decision,
+            )
+
+        strategy = self._select_execution_strategy(fragment, fragment_validation)
+        if strategy is None:
+            reason = "The correction cannot bypass strategy selection."
+            self._execution_supervisor.record_objective_correction(
+                session_id,
+                {
+                    **base_snapshot,
+                    "status": CorrectionLifecycleStatus.REJECTED.value,
+                    "validation_status": "valid",
+                    "rejection_reason": reason,
+                },
+                event_type="objective_correction_rejected",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status="correction_rejected",
+                message="La corrección no puede ejecutarse sin estrategia validada.",
+                plan=plan,
+                validation_result=validation,
+                execution_result=execution,
+                error_code="CORRECTION_STRATEGY_UNAVAILABLE",
+                error=reason,
+                operational_report=self.get_execution_report(session_id),
+                objective_correction=decision,
+            )
+        confirmations = self._confirmation_references(
+            fragment,
+            fragment_validation,
+            strategy,
+        )
+        authorization = self._authorize_execution(
+            fragment,
+            fragment_validation,
+            strategy,
+            required_confirmations=confirmations,
+            source=(
+                "StructuredExecutionCoordinator.objective_correction:"
+                + decision.request.correction_request_id
+            ),
+        )
+        if (
+            authorization.decision
+            is not ExecutionAuthorizationDecision.CONFIRMATION_PENDING
+        ):
+            self._execution_supervisor.record_objective_correction(
+                session_id,
+                {
+                    **base_snapshot,
+                    "status": CorrectionLifecycleStatus.REJECTED.value,
+                    "validation_status": "valid",
+                    "authorization": authorization.persisted_snapshot(),
+                    "rejection_reason": authorization.reason,
+                },
+                event_type="objective_correction_rejected",
+            )
+            return StructuredExecutionResponse(
+                handled=True,
+                status=authorization.decision.value.lower(),
+                message=authorization.reason,
+                plan=plan,
+                validation_result=validation,
+                execution_result=execution,
+                error_code=f"CORRECTION_AUTHORIZATION_{authorization.decision.value}",
+                error=authorization.reason,
+                operational_report=self.get_execution_report(session_id),
+                strategy_selection=strategy,
+                authorization_result=authorization,
+                objective_correction=decision,
+            )
+
+        correction_session = self._start_waiting_confirmation_session(
+            fragment,
+            strategy,
+            authorization,
+        )
+        token = self._store_pending_plan(
+            plan.goal,
+            fragment,
+            fragment_validation,
+            correction_session.session_id,
+            strategy,
+            authorization,
+            confirmations,
+            decision.request.correction_request_id,
+            correction_decision=decision,
+            original_plan=plan,
+            original_execution=execution,
+            original_session_id=session_id,
+        )
+        self._correction_fingerprints.add(fingerprint)
+        self._execution_supervisor.record_objective_correction(
+            session_id,
+            {
+                **base_snapshot,
+                "status": CorrectionLifecycleStatus.PENDING_CONFIRMATION.value,
+                "validation_status": "valid",
+                "strategy": strategy.persisted_snapshot(),
+                "authorization": authorization.persisted_snapshot(),
+                "correction_session_id": correction_session.session_id,
+                "confirmation_token": token,
+            },
+            event_type="objective_correction_pending_confirmation",
+        )
+        return StructuredExecutionResponse(
+            handled=True,
+            status="correction_confirmation_required",
+            message=(
+                "El objetivo no se verificó en el primer intento. "
+                "Atlas preparó una corrección limitada del recurso declarado; "
+                "requiere confirmación explícita antes de escribir."
+            ),
+            plan=plan,
+            validation_result=validation,
+            execution_result=execution,
+            requires_confirmation=True,
+            confirmation_token=token,
+            error_code="CORRECTION_CONFIRMATION_REQUIRED",
+            operational_report=self.get_execution_report(session_id),
+            strategy_selection=strategy,
+            authorization_result=authorization,
+            objective_correction=decision,
+        )
+
+    def _corrective_fragment_error(
+        self,
+        original_plan: ExecutionPlan,
+        original_execution: PlanExecutionResult,
+        decision: ObjectiveCorrectionDecision,
+    ) -> str | None:
+        fragment = decision.fragment
+        if fragment is None:
+            return "Corrective fragment is missing."
+        policy = self._objective_correction_policy
+        if fragment.goal != original_plan.goal:
+            return "Corrective fragment changes the original objective."
+        if len(fragment.ordered_steps) > policy.max_steps:
+            return "Corrective fragment exceeds the step limit."
+        writes = tuple(
+            step for step in fragment.ordered_steps if step.tool == "write_file"
+        )
+        resources = {
+            step.arguments.get("path")
+            for step in writes
+            if isinstance(step.arguments.get("path"), str)
+        }
+        if len(resources) > policy.max_resources:
+            return "Corrective fragment exceeds the resource limit."
+        if not fragment.requires_confirmation or len(writes) != 1:
+            return "Resource correction must retain one explicit confirmation."
+        if set(original_execution.completed_steps).intersection(
+            step.id for step in fragment.ordered_steps
+        ):
+            return "Corrective fragment repeats completed step identifiers."
+        if any(
+            step.retry_policy is not None
+            and getattr(step.retry_policy, "max_attempts", 1) > 1
+            for step in fragment.ordered_steps
+        ):
+            return "Corrective fragment cannot increase retry attempts."
+        return None
+
+    @staticmethod
+    def _correction_snapshot(
+        decision: ObjectiveCorrectionDecision,
+        *,
+        status: CorrectionLifecycleStatus,
+    ) -> dict[str, object]:
+        cycle_started = status in {
+            CorrectionLifecycleStatus.AUTHORIZED,
+            CorrectionLifecycleStatus.DISPATCHED,
+            CorrectionLifecycleStatus.RUNNING,
+            CorrectionLifecycleStatus.COMPLETED,
+            CorrectionLifecycleStatus.FAILED,
+            CorrectionLifecycleStatus.VERIFIED_AFTER_CORRECTION,
+        } or (
+            status is CorrectionLifecycleStatus.LIMIT_REACHED
+            and decision.fragment is not None
+        )
+        return {
+            "correction_request_id": decision.request.correction_request_id,
+            "original_session_id": decision.request.session_id,
+            "initial_verification_status": decision.request.verification_status,
+            "classification": decision.classification.value,
+            "correction_type": decision.correction_type.value,
+            "status": status.value,
+            "cycle": (
+                decision.request.previous_attempts + 1
+                if cycle_started
+                else decision.request.previous_attempts
+            ),
+            "cycle_limit": (
+                decision.request.previous_attempts
+                + decision.request.remaining_cycles
+            ),
+            "affected_criteria": list(decision.affected_criterion_ids),
+            "failed_criteria": [
+                item.to_dict() for item in decision.request.failed_criteria
+            ],
+            "fragment_signature": decision.fragment_signature,
+            "fragment_step_ids": (
+                []
+                if decision.fragment is None
+                else [step.id for step in decision.fragment.ordered_steps]
+            ),
+            "reason": decision.reason,
+        }
+
     def _execution_response(
         self,
         plan: ExecutionPlan,
@@ -2799,6 +3678,13 @@ class StructuredExecutionCoordinator:
         *,
         confirmation_token: str | None = None,
     ) -> StructuredExecutionResponse:
+        correction_response = self._prepare_objective_correction(
+            plan,
+            validation,
+            execution,
+        )
+        if correction_response is not None:
+            return correction_response
         report = self._report_for_execution(execution)
         if execution.success:
             return StructuredExecutionResponse(
@@ -2947,10 +3833,19 @@ class StructuredExecutionCoordinator:
             if execution.trace is not None
             else None
         )
-        execution_context = ExecutionContext(execution_id)
+        saved_context = execution.metadata.get("execution_context_snapshot")
+        execution_context = (
+            ExecutionContext.restore(saved_context)
+            if isinstance(saved_context, ExecutionContextSnapshot)
+            else ExecutionContext(execution_id)
+        )
         step_by_id = {step.id: step for step in plan.ordered_steps}
         for result in execution.step_results:
-            if result.success and result.status == "completed":
+            if (
+                not isinstance(saved_context, ExecutionContextSnapshot)
+                and result.success
+                and result.status == "completed"
+            ):
                 execution_context.mark_step_started(
                     result.step_id,
                     int(result.metadata.get("attempt_number", 1)),
@@ -2968,7 +3863,10 @@ class StructuredExecutionCoordinator:
                         ),
                     )
                 continue
-            if result.status == "skipped":
+            if (
+                not isinstance(saved_context, ExecutionContextSnapshot)
+                and result.status == "skipped"
+            ):
                 execution_context.mark_step_skipped(result.step_id)
         return ResumableExecutionState(
             objective=objective,

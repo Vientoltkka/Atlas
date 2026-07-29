@@ -8,8 +8,22 @@ from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
 
-from core.planner import ExecutionPlan, PlanGenerationResult, Planner
+from core.acceptance_criteria import AcceptanceCriterion, AcceptanceCriterionKind
+from core.execution_variable_reference import ExecutionVariableReference
+from core.goal_verifier import GoalVerificationResult
+from core.objective_correction import (
+    CorrectionClassification,
+    CorrectionType,
+    ObjectiveCorrectionDecision,
+    ObjectiveCorrectionPolicy,
+    classify_correction,
+)
+from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Planner
 from core.execution_plan_validator import plan_signature
+from core.structured_reference_path import navigate_structured_path
+
+
+_MISSING = object()
 
 
 def _utc_now() -> datetime:
@@ -390,6 +404,196 @@ class ExecutionReplanner:
             reason=ReplanReason.RECOVERABLE_FAILURE,
             planner_result=generation,
         )
+
+    def corrective_fragment(
+        self,
+        plan: ExecutionPlan,
+        execution_result: object,
+        verification: GoalVerificationResult,
+        *,
+        session_id: str,
+        previous_attempts: int = 0,
+        policy: ObjectiveCorrectionPolicy | None = None,
+    ) -> ObjectiveCorrectionDecision:
+        """Build one deterministic postcondition repair without invoking Planner."""
+
+        classification, correction_type, request, reason = classify_correction(
+            plan,
+            execution_result,
+            verification,
+            session_id=session_id,
+            previous_attempts=previous_attempts,
+            policy=policy,
+        )
+        if classification is not CorrectionClassification.CORRECTABLE:
+            return ObjectiveCorrectionDecision(
+                classification=classification,
+                correction_type=correction_type,
+                request=request,
+                reason=reason,
+            )
+
+        failed_ids = {
+            item.criterion_id
+            for item in request.failed_criteria
+        }
+        criterion = next(
+            item
+            for item in plan.acceptance_criteria
+            if item.criterion_id in failed_ids
+            and item.kind is AcceptanceCriterionKind.RESOURCE_CONTENT_EQUALS
+        )
+        expected = self._demonstrated_expected_value(
+            criterion,
+            execution_result,
+        )
+        if expected is _MISSING or not isinstance(expected, str):
+            return ObjectiveCorrectionDecision(
+                classification=CorrectionClassification.INSUFFICIENT_EVIDENCE,
+                correction_type=CorrectionType.NO_SAFE_CORRECTION,
+                request=request,
+                reason="The demonstrated expected resource value is unavailable or not text.",
+            )
+
+        write_source = next(
+            (
+                step
+                for step in plan.ordered_steps
+                if step.tool == "write_file"
+                and step.arguments.get("path") == criterion.resource_path
+            ),
+            None,
+        )
+        read_source = next(
+            (
+                step
+                for step in reversed(plan.ordered_steps)
+                if step.tool == "read_file"
+                and step.arguments.get("path") == criterion.resource_path
+            ),
+            None,
+        )
+        if write_source is None or read_source is None:
+            return ObjectiveCorrectionDecision(
+                classification=CorrectionClassification.UNSAFE_TO_CORRECT,
+                correction_type=CorrectionType.NO_SAFE_CORRECTION,
+                request=request,
+                reason="The declared resource has no matching write/read steps.",
+            )
+
+        write_step = ExecutionStep(
+            "corrective_step_1",
+            "Rewrite the declared resource from preserved verified evidence.",
+            "write_file",
+            arguments={
+                "path": criterion.resource_path,
+                "content": ExecutionVariableReference("correction_expected_value"),
+            },
+            retry_policy=write_source.retry_policy,
+            resource_keys=write_source.resource_keys,
+            idempotent=write_source.idempotent,
+            recovery_safe=write_source.recovery_safe,
+            side_effect_free=False,
+            criticality=write_source.criticality,
+            resource_requirements=write_source.resource_requirements,
+        )
+        read_step = ExecutionStep(
+            "corrective_step_2",
+            "Read the corrected declared resource exactly once.",
+            "read_file",
+            dependencies=(write_step.id,),
+            arguments={"path": criterion.resource_path},
+            retry_policy=read_source.retry_policy,
+            resource_keys=read_source.resource_keys,
+            idempotent=read_source.idempotent,
+            recovery_safe=read_source.recovery_safe,
+            side_effect_free=True,
+            criticality=read_source.criticality,
+            resource_requirements=read_source.resource_requirements,
+        )
+        fragment = ExecutionPlan(
+            goal=plan.goal,
+            ordered_steps=(write_step, read_step),
+            estimated_steps=2,
+            required_tools=("write_file", "read_file"),
+            detected_risks=tuple(
+                dict.fromkeys((*plan.detected_risks, "corrective_resource_write"))
+            ),
+            requires_confirmation=True,
+            status="planned",
+            acceptance_criteria=(
+                AcceptanceCriterion(
+                    criterion_id=f"corrective.{criterion.criterion_id}",
+                    kind=AcceptanceCriterionKind.RESOURCE_CONTENT_EQUALS,
+                    description=(
+                        "The corrected declared resource equals the preserved "
+                        "demonstrated value."
+                    ),
+                    source_step_id=read_step.id,
+                    expected_value=expected,
+                    resource_path=criterion.resource_path,
+                ),
+                AcceptanceCriterion(
+                    criterion_id="corrective.no_critical_failures",
+                    kind=AcceptanceCriterionKind.NO_CRITICAL_FAILURES,
+                    description="The corrective fragment has no critical failure.",
+                ),
+                AcceptanceCriterion(
+                    criterion_id="corrective.no_pending_confirmations",
+                    kind=AcceptanceCriterionKind.NO_PENDING_CONFIRMATIONS,
+                    description="No corrective confirmation remains pending.",
+                ),
+            ),
+            replanning_policy=None,
+        )
+        affected = tuple(
+            item.criterion_id
+            for item in plan.acceptance_criteria
+            if item.criterion_id in failed_ids
+            and (
+                item.resource_path == criterion.resource_path
+                or item.source_step_id == read_source.id
+            )
+        )
+        return ObjectiveCorrectionDecision(
+            classification=classification,
+            correction_type=correction_type,
+            request=request,
+            fragment=fragment,
+            affected_criterion_ids=affected,
+            expected_context={"correction_expected_value": expected},
+            reason=reason,
+        )
+
+    @staticmethod
+    def _demonstrated_expected_value(
+        criterion: AcceptanceCriterion,
+        execution_result: object,
+    ) -> object:
+        if criterion.comparison_step_id is None:
+            return criterion.expected_value
+        result = next(
+            (
+                item
+                for item in tuple(getattr(execution_result, "step_results", ()) or ())
+                if getattr(item, "step_id", None) == criterion.comparison_step_id
+                and getattr(item, "success", False)
+            ),
+            None,
+        )
+        if result is None:
+            return _MISSING
+        value = getattr(result, "output", _MISSING)
+        if criterion.comparison_path:
+            try:
+                value = navigate_structured_path(
+                    value,
+                    criterion.comparison_path,
+                    label="correction expected value",
+                )
+            except (KeyError, IndexError, TypeError, ValueError):
+                return _MISSING
+        return value
 
     def _replan_objective(self, request: ReplanRequest) -> str:
         completed = ", ".join(sorted(request.partial_results)) or "none"

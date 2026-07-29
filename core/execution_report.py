@@ -134,6 +134,7 @@ class OperationalExecutionReport:
     goal_verification_message: str = (
         "No hay verificación del objetivo registrada."
     )
+    objective_correction: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.progress_percent <= 100.0:
@@ -180,6 +181,11 @@ class OperationalExecutionReport:
             _safe_text(self.strategy_reason),
         )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(
+            self,
+            "objective_correction",
+            MappingProxyType(dict(self.objective_correction)),
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable representation without technical objects."""
@@ -246,6 +252,7 @@ class OperationalExecutionReport:
             ),
             "goal_verification_action": self.goal_verification_action,
             "goal_verification_message": self.goal_verification_message,
+            "objective_correction": dict(self.objective_correction),
         }
 
     def to_text(self) -> str:
@@ -321,6 +328,51 @@ class OperationalExecutionReport:
         lines.append(f"- Resultado: {self.goal_verification_message}")
         if self.goal_verification_action is not None:
             lines.append(f"- Acción recomendada: {self.goal_verification_action}")
+        if self.objective_correction:
+            correction = self.objective_correction
+            lines.append("Corrección del objetivo:")
+            lines.append(
+                "- Estado inicial: "
+                + str(correction.get("initial_verification_status", "desconocido"))
+                + "."
+            )
+            lines.append(
+                "- Clasificación: "
+                + str(correction.get("classification", "desconocida"))
+                + "."
+            )
+            lines.append(
+                "- Corrección seleccionada: "
+                + str(correction.get("correction_type", "NO_SAFE_CORRECTION"))
+                + "."
+            )
+            lines.append(
+                "- Pasos correctivos: "
+                + str(len(correction.get("fragment_step_ids", ())))
+                + "."
+            )
+            lines.append(
+                "- Confirmación: "
+                + str(correction.get("confirmation", "pendiente o no aplicable"))
+                + "."
+            )
+            lines.append(
+                "- Resultado de la corrección: "
+                + str(correction.get("status", "NOT_STARTED"))
+                + "."
+            )
+            final_verification = correction.get("final_verification_status")
+            if final_verification is not None:
+                lines.append(f"- Nueva verificación: {final_verification}.")
+            lines.append(
+                "- Ciclos utilizados: "
+                + str(correction.get("cycle", 0))
+                + "/"
+                + str(correction.get("cycle_limit", 1))
+                + "."
+            )
+            if correction.get("rejection_reason") is not None:
+                lines.append("- Motivo: " + str(correction["rejection_reason"]))
         lines.append(f"Mensaje final: {self.final_message}")
         return "\n".join(lines)
 
@@ -387,6 +439,7 @@ class ExecutionReportGenerator:
             session.execution_authorization
         )
         verification = _verification_report_fields(session)
+        correction = session.results.get("objective_correction")
         if (
             status
             in {
@@ -426,6 +479,9 @@ class ExecutionReportGenerator:
             **strategy,
             **authorization,
             **verification,
+            objective_correction=(
+                correction if isinstance(correction, Mapping) else {}
+            ),
         )
 
     @staticmethod

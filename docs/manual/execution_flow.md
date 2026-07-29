@@ -55,6 +55,27 @@ Los planes antiguos sin criterios continúan ejecutándose, pero su objetivo se
 clasifica como `INCONCLUSIVE`; Atlas no inventa evidencia ni los presenta como
 verificados.
 
+## Corrección controlada del objetivo
+
+Una verificación `NOT_VERIFIED` o `PARTIALLY_VERIFIED` se clasifica antes de
+cualquier acción. Atlas solo prepara una corrección cuando existe un criterio
+fallido, evidencia concreta, un valor esperado ya demostrado y un único
+recurso declarado. `INCONCLUSIVE` no inicia reparaciones especulativas y
+`USER_ACTION_REQUIRED` se detiene.
+
+La primera capacidad correctiva es deliberadamente estrecha:
+`RESOURCE_CONTENT_EQUALS` puede producir un fragmento de dos pasos
+`write_file` → `read_file`. El valor preservado se suministra mediante una
+referencia tipada del `ExecutionContext`; no se inventa ni se solicita a un
+modelo. El fragmento conserva el objetivo, pasa por Validator, estrategia,
+AuthorizationGate y Dispatcher, y requiere una confirmación nueva ligada a su
+propia firma.
+
+Después del único ciclo permitido, `GoalVerifier` vuelve a evaluar el plan
+original combinando evidencia previa válida y la nueva lectura. El informe
+mantiene visible el `NOT_VERIFIED` inicial y distingue
+`VERIFIED_AFTER_CORRECTION`, fallo correctivo y `LIMIT_REACHED`.
+
 ## Confirmaciones y bloqueos
 
 - Una confirmación pendiente crea sesión e informe, pero no llega al Executor.

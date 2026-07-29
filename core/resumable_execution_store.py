@@ -1396,7 +1396,13 @@ def _safe_metadata(
         key: value
         for key, value in metadata.items()
         if isinstance(key, str)
-        and key in {"created_at", "updated_at", "schema_version"}
+        and key
+        in {
+            "created_at",
+            "updated_at",
+            "schema_version",
+            "objective_correction_resume",
+        }
         and _is_json_safe(value)
     }
     safe["created_at"] = created_at

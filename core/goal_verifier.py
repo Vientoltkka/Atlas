@@ -582,10 +582,14 @@ def _evaluate_criterion(
                 "La salida contiene el valor esperado.",
                 "La salida no contiene el valor esperado.",
             )
-        comparison_state = _step_value(
-            outputs,
-            criterion.comparison_step_id,
-            criterion.comparison_path,
+        comparison_state = (
+            (criterion.expected_value is not None, criterion.expected_value)
+            if criterion.comparison_step_id is None
+            else _step_value(
+                outputs,
+                criterion.comparison_step_id,
+                criterion.comparison_path,
+            )
         )
         if not comparison_state[0]:
             return _evaluation(
