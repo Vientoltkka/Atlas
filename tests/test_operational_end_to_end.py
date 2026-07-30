@@ -93,7 +93,10 @@ def test_bootstrapped_text_flow_is_observable_persistent_and_repeatable(
     assert report.dispatch_completed is True
     assert report.steps[0].result is not None
     assert report.steps[0].result.startswith("# Atlas")
-    assert visible.startswith("Ejecucion completada.")
+    assert visible.startswith(
+        "Ejecucion completada, pero no hay evidencia suficiente "
+        "para verificar el objetivo."
+    )
     assert "read_file: # Atlas" in visible
     assert "Estrategia:" not in visible
     assert "Autorización:" not in visible

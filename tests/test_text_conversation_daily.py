@@ -57,7 +57,10 @@ def test_structured_result_becomes_bounded_conversational_context(
         confirm=lambda _prompt: "",
     )
 
-    assert read_response.startswith("Ejecucion completada.")
+    assert read_response.startswith(
+        "Ejecucion completada, pero no hay evidencia suficiente "
+        "para verificar el objetivo."
+    )
     assert "Estrategia:" not in read_response
     assert "Autorizacion:" not in read_response
     assert summary.startswith("Atlas es")
@@ -109,7 +112,10 @@ def test_last_error_is_available_and_next_request_recovers(
     assert "Estado: FAILED" in error_context
     assert "__fase_15_6_missing__.txt" in error_context
     assert "Error:" in error_context
-    assert succeeded.startswith("Ejecucion completada.")
+    assert succeeded.startswith(
+        "Ejecucion completada, pero no hay evidencia suficiente "
+        "para verificar el objetivo."
+    )
 
 
 def test_twenty_direct_turns_use_bounded_existing_context(
@@ -254,7 +260,10 @@ def test_confirmation_is_consumed_once_and_cancel_does_not_execute(
     assert confirmed_target.read_text(encoding="utf-8") == original
     assert "No hay una confirmacion pendiente" in repeated
     assert confirmed_target.read_text(encoding="utf-8") == original
-    assert confirmed.startswith("Plan confirmado. Ejecucion completada.")
+    assert confirmed.startswith(
+        "Plan confirmado. Ejecucion completada, pero no hay evidencia "
+        "suficiente para verificar el objetivo."
+    )
 
     second_pending = orchestrator.process_prompt(
         "Escribe adios en cancelled.txt",

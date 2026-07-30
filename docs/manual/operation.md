@@ -62,6 +62,12 @@ referencia resuelta y el recurso producido. Además, la sección
 existencia y lectura del recurso, la igualdad del contenido, la confirmación y
 la ausencia de fallos críticos. Solo entonces muestra `VERIFIED`.
 
+La respuesta visible distingue el resultado tecnico del cumplimiento del
+objetivo: `Objetivo verificado`, `completada, pero no verificado`, evidencia
+insuficiente y `objetivo corregido y verificado` son estados diferentes. Una
+ejecucion tecnica completada nunca se presenta como objetivo cumplido cuando el
+informe conserva `NOT_VERIFIED`, `PARTIALLY_VERIFIED` o `INCONCLUSIVE`.
+
 ## Consultar herramientas
 
 ```text
