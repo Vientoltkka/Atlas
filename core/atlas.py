@@ -30,3 +30,10 @@ class Atlas:
         """Return available input microphones."""
 
         return self._orchestrator.list_microphones()
+
+    def close(self) -> None:
+        """Release runtime resources owned by the orchestrator, when supported."""
+
+        close = getattr(self._orchestrator, "close", None)
+        if callable(close):
+            close()

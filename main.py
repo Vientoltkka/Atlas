@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import logging
+from pathlib import Path
+from typing import Any
 
-from core.atlas import Atlas
-from use_cases.speech_engine import SoundDeviceAudioCapture
+from core.startup import (
+    WindowsStartupPreflight,
+    close_operational_logging,
+    configure_degraded_logging,
+    configure_operational_logging,
+    render_startup_banner,
+    render_startup_failure,
+    render_startup_warnings,
+    sanitize_log_message,
+)
+
+# Kept as injectable seams for the existing deterministic CLI tests.
+Atlas: Any = None
+SoundDeviceAudioCapture: Any = None
 
 
-def main() -> None:
+def main() -> int:
     """Start Atlas."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -32,30 +47,77 @@ def main() -> None:
         help="Prueba un microfono por indice sin cargar Whisper, Atlas ni TTS.",
     )
     args = parser.parse_args()
+    mode = _requested_mode(args)
+    project_root = Path(__file__).resolve().parent
+    report = WindowsStartupPreflight(project_root).run(mode)
 
-    if args.list_microphones:
-        print(_list_microphones())
-        return
+    if not report.ready:
+        print(render_startup_failure(report))
+        return 1
 
-    if args.test_microphone is not None:
-        print(_test_microphone(args.test_microphone))
-        return
+    warnings = render_startup_warnings(report)
+    if warnings:
+        print(warnings)
+        print()
 
-    atlas = Atlas()
+    try:
+        logger = configure_operational_logging(project_root)
+    except Exception:
+        logger = configure_degraded_logging()
+        print(
+            "Aviso: no se pudo abrir logs\\atlas.log. "
+            "Atlas continuara en modo degradado sin log de archivo."
+        )
+        print()
+    logger.info("Inicio solicitado | modo=%s", mode)
+    atlas = None
 
-    if args.voice:
-        atlas.start_voice()
-        return
+    try:
+        if args.list_microphones:
+            print(_list_microphones())
+            return 0
 
-    if args.assistant:
-        atlas.start_assistant()
-        return
+        if args.test_microphone is not None:
+            print(_test_microphone(args.test_microphone))
+            return 0
 
-    atlas.start()
+        print(render_startup_banner(report))
+        print()
+        atlas = _atlas_class()()
+
+        if args.voice:
+            atlas.start_voice()
+            return 0
+
+        if args.assistant:
+            atlas.start_assistant()
+            return 0
+
+        atlas.start()
+        return 0
+    except KeyboardInterrupt:
+        logger.info("Cierre voluntario por KeyboardInterrupt")
+        print("\nInterrupcion recibida. Atlas se ha cerrado correctamente.")
+        return 0
+    except Exception as exc:
+        logger.error(
+            "Fallo interno | tipo=%s | detalle=%s",
+            type(exc).__name__,
+            sanitize_log_message(exc),
+        )
+        print(
+            "Atlas no pudo continuar por un error interno. "
+            "Revisa logs\\atlas.log."
+        )
+        return 1
+    finally:
+        _close_atlas(atlas, logger)
+        logger.info("Proceso Atlas finalizado")
+        close_operational_logging(logger)
 
 
 def _list_microphones() -> str:
-    capture = SoundDeviceAudioCapture()
+    capture = _audio_capture_class()()
     microphones = capture.list_microphones(include_open_status=True)
 
     if not microphones:
@@ -87,7 +149,7 @@ def _list_microphones() -> str:
 
 
 def _test_microphone(index: int) -> str:
-    capture = SoundDeviceAudioCapture()
+    capture = _audio_capture_class()()
     result = capture.test_microphone(index, duration_seconds=3.0)
     microphone = result.microphone
     lines = [
@@ -106,5 +168,47 @@ def _test_microphone(index: int) -> str:
     return "\n".join(lines)
 
 
+def _requested_mode(args: argparse.Namespace) -> str:
+    if args.list_microphones or args.test_microphone is not None:
+        return "microphone"
+    if args.voice:
+        return "voice"
+    if args.assistant:
+        return "assistant"
+    return "text"
+
+
+def _atlas_class() -> Any:
+    if Atlas is not None:
+        return Atlas
+    from core.atlas import Atlas as AtlasApplication
+
+    return AtlasApplication
+
+
+def _audio_capture_class() -> Any:
+    if SoundDeviceAudioCapture is not None:
+        return SoundDeviceAudioCapture
+    from use_cases.speech_engine import SoundDeviceAudioCapture as AudioCapture
+
+    return AudioCapture
+
+
+def _close_atlas(atlas: Any, logger: logging.Logger) -> None:
+    if atlas is None:
+        return
+    close = getattr(atlas, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        logger.error(
+            "Fallo al liberar recursos | tipo=%s | detalle=%s",
+            type(exc).__name__,
+            sanitize_log_message(exc),
+        )
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bootstrap.bootstrap import Bootstrap
 from core.execution_authorization import (
     DispatchStatus,
@@ -185,6 +187,64 @@ def test_real_tool_error_does_not_break_the_next_text_request(
     ]
 
 
+def test_text_loop_rejects_empty_input_without_closing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+    inputs = iter(("", "salir"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+
+    orchestrator.start()
+
+    output = capsys.readouterr().out
+    assert "peticion esta vacia" in output
+    assert "Hasta pronto." in output
+    assert "Traceback" not in output
+
+
+def test_text_loop_treats_eof_as_clean_close(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+
+    def end_of_input(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", end_of_input)
+
+    orchestrator.start()
+
+    output = capsys.readouterr().out
+    assert "Hasta pronto." in output
+    assert "Traceback" not in output
+
+
+def test_text_loop_treats_keyboard_interrupt_as_clean_close(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+
+    def interrupt(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", interrupt)
+
+    orchestrator.start()
+
+    output = capsys.readouterr().out
+    assert "Interrupcion recibida" in output
+    assert "Traceback" not in output
+
+
 def test_real_confirmation_stays_pending_without_tool_execution(
     monkeypatch,
     tmp_path: Path,
@@ -276,3 +336,52 @@ def test_unknown_tool_fails_controlled_and_is_persisted(
     restored = restored_snapshot.to_session()
     assert restored.state is ExecutionState.FAILED
     assert restored.results["plan_status"] == "failed"
+
+
+def test_tool_catalog_queries_use_real_registry_without_execution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+
+    def forbidden_execution(*_args, **_kwargs):
+        raise AssertionError("tool execution is forbidden for catalog queries")
+
+    monkeypatch.setattr(ToolExecutor, "execute", forbidden_execution)
+    prompts = (
+        "\u00bfQu\u00e9 herramientas tienes?",
+        "Lista tus herramientas",
+        "\u00bfQu\u00e9 puedes ejecutar?",
+        "Mu\u00e9strame tus capacidades disponibles",
+    )
+
+    for prompt in prompts:
+        response = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+        assert response.startswith("Herramientas disponibles (")
+        assert "El registro activo solo contiene herramientas disponibles." in response
+        for tool_name in orchestrator._tool_registry.list():
+            assert f"- {tool_name}:" in response
+
+    assert orchestrator.last_structured_execution_response is None
+
+
+@pytest.mark.parametrize("command", ("exit", "quit"))
+def test_text_loop_accepts_english_exit_commands_and_can_restart(
+    command: str,
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+    inputs = iter((command, "salir"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+
+    orchestrator.start()
+    orchestrator.start()
+
+    output = capsys.readouterr().out
+    assert output.count("Hasta pronto.") == 2
+    assert "Atlas iniciado correctamente" not in output
+    assert "Traceback" not in output

@@ -80,6 +80,7 @@ from use_cases.speech_engine import SpeechInteractionUseCase
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
+from tools.registry import ToolRegistry
 
 
 class AtlasOrchestrator:
@@ -116,6 +117,7 @@ class AtlasOrchestrator:
         execution_strategy_selector: ExecutionStrategySelector | None = None,
         execution_authorization_gate: ExecutionAuthorizationGate | None = None,
         execution_dispatcher: ExecutionDispatcher | None = None,
+        tool_registry: ToolRegistry | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -155,6 +157,7 @@ class AtlasOrchestrator:
         self._execution_strategy_selector = execution_strategy_selector
         self._execution_authorization_gate = execution_authorization_gate
         self._execution_dispatcher = execution_dispatcher
+        self._tool_registry = tool_registry
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -213,19 +216,37 @@ class AtlasOrchestrator:
 
     def start(self) -> None:
 
-        print("Atlas iniciado correctamente.")
-        print()
         startup_response = self._load_persisted_structured_execution()
         if startup_response is not None:
             self._print_atlas(startup_response.message)
 
         while True:
 
-            prompt = input("Tú: ")
-
-            if prompt.lower() in ("exit", "quit", "salir"):
+            try:
+                prompt = input("Tú: ")
+            except EOFError:
                 print("\nHasta pronto.")
                 break
+            except KeyboardInterrupt:
+                print("\n\nInterrupcion recibida. Hasta pronto.")
+                break
+
+            prompt = prompt.strip()
+
+            if not prompt:
+                self._print_atlas(
+                    "La peticion esta vacia. Escribe una instruccion o 'salir'."
+                )
+                continue
+
+            if prompt.casefold() in ("exit", "quit", "salir"):
+                print("\nHasta pronto.")
+                break
+
+            tool_catalog = self._tool_catalog_response(prompt)
+            if tool_catalog is not None:
+                self._print_atlas(tool_catalog)
+                continue
 
             request = self._request_gateway.from_text(prompt)
             structured_response = self._handle_structured_execution(
@@ -337,6 +358,10 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        tool_catalog = self._tool_catalog_response(prompt)
+        if tool_catalog is not None:
+            return tool_catalog
+
         request = self._request_gateway.from_text(prompt)
         structured_response = self._handle_structured_execution(
             request.content,
@@ -989,6 +1014,31 @@ class AtlasOrchestrator:
 
         return prompt.strip()
 
+    def _tool_catalog_response(self, prompt: str) -> str | None:
+        """Render the active registry without routing or executing tools."""
+
+        if not _is_tool_catalog_query(prompt):
+            return None
+        if self._tool_registry is None:
+            return "El catalogo de herramientas no esta disponible."
+
+        descriptors = self._tool_registry.descriptors()
+        lines = [f"Herramientas disponibles ({len(descriptors)}):"]
+        for descriptor in descriptors:
+            description = " ".join(descriptor.description.split())[:160]
+            confirmation = (
+                " Requiere confirmacion."
+                if descriptor.requires_confirmation
+                else ""
+            )
+            lines.append(
+                f"- {descriptor.name}: {description}{confirmation}"
+            )
+        lines.append(
+            "El registro activo solo contiene herramientas disponibles."
+        )
+        return "\n".join(lines)
+
     def _print_atlas(
         self,
         response: str,
@@ -1417,6 +1467,16 @@ def _first_pending_step_index(
             return index
 
     return None
+
+
+def _is_tool_catalog_query(prompt: str) -> bool:
+    normalized = _normalize_confirmation_text(prompt)
+    return normalized in {
+        "que herramientas tienes",
+        "lista tus herramientas",
+        "que puedes ejecutar",
+        "muestrame tus capacidades disponibles",
+    }
 
 
 def _normalize_confirmation_text(

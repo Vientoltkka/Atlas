@@ -1105,6 +1105,7 @@ class Bootstrap:
             execution_strategy_selector=execution_strategy_selector,
             execution_authorization_gate=execution_authorization_gate,
             execution_dispatcher=execution_dispatcher,
+            tool_registry=tool_registry,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

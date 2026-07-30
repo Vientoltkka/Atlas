@@ -7,8 +7,18 @@ Propósito: listar el comando oficial de arranque, requisitos y uso local.
 ## Requisitos mínimos
 
 - Windows con PowerShell.
-- Python y las dependencias de `requirements.txt`.
-- Ejecutar desde la raíz del repositorio.
+- Python 3.11, 3.12, 3.13 o 3.14.
+- Dependencias críticas del modo texto: `ollama` y `numpy`.
+- Dependencias opcionales para voz: `sounddevice`, `faster-whisper`,
+  `pyttsx3` y `openwakeword`.
+- Ejecutar desde la raíz `C:\AI\Atlas`.
+
+Si se utiliza el entorno virtual incluido:
+
+```powershell
+Set-Location C:\AI\Atlas
+.\.venv\Scripts\Activate.ps1
+```
 
 La planificación híbrida determinista, la ejecución estructurada y la
 persistencia están activadas de forma predeterminada. Sus variables
@@ -20,11 +30,11 @@ opt-out de desarrollo.
 ## Comando oficial
 
 ```powershell
-python main.py
+python -B main.py
 ```
 
-`python -B main.py` es una variante de desarrollo que evita generar bytecode,
-pero no es un segundo punto de entrada.
+Este es el único comando de arranque para el usuario. Los comandos de tests,
+diagnóstico y desarrollo no son puntos de entrada alternativos.
 
 ## Escenario seguro verificado
 
@@ -50,6 +60,16 @@ referencia resuelta y el recurso producido. Además, la sección
 `Verificación del objetivo` comprueba el número de pasos, las herramientas, la
 existencia y lectura del recurso, la igualdad del contenido, la confirmación y
 la ausencia de fallos críticos. Solo entonces muestra `VERIFIED`.
+
+## Consultar herramientas
+
+```text
+Tú: ¿Qué herramientas tienes?
+```
+
+Atlas responde desde el `ToolRegistry` activo. La consulta no genera un plan ni
+ejecuta herramientas. Las operaciones con escritura o control del escritorio
+indican que requieren confirmación.
 
 ## Persistencia e informe
 
@@ -89,6 +109,38 @@ salir
 ```
 
 También se aceptan `exit` y `quit`.
+
+## Preflight, logs y sesiones
+
+Antes de arrancar, Atlas comprueba Python, archivos esenciales, directorios,
+dependencias y configuración. Un `ERROR` bloquea el inicio y muestra una acción
+recomendada. Un `WARNING` informa de una capacidad opcional no configurada, pero
+no bloquea el modo texto.
+
+- Log operativo: `logs/atlas.log`.
+- Sesiones: `.atlas/execution_sessions/`.
+- Estado reanudable: `.atlas/execution_state.json`.
+
+El log rota al alcanzar 1 MB y conserva tres copias. Si no puede abrirse, Atlas
+informa del modo degradado y continúa sin mostrar traceback.
+
+## Codificación de PowerShell
+
+La consola interactiva normal no necesita configuración adicional. Si una
+redirección muestra caracteres españoles dañados, ejecuta antes:
+
+```powershell
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+$OutputEncoding = [Console]::OutputEncoding
+$env:PYTHONIOENCODING = "utf-8"
+```
+
+## Limitaciones actuales
+
+- La voz permanece desactivada cuando faltan sus dependencias opcionales.
+- Ollama debe estar iniciado para las respuestas que requieren modelo local.
+- No existe instalador, ejecutable `.exe`, GUI ni autoarranque.
+- Los comandos `salir`, `exit`, `quit`, Ctrl+C y EOF cierran el modo texto.
 
 ## Tests
 
