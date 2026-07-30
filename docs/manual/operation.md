@@ -43,8 +43,9 @@ Tú: Lee README.md
 ```
 
 La petición se clasifica como `SINGLE_TOOL`, selecciona `read_file`, genera y
-valida un plan, selecciona estrategia, autoriza un único despacho, ejecuta la
-lectura y presenta el informe operativo con el resultado real.
+valida un plan, selecciona estrategia, autoriza un único despacho y ejecuta la
+lectura. La consola muestra un resultado breve; el informe operativo completo
+permanece disponible para diagnóstico y persistencia.
 
 Un objetivo de varios pasos puede solicitar una copia verificable:
 
@@ -70,6 +71,28 @@ Tú: ¿Qué herramientas tienes?
 Atlas responde desde el `ToolRegistry` activo. La consulta no genera un plan ni
 ejecuta herramientas. Las operaciones con escritura o control del escritorio
 indican que requieren confirmación.
+
+## Conversación diaria
+
+Atlas acepta varias peticiones consecutivas dentro del mismo proceso. Después
+de una lectura o de un error controlado puedes usar referencias como:
+
+```text
+Tú: Resume brevemente lo que acabas de leer.
+Tú: ¿Qué archivo has leído?
+Tú: ¿Cuál fue el error anterior?
+```
+
+Atlas conserva durante la sesión el contexto reciente y resúmenes acotados de
+las ejecuciones. Si una referencia no tiene antecedente suficiente, solicita
+aclaración en lugar de inventarlo. Un error esperado no cierra el bucle: puedes
+enviar otra petición cuando reaparezca `Tú:`.
+
+Cuando exista un plan pendiente, responde `confirmo` para ejecutarlo una sola
+vez, `cancela`, `no`, `rechazar`, `olvidalo` o `no lo hagas` para descartarlo, o
+`muestrame el plan` para revisarlo. Una consulta distinta no confirma la acción
+pendiente. Al cerrar Atlas se descarta el contexto conversacional temporal; las
+sesiones operativas persistidas y los informes conservan su ciclo independiente.
 
 ## Persistencia e informe
 

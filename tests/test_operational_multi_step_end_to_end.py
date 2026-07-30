@@ -60,7 +60,8 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
         StepOutputReference("step_1")
     )
     assert pending.plan.ordered_steps[2].dependencies == ("step_2",)
-    assert "Confirma o cancela" in pending_visible
+    assert "Responde 'confirmo'" in pending_visible
+    assert "'cancela'" in pending_visible
     assert destination.exists() is False
     assert pending.operational_report is not None
     assert pending.operational_report.steps[1].produced_resource is None
@@ -116,12 +117,14 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
         "steps.step_1.output",
     )
     assert report.steps[1].produced_resource == str(destination)
-    assert "[write_file]" in visible
-    assert "Referencias resueltas: steps.step_1.output" in visible
-    assert f"Recurso producido: {destination}" in visible
-    assert "Verificación del objetivo:" in visible
-    assert "Estado: VERIFIED." in visible
-    assert "Criterios satisfechos: 10/10." in visible
+    assert "write_file:" in visible
+    assert "Referencias resueltas:" not in visible
+    detailed_report = report.to_text()
+    assert "Referencias resueltas: steps.step_1.output" in detailed_report
+    assert f"Recurso producido: {destination}" in detailed_report
+    assert "Verificación del objetivo:" in detailed_report
+    assert "Estado: VERIFIED." in detailed_report
+    assert "Criterios satisfechos: 10/10." in detailed_report
 
     session_id = detail.execution_result.metadata["execution_session_id"]
     restored_snapshot = FileExecutionSessionRepository(history_path).load(

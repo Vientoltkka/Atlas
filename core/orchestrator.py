@@ -43,7 +43,7 @@ from core.request_gateway import (
     AtlasRequest,
     RequestGateway,
 )
-from core.operational_request_router import RouteDecision
+from core.operational_request_router import RequestRoute, RouteDecision
 from core.operational_route_executor import (
     OperationalRouteExecutor,
     RouteExecutionPresenter,
@@ -248,15 +248,28 @@ class AtlasOrchestrator:
                 self._print_atlas(tool_catalog)
                 continue
 
+            capability_status = self._capability_status_response(prompt)
+            if capability_status is not None:
+                self._print_atlas(capability_status)
+                continue
+
             request = self._request_gateway.from_text(prompt)
+            direct_response = self._process_direct_conversation(
+                request,
+                status_sink=self._print_atlas,
+            )
+            if direct_response is not None:
+                self._print_atlas(direct_response)
+                continue
+
             structured_response = self._handle_structured_execution(
                 request.content,
                 request=request,
             )
             if structured_response is not None:
-                self._print_atlas(
-                    self._present_structured_execution(structured_response)
-                )
+                visible = self._present_structured_execution(structured_response)
+                self._remember_structured_turn(request.content, structured_response)
+                self._print_atlas(visible)
                 continue
 
             if self._execution_conversation is not None:
@@ -362,13 +375,23 @@ class AtlasOrchestrator:
         if tool_catalog is not None:
             return tool_catalog
 
+        capability_status = self._capability_status_response(prompt)
+        if capability_status is not None:
+            return capability_status
+
         request = self._request_gateway.from_text(prompt)
+        direct_response = self._process_direct_conversation(request)
+        if direct_response is not None:
+            return direct_response
+
         structured_response = self._handle_structured_execution(
             request.content,
             request=request,
         )
         if structured_response is not None:
-            return self._present_structured_execution(structured_response)
+            visible = self._present_structured_execution(structured_response)
+            self._remember_structured_turn(request.content, structured_response)
+            return visible
 
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
@@ -768,12 +791,33 @@ class AtlasOrchestrator:
     def _present_structured_execution(
         response: StructuredExecutionResponse,
     ) -> str:
-        if response.operational_report is not None:
-            return (
-                response.message
-                + "\n\n"
-                + response.operational_report.to_text()
+        report = response.operational_report
+        if report is None or report.status.value == "USER_ACTION_REQUIRED":
+            return response.message
+
+        if report.status.value in {"COMPLETED", "COMPLETED_WITH_RECOVERY"}:
+            confirmation_intent = _classify_structured_confirmation_intent(
+                response.original_request or ""
             )
+            prefix = "Plan confirmado. " if confirmation_intent == "confirm" else ""
+            lines = [prefix + "Ejecucion completada."]
+            for step in report.steps:
+                if step.result:
+                    label = step.tool_name or step.description
+                    lines.append(f"{label}: {step.result}")
+            if report.warnings:
+                lines.append("Aviso: " + report.warnings[0])
+            return "\n".join(lines)
+
+        if report.status.value == "FAILED":
+            error = next((step.error for step in report.steps if step.error), None)
+            if error:
+                return f"No pude completar la accion. Error: {error}"
+            return "No pude completar la accion. Consulta el log para mas detalle."
+
+        if report.status.value == "CANCELLED":
+            return "La ejecucion fue cancelada. No se ejecuto ninguna accion pendiente."
+
         return response.message
 
     def _load_persisted_structured_execution(self) -> StructuredExecutionResponse | None:
@@ -1013,6 +1057,152 @@ class AtlasOrchestrator:
             return normalized_newlines.split(marker, 1)[0].strip()
 
         return prompt.strip()
+
+    def _capability_status_response(self, prompt: str) -> str | None:
+        """Return deterministic status for common daily-use capability questions."""
+        normalized = _normalize_confirmation_text(prompt)
+        queries = {
+            "que puedes hacer",
+            "que capacidades estan disponibles",
+            "tienes voz",
+            "puedes leer archivos",
+            "puedes escribir archivos",
+        }
+        if normalized not in queries:
+            return None
+
+        registry = self._tool_registry
+        read_available = registry is not None and registry.exists("read_file")
+        write_available = registry is not None and registry.exists("write_file")
+        write_confirmation = False
+        if write_available and registry is not None:
+            write_confirmation = registry.descriptor("write_file").requires_confirmation
+
+        if normalized == "tienes voz":
+            return (
+                "Voz: capacidad opcional no configurada para esta sesion de texto. "
+                "El banner de inicio muestra su estado operativo."
+            )
+        if normalized == "puedes leer archivos":
+            return (
+                "Si. read_file esta disponible para leer archivos permitidos."
+                if read_available
+                else "No. read_file no esta disponible en el registro activo."
+            )
+        if normalized == "puedes escribir archivos":
+            if not write_available:
+                return "No. write_file no esta disponible en el registro activo."
+            suffix = " Requiere confirmacion explicita." if write_confirmation else ""
+            return "Si. write_file esta disponible para escribir archivos permitidos." + suffix
+
+        tool_count = len(registry.list()) if registry is not None else 0
+        return "\n".join(
+            (
+                "Capacidades actuales:",
+                "- Texto: disponible.",
+                "- Voz: opcional; no configurada para esta sesion de texto.",
+                f"- Herramientas registradas y disponibles: {tool_count}.",
+                "- Lectura de archivos: disponible." if read_available else "- Lectura de archivos: no disponible.",
+                (
+                    "- Escritura de archivos: disponible; requiere confirmacion."
+                    if write_available and write_confirmation
+                    else "- Escritura de archivos: disponible."
+                    if write_available
+                    else "- Escritura de archivos: no disponible."
+                ),
+            )
+        )
+
+    def _process_direct_conversation(
+        self,
+        request: AtlasRequest,
+        *,
+        status_sink=None,
+    ) -> str | None:
+        """Use the existing bounded direct-response route for conversational turns."""
+        if self._operational_route_executor is None:
+            return None
+        if (
+            self._structured_execution_coordinator is not None
+            and self._structured_execution_coordinator.has_pending_execution()
+        ):
+            return None
+
+        decision = self._structured_route_decision(request)
+        if decision is None:
+            return None
+        is_reference = _is_conversational_reference_query(request.content)
+        if is_reference and not self._has_execution_context():
+            response = (
+                "Necesito que aclares a que archivo, resultado o error te refieres."
+            )
+            self._memory.add_user(request.content)
+            self._memory.add_assistant(response)
+            return response
+        if decision.route is not RequestRoute.DIRECT_RESPONSE and not is_reference:
+            return None
+        if decision.route is not RequestRoute.DIRECT_RESPONSE:
+            decision = replace(
+                decision,
+                route=RequestRoute.DIRECT_RESPONSE,
+                reason="Conversational reference with bounded current-session context.",
+                target_tool_name=None,
+                target_agent_name=None,
+                target_session_id=None,
+                requires_confirmation=False,
+                requires_clarification=False,
+                clarification_question=None,
+                fallback_route=None,
+                system_command=None,
+                memory_operation=None,
+            )
+
+        if callable(status_sink):
+            status_sink("Procesando...")
+        result = self._operational_route_executor.execute(request, decision)
+        response = self._route_execution_presenter.present(result)
+        self._memory.add_user(request.content)
+        self._memory.add_assistant(response)
+        return response
+
+    def _remember_structured_turn(
+        self,
+        prompt: str,
+        response: StructuredExecutionResponse,
+    ) -> None:
+        """Keep one bounded safe execution summary in existing temporary memory."""
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(self._structured_context_summary(response))
+
+    @staticmethod
+    def _structured_context_summary(response: StructuredExecutionResponse) -> str:
+        report = response.operational_report
+        if report is None:
+            return _bounded_context_text(
+                "Contexto de ejecucion: " + response.message,
+            )
+
+        parts = [
+            "Contexto de ejecucion:",
+            f"Objetivo: {report.objective}",
+            f"Estado: {report.status.value}.",
+        ]
+        for step in report.steps:
+            label = step.tool_name or step.description
+            if label:
+                parts.append(f"Herramienta: {label}.")
+            if step.result:
+                parts.append(f"Resultado: {step.result}")
+            if step.error:
+                parts.append(f"Error: {step.error}")
+        return _bounded_context_text(" ".join(parts))
+
+    def _has_execution_context(self) -> bool:
+        return any(
+            message.get("role") == "assistant"
+            and message.get("content", "").startswith("Contexto de ejecucion:")
+            for message in self._memory.history()
+        )
 
     def _tool_catalog_response(self, prompt: str) -> str | None:
         """Render the active registry without routing or executing tools."""
@@ -1467,6 +1657,40 @@ def _first_pending_step_index(
             return index
 
     return None
+
+
+def _is_conversational_reference_query(prompt: str) -> bool:
+    normalized = _normalize_confirmation_text(prompt)
+    markers = (
+        "lo que acabas de leer",
+        "ese archivo",
+        "archivo has leido",
+        "error anterior",
+        "ultimo resultado",
+        "ultima herramienta",
+        "vuelve a hacerlo",
+        "repitelo",
+        "haz lo mismo",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _bounded_context_text(value: str, limit: int = 1200) -> str:
+    normalized = " ".join(value.split())
+    sensitive_markers = (
+        "api_key",
+        "api key",
+        "authorization",
+        "bearer",
+        "credential",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    )
+    if any(marker in normalized.casefold() for marker in sensitive_markers):
+        return "Contexto de ejecucion: [redacted]"
+    return normalized[:limit]
 
 
 def _is_tool_catalog_query(prompt: str) -> bool:

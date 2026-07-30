@@ -182,6 +182,38 @@ def test_repository_save_load_exists_delete_and_path_traversal(tmp_path) -> None
     assert repository.load(snapshot.session_id) is None
 
 
+def test_new_supervisor_continues_persisted_session_ids_without_overwrite(
+    tmp_path,
+) -> None:
+    repository = FileExecutionSessionRepository(tmp_path)
+    first_supervisor = ExecutionSupervisor(session_repository=repository)
+    first = first_supervisor.start(_plan())
+    second_plan = ExecutionPlan(
+        goal="second persisted execution",
+        ordered_steps=_plan().ordered_steps,
+        estimated_steps=2,
+        required_tools=("read_file", "read_file"),
+        detected_risks=(),
+        requires_confirmation=False,
+    )
+
+    second_supervisor = ExecutionSupervisor(session_repository=repository)
+    second = second_supervisor.start(second_plan)
+
+    assert first.session_id == "execution.session.000001"
+    assert second.session_id == "execution.session.000002"
+    assert repository.list() == (
+        "execution.session.000001",
+        "execution.session.000002",
+    )
+    restored_first = repository.load(first.session_id)
+    restored_second = repository.load(second.session_id)
+    assert restored_first is not None
+    assert restored_second is not None
+    assert restored_first.active_plan.goal == "persisted execution"
+    assert restored_second.active_plan.goal == "second persisted execution"
+
+
 def test_repository_rejects_corrupt_and_unsupported_snapshots(tmp_path) -> None:
     repository = FileExecutionSessionRepository(tmp_path)
     (tmp_path / "bad.json").write_text("{bad", encoding="utf-8")

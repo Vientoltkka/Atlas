@@ -422,11 +422,14 @@ class ExecutionSupervisor:
             raise ValueError("session_id_prefix must be a non-empty string.")
         self._clock = clock or _utc_now
         self._session_id_prefix = session_id_prefix
-        self._counter = 0
+        self._session_repository = session_repository
+        self._counter = _persisted_session_counter(
+            session_repository,
+            session_id_prefix,
+        )
         self._sessions: dict[str, ExecutionSession] = {}
         self._events: list[ExecutionSupervisorEvent] = []
         self._lock = RLock()
-        self._session_repository = session_repository
 
     def start(
         self,
@@ -1583,6 +1586,24 @@ class ExecutionSupervisor:
         from core.execution_session_persistence import ExecutionSessionSnapshot
 
         self._session_repository.save(ExecutionSessionSnapshot.from_session(session))
+
+
+def _persisted_session_counter(
+    repository: Any | None,
+    session_id_prefix: str,
+) -> int:
+    list_sessions = getattr(repository, "list", None)
+    if not callable(list_sessions):
+        return 0
+    prefix = session_id_prefix + "."
+    counters = []
+    for session_id in list_sessions():
+        if not isinstance(session_id, str) or not session_id.startswith(prefix):
+            continue
+        suffix = session_id[len(prefix):]
+        if suffix.isdigit():
+            counters.append(int(suffix))
+    return max(counters, default=0)
 
 
 def summarize_execution_session(

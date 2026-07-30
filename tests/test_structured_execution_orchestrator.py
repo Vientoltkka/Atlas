@@ -456,7 +456,7 @@ def test_actionable_safe_request_uses_structured_pipeline() -> None:
 
     response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
 
-    assert "Ejecucion estructurada completada" in response
+    assert "Ejecucion completada" in response
     assert agent.calls == 0
     assert calls == ["read_file"]
 
@@ -498,7 +498,7 @@ def test_execution_enabled_shows_safe_progress_messages(capsys) -> None:
     assert "plan_signature" not in output
     assert "raw_response" not in output
     assert "confirmation_token" not in output
-    assert "Ejecucion estructurada completada" in response
+    assert "Ejecucion completada" in response
     assert calls == ["read_file"]
 
 
@@ -1315,7 +1315,7 @@ def test_new_request_does_not_resume_interrupted_execution_implicitly() -> None:
 
     response = orchestrator.process_prompt("Lee README.md", confirm=lambda _prompt: "")
 
-    assert "Ejecucion estructurada completada" in response
+    assert "Ejecucion completada" in response
     assert calls == ["read_file", "read_file"]
     assert coordinator.has_resumable_execution() is True
 

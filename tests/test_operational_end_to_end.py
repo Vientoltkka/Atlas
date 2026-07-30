@@ -93,13 +93,13 @@ def test_bootstrapped_text_flow_is_observable_persistent_and_repeatable(
     assert report.dispatch_completed is True
     assert report.steps[0].result is not None
     assert report.steps[0].result.startswith("# Atlas")
-    assert "Objetivo: Lee README.md" in visible
-    assert "Resultado: Ejecución completada" in visible
-    assert "Resultado: # Atlas" in visible
-    assert "Estrategia:" in visible
-    assert "Autorización:" in visible
-    assert "Estado: AUTHORIZED" in visible
-    assert "Duración:" in visible
+    assert visible.startswith("Ejecucion completada.")
+    assert "read_file: # Atlas" in visible
+    assert "Estrategia:" not in visible
+    assert "Autorización:" not in visible
+    assert "Duración:" not in visible
+    assert "Estrategia:" in report.to_text()
+    assert "Estado: AUTHORIZED" in report.to_text()
 
     session_id = detail.execution_result.metadata["execution_session_id"]
     repository = FileExecutionSessionRepository(history_path)
@@ -137,7 +137,7 @@ def test_bootstrapped_text_flow_is_observable_persistent_and_repeatable(
         second.execution_result.metadata["execution_session_id"]
         != session_id
     )
-    assert "Resultado: # Atlas" in second_visible
+    assert "read_file: # Atlas" in second_visible
     assert read_calls == ["README.md", "README.md"]
 
 
@@ -172,8 +172,8 @@ def test_real_tool_error_does_not_break_the_next_text_request(
     assert succeeded_detail is not None
     assert succeeded_detail.execution_result is not None
     assert succeeded_detail.execution_result.success is True
-    assert "Ejecución fallida" in output
-    assert "Ejecución completada" in output
+    assert "No pude completar la accion" in output
+    assert "Ejecucion completada" in output
     assert "Hasta pronto." in output
     assert "Traceback" not in output
     history = orchestrator.execution_history
@@ -276,7 +276,8 @@ def test_real_confirmation_stays_pending_without_tool_execution(
     )
     assert detail.operational_report is not None
     assert detail.operational_report.pending_user_actions
-    assert "Confirma o cancela" in visible
+    assert "Responde 'confirmo'" in visible
+    assert "'cancela'" in visible
     assert read_calls == []
     assert not (Path.cwd() / "phase_15_1_output.txt").exists()
 
