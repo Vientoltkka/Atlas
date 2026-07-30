@@ -118,6 +118,7 @@ def test_text_read_write_verify_uses_real_tools_references_and_persistence(
     )
     assert report.steps[1].produced_resource == str(destination)
     assert "write_file:" in visible
+    assert visible.startswith("Plan confirmado. Objetivo verificado.")
     assert "Referencias resueltas:" not in visible
     detailed_report = report.to_text()
     assert "Referencias resueltas: steps.step_1.output" in detailed_report

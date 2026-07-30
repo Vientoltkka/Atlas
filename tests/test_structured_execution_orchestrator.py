@@ -461,6 +461,54 @@ def test_actionable_safe_request_uses_structured_pipeline() -> None:
     assert calls == ["read_file"]
 
 
+def test_completed_report_preserves_goal_verification_in_visible_response() -> None:
+    coordinator, _, _ = _structured_parts([])
+    response = coordinator.handle("Lee README.md")
+    report = response.operational_report
+    assert report is not None
+    cases = (
+        ("VERIFIED", "Objetivo verificado."),
+        (
+            "NOT_VERIFIED",
+            "Ejecucion completada, pero el objetivo no fue verificado.",
+        ),
+        (
+            "PARTIALLY_VERIFIED",
+            "Ejecucion completada, pero el objetivo solo fue verificado parcialmente.",
+        ),
+        (
+            "INCONCLUSIVE",
+            "Ejecucion completada, pero no hay evidencia suficiente para verificar el objetivo.",
+        ),
+    )
+
+    for verification_status, expected in cases:
+        visible = AtlasOrchestrator._present_structured_execution(
+            replace(
+                response,
+                operational_report=replace(
+                    report,
+                    goal_verification_status=verification_status,
+                ),
+            )
+        )
+        assert visible.startswith(expected)
+        if verification_status != "VERIFIED":
+            assert "Objetivo verificado." not in visible
+
+    corrected = AtlasOrchestrator._present_structured_execution(
+        replace(
+            response,
+            operational_report=replace(
+                report,
+                goal_verification_status="VERIFIED",
+                objective_correction={"status": "VERIFIED_AFTER_CORRECTION"},
+            ),
+        )
+    )
+    assert corrected.startswith("Objetivo corregido y verificado.")
+
+
 def test_execution_disabled_by_default_returns_plan_without_tool_execution() -> None:
     calls: list[str] = []
     coordinator, _, _ = _structured_parts(calls)

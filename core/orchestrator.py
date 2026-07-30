@@ -800,7 +800,29 @@ class AtlasOrchestrator:
                 response.original_request or ""
             )
             prefix = "Plan confirmado. " if confirmation_intent == "confirm" else ""
-            lines = [prefix + "Ejecucion completada."]
+            correction_status = report.objective_correction.get("status")
+            verification_status = report.goal_verification_status
+            if correction_status == "VERIFIED_AFTER_CORRECTION":
+                outcome = "Objetivo corregido y verificado."
+            elif verification_status == "VERIFIED":
+                outcome = "Objetivo verificado."
+            elif verification_status == "NOT_VERIFIED":
+                outcome = (
+                    "Ejecucion completada, pero el objetivo no fue verificado."
+                )
+            elif verification_status == "PARTIALLY_VERIFIED":
+                outcome = (
+                    "Ejecucion completada, pero el objetivo solo fue "
+                    "verificado parcialmente."
+                )
+            elif verification_status == "INCONCLUSIVE":
+                outcome = (
+                    "Ejecucion completada, pero no hay evidencia suficiente "
+                    "para verificar el objetivo."
+                )
+            else:
+                outcome = "Ejecucion completada."
+            lines = [prefix + outcome]
             for step in report.steps:
                 if step.result:
                     label = step.tool_name or step.description
