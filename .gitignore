@@ -1,9 +1,40 @@
-__pycache__/
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime state and logs
 .atlas/
+logs/
+data/executions/
+execution_sessions/
+traces/
+*.trace
+*.trace.json
+
+# Python and tool caches
+__pycache__/
 *.py[cod]
 .pytest_cache/
-.env
-*.onnx
-data/executions/
+.mypy_cache/
+.ruff_cache/
 
-logs/
+# Local models and generated media
+*.onnx
+*.wav
+*.mp3
+*.flac
+artifacts/screenshots/
+screenshots/
+screenshot_*.png
+
+# Generated packages and test temporaries
+dist/
+*.zip
+*.tmp
+*.temp
+pytest-*/

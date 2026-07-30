@@ -2,84 +2,65 @@
 
 ## Regla principal
 
-No compartir el repositorio completo. `.env` esta versionado, por lo que un
-clon, bundle o `git archive atlas-base-v1.0` sin exclusiones no es seguro.
+No compartir el repositorio completo ni construir el paquete con `git archive`,
+un clon o un bundle. El unico artefacto autorizado es el ZIP generado desde la
+lista blanca cerrada de `scripts/build_architecture_review_package.py`.
 
-## Obligatorios
+## Comando oficial
 
-- `docs/architecture_review/*.md`;
-- `VERSION`, `RELEASE.md`, `CHECKLIST_FINAL.md`;
-- `requirements.txt`;
-- `main.py`, `core/atlas.py`, `core/startup.py`;
-- `bootstrap/bootstrap.py`;
-- `core/orchestrator.py`;
-- `core/request_gateway.py`, `core/operational_request_router.py`,
-  `core/router.py`, `core/operational_route_executor.py`;
-- planning: planner, planners hibrido/determinista y validator;
-- ejecucion: arguments, context, resolver, strategy, authorization,
-  structured execution, executor y supervisor;
-- verificacion/persistencia: verifier, correction, report, session persistence,
-  resumable store e history;
-- `tools/registry.py`, `tools/executor.py`, tools filesystem;
-- agentes clasicos y contratos del AgentSystem declarativo;
-- memoria conversacional/operacional y clientes de modelo;
-- pruebas focalizadas listadas en `07_TESTING_EVIDENCE.md`.
-
-## Opcionales
-
-- resto de `core/`, `bootstrap/`, `tools/`, `agents/`, `memory/`, `models/`,
-  `services/`, `domain/`, `use_cases/` y `voice/`;
-- suite completa `tests/`;
-- manual interno `docs/manual/`;
-- `README.md` y `docs/ARCHITECTURE.md`, marcados como contexto historico;
-- ROADMAP/TASKS solo si se advierte que no prueban implementacion.
-
-## Nunca compartir
-
-- `.env`;
-- `.git/`, `.venv/`, `__pycache__/`, `.pytest_cache/`;
-- `.atlas/` y `logs/`;
-- `artifacts/` y screenshots;
-- `audio_test.wav`;
-- modelos `.onnx` o audio de wake word personalizado;
-- archivos generados por el usuario;
-- dumps, traces o sesiones reales.
-
-## Sanitizar antes de compartir
-
-- notebooks: outputs, metadata, rutas locales y datos de entrenamiento;
-- configuraciones exportadas y variables de entorno;
-- logs y reportes, incluso si parecen sanitizados;
-- screenshots y audio;
-- fixtures nuevos que contengan valores parecidos a credenciales;
-- paths absolutos de usuario.
-
-## Tamano aproximado
-
-Medicion del checkout congelado excluyendo `.env`, runtime, notebooks,
-artifacts y binarios:
-
-- 374 archivos;
-- 5.74 MiB sin comprimir;
-- aproximadamente 1.13 MiB en ZIP con deflate.
-
-Los documentos de esta fase agregan una cantidad pequena a ese total.
-
-## Compresion recomendada
-
-1. Crear fuera del repositorio una carpeta vacia.
-2. Copiar solo los paths de la lista blanca.
-3. Ejecutar un escaneo de secretos sobre esa carpeta.
-4. Revisar manualmente el listado.
-5. Comprimir la carpeta, no el repositorio.
-
-Ejemplo:
+Desde la raiz del repositorio:
 
 ```powershell
-Compress-Archive `
-  -Path C:\ruta\atlas-architecture-review\* `
-  -DestinationPath C:\ruta\atlas-base-v1.0-architecture-review.zip
+python -B scripts/build_architecture_review_package.py
 ```
 
-No incluir `.git` ni usar el ZIP como mecanismo de backup. Compartir tambien el
-hash SHA-256 del ZIP por un canal separado.
+El comando genera:
+
+- `dist/review/atlas-architecture-review-v1.0.zip`;
+- `dist/review/atlas-architecture-review-v1.0.manifest.json`.
+
+Ambos archivos son locales, estan ignorados por Git y deben eliminarse despues
+de completar la revision externa.
+
+## Lista blanca incluida
+
+- los doce documentos de `docs/architecture_review/`;
+- `.env.example`, `VERSION`, `RELEASE.md`, `CHECKLIST_FINAL.md`,
+  `requirements.txt`, `README.md` y `main.py`;
+- `docs/ARCHITECTURE.md`, `docs/execution_decision.md` y `docs/manual/*.md`;
+- codigo Python de `agents/`, `api/`, `bootstrap/`, `core/`, `domain/`,
+  `memory/`, `models/`, `scripts/`, `services/`, `tools/`, `use_cases/` y
+  `voice/`;
+- las pruebas focalizadas declaradas en `AUTHORIZED_TEST_FILES`.
+
+`MANIFEST.json`, incluido dentro del ZIP, enumera de forma exacta cada path,
+tamano y hash SHA-256. El manifest adyacente debe coincidir byte a byte con el
+interno.
+
+## Exclusiones obligatorias
+
+- `.env`, `.git/`, `.venv/`, `venv/` y caches;
+- `.atlas/`, `logs/`, sesiones, trazas y estado de ejecucion;
+- `artifacts/`, screenshots, notebooks y archivos generados por el usuario;
+- audio, imagenes, modelos `.onnx`, ZIP previos y temporales;
+- cualquier path absoluto, traversal, symlink, duplicado o archivo fuera de la
+  lista blanca;
+- cualquier archivo que active el escaneo de secretos de alta confianza.
+
+## Verificacion antes de entregar
+
+1. Abrir el ZIP y comprobar que no esta corrupto.
+2. Comparar `MANIFEST.json` interno con el manifest adyacente.
+3. Recalcular SHA-256 y tamano de cada entrada contra el manifest.
+4. Revisar el listado completo y confirmar que no contiene categorias
+   excluidas.
+5. Ejecutar de nuevo el generador y confirmar el mismo orden y contenido logico.
+6. Compartir el hash SHA-256 del ZIP por un canal separado.
+
+## Historial y respuesta ante incidentes
+
+La retirada de `.env` del indice actual no elimina versiones historicas. Antes
+de publicar el repositorio o su historial, auditar todos los commits. Si se
+detecta una credencial real, revocarla o rotarla primero y sanear el historial
+solo mediante un procedimiento separado y revisado. No reescribir historial
+durante la construccion de este paquete.
