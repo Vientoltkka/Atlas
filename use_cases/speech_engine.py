@@ -325,6 +325,11 @@ class SoundDeviceAudioCapture:
     _FLOAT32_MIN_VOICE_RMS = 0.0015
     _NOISE_MULTIPLIER = 3.0
     _RECOVERY_CONTRAST_MULTIPLIER = 2.2
+    _SHORT_UTTERANCE_MIN_BLOCKS = 3
+    _SHORT_UTTERANCE_MIN_SECONDS = 0.25
+    _SHORT_UTTERANCE_THRESHOLD_MULTIPLIER = 1.5
+    _SHORT_UTTERANCE_NOISE_MULTIPLIER = 3.0
+    _SHORT_UTTERANCE_PADDING_SECONDS = 0.20
     _PRE_ROLL_SECONDS = 0.45
 
     def __init__(
@@ -906,6 +911,33 @@ class SoundDeviceAudioCapture:
                 end_reason = "duracion maxima alcanzada"
                 break
 
+        if not self._has_complete_voice(accumulated_voice, voice_blocks):
+            short_utterance = self._recover_short_utterance(
+                mono_chunks,
+                block_rms_values,
+                voice_threshold,
+                noise_floor,
+            )
+
+            if short_utterance is not None:
+                samples, start_ms, voice_ms = short_utterance
+                warnings.append(
+                    "short utterance conservado: voz consecutiva con contraste suficiente"
+                )
+                return AudioCaptureResult(
+                    samples=samples,
+                    sample_rate=self.sample_rate,
+                    duration_seconds=len(samples) / self.sample_rate,
+                    microphone_name=microphone_name,
+                    completed=True,
+                    warnings=tuple(warnings),
+                    phrase_start_ms=start_ms,
+                    accumulated_voice_ms=voice_ms,
+                    end_reason="short utterance por contraste",
+                    voice_threshold=voice_threshold,
+                    noise_floor=noise_floor,
+                )
+
         if not voice_started:
             recovered = self._recover_contrasting_phrase(
                 mono_chunks,
@@ -991,7 +1023,10 @@ class SoundDeviceAudioCapture:
                 overflow_count += 1
 
             partial = self.capture_from_chunks(chunks)
-            if partial.completed and partial.end_reason == "silencio posterior detectado":
+            if partial.completed and partial.end_reason in {
+                "silencio posterior detectado",
+                "short utterance por contraste",
+            }:
                 break
 
         total_buffer_length = sum(block_lengths)
@@ -1200,6 +1235,89 @@ class SoundDeviceAudioCapture:
         )
 
         return min(adaptive, configured_cap)
+
+    def _recover_short_utterance(
+        self,
+        mono_chunks: list[np.ndarray],
+        block_rms_values: list[float],
+        voice_threshold: float,
+        noise_floor: float,
+    ) -> tuple[np.ndarray, float, float] | None:
+        if not mono_chunks or len(mono_chunks) != len(block_rms_values):
+            return None
+
+        short_threshold = max(
+            self._FLOAT32_MIN_VOICE_RMS
+            * self._SHORT_UTTERANCE_THRESHOLD_MULTIPLIER,
+            voice_threshold * self._SHORT_UTTERANCE_THRESHOLD_MULTIPLIER,
+            noise_floor * self._SHORT_UTTERANCE_NOISE_MULTIPLIER,
+        )
+        runs: list[tuple[int, int, float]] = []
+        run_start: int | None = None
+
+        for index, rms in enumerate(block_rms_values):
+            if rms >= short_threshold:
+                if run_start is None:
+                    run_start = index
+                continue
+
+            if run_start is not None:
+                duration = sum(
+                    len(mono_chunks[item]) / self.sample_rate
+                    for item in range(run_start, index)
+                )
+                runs.append((run_start, index, duration))
+                run_start = None
+
+        if run_start is not None:
+            duration = sum(
+                len(mono_chunks[item]) / self.sample_rate
+                for item in range(run_start, len(mono_chunks))
+            )
+            runs.append((run_start, len(mono_chunks), duration))
+
+        def trailing_quiet_duration(run_end: int) -> float:
+            duration = 0.0
+            for index in range(run_end, len(mono_chunks)):
+                if block_rms_values[index] >= short_threshold:
+                    break
+                duration += len(mono_chunks[index]) / self.sample_rate
+            return duration
+
+        required_trailing_silence = self._trailing_silence_duration()
+        eligible = [
+            run
+            for run in runs
+            if run[1] - run[0] >= self._SHORT_UTTERANCE_MIN_BLOCKS
+            and run[2] >= self._SHORT_UTTERANCE_MIN_SECONDS
+            and trailing_quiet_duration(run[1]) + 1e-9
+            >= required_trailing_silence
+        ]
+        if not eligible:
+            return None
+
+        voice_start, voice_end, voice_duration = max(
+            eligible,
+            key=lambda run: (run[2], run[1] - run[0]),
+        )
+        padding_blocks = max(
+            1,
+            math.ceil(
+                self._SHORT_UTTERANCE_PADDING_SECONDS / self.chunk_duration
+            ),
+        )
+        capture_start = max(0, voice_start - padding_blocks)
+        capture_end = min(len(mono_chunks), voice_end + padding_blocks)
+        samples = np.concatenate(
+            mono_chunks[capture_start:capture_end]
+        ).astype(np.float32)
+        start_ms = (
+            sum(len(chunk) for chunk in mono_chunks[:voice_start])
+            / self.sample_rate
+            * 1000.0
+        )
+
+        return samples, start_ms, voice_duration * 1000.0
 
     def _recover_contrasting_phrase(
         self,

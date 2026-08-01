@@ -472,6 +472,11 @@ class VoiceConversationUseCase:
             emit(session.summary, diagnostic=True)
             return VoiceConversationResult(session=session, messages=messages)
 
+        if self._is_close_command(transcription.text):
+            self._end_session(session, "explicit_close", "Conversacion finalizada.")
+            emit("Conversacion finalizada.", diagnostic=True)
+            return VoiceConversationResult(session=session, messages=messages)
+
         text = self._accepted_transcription_text(
             transcription,
             trim_edge_punctuation=True,
@@ -724,6 +729,16 @@ class VoiceConversationUseCase:
                 )
                 emit(f"No se pudo procesar el turno: {error}", diagnostic=True)
                 continue
+
+            if self._is_close_command(transcription.text):
+                self._end_session(
+                    session,
+                    "explicit_close",
+                    "Conversacion finalizada.",
+                )
+                emit("Estado: conversacion finalizada.", diagnostic=True)
+                emit("Conversacion finalizada.", diagnostic=True)
+                break
 
             accepted_text = self._accepted_transcription_text(
                 transcription,
@@ -1815,7 +1830,12 @@ class VoiceConversationUseCase:
         self,
         text: str,
     ) -> bool:
-        return self._normalize(text) in self._CLOSE_COMMANDS
+        normalized = self._normalize(text)
+        without_punctuation = "".join(
+            " " if unicodedata.category(character).startswith("P") else character
+            for character in normalized
+        )
+        return " ".join(without_punctuation.split()) in self._CLOSE_COMMANDS
 
     def _is_critical_error(
         self,

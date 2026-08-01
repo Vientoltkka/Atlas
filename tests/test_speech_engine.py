@@ -405,7 +405,7 @@ def test_voice_commands_are_not_cut_before_phrase_is_complete(
     assert result.accumulated_voice_ms >= 600.0
 
 
-def test_three_hundred_ms_voice_does_not_close_as_complete_phrase() -> None:
+def test_two_hundred_ms_voice_does_not_close_as_complete_phrase() -> None:
     capture = SoundDeviceAudioCapture(
         sample_rate=10,
         speech_threshold=0.006,
@@ -417,7 +417,7 @@ def test_three_hundred_ms_voice_does_not_close_as_complete_phrase() -> None:
     voice = np.ones(1, dtype=np.float32) * 0.02
 
     result = capture.capture_from_chunks(
-        [voice, voice, voice] + [silence for _ in range(8)],
+        [voice, voice] + [silence for _ in range(8)],
         "Fake Mic",
     )
 
@@ -549,6 +549,96 @@ def test_single_isolated_noise_block_does_not_start_phrase() -> None:
     assert result.completed is False
     assert result.no_speech_detected is True
     assert result.samples.size == 0
+
+
+def test_short_utterance_preserves_three_consecutive_high_contrast_blocks() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.001
+    short_voice = np.ones(1, dtype=np.float32) * 0.012
+
+    result = capture.capture_from_chunks(
+        [room, room] + [short_voice for _ in range(3)] + [room for _ in range(8)],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.no_speech_detected is False
+    assert result.samples.size > 0
+    assert result.accumulated_voice_ms == pytest.approx(300.0)
+    assert result.end_reason == "short utterance por contraste"
+
+
+def test_short_utterance_waits_for_normal_trailing_silence() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.001
+    short_voice = np.ones(1, dtype=np.float32) * 0.012
+
+    result = capture.capture_from_chunks(
+        [room, room] + [short_voice for _ in range(3)] + [room, room],
+        "Fake Mic",
+    )
+
+    assert result.completed is False
+    assert result.samples.size == 0
+
+
+def test_short_utterance_rejects_nonconsecutive_noise_bursts() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.001
+    noise = np.ones(1, dtype=np.float32) * 0.012
+
+    result = capture.capture_from_chunks(
+        [room, noise, room, noise, room, noise] + [room for _ in range(6)],
+        "Fake Mic",
+    )
+
+    assert result.completed is False
+    assert result.no_speech_detected is True
+    assert result.samples.size == 0
+
+
+def test_short_utterance_capture_reaches_stt_provider() -> None:
+    vad_capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.001
+    short_voice = np.ones(1, dtype=np.float32) * 0.012
+    short_result = vad_capture.capture_from_chunks(
+        [room, room] + [short_voice for _ in range(3)] + [room for _ in range(8)],
+        "Fake Mic",
+    )
+    capture = FakeCapture()
+    capture.result = short_result
+    provider = FakeProvider()
+    provider.text = "salir"
+
+    result = SpeechEngineUseCase(capture, provider).transcribe_once()
+
+    assert provider.calls == 1
+    assert result.completed is True
+    assert result.text == "salir"
 
 
 def test_conservative_recovery_uses_high_energy_contrast() -> None:

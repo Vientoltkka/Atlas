@@ -1834,6 +1834,38 @@ def test_manual_voice_exits_by_spoken_commands(command: str) -> None:
     assert output.calls == []
 
 
+@pytest.mark.parametrize("command", ["salir", "Salir.", "EXIT", "quit"])
+def test_manual_voice_exit_command_bypasses_stt_filters_and_model(command: str) -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result(
+                command,
+                average_log_probability=-1.5,
+                no_speech_probability=0.9,
+            ),
+            speech_result("", completed=False, cancelled=True),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+    model_calls: list[str] = []
+
+    def process_text(text: str) -> str:
+        model_calls.append(text)
+        return "unexpected"
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=process_text,
+    )
+
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.total_turns == 0
+    assert result.session.state is VoiceConversationState.STOPPED
+    assert speech.transcribe_calls == 1
+    assert model_calls == []
+    assert output.calls == []
+    assert output.closed is True
+
+
 @pytest.mark.parametrize("command", ["salir", "exit", "quit", "terminar", "cancelar"])
 def test_manual_voice_exits_by_typed_commands(command: str) -> None:
     speech = FakeSpeechEngine([speech_result("no debe escucharse")])
