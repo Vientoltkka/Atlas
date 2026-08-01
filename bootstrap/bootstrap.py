@@ -916,7 +916,14 @@ class Bootstrap:
             wait_engine,
         )
         speech_engine = SpeechEngineUseCase(
-            SoundDeviceAudioCapture(),
+            SoundDeviceAudioCapture(
+                sample_rate=_read_int(
+                    "ATLAS_VOICE_SAMPLE_RATE",
+                    16_000,
+                    minimum=8_000,
+                    maximum=48_000,
+                )
+            ),
             FasterWhisperSpeechToTextProvider(),
         )
         speech_output_engine = Pyttsx3SpeechOutputEngine.from_environment()

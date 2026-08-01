@@ -27,6 +27,7 @@ class FakeCapture:
     def __init__(self) -> None:
         self.selected_index: int | None = None
         self.capture_calls = 0
+        self.mark_valid_calls = 0
         self.raise_error: Exception | None = None
         self.result = AudioCaptureResult(
             samples=np.ones(16_000, dtype=np.float32) * 0.1,
@@ -60,6 +61,9 @@ class FakeCapture:
         if self.raise_error is not None:
             raise self.raise_error
         return self.result
+
+    def mark_transcription_valid(self) -> None:
+        self.mark_valid_calls += 1
 
 
 class FakeProvider:
@@ -748,7 +752,7 @@ def test_microphone_probe_reports_rms_without_stt_or_tts(
     assert result.voice_detected is True
 
 
-def test_capture_drains_buffer_before_reading_phrase(
+def test_fresh_capture_stream_keeps_first_audio_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     capture = SoundDeviceAudioCapture(
@@ -797,7 +801,7 @@ def test_capture_drains_buffer_before_reading_phrase(
 
     assert reads[0] == pytest.approx(0.5)
     assert result.completed is True
-    assert result.samples[0] == pytest.approx(0.01)
+    assert result.samples[0] == pytest.approx(0.5)
 
 
 def test_capture_prints_audio_diagnostics_and_switches_to_device_with_signal(
@@ -805,6 +809,7 @@ def test_capture_prints_audio_diagnostics_and_switches_to_device_with_signal(
     capsys,
 ) -> None:
     monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    monkeypatch.setenv("ATLAS_VOICE_MICROPHONE_FALLBACK_FAILURES", "1")
     capture = SoundDeviceAudioCapture(
         sample_rate=10,
         chunk_duration=0.1,
@@ -870,9 +875,137 @@ def test_capture_prints_audio_diagnostics_and_switches_to_device_with_signal(
     assert "Frecuencia de muestreo: 10 Hz" in output
     assert "Nivel RMS del audio recibido:" in output
     assert opened_devices[0] == 0
-    assert 1 not in opened_devices
+    assert 1 in opened_devices
 
 
+def test_two_complete_silent_captures_keep_affinity_then_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MICROPHONE_FALLBACK_FAILURES", "3")
+    capture = SoundDeviceAudioCapture(sample_rate=10, chunk_duration=0.1)
+    microphones = [
+        MicrophoneInfo(0, "Primary Mic", True, 1, "MME"),
+        MicrophoneInfo(1, "Fallback Mic", False, 1, "MME"),
+    ]
+    capture.select_microphone(0)
+    capture._remember_microphone_signal(0)
+    monkeypatch.setattr(capture, "list_microphones", lambda: microphones)
+
+    silent = AudioCaptureResult(
+        samples=np.array([], dtype=np.float32),
+        sample_rate=10,
+        duration_seconds=1.0,
+        microphone_name="Primary Mic",
+        completed=False,
+        no_speech_detected=True,
+    )
+    chunks = [np.zeros((1, 1), dtype=np.float32)]
+
+    capture._record_microphone_capture(microphones[0], silent, chunks)
+    first = capture._select_microphone_with_audio(SimpleNamespace())
+    capture._record_microphone_capture(microphones[0], silent, chunks)
+    second = capture._select_microphone_with_audio(SimpleNamespace())
+    capture._record_microphone_capture(microphones[0], silent, chunks)
+    fallback = capture._select_microphone_with_audio(SimpleNamespace())
+
+    assert [first.index, second.index, fallback.index] == [0, 0, 1]
+    assert capture.last_voice_microphone_index == 0
+    assert capture._selected_index == 1
+
+
+def test_silence_fallback_does_not_leave_last_valid_host_or_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MICROPHONE_FALLBACK_FAILURES", "3")
+    capture = SoundDeviceAudioCapture(sample_rate=10, chunk_duration=0.1)
+    microphones = [
+        MicrophoneInfo(1, "Microphone Array", True, 1, "MME"),
+        MicrophoneInfo(4, "Primary Capture", False, 1, "Windows DirectSound"),
+        MicrophoneInfo(5, "Microphone Array", False, 1, "Windows DirectSound"),
+        MicrophoneInfo(9, "Microphone Array", False, 1, "Windows WASAPI"),
+        MicrophoneInfo(10, "Realtek input", False, 1, "Windows WDM-KS"),
+    ]
+    monkeypatch.setattr(capture, "list_microphones", lambda: microphones)
+    capture.select_microphone(1)
+    capture._remember_microphone_signal(1)
+    capture._microphone_signal_failures[1] = 3
+
+    selected = [capture._select_microphone_with_audio(SimpleNamespace()).index for _ in range(4)]
+
+    assert selected == [1, 1, 1, 1]
+    assert capture.last_voice_microphone_index == 1
+    assert capsys.readouterr().out.count("no hay otro micrófono físico compatible") == 1
+
+def test_valid_transcription_resets_silence_penalties_and_keeps_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MICROPHONE_FALLBACK_FAILURES", "3")
+    capture = SoundDeviceAudioCapture(sample_rate=10, chunk_duration=0.1)
+    microphones = [MicrophoneInfo(1, "Microphone Array", True, 1, "MME")]
+    monkeypatch.setattr(capture, "list_microphones", lambda: microphones)
+    capture.select_microphone(1)
+    capture._microphone_signal_failures[1] = 2
+
+    capture.mark_transcription_valid()
+
+    assert capture.last_voice_microphone_index == 1
+    assert capture._microphone_signal_failures == {1: 0}
+    assert capture._select_microphone_with_audio(SimpleNamespace()).index == 1
+
+
+def test_five_consecutive_captures_reopen_same_stream_without_audio_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=2.0,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.2,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+        minimum_audio_duration=0.2,
+    )
+    opened_devices: list[int] = []
+    closed_streams: list[int] = []
+
+    class Stream:
+        def __init__(self, device: int) -> None:
+            self.device = device
+            self.chunks = iter(
+                [np.ones((1, 1), dtype=np.float32) * 0.02 for _ in range(7)]
+                + [np.zeros((1, 1), dtype=np.float32) for _ in range(10)]
+            )
+
+        def __enter__(self):
+            opened_devices.append(self.device)
+            return self
+
+        def __exit__(self, *_args):
+            closed_streams.append(self.device)
+            return False
+
+        def read(self, _frames):
+            return next(self.chunks), False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [{"name": "Microphone Array", "max_input_channels": 1, "hostapi": 0, "default_samplerate": 44100}],
+        InputStream=lambda **kwargs: Stream(kwargs["device"]),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    results = []
+    for _ in range(5):
+        results.append(capture.capture_phrase())
+        capture.mark_transcription_valid()
+
+    assert all(result.completed for result in results)
+    assert opened_devices == [0, 0, 0, 0, 0]
+    assert closed_streams == opened_devices
+    assert capture.last_voice_microphone_index == 0
+    assert capture._microphone_signal_failures == {0: 0}
 def test_capture_debug_timeout_is_raised_for_short_initial_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -934,6 +1067,7 @@ def test_transcribes_valid_audio_and_returns_structured_result() -> None:
     assert result.processing_duration_seconds == 0.25
     assert result.provider == "fake-local"
     assert result.microphone_name == "Fake Mic"
+    assert capture.mark_valid_calls == 1
     assert result.phrase_start_ms == pytest.approx(0.0)
     assert result.capture_end_reason == ""
 

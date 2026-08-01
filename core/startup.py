@@ -79,7 +79,8 @@ class WindowsStartupPreflight:
         "requirements.txt",
     )
     _TEXT_MODULES = ("ollama", "numpy")
-    _VOICE_MODULES = ("sounddevice", "faster_whisper", "pyttsx3")
+    _VOICE_REQUIRED_MODULES = ("sounddevice", "faster_whisper")
+    _VOICE_OPTIONAL_MODULES = ("pyttsx3",)
     _ASSISTANT_MODULES = ("openwakeword",)
     _OPERATIONAL_DIRECTORIES = (
         "logs",
@@ -112,10 +113,10 @@ class WindowsStartupPreflight:
         checks.append(self._check_local_model_service())
 
         capabilities = ["texto"]
-        if self._modules_available(self._VOICE_MODULES):
+        if self._modules_available(self._VOICE_REQUIRED_MODULES):
             capabilities.append("voz manual")
         if (
-            self._modules_available(self._VOICE_MODULES)
+            self._modules_available(self._VOICE_REQUIRED_MODULES)
             and self._modules_available(self._ASSISTANT_MODULES)
         ):
             capabilities.append("asistente permanente")
@@ -223,16 +224,16 @@ class WindowsStartupPreflight:
 
     def _check_modules(self, mode: str) -> Iterable[StartupCheck]:
         required = list(self._TEXT_MODULES)
-        optional = list(self._VOICE_MODULES + self._ASSISTANT_MODULES)
+        optional = list(self._VOICE_REQUIRED_MODULES + self._VOICE_OPTIONAL_MODULES + self._ASSISTANT_MODULES)
         if mode == "microphone":
             required = ["numpy", "sounddevice"]
             optional = []
         elif mode == "voice":
-            required.extend(self._VOICE_MODULES)
-            optional = list(self._ASSISTANT_MODULES)
+            required.extend(self._VOICE_REQUIRED_MODULES)
+            optional = list(self._VOICE_OPTIONAL_MODULES + self._ASSISTANT_MODULES)
         elif mode == "assistant":
-            required.extend(self._VOICE_MODULES + self._ASSISTANT_MODULES)
-            optional = []
+            required.extend(self._VOICE_REQUIRED_MODULES + self._ASSISTANT_MODULES)
+            optional = list(self._VOICE_OPTIONAL_MODULES)
 
         for module_name in dict.fromkeys(required):
             if self._module_available(module_name):

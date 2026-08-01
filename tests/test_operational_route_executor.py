@@ -767,6 +767,25 @@ def test_orchestrator_voice_result_uses_same_flow_and_rejects_empty_transcriptio
         orchestrator.process_voice_prompt_result("   ")
 
 
+def test_orchestrator_voice_direct_timeout_is_not_presented_as_success() -> None:
+    def timed_out(_request):
+        raise TimeoutError("native Ollama timeout")
+
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(create_plan=lambda text: Plan("chat", text)),
+        router=Router(operational_router=OperationalRequestRouter(clock=lambda: NOW)),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=_Memory(),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        request_gateway=_gateway(),
+        operational_route_executor=_executor(direct_responder=timed_out),
+    )
+
+    with pytest.raises(TimeoutError, match="agotó su timeout"):
+        orchestrator.process_voice_prompt("hola", confirm=lambda _prompt: "")
+
+
 def test_result_models_events_and_trace_are_immutable_and_content_safe() -> None:
     request = _gateway().from_text("contenido privado completo")
     executor = _executor()

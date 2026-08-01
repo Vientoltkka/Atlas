@@ -11,7 +11,10 @@ from agents.registry import AgentRegistry
 from core.orchestrator import AtlasOrchestrator
 from core.router import Router
 from use_cases.speech_engine import SpeechTranscriptionResult
-from use_cases.voice_conversation import VoiceConversationUseCase
+from use_cases.voice_conversation import (
+    VoiceConversationState,
+    VoiceConversationUseCase,
+)
 from use_cases.wake_word_engine import WakeWordDetectionResult, WakeWordEngine
 
 
@@ -1469,7 +1472,38 @@ def test_model_timeout_prints_speaks_and_returns_to_next_turn(
     assert console.count(f"Atlas: {timeout_response}") == 1
     assert "Atlas: Son las seis y doce de la tarde." in console
     assert tts.calls == [timeout_response, "Son las seis y doce de la tarde."]
+    assert result.session.turns[0].outcome == "model_timeout"
+    assert result.session.turns[0].success is False
+    assert result.session.turns[1].outcome == "completed"
     assert use_case._tts_speaking is False
+    assert not use_case._model_workers
+
+
+def test_consecutive_model_timeouts_end_session_with_bounded_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MODEL_TIMEOUT", "0.01")
+    monkeypatch.setenv("ATLAS_VOICE_MAX_CONSECUTIVE_TIMEOUTS", "2")
+    speech = FakeSpeechEngine(
+        [speech_result("primera pregunta"), speech_result("segunda pregunta")]
+    )
+
+    def blocked_model(_text: str) -> str:
+        time.sleep(0.2)
+        return "respuesta tardia"
+
+    use_case = make_use_case(speech, output=FakeSpeechOutputEngine())
+    result = use_case.execute_manual(process_text=blocked_model)
+
+    assert result.session.ended_reason == "model_timeout_limit"
+    assert [turn.outcome for turn in result.session.turns] == [
+        "model_timeout",
+        "model_timeout",
+    ]
+    assert result.session.failed_turns == 2
+    assert result.session.successful_turns == 0
+    assert speech.transcribe_calls == 2
+    assert not use_case._model_workers
 
 
 def test_model_route_valid_response_keeps_voice_loop_active(
@@ -1532,6 +1566,9 @@ def test_model_route_exception_is_recoverable_and_next_turn_continues() -> None:
     assert console.count(f"Atlas: {expected}") == 1
     assert "Atlas: Son las seis y doce de la tarde." in console
     assert tts.calls == [expected, "Son las seis y doce de la tarde."]
+    assert result.session.turns[0].outcome == "model_failure"
+    assert result.session.turns[0].success is False
+    assert result.session.turns[1].outcome == "completed"
 
 
 def test_model_route_system_exit_is_recoverable_and_not_silent() -> None:
@@ -1583,6 +1620,9 @@ def test_model_route_empty_response_is_recoverable_and_next_turn_continues() -> 
     assert console.count(f"Atlas: {expected}") == 1
     assert "Atlas: Son las seis y doce de la tarde." in console
     assert tts.calls == [expected, "Son las seis y doce de la tarde."]
+    assert result.session.turns[0].outcome == "empty_response"
+    assert result.session.turns[0].success is False
+    assert result.session.turns[1].outcome == "completed"
 
 
 def test_model_route_none_response_is_recoverable_and_next_turn_continues() -> None:
@@ -1773,12 +1813,14 @@ def test_empty_response_is_reported_and_spoken_once() -> None:
     )
 
     expected = "No pude generar una respuesta. Inténtalo de nuevo."
-    assert result.session.successful_turns == 1
+    assert result.session.successful_turns == 0
+    assert result.session.failed_turns == 1
+    assert result.session.turns[0].outcome == "empty_response"
     assert result.session.response_history == [expected]
     assert output.calls == [expected]
 
 
-@pytest.mark.parametrize("command", ["salir", "terminar", "cancelar"])
+@pytest.mark.parametrize("command", ["salir", "exit", "quit", "terminar", "cancelar"])
 def test_manual_voice_exits_by_spoken_commands(command: str) -> None:
     speech = FakeSpeechEngine([speech_result(command)])
     output = FakeSpeechOutputEngine()
@@ -1792,7 +1834,7 @@ def test_manual_voice_exits_by_spoken_commands(command: str) -> None:
     assert output.calls == []
 
 
-@pytest.mark.parametrize("command", ["salir", "terminar", "cancelar"])
+@pytest.mark.parametrize("command", ["salir", "exit", "quit", "terminar", "cancelar"])
 def test_manual_voice_exits_by_typed_commands(command: str) -> None:
     speech = FakeSpeechEngine([speech_result("no debe escucharse")])
     output = FakeSpeechOutputEngine()
@@ -2293,3 +2335,134 @@ def test_bootstrap_injects_voice_conversation() -> None:
     orchestrator = Bootstrap.build()
 
     assert orchestrator._voice_conversation is not None
+
+
+def test_phase_17_1_five_turns_follow_explicit_state_cycle() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("turno uno"),
+            speech_result("turno dos"),
+            speech_result("turno tres"),
+            speech_result("turno cuatro"),
+            speech_result("turno cinco"),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=output, max_turns=10).execute_manual(
+        process_text=lambda text: f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert result.session.successful_turns == 5
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.state == VoiceConversationState.STOPPED
+    assert result.session.states[0] == VoiceConversationState.STARTING
+    assert result.session.states[-2:] == [
+        VoiceConversationState.STOPPING,
+        VoiceConversationState.STOPPED,
+    ]
+    for expected in (
+        VoiceConversationState.READY,
+        VoiceConversationState.LISTENING,
+        VoiceConversationState.TRANSCRIBING,
+        VoiceConversationState.PROCESSING,
+        VoiceConversationState.SPEAKING,
+    ):
+        assert expected in result.session.states
+    assert len(output.calls) == 5
+
+
+def test_phase_17_1_recovering_returns_to_listening_after_empty_phrase() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("", completed=False, warnings=("transcripcion vacia",)),
+            speech_result("peticion valida"),
+            speech_result("salir"),
+        ]
+    )
+
+    result = make_use_case(speech, output=FakeSpeechOutputEngine()).execute_manual(
+        process_text=lambda _text: "respuesta valida",
+    )
+
+    recovering = result.session.states.index(VoiceConversationState.RECOVERING)
+    assert VoiceConversationState.LISTENING in result.session.states[recovering + 1 :]
+    assert result.session.successful_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_1_metrics_are_structured_and_privacy_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_METRICS", "1")
+    console: list[str] = []
+    result = make_use_case(
+        FakeSpeechEngine([speech_result("dato sensible"), speech_result("salir")]),
+        output=FakeSpeechOutputEngine(),
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda _text: "respuesta",
+        status_sink=console.append,
+    )
+
+    metrics = result.session.turns[0].metrics
+    assert metrics.capture_seconds == pytest.approx(1.0)
+    assert metrics.stt_seconds == pytest.approx(0.2)
+    assert metrics.total_seconds >= 0.0
+    metric_lines = [
+        line
+        for line in console
+        if line.startswith(
+            (
+                "Inicio de voz:",
+                "Captura:",
+                "STT:",
+                "Atlas:",
+                "Modelo:",
+                "Síntesis TTS:",
+                "Reproducción:",
+                "Total:",
+            )
+        )
+        and line.endswith(" ms")
+    ]
+    assert len(metric_lines) == 8
+    assert "dato sensible" not in "\n".join(metric_lines)
+
+
+def test_phase_17_1_tts_warmup_failure_degrades_without_closing_session() -> None:
+    class MissingTts(FakeSpeechOutputEngine):
+        def warm_up(self) -> None:
+            raise RuntimeError("Dependencia no disponible: pyttsx3")
+
+    output = MissingTts()
+    result = make_use_case(
+        FakeSpeechEngine([speech_result("pregunta"), speech_result("salir")]),
+        output=output,
+    ).execute_manual(process_text=lambda _text: "respuesta por texto")
+
+    assert result.session.successful_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+    assert VoiceConversationState.DEGRADED in result.session.states
+    assert output.calls == []
+    assert "respuesta por texto" in "\n".join(result.messages)
+
+
+def test_phase_17_1_sessions_do_not_share_transient_histories() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("primera sesion"),
+            speech_result("salir"),
+            speech_result("segunda sesion"),
+            speech_result("salir"),
+        ]
+    )
+    use_case = make_use_case(speech, output=FakeSpeechOutputEngine())
+
+    first = use_case.execute_manual(process_text=lambda _text: "respuesta uno")
+    second = use_case.execute_manual(process_text=lambda _text: "respuesta dos")
+
+    assert first.session.transcript_history == ["primera sesion"]
+    assert second.session.transcript_history == ["segunda sesion"]
+    assert first.session.turns is not second.session.turns

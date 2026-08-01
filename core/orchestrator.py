@@ -1,4 +1,4 @@
-﻿"""Core orchestration module for Atlas."""
+"""Core orchestration module for Atlas."""
 
 from __future__ import annotations
 
@@ -48,6 +48,7 @@ from core.operational_route_executor import (
     OperationalRouteExecutor,
     RouteExecutionPresenter,
     RouteExecutionResult,
+    RouteExecutionStatus,
 )
 from core.capability_execution_service import (
     CapabilityExecutionRequest,
@@ -1049,6 +1050,21 @@ class AtlasOrchestrator:
                 confirm,
             )
 
+        tool_catalog = self._tool_catalog_response(request.content)
+        if tool_catalog is not None:
+            return tool_catalog
+
+        capability_status = self._capability_status_response(request.content)
+        if capability_status is not None:
+            return capability_status
+
+        direct_response = self._process_direct_conversation(
+            request,
+            raise_on_failure=True,
+        )
+        if direct_response is not None:
+            return direct_response
+
         return self.process_prompt(request.content, confirm=confirm)
 
     def _execute_voice_desktop_command(
@@ -1140,6 +1156,7 @@ class AtlasOrchestrator:
         request: AtlasRequest,
         *,
         status_sink=None,
+        raise_on_failure: bool = False,
     ) -> str | None:
         """Use the existing bounded direct-response route for conversational turns."""
         if self._operational_route_executor is None:
@@ -1182,6 +1199,15 @@ class AtlasOrchestrator:
         if callable(status_sink):
             status_sink("Procesando...")
         result = self._operational_route_executor.execute(request, decision)
+        if raise_on_failure and result.status is RouteExecutionStatus.FAILED:
+            safe_cause = result.error.safe_cause if result.error is not None else ""
+            if "timeout" in safe_cause.casefold():
+                raise TimeoutError("La respuesta directa del modelo agotó su timeout.")
+            raise RuntimeError(
+                result.error.summary
+                if result.error is not None
+                else "Direct response failed."
+            )
         response = self._route_execution_presenter.present(result)
         self._memory.add_user(request.content)
         self._memory.add_assistant(response)

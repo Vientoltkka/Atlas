@@ -117,3 +117,23 @@ def test_pyttsx3_failure_discards_engine_and_rebuilds_next_turn(
     assert broken.stop_calls == 1
     assert healthy.say_calls == ["segunda"]
     assert fake_module.init_calls == 2
+
+
+def test_pyttsx3_reports_separate_monotonic_synthesis_and_playback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakePyttsx3Engine()
+    fake_module = FakePyttsx3Module([engine])
+    ticks = iter((1.0, 1.1, 1.2, 1.5))
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    monkeypatch.setattr(
+        "use_cases.speech_output_engine.time.monotonic",
+        lambda: next(ticks),
+    )
+
+    metrics = Pyttsx3SpeechOutputEngine(SpeechOutputSettings()).speak_with_metrics(
+        "respuesta"
+    )
+
+    assert metrics.synthesis_seconds == pytest.approx(0.1)
+    assert metrics.playback_seconds == pytest.approx(0.3)

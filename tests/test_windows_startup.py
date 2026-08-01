@@ -196,3 +196,32 @@ def test_operation_guide_documents_one_official_start_command() -> None:
     assert "python -B main.py" in guide
     assert "python main.py" not in guide
     assert "variante de desarrollo" not in guide
+
+
+def test_voice_preflight_treats_tts_as_optional(tmp_path) -> None:
+    def find_module(name: str) -> object | None:
+        return None if name == "pyttsx3" else object()
+
+    report = WindowsStartupPreflight(
+        _project(tmp_path),
+        module_finder=find_module,
+        socket_probe=lambda *_args: True,
+    ).run("voice")
+
+    assert report.ready
+    assert not any("pyttsx3" in check.name for check in report.errors)
+    assert any("pyttsx3" in check.name for check in report.warnings)
+
+
+def test_voice_preflight_still_requires_stt(tmp_path) -> None:
+    def find_module(name: str) -> object | None:
+        return None if name == "faster_whisper" else object()
+
+    report = WindowsStartupPreflight(
+        _project(tmp_path),
+        module_finder=find_module,
+        socket_probe=lambda *_args: True,
+    ).run("voice")
+
+    assert not report.ready
+    assert any("faster_whisper" in check.name for check in report.errors)

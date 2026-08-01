@@ -150,10 +150,10 @@ class FasterWhisperSpeechToTextProvider:
         min_confidence: float | None = None,
         max_no_speech_probability: float | None = None,
     ) -> None:
-        self._model_size = model_size
+        self._model_size = os.getenv("ATLAS_STT_MODEL", model_size).strip() or model_size
         self._device = device
         self._compute_type = compute_type
-        self._language = language or "es"
+        self._language = language or os.getenv("ATLAS_STT_LANGUAGE", "es").strip() or "es"
         self._initial_prompt = initial_prompt or os.getenv(
             "ATLAS_STT_INITIAL_PROMPT",
             "Atlas, hora, fecha, capital de Francia, abrir Bloc de notas, abrir VS Code",
@@ -349,6 +349,17 @@ class SoundDeviceAudioCapture:
         )
         self.minimum_audio_duration = minimum_audio_duration
         self._selected_index: int | None = None
+        self._last_voice_microphone_index: int | None = None
+        self._microphone_signal_failures: dict[int, int] = {}
+        self._fallback_notice_indices: set[int] = set()
+        self._microphone_fallback_failures = int(
+            _read_float(
+                "ATLAS_VOICE_MICROPHONE_FALLBACK_FAILURES",
+                3.0,
+                1.0,
+                10.0,
+            )
+        )
         self._empty_capture_diagnostics = 0
 
     def list_microphones(
@@ -422,6 +433,9 @@ class SoundDeviceAudioCapture:
 
     def selected_or_default_microphone(self) -> MicrophoneInfo:
         """Return the selected microphone or the default input."""
+        if self._selected_index is not None:
+            return self.select_microphone(self._selected_index)
+
         env_index = os.getenv("ATLAS_MICROPHONE_INDEX", "").strip()
 
         if env_index:
@@ -429,9 +443,6 @@ class SoundDeviceAudioCapture:
                 return self.select_microphone(int(env_index))
             except ValueError:
                 pass
-
-        if self._selected_index is not None:
-            return self.select_microphone(self._selected_index)
 
         return self.default_microphone()
 
@@ -573,7 +584,7 @@ class SoundDeviceAudioCapture:
         self,
         settings: SpeechCaptureSettings | None = None,
     ) -> AudioCaptureResult:
-        """Capture one phrase from the selected microphone."""
+        """Capture one phrase from a fresh stream on the affinity microphone."""
         original = self._snapshot_settings()
         self._apply_settings(settings)
         self._apply_debug_timeouts()
@@ -584,28 +595,7 @@ class SoundDeviceAudioCapture:
             frames = int(self.sample_rate * self.chunk_duration)
 
             try:
-                with sd.InputStream(
-                    samplerate=self.sample_rate,
-                    channels=1,
-                    dtype="float32",
-                    device=microphone.index,
-                ) as stream:
-                    drained = self._drain_input_buffer(stream, frames)
-                    chunks, diagnostics = self._read_stream_chunks(
-                        stream,
-                        frames,
-                        drained,
-                    )
-                    capture = self.capture_from_chunks(
-                        chunks,
-                        microphone.name,
-                    )
-                    self._print_stream_read_diagnostic(
-                        diagnostics,
-                        capture,
-                        chunks,
-                    )
-                    return capture
+                return self._capture_open_stream(sd, microphone, frames)
             except KeyboardInterrupt:
                 return AudioCaptureResult(
                     samples=np.array([], dtype=np.float32),
@@ -617,9 +607,24 @@ class SoundDeviceAudioCapture:
                     warnings=("captura cancelada por el usuario",),
                 )
             except Exception as error:
-                raise RuntimeError(
-                    f"Fallo al abrir o leer el stream del microfono: {error}"
-                ) from error
+                self._microphone_signal_failures[microphone.index] = self._microphone_fallback_failures
+                alternative = self._first_open_microphone(exclude_index=microphone.index)
+                if alternative is None:
+                    raise RuntimeError(
+                        f"Fallo al abrir o leer el stream del microfono: {error}"
+                    ) from error
+                self._selected_index = alternative.index
+                print(
+                    "Cambiando automáticamente al dispositivo de entrada tras "
+                    f"fallo real de apertura: {alternative.index} - {alternative.name}"
+                )
+                try:
+                    return self._capture_open_stream(sd, alternative, frames)
+                except Exception as fallback_error:
+                    raise RuntimeError(
+                        "Fallo al abrir o leer el stream del microfono de fallback: "
+                        f"{fallback_error}"
+                    ) from fallback_error
         except KeyboardInterrupt:
             return AudioCaptureResult(
                 samples=np.array([], dtype=np.float32),
@@ -632,7 +637,6 @@ class SoundDeviceAudioCapture:
             )
         finally:
             self._restore_settings(original)
-
     def _apply_debug_timeouts(self) -> None:
         if self.max_duration < self.initial_silence_timeout:
             self.max_duration = self.initial_silence_timeout + 1.0
@@ -641,107 +645,143 @@ class SoundDeviceAudioCapture:
         self,
         sd,
     ) -> MicrophoneInfo:
+        """Keep affinity unless complete captures reached the fallback limit."""
         microphone = self.selected_or_default_microphone()
-        try:
-            self._open_probe_stream(microphone, None)
-        except Exception:
-            alternative = self._first_open_microphone(exclude_index=microphone.index)
+        if self._is_blocking_unsupported(microphone):
+            raise RuntimeError(self._unsupported_microphone_message(microphone))
 
-            if alternative is None:
-                raise
-
-            self._selected_index = alternative.index
-            microphone = alternative
-
-        diagnostic = self._probe_microphone_audio(sd, microphone)
-        self._print_capture_diagnostic(microphone, diagnostic)
-        return microphone
-
-        diagnostic = self._probe_microphone_audio(sd, microphone)
-        self._print_capture_diagnostic(microphone, diagnostic)
-
-        if diagnostic["has_audio"]:
+        failures = self._microphone_signal_failures.get(microphone.index, 0)
+        if failures < self._microphone_fallback_failures:
             return microphone
 
-        alternative = self._first_microphone_with_audio(sd, exclude_index=microphone.index)
+        blocked_indices = {
+            index
+            for index, count in self._microphone_signal_failures.items()
+            if count >= self._microphone_fallback_failures
+        }
+        alternative = self._first_fallback_candidate(
+            exclude_index=microphone.index,
+            excluded_indices=blocked_indices,
+            preferred_host_api=microphone.host_api,
+        )
 
         if alternative is None:
-            print("Audio de micrófono: no se encontró otro dispositivo con señal.")
+            if microphone.index not in self._fallback_notice_indices:
+                print(
+                    "Audio de micrófono: se mantiene el último dispositivo válido; "
+                    "no hay otro micrófono físico compatible."
+                )
+                self._fallback_notice_indices.add(microphone.index)
             return microphone
 
-        alternative_microphone, alternative_diagnostic = alternative
-        self._selected_index = alternative_microphone.index
+        self._selected_index = alternative.index
         print(
             "Cambiando automáticamente al dispositivo de entrada: "
-            f"{alternative_microphone.index} - {alternative_microphone.name}"
+            f"{alternative.index} - {alternative.name}"
         )
-        self._print_capture_diagnostic(alternative_microphone, alternative_diagnostic)
-        return alternative_microphone
+        return alternative
+    @property
+    def last_voice_microphone_index(self) -> int | None:
+        """Return the most recent device that produced a valid voice signal."""
+        return self._last_voice_microphone_index
 
-    def _first_microphone_with_audio(
+    def _record_microphone_capture(
+        self,
+        microphone: MicrophoneInfo,
+        capture: AudioCaptureResult,
+        chunks: list[np.ndarray],
+    ) -> None:
+        rms_values = [self._rms(self._mono_float32(chunk)) for chunk in chunks]
+        rms = max(rms_values) if rms_values else 0.0
+        self._print_capture_diagnostic(
+            microphone,
+            {"rms": rms, "has_audio": rms >= self._input_signal_threshold()},
+        )
+
+        if capture.completed and not capture.no_speech_detected and capture.samples.size > 0:
+            self._selected_index = microphone.index
+            self._last_voice_microphone_index = microphone.index
+            return
+
+        failures = self._microphone_signal_failures.get(microphone.index, 0) + 1
+        self._microphone_signal_failures[microphone.index] = failures
+        if failures < self._microphone_fallback_failures:
+            print(
+                "No se detectó voz; se mantiene el micrófono actual "
+                f"({failures}/{self._microphone_fallback_failures})."
+            )
+
+    def mark_transcription_valid(self) -> None:
+        """Confirm affinity and reset temporary penalties after valid STT."""
+        if self._selected_index is not None:
+            self._remember_microphone_signal(self._selected_index)
+
+    def _remember_microphone_signal(self, index: int) -> None:
+        self._selected_index = index
+        self._last_voice_microphone_index = index
+        self._microphone_signal_failures.clear()
+        self._microphone_signal_failures[index] = 0
+        self._fallback_notice_indices.clear()
+
+    def _capture_open_stream(
         self,
         sd,
+        microphone: MicrophoneInfo,
+        frames: int,
+    ) -> AudioCaptureResult:
+        """Capture with one fresh stream; closing the context releases it."""
+        with sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+            device=microphone.index,
+        ) as stream:
+            chunks, diagnostics = self._read_stream_chunks(stream, frames, 0)
+            capture = self.capture_from_chunks(chunks, microphone.name)
+            self._print_stream_read_diagnostic(diagnostics, capture, chunks)
+            self._record_microphone_capture(microphone, capture, chunks)
+            return capture
+    def _first_fallback_candidate(
+        self,
         exclude_index: int,
-    ) -> tuple[MicrophoneInfo, dict[str, float | bool]] | None:
-        for microphone in self.list_microphones():
-            if microphone.index == exclude_index or self._is_blocking_unsupported(microphone):
-                continue
-
-            diagnostic = self._probe_microphone_audio(sd, microphone)
-
-            if diagnostic["has_audio"]:
-                return microphone, diagnostic
-
-        return None
-
+        excluded_indices: set[int] | None = None,
+        preferred_host_api: str = "",
+    ) -> MicrophoneInfo | None:
+        excluded_indices = excluded_indices or set()
+        normalized_host_api = _normalize_text(preferred_host_api)
+        candidates = [
+            microphone
+            for microphone in self.list_microphones()
+            if microphone.index != exclude_index
+            and microphone.index not in excluded_indices
+            and not self._is_blocking_unsupported(microphone)
+            and not self._is_generic_microphone(microphone.name)
+            and (
+                not normalized_host_api
+                or _normalize_text(microphone.host_api) == normalized_host_api
+            )
+        ]
+        return candidates[0] if candidates else None
     def _first_open_microphone(
         self,
         exclude_index: int,
     ) -> MicrophoneInfo | None:
-        for microphone in self.list_microphones():
-            if microphone.index == exclude_index or self._is_blocking_unsupported(microphone):
-                continue
+        candidates = [
+            microphone
+            for microphone in self.list_microphones()
+            if microphone.index != exclude_index
+            and not self._is_blocking_unsupported(microphone)
+        ]
+        candidates.sort(key=lambda item: self._is_generic_microphone(item.name))
 
+        for microphone in candidates:
             try:
                 self._open_probe_stream(microphone, None)
             except Exception:
                 continue
-
             return microphone
 
         return None
-
-    def _probe_microphone_audio(
-        self,
-        sd,
-        microphone: MicrophoneInfo,
-    ) -> dict[str, float | bool]:
-        if self._is_blocking_unsupported(microphone):
-            return {"rms": 0.0, "has_audio": False}
-
-        frames = max(1, int(self.sample_rate * self.chunk_duration))
-        probe_chunks = max(1, math.ceil(0.5 / self.chunk_duration))
-        rms_values: list[float] = []
-
-        try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="float32",
-                device=microphone.index,
-            ) as stream:
-                for _ in range(probe_chunks):
-                    data, _overflowed = stream.read(frames)
-                    rms_values.append(self._rms(self._mono_float32(data)))
-        except Exception:
-            return {"rms": 0.0, "has_audio": False}
-
-        rms = max(rms_values) if rms_values else 0.0
-        return {
-            "rms": rms,
-            "has_audio": rms >= self._input_signal_threshold(),
-        }
-
     def _print_capture_diagnostic(
         self,
         microphone: MicrophoneInfo,
@@ -1660,6 +1700,7 @@ class SpeechEngineUseCase:
     def transcribe_once(
         self,
         capture_settings: SpeechCaptureSettings | None = None,
+        stage_sink: Callable[[str], None] | None = None,
     ) -> SpeechTranscriptionResult:
         """Capture one phrase and transcribe it."""
         started = time.monotonic()
@@ -1680,6 +1721,9 @@ class SpeechEngineUseCase:
 
         if capture.no_speech_detected or len(capture.samples) == 0:
             return self._capture_failure(capture, no_speech=True)
+
+        if stage_sink is not None:
+            stage_sink("transcribing")
 
         try:
             provider_result = self._provider.transcribe(
@@ -1736,7 +1780,7 @@ class SpeechEngineUseCase:
         ):
             warnings.append("confianza baja de transcripcion")
 
-        return SpeechTranscriptionResult(
+        result = SpeechTranscriptionResult(
             text=text,
             language=provider_result.language,
             audio_duration_seconds=capture.duration_seconds,
@@ -1757,6 +1801,10 @@ class SpeechEngineUseCase:
             capture_end_reason=capture.end_reason,
         )
 
+        mark_valid = getattr(self._capture, "mark_transcription_valid", None)
+        if callable(mark_valid):
+            mark_valid()
+        return result
     def _confidence(
         self,
         average_log_probability: float | None,

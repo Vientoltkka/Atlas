@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import time
 from typing import Any, Protocol
 
 
@@ -14,6 +15,14 @@ class SpeechOutputSettings:
     rate: int = 180
     volume: float = 1.0
     voice: str | None = None
+
+
+@dataclass(frozen=True)
+class SpeechOutputMetrics:
+    """Monotonic timings for one local TTS delivery."""
+
+    synthesis_seconds: float = 0.0
+    playback_seconds: float = 0.0
 
 
 class SpeechOutputEngine(Protocol):
@@ -63,17 +72,28 @@ class Pyttsx3SpeechOutputEngine:
         text: str,
     ) -> None:
         """Speak text with the configured local voice."""
+        self.speak_with_metrics(text)
+
+    def speak_with_metrics(
+        self,
+        text: str,
+    ) -> SpeechOutputMetrics:
+        """Speak text and return real synthesis/playback timings."""
         clean_text = text.strip()
 
         if not clean_text:
-            return
+            return SpeechOutputMetrics()
 
+        synthesis_started = time.monotonic()
         engine = self._load_engine()
 
         try:
             self._stop_if_busy(engine)
             engine.say(clean_text)
+            synthesis_seconds = time.monotonic() - synthesis_started
+            playback_started = time.monotonic()
             engine.runAndWait()
+            playback_seconds = time.monotonic() - playback_started
         except Exception as error:
             self._discard_failed_engine(engine)
             raise RuntimeError(str(error)) from error
@@ -81,6 +101,11 @@ class Pyttsx3SpeechOutputEngine:
             if self._engine is engine:
                 self._release_engine(engine)
                 self._engine = None
+
+        return SpeechOutputMetrics(
+            synthesis_seconds=synthesis_seconds,
+            playback_seconds=playback_seconds,
+        )
 
     def warm_up(self) -> None:
         """Initialize pyttsx3 and select voice before the first spoken response."""
