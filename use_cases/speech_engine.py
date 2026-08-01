@@ -1249,7 +1249,7 @@ class SoundDeviceAudioCapture:
         short_threshold = max(
             self._FLOAT32_MIN_VOICE_RMS
             * self._SHORT_UTTERANCE_THRESHOLD_MULTIPLIER,
-            voice_threshold * self._SHORT_UTTERANCE_THRESHOLD_MULTIPLIER,
+            voice_threshold,
             noise_floor * self._SHORT_UTTERANCE_NOISE_MULTIPLIER,
         )
         runs: list[tuple[int, int, float]] = []

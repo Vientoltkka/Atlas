@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import threading
 import time
 from typing import Any, Protocol
 
@@ -23,6 +24,9 @@ class SpeechOutputMetrics:
 
     synthesis_seconds: float = 0.0
     playback_seconds: float = 0.0
+    barge_in_detected: bool = False
+    tts_cancel_latency_ms: float = 0.0
+    barge_in_to_stt_ms: float = 0.0
 
 
 class SpeechOutputEngine(Protocol):
@@ -37,6 +41,9 @@ class SpeechOutputEngine(Protocol):
     def warm_up(self) -> None:
         """Initialize speech resources before the first response."""
 
+    def cancel(self) -> bool:
+        """Cancel active playback once and report whether it was active."""
+
     def close(self) -> None:
         """Release speech resources."""
 
@@ -50,6 +57,10 @@ class Pyttsx3SpeechOutputEngine:
     ) -> None:
         self._settings = settings or SpeechOutputSettings()
         self._engine: Any | None = None
+        self._engine_lock = threading.RLock()
+        self._cancel_requested = threading.Event()
+        self._playback_active = False
+        self._external_loop_active = False
 
     @classmethod
     def from_environment(cls) -> "Pyttsx3SpeechOutputEngine":
@@ -84,6 +95,7 @@ class Pyttsx3SpeechOutputEngine:
         if not clean_text:
             return SpeechOutputMetrics()
 
+        self._cancel_requested.clear()
         synthesis_started = time.monotonic()
         engine = self._load_engine()
 
@@ -92,15 +104,23 @@ class Pyttsx3SpeechOutputEngine:
             engine.say(clean_text)
             synthesis_seconds = time.monotonic() - synthesis_started
             playback_started = time.monotonic()
-            engine.runAndWait()
+            use_external_loop = self._supports_external_loop(engine)
+            with self._engine_lock:
+                self._playback_active = True
+                self._external_loop_active = use_external_loop
+            self._run_playback(engine, use_external_loop)
             playback_seconds = time.monotonic() - playback_started
         except Exception as error:
             self._discard_failed_engine(engine)
             raise RuntimeError(str(error)) from error
         finally:
-            if self._engine is engine:
-                self._release_engine(engine)
-                self._engine = None
+            with self._engine_lock:
+                self._playback_active = False
+                self._external_loop_active = False
+                if self._engine is engine:
+                    if not self._cancel_requested.is_set():
+                        self._release_engine(engine)
+                    self._engine = None
 
         return SpeechOutputMetrics(
             synthesis_seconds=synthesis_seconds,
@@ -108,40 +128,94 @@ class Pyttsx3SpeechOutputEngine:
         )
 
     def warm_up(self) -> None:
-        """Initialize pyttsx3 and select voice before the first spoken response."""
-        self._load_engine()
-
-    def close(self) -> None:
-        """Stop any pending speech."""
-        if self._engine is None:
-            return
-
-        stop = getattr(self._engine, "stop", None)
-
-        if callable(stop):
-            stop()
-
-        self._engine = None
-
-    def _load_engine(self):
-        if self._engine is not None:
-            return self._engine
-
+        """Validate pyttsx3 without acquiring an audio device before capture."""
         try:
-            import pyttsx3
+            import pyttsx3  # noqa: F401
         except ImportError as error:
             raise RuntimeError("Dependencia no disponible: pyttsx3.") from error
 
-        try:
-            engine = pyttsx3.init()
-            engine.setProperty("rate", self._settings.rate)
-            engine.setProperty("volume", self._settings.volume)
-            self._select_voice(engine, self._settings.voice)
-        except Exception as error:
-            raise RuntimeError(f"No se pudo inicializar TTS local: {error}") from error
+    def cancel(self) -> bool:
+        """Stop active playback once."""
+        with self._engine_lock:
+            if (
+                self._engine is None
+                or not self._playback_active
+                or self._cancel_requested.is_set()
+            ):
+                return False
+            self._cancel_requested.set()
+            engine = self._engine
+            external_loop_active = self._external_loop_active
 
-        self._engine = engine
-        return engine
+        if not external_loop_active:
+            stop = getattr(engine, "stop", None)
+            if callable(stop):
+                stop()
+        return True
+
+    def close(self) -> None:
+        """Stop any pending speech and release a warmed engine."""
+        if self.cancel():
+            return
+
+        with self._engine_lock:
+            engine = self._engine
+            self._engine = None
+            self._playback_active = False
+            self._external_loop_active = False
+
+        if engine is not None:
+            self._release_engine(engine)
+
+    def _load_engine(self):
+        with self._engine_lock:
+            if self._engine is not None:
+                return self._engine
+
+            try:
+                import pyttsx3
+            except ImportError as error:
+                raise RuntimeError("Dependencia no disponible: pyttsx3.") from error
+
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty("rate", self._settings.rate)
+                engine.setProperty("volume", self._settings.volume)
+                self._select_voice(engine, self._settings.voice)
+            except Exception as error:
+                raise RuntimeError(f"No se pudo inicializar TTS local: {error}") from error
+
+            self._engine = engine
+            return engine
+
+    def _supports_external_loop(
+        self,
+        engine,
+    ) -> bool:
+        return all(
+            callable(getattr(engine, name, None))
+            for name in ("startLoop", "iterate", "endLoop", "isBusy")
+        )
+
+    def _run_playback(
+        self,
+        engine,
+        use_external_loop: bool,
+    ) -> None:
+        if not use_external_loop:
+            engine.runAndWait()
+            return
+
+        engine.startLoop(False)
+        try:
+            while engine.isBusy():
+                if self._cancel_requested.is_set():
+                    engine.stop()
+                    break
+                engine.iterate()
+                time.sleep(0.01)
+        finally:
+            engine.endLoop()
 
     def _stop_if_busy(
         self,

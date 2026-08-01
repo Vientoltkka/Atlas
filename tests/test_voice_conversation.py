@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime
 from types import SimpleNamespace
@@ -1834,7 +1835,9 @@ def test_manual_voice_exits_by_spoken_commands(command: str) -> None:
     assert output.calls == []
 
 
-@pytest.mark.parametrize("command", ["salir", "Salir.", "EXIT", "quit"])
+@pytest.mark.parametrize(
+    "command", ["salir", "Salir", "SALIR", "Salir.", "EXIT", "quit"]
+)
 def test_manual_voice_exit_command_bypasses_stt_filters_and_model(command: str) -> None:
     speech = FakeSpeechEngine(
         [
@@ -1864,6 +1867,7 @@ def test_manual_voice_exit_command_bypasses_stt_filters_and_model(command: str) 
     assert model_calls == []
     assert output.calls == []
     assert output.closed is True
+    assert result.messages.count("Esperando voz...") == 1
 
 
 @pytest.mark.parametrize("command", ["salir", "exit", "quit", "terminar", "cancelar"])
@@ -2498,3 +2502,234 @@ def test_phase_17_1_sessions_do_not_share_transient_histories() -> None:
     assert first.session.transcript_history == ["primera sesion"]
     assert second.session.transcript_history == ["segunda sesion"]
     assert first.session.turns is not second.session.turns
+
+class InterruptibleSpeechOutputEngine(FakeSpeechOutputEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.released = threading.Event()
+        self.cancel_calls = 0
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    def speak(self, text: str) -> None:
+        self.calls.append(text)
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            if len(self.calls) == 1:
+                self.started.set()
+                if not self.released.wait(timeout=2.0):
+                    raise RuntimeError("TTS de prueba no liberado")
+        finally:
+            self.active_calls -= 1
+
+    def cancel(self) -> bool:
+        self.cancel_calls += 1
+        self.released.set()
+        return True
+
+    def release(self) -> None:
+        self.released.set()
+
+
+class FirstCaptureThenBargeSpeech(FakeSpeechEngine):
+    def __init__(
+        self,
+        results: list[SpeechTranscriptionResult],
+        output: InterruptibleSpeechOutputEngine,
+    ) -> None:
+        super().__init__(results)
+        self._output = output
+        self.first_capture_started_without_tts = False
+        self.barge_in_capture_started_during_tts = False
+
+    def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+        if self.transcribe_calls == 0:
+            assert self._output.active_calls == 0
+            assert not self._output.started.is_set()
+            self.first_capture_started_without_tts = True
+        elif self.transcribe_calls == 1:
+            assert self._output.started.wait(timeout=1.0)
+            assert self._output.active_calls == 1
+            self.barge_in_capture_started_during_tts = True
+        return super().transcribe_once(capture_settings)
+
+
+class ReleasingBargeInSpeech(FakeSpeechEngine):
+    def __init__(
+        self,
+        results: list[SpeechTranscriptionResult],
+        output: InterruptibleSpeechOutputEngine,
+        release_on_call: int = 2,
+    ) -> None:
+        super().__init__(results)
+        self._output = output
+        self._release_on_call = release_on_call
+
+    def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+        result = super().transcribe_once(capture_settings)
+        if self.transcribe_calls == self._release_on_call:
+            self._output.release()
+        return result
+
+
+def test_phase_17_2_normal_tts_without_barge_in_returns_to_listening() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = ReleasingBargeInSpeech(
+        [
+            speech_result("pregunta normal"),
+            speech_result("", completed=False, no_speech=True),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0]) or "respuesta normal",
+    )
+
+    assert processed == ["pregunta normal"]
+    assert output.cancel_calls == 0
+    assert output.max_active_calls == 1
+    assert speech.transcribe_calls == 3
+    normal_settings = speech.capture_settings_seen[0]
+    barge_in_settings = speech.capture_settings_seen[1]
+    resumed_settings = speech.capture_settings_seen[2]
+    assert normal_settings.initial_silence_timeout == 3.0
+    assert barge_in_settings.initial_silence_timeout == 0.4
+    assert barge_in_settings.max_duration == 3.0
+    assert barge_in_settings.minimum_audio_duration == 0.2
+    assert resumed_settings == normal_settings
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_2_first_capture_then_barge_in_processes_each_turn_once() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica hyrox"),
+            speech_result("Para. ¿Qué hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+    use_case = make_use_case(speech, output=output)
+
+    result = use_case.execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0])
+        or f"respuesta {text.splitlines()[0]}",
+    )
+
+    assert speech.first_capture_started_without_tts is True
+    assert speech.barge_in_capture_started_during_tts is True
+    assert processed == ["explica hyrox", "¿Qué hora es?"]
+    assert output.calls == [
+        "respuesta explica hyrox",
+        "respuesta ¿Qué hora es?",
+    ]
+    assert output.cancel_calls == 1
+    assert output.max_active_calls == 1
+    assert speech.transcribe_calls == 3
+    assert result.session.successful_turns == 2
+    assert result.session.ended_reason == "explicit_close"
+    assert not use_case._tts_workers
+    speaking = result.session.states.index(VoiceConversationState.SPEAKING)
+    assert VoiceConversationState.LISTENING in result.session.states[speaking + 1 :]
+
+    metrics = result.session.turns[0].metrics
+    assert metrics.barge_in_detected is True
+    assert metrics.tts_cancel_latency_ms >= 0.0
+    assert metrics.barge_in_to_stt_ms >= 0.0
+
+
+def test_phase_17_2_isolated_para_stops_tts_without_creating_a_turn() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = FakeSpeechEngine(
+        [
+            speech_result("explica hyrox"),
+            speech_result("para"),
+            speech_result("salir"),
+        ]
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0])
+        or "respuesta para explicar HYROX",
+    )
+
+    assert processed == ["explica hyrox"]
+    assert output.calls == ["respuesta para explicar HYROX"]
+    assert output.cancel_calls == 1
+    assert speech.transcribe_calls == 3
+    assert result.session.successful_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+    assert result.messages.count("Esperando voz...") == 2
+
+def test_phase_17_2_exit_during_tts_closes_without_next_capture() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = FakeSpeechEngine(
+        [
+            speech_result("pregunta"),
+            speech_result("salir"),
+            speech_result("no debe capturarse"),
+        ]
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0]) or "puedes decir salir",
+    )
+
+    assert processed == ["pregunta"]
+    assert output.calls == ["puedes decir salir"]
+    assert output.cancel_calls == 1
+    assert speech.transcribe_calls == 2
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.state is VoiceConversationState.STOPPED
+    assert result.messages.count("Esperando voz...") == 1
+
+
+def test_phase_17_2_tts_echo_does_not_trigger_false_barge_in() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    response = "HYROX combina carrera y estaciones."
+    speech = ReleasingBargeInSpeech(
+        [
+            speech_result("explica hyrox"),
+            speech_result("HYROX combina carrera y estaciones"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0]) or response,
+    )
+
+    assert processed == ["explica hyrox"]
+    assert output.cancel_calls == 0
+    assert speech.transcribe_calls == 3
+    assert result.session.successful_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_2_ctrl_c_during_tts_cancels_worker_and_session() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = FakeSpeechEngine(
+        [
+            speech_result("pregunta"),
+            speech_result("", completed=False, cancelled=True),
+        ]
+    )
+    use_case = make_use_case(speech, output=output)
+
+    result = use_case.execute_manual(process_text=lambda _text: "respuesta larga")
+
+    assert output.cancel_calls == 1
+    assert result.session.ended_reason == "cancelled"
+    assert result.session.state is VoiceConversationState.STOPPED
+    assert not use_case._tts_workers

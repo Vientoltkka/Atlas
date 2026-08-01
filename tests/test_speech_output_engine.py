@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -137,3 +138,114 @@ def test_pyttsx3_reports_separate_monotonic_synthesis_and_playback(
 
     assert metrics.synthesis_seconds == pytest.approx(0.1)
     assert metrics.playback_seconds == pytest.approx(0.3)
+
+def test_pyttsx3_cancel_stops_active_playback_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingEngine(FakePyttsx3Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.released = threading.Event()
+
+        def runAndWait(self) -> None:
+            self.run_and_wait_calls += 1
+            self.started.set()
+            if not self.released.wait(timeout=2.0):
+                raise RuntimeError("playback de prueba no cancelado")
+
+        def stop(self) -> None:
+            super().stop()
+            self.released.set()
+
+    engine = BlockingEngine()
+    fake_module = FakePyttsx3Module([engine])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+    errors: list[BaseException] = []
+
+    def speak() -> None:
+        try:
+            output.speak("respuesta larga")
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=speak)
+    worker.start()
+    assert engine.started.wait(timeout=1.0)
+
+    assert output.cancel() is True
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert errors == []
+    assert engine.stop_calls == 1
+    assert output.cancel() is False
+    assert engine.stop_calls == 1
+
+def test_pyttsx3_external_loop_cancels_on_playback_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExternalLoopEngine(FakePyttsx3Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loop_started = threading.Event()
+            self.busy = False
+            self.start_loop_calls = 0
+            self.iterate_calls = 0
+            self.end_loop_calls = 0
+            self.stop_thread_id: int | None = None
+
+        def say(self, text: str) -> None:
+            super().say(text)
+            self.busy = True
+
+        def isBusy(self) -> bool:
+            return self.busy
+
+        def startLoop(self, use_driver_loop: bool) -> None:
+            assert use_driver_loop is False
+            self.start_loop_calls += 1
+            self.loop_started.set()
+
+        def iterate(self) -> None:
+            self.iterate_calls += 1
+
+        def endLoop(self) -> None:
+            self.end_loop_calls += 1
+
+        def stop(self) -> None:
+            super().stop()
+            self.stop_thread_id = threading.get_ident()
+            self.busy = False
+
+    engine = ExternalLoopEngine()
+    fake_module = FakePyttsx3Module([engine])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+    worker = threading.Thread(target=output.speak, args=("respuesta larga",))
+    worker.start()
+    assert engine.loop_started.wait(timeout=1.0)
+
+    assert output.cancel() is True
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert engine.run_and_wait_calls == 0
+    assert engine.start_loop_calls == 1
+    assert engine.end_loop_calls == 1
+    assert engine.stop_calls == 1
+    assert engine.stop_thread_id == worker.ident
+
+def test_pyttsx3_warm_up_does_not_initialize_audio_before_first_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakePyttsx3Engine()
+    fake_module = FakePyttsx3Module([engine])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+
+    output.warm_up()
+
+    assert fake_module.init_calls == 0
+    assert engine.stop_calls == 0

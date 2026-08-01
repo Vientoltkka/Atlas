@@ -54,6 +54,9 @@ class VoiceTurnMetrics:
     model_seconds: float = 0.0
     synthesis_seconds: float = 0.0
     playback_seconds: float = 0.0
+    barge_in_detected: bool = False
+    tts_cancel_latency_ms: float = 0.0
+    barge_in_to_stt_ms: float = 0.0
     total_seconds: float = 0.0
 
 
@@ -221,6 +224,9 @@ class VoiceConversationUseCase:
         self._tts_speaking = False
         self._tts_warmup_error = ""
         self._model_workers: set[threading.Thread] = set()
+        self._tts_workers: set[threading.Thread] = set()
+        self._pending_barge_in: SpeechTranscriptionResult | None = None
+        self._barge_in_enabled = False
         self._model_timeout_seconds = _read_float(
             "ATLAS_VOICE_MODEL_TIMEOUT",
             135.0,
@@ -606,6 +612,7 @@ class VoiceConversationUseCase:
     ) -> None:
         first_listen = True
         last_activity = self._clock()
+        self._barge_in_enabled = True
 
         while session.active:
             typed_command = typed_input() if typed_input is not None else None
@@ -650,16 +657,27 @@ class VoiceConversationUseCase:
                 break
 
             turn_started = time.monotonic()
+            pending_barge_in = self._take_pending_barge_in()
+            from_barge_in = pending_barge_in is not None
             self._set_state(session, VoiceConversationState.LISTENING, emit)
             self._emit_voice_flow("comenzar siguiente turno", emit, voice_debug)
-            emit("Esperando voz...", diagnostic=False)
-            transcription = self._transcribe_turn(session, emit)
+            if from_barge_in:
+                transcription = pending_barge_in
+                self._emit_voice_flow(
+                    "barge-in entregado al siguiente turno",
+                    emit,
+                    voice_debug,
+                )
+            else:
+                emit("Esperando voz...", diagnostic=False)
+                transcription = self._transcribe_turn(session, emit)
             if transcription.no_speech_detected or not transcription.completed:
                 self._emit_voice_debug_transcription(transcription, emit, voice_debug)
 
             if (
                 retry_initial_no_speech
                 and first_listen
+                and not from_barge_in
                 and self._should_retry_initial_listen(transcription)
             ):
                 emit("No se detecto voz. Vuelvo a escuchar...", diagnostic=True)
@@ -740,10 +758,13 @@ class VoiceConversationUseCase:
                 emit("Conversacion finalizada.", diagnostic=True)
                 break
 
-            accepted_text = self._accepted_transcription_text(
-                transcription,
-                trim_edge_punctuation=enforce_spanish_response,
-            )
+            if from_barge_in:
+                accepted_text = transcription.text
+            else:
+                accepted_text = self._accepted_transcription_text(
+                    transcription,
+                    trim_edge_punctuation=enforce_spanish_response,
+                )
 
             if accepted_text is None:
                 self._set_state(session, VoiceConversationState.RECOVERING, emit)
@@ -926,6 +947,9 @@ class VoiceConversationUseCase:
             model_seconds=max(0.0, model_duration),
             synthesis_seconds=max(0.0, output_metrics.synthesis_seconds),
             playback_seconds=max(0.0, output_metrics.playback_seconds),
+            barge_in_detected=output_metrics.barge_in_detected,
+            tts_cancel_latency_ms=max(0.0, output_metrics.tts_cancel_latency_ms),
+            barge_in_to_stt_ms=max(0.0, output_metrics.barge_in_to_stt_ms),
             total_seconds=max(0.0, time.monotonic() - turn_started),
         )
 
@@ -993,9 +1017,15 @@ class VoiceConversationUseCase:
             else:
                 self._set_state(session, VoiceConversationState.SPEAKING, emit)
                 self._emit_voice_flow("inicio TTS", emit, voice_debug)
-                output_metrics = self._speak_response(response, session, emit)
+                output_metrics = self._speak_response(
+                    response,
+                    session,
+                    emit,
+                    voice_debug,
+                )
                 self._emit_voice_flow("fin TTS", emit, voice_debug)
-                time.sleep(0.2)
+                if not output_metrics.barge_in_detected:
+                    time.sleep(0.2)
                 self._emit_voice_flow("vuelta a escucha", emit, voice_debug)
 
         return output_metrics
@@ -1016,6 +1046,16 @@ class VoiceConversationUseCase:
             emit(f"Síntesis TTS: {metrics.synthesis_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Reproducción: {metrics.playback_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Total: {metrics.total_seconds * 1000:.0f} ms", diagnostic=False)
+            if metrics.barge_in_detected:
+                emit("barge_in_detected: true", diagnostic=False)
+                emit(
+                    f"tts_cancel_latency_ms: {metrics.tts_cancel_latency_ms:.0f}",
+                    diagnostic=False,
+                )
+                emit(
+                    f"barge_in_to_stt_ms: {metrics.barge_in_to_stt_ms:.0f}",
+                    diagnostic=False,
+                )
 
         if voice_debug:
             self._emit_voice_flow(
@@ -1130,6 +1170,7 @@ class VoiceConversationUseCase:
         response: str,
         session: VoiceConversationSession,
         emit: Callable[[str, bool], None],
+        voice_debug: bool = False,
     ) -> SpeechOutputMetrics:
         if self._speech_output_engine is None or not response.strip():
             return SpeechOutputMetrics()
@@ -1137,27 +1178,251 @@ class VoiceConversationUseCase:
         self._tts_speaking = True
         try:
             emit("TTS iniciado", diagnostic=True)
-            speak_with_metrics = getattr(
-                self._speech_output_engine,
-                "speak_with_metrics",
-                None,
-            )
-            if callable(speak_with_metrics):
-                metrics = speak_with_metrics(response)
-            else:
-                playback_started = time.monotonic()
-                self._speech_output_engine.speak(response)
-                metrics = SpeechOutputMetrics(
-                    playback_seconds=time.monotonic() - playback_started,
+            cancel = getattr(self._speech_output_engine, "cancel", None)
+            if self._barge_in_enabled and callable(cancel):
+                metrics = self._speak_with_barge_in(
+                    response,
+                    emit,
+                    voice_debug,
                 )
+            else:
+                metrics = self._invoke_speech_output(response)
             emit("TTS finalizado", diagnostic=True)
             return metrics
+        except KeyboardInterrupt:
+            raise
         except Exception as error:
             self._set_state(session, VoiceConversationState.DEGRADED, emit)
             emit(f"Error TTS: {error}", diagnostic=False)
             return SpeechOutputMetrics()
         finally:
             self._tts_speaking = False
+
+    def _invoke_speech_output(
+        self,
+        response: str,
+    ) -> SpeechOutputMetrics:
+        if self._speech_output_engine is None:
+            return SpeechOutputMetrics()
+
+        speak_with_metrics = getattr(
+            self._speech_output_engine,
+            "speak_with_metrics",
+            None,
+        )
+        if callable(speak_with_metrics):
+            return speak_with_metrics(response)
+
+        playback_started = time.monotonic()
+        self._speech_output_engine.speak(response)
+        return SpeechOutputMetrics(
+            playback_seconds=time.monotonic() - playback_started,
+        )
+
+    def _speak_with_barge_in(
+        self,
+        response: str,
+        emit: Callable[[str, bool], None],
+        voice_debug: bool,
+    ) -> SpeechOutputMetrics:
+        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+        cancel_attempted = False
+        detected = False
+        cancel_latency_ms = 0.0
+        barge_in_to_stt_ms = 0.0
+
+        def run_tts() -> None:
+            try:
+                result_queue.put((True, self._invoke_speech_output(response)))
+            except BaseException as error:
+                result_queue.put((False, error))
+            finally:
+                self._tts_workers.discard(threading.current_thread())
+
+        worker = threading.Thread(
+            target=run_tts,
+            name="atlas-voice-tts",
+            daemon=True,
+        )
+        self._tts_workers.add(worker)
+        worker.start()
+
+        try:
+            while worker.is_alive():
+                stt_started = time.monotonic()
+                transcription = self._transcribe_barge_in_turn()
+                stt_finished = time.monotonic()
+
+                if transcription.cancelled:
+                    self._cancel_speech_output()
+                    cancel_attempted = True
+                    worker.join()
+                    raise KeyboardInterrupt
+
+                accepted_text = self._accepted_barge_in_text(
+                    transcription,
+                    response,
+                )
+                if accepted_text is None:
+                    worker.join(timeout=0.01)
+                    continue
+
+                if accepted_text:
+                    self._pending_barge_in = replace(
+                        transcription,
+                        text=accepted_text,
+                    )
+                detected = True
+                barge_in_to_stt_ms = max(
+                    0.0,
+                    (stt_finished - stt_started) * 1000.0
+                    - max(0.0, transcription.phrase_start_ms),
+                )
+                cancel_started = time.monotonic()
+                self._cancel_speech_output()
+                cancel_attempted = True
+                worker.join()
+                cancel_latency_ms = max(
+                    0.0,
+                    (time.monotonic() - cancel_started) * 1000.0,
+                )
+                self._emit_voice_flow(
+                    f"barge-in detectado: {accepted_text!r}",
+                    emit,
+                    voice_debug,
+                )
+                break
+
+            worker.join()
+            completed, payload = result_queue.get()
+            if not completed:
+                raise payload
+            output_metrics = payload
+            if not isinstance(output_metrics, SpeechOutputMetrics):
+                output_metrics = SpeechOutputMetrics()
+            return replace(
+                output_metrics,
+                barge_in_detected=detected,
+                tts_cancel_latency_ms=cancel_latency_ms,
+                barge_in_to_stt_ms=barge_in_to_stt_ms,
+            )
+        except BaseException:
+            if not cancel_attempted:
+                self._cancel_speech_output()
+            worker.join()
+            raise
+        finally:
+            if not worker.is_alive():
+                self._tts_workers.discard(worker)
+
+    def _transcribe_barge_in_turn(self) -> SpeechTranscriptionResult:
+        settings = replace(
+            self._turn_capture_settings,
+            max_duration=min(self._turn_capture_settings.max_duration, 3.0),
+            initial_silence_timeout=min(
+                self._turn_capture_settings.initial_silence_timeout,
+                0.4,
+            ),
+            minimum_audio_duration=min(
+                self._turn_capture_settings.minimum_audio_duration,
+                0.2,
+            ),
+        )
+        try:
+            return self._speech_engine.transcribe_once(settings)
+        except TypeError:
+            return self._speech_engine.transcribe_once()
+
+    def _accepted_barge_in_text(
+        self,
+        transcription: SpeechTranscriptionResult,
+        spoken_response: str,
+    ) -> str | None:
+        if (
+            transcription.cancelled
+            or transcription.no_speech_detected
+            or not transcription.completed
+        ):
+            return None
+
+        clean_text = self._clean_transcription_text(transcription.text)
+        if not clean_text:
+            return None
+        if self._is_close_command(clean_text):
+            return clean_text
+
+        has_interruption_prefix, candidate_text = (
+            self._strip_interruption_prefix(clean_text)
+        )
+        if has_interruption_prefix and not candidate_text:
+            return ""
+        if has_interruption_prefix:
+            clean_text = candidate_text
+
+        if self._is_tts_echo(clean_text, spoken_response):
+            return None
+
+        return self._accepted_transcription_text(
+            replace(transcription, text=clean_text),
+            trim_edge_punctuation=False,
+        )
+
+    def _strip_interruption_prefix(
+        self,
+        text: str,
+    ) -> tuple[bool, str]:
+        match = re.match(r"^\s*para\b", text, flags=re.IGNORECASE)
+        if match is None:
+            return False, text
+
+        remainder = text[match.end():].lstrip()
+        remainder = re.sub(r"^[,.;:!¡-]+\s*", "", remainder)
+        if not self._useful_text(remainder):
+            return True, ""
+        return True, remainder.strip()
+
+    def _is_tts_echo(
+        self,
+        transcription: str,
+        spoken_response: str,
+    ) -> bool:
+        normalized_transcription = self._normalize_echo_text(transcription)
+        normalized_response = self._normalize_echo_text(spoken_response)
+        if not normalized_transcription or not normalized_response:
+            return False
+        if normalized_transcription in normalized_response:
+            return True
+
+        transcription_tokens = set(normalized_transcription.split())
+        response_tokens = set(normalized_response.split())
+        if not transcription_tokens:
+            return False
+        overlap = len(transcription_tokens & response_tokens)
+        return overlap / len(transcription_tokens) >= 0.8
+
+    def _normalize_echo_text(self, text: str) -> str:
+        normalized = self._normalize(text)
+        without_punctuation = "".join(
+            " " if unicodedata.category(character).startswith("P") else character
+            for character in normalized
+        )
+        return " ".join(without_punctuation.split())
+
+    def _take_pending_barge_in(self) -> SpeechTranscriptionResult | None:
+        pending = self._pending_barge_in
+        self._pending_barge_in = None
+        return pending
+
+    def _cancel_speech_output(self) -> bool:
+        if self._speech_output_engine is None:
+            return False
+        cancel = getattr(self._speech_output_engine, "cancel", None)
+        if not callable(cancel):
+            return False
+        try:
+            return bool(cancel())
+        except Exception:
+            return False
 
     def _calibrate_turn_capture_settings(self) -> None:
         calibrate = getattr(self._speech_engine, "calibrate_noise_threshold", None)
@@ -1185,17 +1450,26 @@ class VoiceConversationUseCase:
             validate(self._turn_capture_settings)
 
     def _close_resources(self) -> None:
-        self._join_model_workers()
-        close_speech = getattr(self._speech_engine, "close", None)
-
-        if callable(close_speech):
-            close_speech()
-
+        self._barge_in_enabled = False
+        self._pending_barge_in = None
         if self._speech_output_engine is not None:
             try:
                 self._speech_output_engine.close()
             except Exception:
                 pass
+        self._join_tts_workers()
+        self._join_model_workers()
+
+        close_speech = getattr(self._speech_engine, "close", None)
+        if callable(close_speech):
+            close_speech()
+
+    def _join_tts_workers(self) -> None:
+        for worker in tuple(self._tts_workers):
+            if worker is threading.current_thread():
+                continue
+            worker.join()
+            self._tts_workers.discard(worker)
 
     def _join_model_workers(self) -> None:
         for worker in tuple(self._model_workers):

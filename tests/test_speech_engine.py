@@ -615,6 +615,65 @@ def test_short_utterance_rejects_nonconsecutive_noise_bursts() -> None:
     assert result.samples.size == 0
 
 
+def test_physical_short_utterance_above_noise_floor_reaches_stt_provider() -> None:
+    vad_capture = SoundDeviceAudioCapture(
+        sample_rate=20,
+        speech_threshold=0.008,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.05,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.0025
+    voice_levels = (0.0100, 0.0139, 0.00935, 0.0105, 0.0098)
+    voice = [np.ones(1, dtype=np.float32) * level for level in voice_levels]
+    short_result = vad_capture.capture_from_chunks(
+        [room, room] + voice + [room for _ in range(16)],
+        "Fake Mic",
+    )
+    capture = FakeCapture()
+    capture.result = short_result
+    provider = FakeProvider()
+    provider.text = "salir"
+
+    result = SpeechEngineUseCase(capture, provider).transcribe_once()
+
+    assert short_result.completed is True
+    assert short_result.samples.size > 0
+    assert short_result.accumulated_voice_ms == pytest.approx(250.0)
+    assert short_result.end_reason == "short utterance por contraste"
+    assert provider.calls == 1
+    assert result.text == "salir"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [np.ones(1, dtype=np.float32) * 0.0025 for _ in range(20)],
+        [np.ones(1, dtype=np.float32) * 0.0139]
+        + [np.ones(1, dtype=np.float32) * 0.0025 for _ in range(19)],
+    ],
+    ids=["ambient-noise", "isolated-peak"],
+)
+def test_noise_or_isolated_peak_does_not_reach_stt_provider(chunks) -> None:
+    vad_capture = SoundDeviceAudioCapture(
+        sample_rate=20,
+        speech_threshold=0.008,
+        initial_silence_timeout=1.0,
+        chunk_duration=0.05,
+        minimum_audio_duration=0.2,
+    )
+    rejected = vad_capture.capture_from_chunks(chunks, "Fake Mic")
+    capture = FakeCapture()
+    capture.result = rejected
+    provider = FakeProvider()
+
+    result = SpeechEngineUseCase(capture, provider).transcribe_once()
+
+    assert rejected.samples.size == 0
+    assert rejected.no_speech_detected is True
+    assert provider.calls == 0
+    assert result.no_speech_detected is True
+
 def test_short_utterance_capture_reaches_stt_provider() -> None:
     vad_capture = SoundDeviceAudioCapture(
         sample_rate=10,
