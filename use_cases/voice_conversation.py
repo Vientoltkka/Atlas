@@ -110,6 +110,9 @@ class VoiceConversationResult:
 class VoiceConversationUseCase:
     """Run a controlled continuous voice conversation."""
 
+    _TTS_WORKER_JOIN_TIMEOUT_SECONDS = 0.25
+    _MAX_EMPTY_BARGE_IN_CAPTURES = 2
+    _EMPTY_BARGE_IN_BACKOFF_SECONDS = 0.05
     _CODE_BLOCK_PATTERN = re.compile(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", re.DOTALL)
     _COMMANDS = {
         "activa conversacion por voz",
@@ -664,7 +667,7 @@ class VoiceConversationUseCase:
             if from_barge_in:
                 transcription = pending_barge_in
                 self._emit_voice_flow(
-                    "barge-in entregado al siguiente turno",
+                    f"BARGE_IN dispatch query={transcription.text!r}",
                     emit,
                     voice_debug,
                 )
@@ -821,6 +824,12 @@ class VoiceConversationUseCase:
                 voice_debug,
                 turn_started,
             )
+            if from_barge_in:
+                self._emit_voice_flow(
+                    f"BARGE_IN completed query={text!r}",
+                    emit,
+                    voice_debug,
+                )
             if session.active:
                 self._set_state(session, VoiceConversationState.READY, emit)
             last_activity = self._clock()
@@ -1227,6 +1236,8 @@ class VoiceConversationUseCase:
     ) -> SpeechOutputMetrics:
         result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
         cancel_attempted = False
+        cancel_request_accepted = False
+        empty_capture_attempts = 0
         detected = False
         cancel_latency_ms = 0.0
         barge_in_to_stt_ms = 0.0
@@ -1246,12 +1257,33 @@ class VoiceConversationUseCase:
         )
         self._tts_workers.add(worker)
         worker.start()
+        worker.join(timeout=0.01)
 
         try:
             while worker.is_alive():
+                self._emit_voice_flow(
+                    "BARGE_IN capture_started",
+                    emit,
+                    voice_debug,
+                )
                 stt_started = time.monotonic()
                 transcription = self._transcribe_barge_in_turn()
                 stt_finished = time.monotonic()
+                speech_detected = bool(
+                    transcription.completed
+                    and not transcription.no_speech_detected
+                    and transcription.text.strip()
+                )
+                self._emit_voice_flow(
+                    f"BARGE_IN speech_detected={speech_detected}",
+                    emit,
+                    voice_debug,
+                )
+                self._emit_voice_flow(
+                    f"BARGE_IN transcript={transcription.text!r}",
+                    emit,
+                    voice_debug,
+                )
 
                 if transcription.cancelled:
                     self._cancel_speech_output()
@@ -1259,6 +1291,29 @@ class VoiceConversationUseCase:
                     worker.join()
                     raise KeyboardInterrupt
 
+                if (
+                    transcription.no_speech_detected
+                    and transcription.samples_count == 0
+                ):
+                    empty_capture_attempts += 1
+                    self._emit_voice_flow(
+                        "BARGE_IN no_audio "
+                        f"attempt={empty_capture_attempts}/"
+                        f"{self._MAX_EMPTY_BARGE_IN_CAPTURES}",
+                        emit,
+                        voice_debug,
+                    )
+                    if empty_capture_attempts >= self._MAX_EMPTY_BARGE_IN_CAPTURES:
+                        self._emit_voice_flow(
+                            "BARGE_IN monitoring_stopped reason=no_audio",
+                            emit,
+                            voice_debug,
+                        )
+                        break
+                    time.sleep(self._EMPTY_BARGE_IN_BACKOFF_SECONDS)
+                    continue
+
+                empty_capture_attempts = 0
                 accepted_text = self._accepted_barge_in_text(
                     transcription,
                     response,
@@ -1267,10 +1322,24 @@ class VoiceConversationUseCase:
                     worker.join(timeout=0.01)
                     continue
 
+                clean_text = self._clean_transcription_text(transcription.text)
+                interruption_recognized, _remainder = (
+                    self._strip_interruption_prefix(clean_text)
+                )
+                self._emit_voice_flow(
+                    f"BARGE_IN interruption_recognized={interruption_recognized}",
+                    emit,
+                    voice_debug,
+                )
                 if accepted_text:
                     self._pending_barge_in = replace(
                         transcription,
                         text=accepted_text,
+                    )
+                    self._emit_voice_flow(
+                        f"BARGE_IN pending_query={accepted_text!r}",
+                        emit,
+                        voice_debug,
                     )
                 detected = True
                 barge_in_to_stt_ms = max(
@@ -1279,9 +1348,14 @@ class VoiceConversationUseCase:
                     - max(0.0, transcription.phrase_start_ms),
                 )
                 cancel_started = time.monotonic()
-                self._cancel_speech_output()
+                cancel_request_accepted = self._cancel_speech_output()
+                self._emit_voice_flow(
+                    f"BARGE_IN stop_requested={cancel_request_accepted}",
+                    emit,
+                    voice_debug,
+                )
                 cancel_attempted = True
-                worker.join()
+                worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
                 cancel_latency_ms = max(
                     0.0,
                     (time.monotonic() - cancel_started) * 1000.0,
@@ -1293,13 +1367,27 @@ class VoiceConversationUseCase:
                 )
                 break
 
-            worker.join()
-            completed, payload = result_queue.get()
-            if not completed:
-                raise payload
-            output_metrics = payload
+            worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
+            if worker.is_alive():
+                output_metrics = SpeechOutputMetrics()
+            else:
+                completed, payload = result_queue.get_nowait()
+                if not completed:
+                    raise payload
+                output_metrics = payload
             if not isinstance(output_metrics, SpeechOutputMetrics):
                 output_metrics = SpeechOutputMetrics()
+            if detected:
+                tts_stopped = bool(
+                    cancel_request_accepted
+                    and not worker.is_alive()
+                    and output_metrics.tts_cancel_confirmed
+                )
+                self._emit_voice_flow(
+                    f"BARGE_IN tts_stopped={tts_stopped}",
+                    emit,
+                    voice_debug,
+                )
             return replace(
                 output_metrics,
                 barge_in_detected=detected,
@@ -1309,20 +1397,18 @@ class VoiceConversationUseCase:
         except BaseException:
             if not cancel_attempted:
                 self._cancel_speech_output()
-            worker.join()
+            worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
             raise
         finally:
             if not worker.is_alive():
                 self._tts_workers.discard(worker)
 
     def _transcribe_barge_in_turn(self) -> SpeechTranscriptionResult:
+        max_duration = min(self._turn_capture_settings.max_duration, 3.0)
         settings = replace(
             self._turn_capture_settings,
-            max_duration=min(self._turn_capture_settings.max_duration, 3.0),
-            initial_silence_timeout=min(
-                self._turn_capture_settings.initial_silence_timeout,
-                0.4,
-            ),
+            max_duration=max_duration,
+            initial_silence_timeout=max_duration,
             minimum_audio_duration=min(
                 self._turn_capture_settings.minimum_audio_duration,
                 0.2,
@@ -1468,8 +1554,9 @@ class VoiceConversationUseCase:
         for worker in tuple(self._tts_workers):
             if worker is threading.current_thread():
                 continue
-            worker.join()
-            self._tts_workers.discard(worker)
+            worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
+            if not worker.is_alive():
+                self._tts_workers.discard(worker)
 
     def _join_model_workers(self) -> None:
         for worker in tuple(self._model_workers):

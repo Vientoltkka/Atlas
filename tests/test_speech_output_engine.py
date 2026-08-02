@@ -237,6 +237,60 @@ def test_pyttsx3_external_loop_cancels_on_playback_thread(
     assert engine.stop_calls == 1
     assert engine.stop_thread_id == worker.ident
 
+
+def test_pyttsx3_external_loop_pumps_until_sapi_confirms_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AsynchronousCancelEngine(FakePyttsx3Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loop_started = threading.Event()
+            self.busy = False
+            self.audio_playing = False
+            self.stop_requested = False
+            self.iterations_after_stop = 0
+            self.stop_thread_id: int | None = None
+
+        def say(self, text: str) -> None:
+            super().say(text)
+            self.busy = True
+            self.audio_playing = True
+
+        def startLoop(self, use_driver_loop: bool) -> None:
+            assert use_driver_loop is False
+            self.loop_started.set()
+
+        def iterate(self) -> None:
+            if self.stop_requested:
+                self.iterations_after_stop += 1
+                self.audio_playing = False
+                self.busy = False
+
+        def endLoop(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+            self.stop_thread_id = threading.get_ident()
+            self.stop_requested = True
+
+    engine = AsynchronousCancelEngine()
+    fake_module = FakePyttsx3Module([engine])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+    worker = threading.Thread(target=output.speak, args=("respuesta larga",))
+    worker.start()
+    assert engine.loop_started.wait(timeout=1.0)
+
+    assert output.cancel() is True
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert engine.stop_thread_id == worker.ident
+    assert engine.iterations_after_stop >= 1
+    assert engine.audio_playing is False
+
+
 def test_pyttsx3_warm_up_does_not_initialize_audio_before_first_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

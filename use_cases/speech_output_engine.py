@@ -27,6 +27,7 @@ class SpeechOutputMetrics:
     barge_in_detected: bool = False
     tts_cancel_latency_ms: float = 0.0
     barge_in_to_stt_ms: float = 0.0
+    tts_cancel_confirmed: bool = False
 
 
 class SpeechOutputEngine(Protocol):
@@ -50,6 +51,8 @@ class SpeechOutputEngine(Protocol):
 
 class Pyttsx3SpeechOutputEngine:
     """Local pyttsx3 speech output backed by Windows SAPI5."""
+
+    _CANCEL_CONFIRM_TIMEOUT_SECONDS = 0.2
 
     def __init__(
         self,
@@ -108,7 +111,7 @@ class Pyttsx3SpeechOutputEngine:
             with self._engine_lock:
                 self._playback_active = True
                 self._external_loop_active = use_external_loop
-            self._run_playback(engine, use_external_loop)
+            cancel_confirmed = self._run_playback(engine, use_external_loop)
             playback_seconds = time.monotonic() - playback_started
         except Exception as error:
             self._discard_failed_engine(engine)
@@ -125,6 +128,7 @@ class Pyttsx3SpeechOutputEngine:
         return SpeechOutputMetrics(
             synthesis_seconds=synthesis_seconds,
             playback_seconds=playback_seconds,
+            tts_cancel_confirmed=cancel_confirmed,
         )
 
     def warm_up(self) -> None:
@@ -201,21 +205,42 @@ class Pyttsx3SpeechOutputEngine:
         self,
         engine,
         use_external_loop: bool,
-    ) -> None:
+    ) -> bool:
         if not use_external_loop:
             engine.runAndWait()
-            return
+            is_busy = getattr(engine, "isBusy", None)
+            return bool(
+                self._cancel_requested.is_set()
+                and callable(is_busy)
+                and not is_busy()
+            )
 
+        cancel_started: float | None = None
+        cancel_confirmed = False
         engine.startLoop(False)
         try:
             while engine.isBusy():
-                if self._cancel_requested.is_set():
+                if self._cancel_requested.is_set() and cancel_started is None:
                     engine.stop()
-                    break
+                    cancel_started = time.monotonic()
+
                 engine.iterate()
+
+                if cancel_started is not None:
+                    if not engine.isBusy():
+                        cancel_confirmed = True
+                        break
+                    if (
+                        time.monotonic() - cancel_started
+                        >= self._CANCEL_CONFIRM_TIMEOUT_SECONDS
+                    ):
+                        break
+
                 time.sleep(0.01)
         finally:
             engine.endLoop()
+
+        return cancel_confirmed
 
     def _stop_if_busy(
         self,

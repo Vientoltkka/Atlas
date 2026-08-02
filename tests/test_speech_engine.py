@@ -18,6 +18,7 @@ from use_cases.speech_engine import (
     MicrophoneInfo,
     ProviderTranscriptionResult,
     SoundDeviceAudioCapture,
+    SpeechCaptureSettings,
     SpeechEngineUseCase,
     SpeechInteractionUseCase,
 )
@@ -643,6 +644,76 @@ def test_physical_short_utterance_above_noise_floor_reaches_stt_provider() -> No
     assert short_result.end_reason == "short utterance por contraste"
     assert provider.calls == 1
     assert result.text == "salir"
+
+
+def test_barge_in_reopens_after_initial_silence_and_later_voice_reaches_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=3.0,
+        initial_silence_timeout=0.4,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones((1, 1), dtype=np.float32) * 0.0005
+    intervention = np.ones((1, 1), dtype=np.float32) * 0.03
+    chunks = (
+        [room.copy() for _ in range(5)]
+        + [intervention.copy() for _ in range(6)]
+        + [room.copy() for _ in range(25)]
+    )
+    reads_per_stream: list[int] = []
+
+    class Stream:
+        def __enter__(self):
+            reads_per_stream.append(0)
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            reads_per_stream[-1] += 1
+            if chunks:
+                return chunks.pop(0), False
+            return room.copy(), False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {
+                "name": "Physical Mic",
+                "max_input_channels": 1,
+                "hostapi": 0,
+            }
+        ],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+    provider = FakeProvider()
+    provider.text = "Para, ¿qué hora es?"
+    engine = SpeechEngineUseCase(capture, provider)
+    settings = SpeechCaptureSettings(
+        max_duration=3.0,
+        initial_silence_timeout=0.4,
+        trailing_silence=0.8,
+        chunk_duration=0.1,
+        speech_threshold=0.004,
+        minimum_audio_duration=0.2,
+    )
+
+    first = engine.transcribe_once(settings)
+    second = engine.transcribe_once(settings)
+
+    assert first.no_speech_detected is True
+    assert reads_per_stream[0] == 4
+    assert second.completed is True
+    assert second.text == "Para, ¿qué hora es?"
+    assert second.accumulated_voice_ms == pytest.approx(600.0)
+    assert provider.calls == 1
 
 
 @pytest.mark.parametrize(

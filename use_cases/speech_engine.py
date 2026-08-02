@@ -310,6 +310,8 @@ class FasterWhisperSpeechToTextProvider:
 class SoundDeviceAudioCapture:
     """Capture one spoken phrase with sounddevice."""
 
+    _INITIAL_SILENCE_TIMEOUT_WARNING = "No se detecto voz antes del tiempo limite."
+
     _GENERIC_MICROPHONE_TERMS = (
         "asignador de sonido microsoft",
         "microsoft sound mapper",
@@ -883,7 +885,7 @@ class SoundDeviceAudioCapture:
                     return self._no_speech_result(
                         microphone_name,
                         elapsed,
-                        "No se detecto voz antes del tiempo limite.",
+                        self._INITIAL_SILENCE_TIMEOUT_WARNING,
                         voice_threshold=voice_threshold,
                         noise_floor=noise_floor,
                     )
@@ -1027,6 +1029,8 @@ class SoundDeviceAudioCapture:
                 "silencio posterior detectado",
                 "short utterance por contraste",
             }:
+                break
+            if partial.warnings == (self._INITIAL_SILENCE_TIMEOUT_WARNING,):
                 break
 
         total_buffer_length = sum(block_lengths)

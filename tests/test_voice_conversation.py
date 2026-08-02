@@ -8,10 +8,23 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from agents.chat_agent import ChatAgent
 from agents.registry import AgentRegistry
+from core.model_manager import ModelManager
+from core.operational_route_executor import (
+    OperationalRouteExecutor,
+    build_default_route_handlers,
+)
 from core.orchestrator import AtlasOrchestrator
 from core.router import Router
-from use_cases.speech_engine import SpeechTranscriptionResult
+from memory.conversation import ConversationMemory
+from use_cases.speech_engine import (
+    ProviderTranscriptionResult,
+    SoundDeviceAudioCapture,
+    SpeechEngineUseCase,
+    SpeechTranscriptionResult,
+)
+from use_cases.speech_output_engine import SpeechOutputMetrics
 from use_cases.voice_conversation import (
     VoiceConversationState,
     VoiceConversationUseCase,
@@ -1359,6 +1372,90 @@ def test_manual_voice_model_response_prints_and_speaks_once() -> None:
     assert tts.calls == ["Paris es la capital de Francia."]
 
 
+def test_phase_17_3_voice_uses_fast_chat_model_once_and_returns_to_listening() -> None:
+    class ModelSource:
+        def list_models(self) -> list[str]:
+            return ["glm4:9b", "glm-5.2-local:latest"]
+
+    class RecordingModelManager(ModelManager):
+        def __init__(self) -> None:
+            super().__init__(ModelSource())
+            self.tasks: list[str] = []
+
+        def choose_model(self, task: str) -> str:
+            self.tasks.append(task)
+            return super().choose_model(task)
+
+    class PromptClientSpy:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[dict[str, str]]]] = []
+
+        def ask(self, *, model: str, messages: list[dict[str, str]]) -> str:
+            self.calls.append((model, messages))
+            return "Paris es la capital de Francia."
+
+    model_manager = RecordingModelManager()
+    prompt_client = PromptClientSpy()
+    registry = AgentRegistry()
+    registry.register(ChatAgent(prompt_client))  # type: ignore[arg-type]
+    memory = ConversationMemory()
+
+    def direct_responder(request, context):
+        chat_agent = registry.get("chat")
+        assert chat_agent is not None
+        messages = [
+            {
+                "role": str(message["role"]),
+                "content": str(message["content"]),
+            }
+            for message in context.recent_messages
+        ]
+        messages.append({"role": "user", "content": request.content})
+        return chat_agent.run(
+            model=model_manager.choose_model("chat"),
+            messages=messages,
+        )
+
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda text: SimpleNamespace(task="chat", objective=text)
+        ),
+        router=Router(),
+        model_manager=model_manager,
+        memory=memory,
+        registry=registry,
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        operational_route_executor=OperationalRouteExecutor(
+            build_default_route_handlers(
+                direct_responder=direct_responder,
+                memory=memory,
+                agent_registry=registry,
+                model_selector=model_manager.choose_model,
+            )
+        ),
+    )
+    speech = FakeSpeechEngine(
+        [speech_result("Cual es la capital de Francia"), speech_result("salir")]
+    )
+    tts = FakeSpeechOutputEngine()
+
+    result = make_use_case(speech, output=tts, diagnostics_enabled=False).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(
+            text,
+            confirm=lambda _prompt: "",
+        )
+    )
+
+    assert model_manager.tasks == ["chat"]
+    assert len(prompt_client.calls) == 1
+    assert prompt_client.calls[0][0] == "glm4:9b"
+    assert tts.calls == ["Paris es la capital de Francia."]
+    assert result.session.total_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+    speaking = result.session.states.index(VoiceConversationState.SPEAKING)
+    assert VoiceConversationState.LISTENING in result.session.states[speaking + 1 :]
+
+
 def test_manual_voice_accented_model_question_uses_model_and_speaks_once() -> None:
     speech = FakeSpeechEngine([speech_result("Cuál es la capital de Francia"), speech_result("salir")])
     tts = FakeSpeechOutputEngine()
@@ -2598,7 +2695,7 @@ def test_phase_17_2_normal_tts_without_barge_in_returns_to_listening() -> None:
     barge_in_settings = speech.capture_settings_seen[1]
     resumed_settings = speech.capture_settings_seen[2]
     assert normal_settings.initial_silence_timeout == 3.0
-    assert barge_in_settings.initial_silence_timeout == 0.4
+    assert barge_in_settings.initial_silence_timeout == 3.0
     assert barge_in_settings.max_duration == 3.0
     assert barge_in_settings.minimum_audio_duration == 0.2
     assert resumed_settings == normal_settings
@@ -2643,6 +2740,203 @@ def test_phase_17_2_first_capture_then_barge_in_processes_each_turn_once() -> No
     assert metrics.barge_in_detected is True
     assert metrics.tts_cancel_latency_ms >= 0.0
     assert metrics.barge_in_to_stt_ms >= 0.0
+
+
+def test_phase_17_3b_debug_traces_one_confirmed_barge_in_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConfirmingOutput(InterruptibleSpeechOutputEngine):
+        def speak_with_metrics(self, text: str) -> SpeechOutputMetrics:
+            self.speak(text)
+            return SpeechOutputMetrics(
+                tts_cancel_confirmed=self.released.is_set(),
+            )
+
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    output = ConfirmingOutput()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica hyrox"),
+            speech_result("Para, Â¿QuÃ© hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0])
+        or f"respuesta {text.splitlines()[0]}"
+    )
+
+    debug = "\n".join(result.messages)
+    assert processed == ["explica hyrox", "Â¿QuÃ© hora es?"]
+    assert processed.count("Â¿QuÃ© hora es?") == 1
+    assert output.cancel_calls == 1
+    assert "[voice-flow] BARGE_IN capture_started" in debug
+    assert "[voice-flow] BARGE_IN speech_detected=True" in debug
+    assert "[voice-flow] BARGE_IN transcript='Para, Â¿QuÃ© hora es?'" in debug
+    assert "[voice-flow] BARGE_IN interruption_recognized=True" in debug
+    assert "[voice-flow] BARGE_IN pending_query='Â¿QuÃ© hora es?'" in debug
+    assert "[voice-flow] BARGE_IN stop_requested=True" in debug
+    assert "[voice-flow] BARGE_IN tts_stopped=True" in debug
+    assert "[voice-flow] BARGE_IN dispatch query='Â¿QuÃ© hora es?'" in debug
+    assert "[voice-flow] BARGE_IN completed query='Â¿QuÃ© hora es?'" in debug
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.state is VoiceConversationState.STOPPED
+    assert output.closed is True
+
+
+def test_phase_17_3c_barge_in_keeps_first_mme_stream_until_voice_reaches_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(sample_rate=10, chunk_duration=0.1)
+    room = np.ones((1, 1), dtype=np.float32) * 0.0005
+    intervention = np.ones((1, 1), dtype=np.float32) * 0.03
+    first_stream = (
+        [room.copy() for _ in range(5)]
+        + [intervention.copy() for _ in range(6)]
+        + [room.copy() for _ in range(10)]
+    )
+    opened_streams = 0
+
+    class Stream:
+        def __init__(self, useful: bool) -> None:
+            self.useful = useful
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            if self.useful and first_stream:
+                return first_stream.pop(0), False
+            return np.ones((1, 1), dtype=np.float32) * 0.000015, False
+
+    def input_stream(**_kwargs):
+        nonlocal opened_streams
+        opened_streams += 1
+        return Stream(useful=opened_streams == 1)
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [
+            {"name": "Physical MME Mic", "max_input_channels": 1, "hostapi": 0}
+        ],
+        InputStream=input_stream,
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+
+    class Provider:
+        name = "fake-local"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, _samples, _sample_rate):
+            self.calls += 1
+            return ProviderTranscriptionResult(
+                text="Para, ¿qué hora es?",
+                language="es",
+                processing_duration_seconds=0.01,
+                provider=self.name,
+            )
+
+    provider = Provider()
+    speech_engine = SpeechEngineUseCase(capture, provider)
+    use_case = make_use_case(speech_engine, output=FakeSpeechOutputEngine())
+
+    transcription = use_case._transcribe_barge_in_turn()
+
+    assert transcription.completed is True
+    assert transcription.text == "Para, ¿qué hora es?"
+    assert provider.calls == 1
+    assert opened_streams == 1
+
+
+def test_phase_17_3c_empty_barge_in_captures_are_bounded() -> None:
+    class SilentSpeech(FakeSpeechEngine):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        def transcribe_once(self, capture_settings=None):
+            self.transcribe_calls += 1
+            return speech_result(
+                "",
+                completed=False,
+                no_speech=True,
+                samples_count=0,
+                rms=0.000015,
+            )
+
+    class TimedOutput(FakeSpeechOutputEngine):
+        def speak(self, text: str) -> None:
+            self.calls.append(text)
+            time.sleep(0.2)
+
+        def cancel(self) -> bool:
+            return False
+
+    speech = SilentSpeech()
+    output = TimedOutput()
+    use_case = make_use_case(speech, output=output)
+
+    use_case._speak_with_barge_in("respuesta larga", lambda *_args: None, False)
+
+    assert speech.transcribe_calls <= 2
+
+
+def test_phase_17_3a_lingering_tts_worker_does_not_block_request_or_exit() -> None:
+    class LingeringSpeechOutputEngine(InterruptibleSpeechOutputEngine):
+        def cancel(self) -> bool:
+            self.cancel_calls += 1
+            return True
+
+        def close(self) -> None:
+            self.closed = True
+            self.released.set()
+
+
+    output = LingeringSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica hyrox"),
+            speech_result("Para, que hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+    result_holder = []
+    finished = threading.Event()
+
+    def run() -> None:
+        result_holder.append(
+            make_use_case(speech, output=output).execute_manual(
+                process_text=lambda text: processed.append(text.splitlines()[0])
+                or f"respuesta {text.splitlines()[0]}"
+            )
+        )
+        finished.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    completed_without_external_release = finished.wait(timeout=1.0)
+    output.released.set()
+    worker.join(timeout=2.0)
+
+    assert completed_without_external_release is True
+    assert worker.is_alive() is False
+    assert processed == ["explica hyrox", "que hora es?"]
+    assert output.calls == ["respuesta explica hyrox", "respuesta que hora es?"]
+    assert output.cancel_calls == 1
+    assert output.closed is True
+    assert speech.transcribe_calls == 3
+    assert result_holder[0].session.ended_reason == "explicit_close"
+    assert result_holder[0].session.state is VoiceConversationState.STOPPED
 
 
 def test_phase_17_2_isolated_para_stops_tts_without_creating_a_turn() -> None:
