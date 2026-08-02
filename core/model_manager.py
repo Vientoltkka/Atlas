@@ -25,7 +25,7 @@ class ModelManager:
     _TASK_MODELS: Mapping[str, str] = {
         "coding": "qwen3.6:latest",
         "reasoning": "qwen3.6:latest",
-        "chat": "glm-5.2-local:latest",
+        "chat": "glm4:9b",
         "vision": "gemma4:latest",
         "project": "glm-5.2-local:latest",
     }

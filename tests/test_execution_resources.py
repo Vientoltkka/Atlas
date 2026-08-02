@@ -312,6 +312,17 @@ def test_model_manager_exposes_local_model_candidates_without_changing_choice() 
     assert manager.choose_model("anything") == "llama3"
 
 
+def test_model_manager_prefers_fast_chat_model_and_preserves_complex_project_model() -> None:
+    class Client:
+        def list_models(self):
+            return ["glm4:9b", "glm-5.2-local:latest"]
+
+    manager = ModelManager(Client())
+
+    assert manager.choose_model("chat") == "glm4:9b"
+    assert manager.choose_model("project") == "glm-5.2-local:latest"
+
+
 def test_validator_rejects_invalid_resource_metadata() -> None:
     step = _step("a")
     object.__setattr__(

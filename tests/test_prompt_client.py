@@ -12,12 +12,19 @@ class _FakeOllamaClient:
     def chat(self, *, model: str, messages: list[dict[str, str]], stream: bool = False, keep_alive: str = "10m"):
         self.calls.append({"model": model, "messages": messages, "stream": stream, "keep_alive": keep_alive})
         if stream:
-            return iter(self.stream_chunks)
+            return iter(
+                self.stream_chunks
+                or [{"message": {"content": "{\"status\":\"ok\"}"}}]
+            )
         return {"message": {"content": "{\"status\":\"ok\"}"}}
 
 
 def test_ask_messages_sends_exact_messages_without_extra_context(monkeypatch) -> None:
     fake_client = _FakeOllamaClient()
+    fake_client.stream_chunks = [
+        {"message": {"content": "{\"status\":"}},
+        {"message": {"content": "\"ok\"}"}},
+    ]
     monkeypatch.setattr(prompt_client_module.ollama, "Client", lambda **_kwargs: fake_client)
     client = PromptClient()
     messages = [
@@ -32,7 +39,7 @@ def test_ask_messages_sends_exact_messages_without_extra_context(monkeypatch) ->
         {
             "model": "planning-model",
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "keep_alive": "10m",
         }
     ]
@@ -53,7 +60,7 @@ def test_ask_keeps_existing_message_route(monkeypatch) -> None:
         {
             "model": "coding-model",
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "keep_alive": "10m",
         }
     ]
@@ -122,13 +129,13 @@ def test_prompt_client_reports_native_ollama_metrics_and_warm_reuse(
     capsys,
 ) -> None:
     fake_client = _FakeOllamaClient()
-    fake_client.chat = lambda **kwargs: {
+    fake_client.chat = lambda **kwargs: iter([{
         "model": kwargs["model"],
         "message": {"content": "París"},
         "load_duration": 250_000_000,
         "eval_duration": 2_500_000_000,
         "total_duration": 3_000_000_000,
-    }
+    }])
     monkeypatch.setenv("ATLAS_VOICE_METRICS", "1")
     monkeypatch.setattr(prompt_client_module.ollama, "Client", lambda **_kwargs: fake_client)
     client = PromptClient()

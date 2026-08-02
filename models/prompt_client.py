@@ -34,13 +34,23 @@ class PromptClient:
         messages: list[dict[str, str]],
     ) -> str:
         """Send exactly the provided messages to the selected model."""
-        response = self._client.chat(
+        stream = self._client.chat(
             model=model,
             messages=messages,
+            stream=True,
             keep_alive=self._keep_alive,
         )
-        self._record_metrics(model, response)
-        return self._extract_content(response)
+        fragments: list[str] = []
+        final_chunk: Any = None
+        for chunk in stream:
+            final_chunk = chunk
+            content = self._extract_stream_content(chunk)
+            if content:
+                fragments.append(content)
+        if final_chunk is None:
+            raise ValueError("Ollama returned an empty response stream.")
+        self._record_metrics(model, final_chunk)
+        return "".join(fragments)
 
     def stream_messages(
         self,
