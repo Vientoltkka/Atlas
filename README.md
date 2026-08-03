@@ -30,8 +30,8 @@ Atlas Core
 Versión inicial:
 Atlas v1.0
 
-## Voz V2
+## Voz V1
 
 Comando oficial: `python -B main.py --voice`.
 
-Consulta [operación, configuración, métricas y diagnóstico de Voz V2](docs/voice_v2.md).
+Consulta [operación, configuración, métricas, límites conocidos y objetivo Voz V2](docs/voice_v2.md).

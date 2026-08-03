@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+import inspect
 from pathlib import Path
 import re
 import sys
@@ -281,14 +282,24 @@ class AtlasOrchestrator:
                     continue
 
             if self._voice_conversation is not None:
-                voice_result = self._voice_conversation.execute(
-                    prompt=prompt,
-                    process_text=lambda text: self.process_voice_prompt(
+                execute_voice = self._voice_conversation.execute
+                voice_kwargs = {
+                    "prompt": prompt,
+                    "process_text": lambda text: self.process_voice_prompt(
                         text,
                         confirm=input,
                     ),
-                    status_sink=self._print_atlas,
-                )
+                    "status_sink": self._print_atlas,
+                }
+                if _accepts_keyword(execute_voice, "process_text_stream"):
+                    voice_kwargs["process_text_stream"] = (
+                        lambda text, fragment_sink: self.process_voice_prompt(
+                            text,
+                            confirm=input,
+                            on_model_fragment=fragment_sink,
+                        )
+                    )
+                voice_result = execute_voice(**voice_kwargs)
 
                 if voice_result is not None:
                     continue
@@ -333,14 +344,24 @@ class AtlasOrchestrator:
             print()
             return
 
-        self._voice_conversation.execute_manual(
-            process_text=lambda text: self.process_voice_prompt(
+        execute_manual = self._voice_conversation.execute_manual
+        voice_kwargs = {
+            "process_text": lambda text: self.process_voice_prompt(
                 text,
                 confirm=input,
             ),
-            status_sink=print,
-            typed_input=self._read_typed_exit_command,
-        )
+            "status_sink": print,
+            "typed_input": self._read_typed_exit_command,
+        }
+        if _accepts_keyword(execute_manual, "process_text_stream"):
+            voice_kwargs["process_text_stream"] = (
+                lambda text, fragment_sink: self.process_voice_prompt(
+                    text,
+                    confirm=input,
+                    on_model_fragment=fragment_sink,
+                )
+            )
+        execute_manual(**voice_kwargs)
 
     def start_assistant(self) -> None:
         """Start permanent assistant mode with wake word."""
@@ -1017,6 +1038,8 @@ class AtlasOrchestrator:
         self,
         prompt: str,
         confirm,
+        *,
+        on_model_fragment=None,
     ) -> str:
         """Route transcribed voice text before falling back to the model."""
         request = self._request_gateway.from_voice(prompt)
@@ -1061,6 +1084,7 @@ class AtlasOrchestrator:
         direct_response = self._process_direct_conversation(
             request,
             raise_on_failure=True,
+            output_fragment_sink=on_model_fragment,
         )
         if direct_response is not None:
             return direct_response
@@ -1157,6 +1181,7 @@ class AtlasOrchestrator:
         *,
         status_sink=None,
         raise_on_failure: bool = False,
+        output_fragment_sink=None,
     ) -> str | None:
         """Use the existing bounded direct-response route for conversational turns."""
         if self._operational_route_executor is None:
@@ -1198,7 +1223,11 @@ class AtlasOrchestrator:
 
         if callable(status_sink):
             status_sink("Procesando...")
-        result = self._operational_route_executor.execute(request, decision)
+        result = self._operational_route_executor.execute(
+            request,
+            decision,
+            output_fragment_sink=output_fragment_sink,
+        )
         if raise_on_failure and result.status is RouteExecutionStatus.FAILED:
             safe_cause = result.error.safe_cause if result.error is not None else ""
             if "timeout" in safe_cause.casefold():
@@ -1739,6 +1768,18 @@ def _bounded_context_text(value: str, limit: int = 1200) -> str:
     if any(marker in normalized.casefold() for marker in sensitive_markers):
         return "Contexto de ejecucion: [redacted]"
     return normalized[:limit]
+
+
+def _accepts_keyword(callable_object, name: str) -> bool:
+    """Return whether a callable accepts one explicit or arbitrary keyword."""
+    try:
+        parameters = inspect.signature(callable_object).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def _is_tool_catalog_query(prompt: str) -> bool:

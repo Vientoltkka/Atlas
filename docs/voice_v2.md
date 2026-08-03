@@ -1,4 +1,4 @@
-# Voz V2 — operación y diagnóstico (FASE 17.1)
+# Voz — operación, cierre de Voz V1 y objetivo Voz V2
 
 ## Comando oficial
 
@@ -8,7 +8,7 @@ Desde la raíz del repositorio:
 python -B main.py --voice
 ```
 
-`--voice` inicia conversación continua sin wake word. `--assistant` es una ruta heredada independiente con activación; no es el comando oficial de Voz V2 en esta fase. El arranque sin argumentos conserva el modo texto.
+`--voice` inicia la conversación continua de Voz V1 sin wake word. `--assistant` es una ruta heredada independiente con activación; no es el comando oficial de voz en esta fase. El arranque sin argumentos conserva el modo texto.
 
 ## Flujo real reutilizado
 
@@ -141,6 +141,21 @@ Con métricas activadas, cada respuesta no streaming de Ollama añade una línea
 
 No debe registrarse una simulación como prueba física.
 
-## Límites para FASE 17.2
+## FASE 17.4D — Voz V1 congelada
 
-Pendiente expresamente: barge-in durante TTS, cancelación de TTS por voz, escucha simultánea durante reproducción, reducción avanzada de latencia, streaming parcial STT/LLM/TTS y wake word robusta. Voz V2 actual es half-duplex: primero escucha y después habla.
+Voz V1 queda cerrada para conversación básica. No se realizarán nuevas mejoras de robustez dentro de FASE 17; el desarrollo general de Atlas puede continuar sin depender de perfeccionar el barge-in actual.
+
+### KNOWN ISSUE / DEFERRED — barge-in durante TTS
+
+Durante TTS activo, el sistema de barge-in todavía puede recoger eco parcial del propio altavoz, generar transcripciones espurias y no garantizar una cancelación instantánea y definitiva de toda la respuesta. 'Para' puede producir una pausa y aún dejar pasar fragmentos posteriores. 'Salir' puede verse afectado por el mismo problema. Este comportamiento se pospone a VOZ V2 y no bloquea el desarrollo del resto de Atlas.
+
+### Objetivo futuro — VOZ V2
+
+- Interrupción instantánea y fiable.
+- Cancelación completa del worker/TTS.
+- Mejor aislamiento acústico y supresión de eco.
+- Menor latencia.
+- Conversación continua más natural.
+- Robustez cercana a una experiencia de asistente de voz moderna.
+
+VOZ V2 requerirá una fase futura explícita. No forma parte del alcance congelado de Voz V1.

@@ -1027,10 +1027,7 @@ class Bootstrap:
                 agent_registry=registry,
             )
         )
-        def direct_responder(request, context):
-            chat_agent = registry.get("chat")
-            if chat_agent is None:
-                raise RuntimeError("Agent 'chat' is not registered.")
+        def direct_messages(request, context):
             messages = [
                 {
                     "role": str(message["role"]),
@@ -1047,14 +1044,33 @@ class Bootstrap:
                     }
                 )
             messages.append({"role": "user", "content": request.content})
+            return messages
+
+        def direct_responder(request, context):
+            chat_agent = registry.get("chat")
+            if chat_agent is None:
+                raise RuntimeError("Agent 'chat' is not registered.")
             return chat_agent.run(
                 model=model_manager.choose_model("chat"),
-                messages=messages,
+                messages=direct_messages(request, context),
+            )
+
+        def direct_streaming_responder(request, context):
+            chat_agent = registry.get("chat")
+            if chat_agent is None:
+                raise RuntimeError("Agent 'chat' is not registered.")
+            stream = getattr(chat_agent, "stream", None)
+            if not callable(stream):
+                raise RuntimeError("Agent 'chat' does not support streaming.")
+            yield from stream(
+                model=model_manager.choose_model("chat"),
+                messages=direct_messages(request, context),
             )
 
         operational_route_executor = OperationalRouteExecutor(
             build_default_route_handlers(
                 direct_responder=direct_responder,
+                direct_streaming_responder=direct_streaming_responder,
                 memory=memory,
                 tool_registry=tool_registry,
                 tool_executor=tool_executor,

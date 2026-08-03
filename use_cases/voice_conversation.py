@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from difflib import SequenceMatcher
 from enum import Enum
 import json
 import os
@@ -52,12 +53,27 @@ class VoiceTurnMetrics:
     stt_seconds: float = 0.0
     atlas_seconds: float = 0.0
     model_seconds: float = 0.0
+    first_token_seconds: float = 0.0
+    first_audio_seconds: float = 0.0
+    post_first_audio_seconds: float = 0.0
     synthesis_seconds: float = 0.0
     playback_seconds: float = 0.0
     barge_in_detected: bool = False
     tts_cancel_latency_ms: float = 0.0
     barge_in_to_stt_ms: float = 0.0
     total_seconds: float = 0.0
+
+
+@dataclass
+class _StreamingVoiceDelivery:
+    """Mutable per-turn state owned by the supervised model worker."""
+
+    buffer: str = ""
+    metrics: SpeechOutputMetrics = field(default_factory=SpeechOutputMetrics)
+    first_fragment_seconds: float | None = None
+    first_audio_at: float | None = None
+    tts_started: bool = False
+    interrupted: bool = False
 
 
 @dataclass
@@ -113,6 +129,13 @@ class VoiceConversationUseCase:
     _TTS_WORKER_JOIN_TIMEOUT_SECONDS = 0.25
     _MAX_EMPTY_BARGE_IN_CAPTURES = 2
     _EMPTY_BARGE_IN_BACKOFF_SECONDS = 0.05
+    _MIN_STREAM_SEGMENT_CHARACTERS = 24
+    _MIN_TTS_ECHO_PREFIX_TOKENS = 2
+    _MIN_TTS_ECHO_PREFIX_CHARACTERS = 12
+    _MIN_TTS_ECHO_TOKEN_SIMILARITY = 0.8
+    _MIN_TTS_ECHO_CONTENT_TOKEN_CHARACTERS = 5
+    _MIN_TTS_ECHO_COMMON_PREFIX_CHARACTERS = 6
+    _MIN_TTS_ECHO_CONTENT_COVERAGE = 0.75
     _CODE_BLOCK_PATTERN = re.compile(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", re.DOTALL)
     _COMMANDS = {
         "activa conversacion por voz",
@@ -253,12 +276,17 @@ class VoiceConversationUseCase:
         prompt: str,
         process_text: Callable[[str], str],
         status_sink: Callable[[str], None] | None = None,
+        process_text_stream=None,
     ) -> VoiceConversationResult | None:
         """Run voice conversation mode for explicit activation commands."""
         if self._normalize(prompt) not in self._COMMANDS:
             return None
         if self._wake_word_engine is None:
-            return self.execute_manual(process_text, status_sink)
+            return self.execute_manual(
+                process_text,
+                status_sink,
+                process_text_stream=process_text_stream,
+            )
 
         messages: list[str] = []
 
@@ -321,6 +349,7 @@ class VoiceConversationUseCase:
                 session,
                 process_text,
                 emit,
+                process_text_stream=process_text_stream,
                 enforce_spanish_response=False,
                 retry_initial_no_speech=True,
             )
@@ -344,6 +373,7 @@ class VoiceConversationUseCase:
         process_text: Callable[[str], str],
         status_sink: Callable[[str], None] | None = None,
         typed_input: Callable[[], str | None] | None = None,
+        process_text_stream=None,
     ) -> VoiceConversationResult:
         """Run voice conversation mode without wake-word activation."""
         messages: list[str] = []
@@ -381,11 +411,12 @@ class VoiceConversationUseCase:
                 session,
                 process_text,
                 emit,
-                typed_input,
+                typed_input=typed_input,
                 enforce_spanish_response=True,
                 retry_initial_no_speech=False,
                 keep_listening_on_recoverable=True,
                 voice_debug=self._voice_debug_enabled,
+                process_text_stream=process_text_stream,
             )
         except KeyboardInterrupt:
             self._end_session(session, "cancelled", "Conversacion cancelada.")
@@ -607,6 +638,7 @@ class VoiceConversationUseCase:
         session: VoiceConversationSession,
         process_text: Callable[[str], str],
         emit: Callable[[str, bool], None],
+        process_text_stream=None,
         typed_input: Callable[[], str | None] | None = None,
         enforce_spanish_response: bool = False,
         retry_initial_no_speech: bool = False,
@@ -823,6 +855,7 @@ class VoiceConversationUseCase:
                 enforce_spanish_response,
                 voice_debug,
                 turn_started,
+                process_text_stream,
             )
             if from_barge_in:
                 self._emit_voice_flow(
@@ -844,6 +877,7 @@ class VoiceConversationUseCase:
         enforce_spanish_response: bool = False,
         voice_debug: bool = False,
         turn_started: float | None = None,
+        process_text_stream=None,
     ) -> None:
         turn_number = session.total_turns + 1
         prompt_for_voice = self._prompt_for_voice(text, enforce_spanish_response)
@@ -852,6 +886,7 @@ class VoiceConversationUseCase:
         error_text = ""
         outcome = "completed"
         model_duration = 0.0
+        stream_delivery: _StreamingVoiceDelivery | None = None
         turn_started = time.monotonic() if turn_started is None else turn_started
         self._set_state(session, VoiceConversationState.PROCESSING, emit)
         processing_started = time.monotonic()
@@ -869,11 +904,32 @@ class VoiceConversationUseCase:
                 self._emit_voice_flow("antes de llamar al modelo", emit, voice_debug)
                 model_started = time.monotonic()
                 try:
-                    response = self._process_text_for_voice(
-                        prompt_for_voice,
-                        process_text,
-                        route_label,
-                    )
+                    if (
+                        callable(process_text_stream)
+                        and self._speech_output_engine is not None
+                        and not self._tts_warmup_error
+                    ):
+                        stream_delivery = _StreamingVoiceDelivery()
+                        response = self._process_text_for_voice(
+                            prompt_for_voice,
+                            process_text,
+                            route_label,
+                            process_text_stream=process_text_stream,
+                            fragment_sink=lambda fragment: self._handle_stream_fragment(
+                                fragment,
+                                stream_delivery,
+                                session,
+                                emit,
+                                voice_debug,
+                                processing_started,
+                            ),
+                        )
+                    else:
+                        response = self._process_text_for_voice(
+                            prompt_for_voice,
+                            process_text,
+                            route_label,
+                        )
                 finally:
                     model_duration = time.monotonic() - model_started
                     self._emit_voice_flow(
@@ -940,13 +996,50 @@ class VoiceConversationUseCase:
             session.failed_turns += 1
             self._set_state(session, VoiceConversationState.RECOVERING, emit)
 
-        output_metrics = self._deliver_voice_response(
-            session,
-            text,
-            response,
-            should_speak_response,
-            emit,
-            voice_debug,
+        if stream_delivery is None:
+            output_metrics = self._deliver_voice_response(
+                session,
+                text,
+                response,
+                should_speak_response,
+                emit,
+                voice_debug,
+            )
+        else:
+            self._deliver_voice_response(
+                session,
+                text,
+                response,
+                False,
+                emit,
+                voice_debug,
+            )
+            output_metrics = self._finish_streaming_delivery(
+                stream_delivery,
+                session,
+                emit,
+                voice_debug,
+                should_speak_response,
+            )
+        turn_finished = time.monotonic()
+        first_token_seconds = (
+            stream_delivery.first_fragment_seconds
+            if stream_delivery is not None
+            and stream_delivery.first_fragment_seconds is not None
+            else 0.0
+        )
+        first_audio_seconds = (
+            transcription.processing_duration_seconds
+            + max(0.0, stream_delivery.first_audio_at - processing_started)
+            if stream_delivery is not None and stream_delivery.first_audio_at is not None
+            else transcription.processing_duration_seconds
+            + processing_duration
+            + output_metrics.first_audio_seconds
+        )
+        post_first_audio_seconds = (
+            max(0.0, turn_finished - stream_delivery.first_audio_at)
+            if stream_delivery is not None and stream_delivery.first_audio_at is not None
+            else max(0.0, output_metrics.playback_seconds - output_metrics.first_audio_seconds)
         )
         metrics = VoiceTurnMetrics(
             voice_start_seconds=max(0.0, transcription.phrase_start_ms / 1000.0),
@@ -954,12 +1047,15 @@ class VoiceConversationUseCase:
             stt_seconds=max(0.0, transcription.processing_duration_seconds),
             atlas_seconds=max(0.0, processing_duration),
             model_seconds=max(0.0, model_duration),
+            first_token_seconds=max(0.0, first_token_seconds),
+            first_audio_seconds=max(0.0, first_audio_seconds),
+            post_first_audio_seconds=max(0.0, post_first_audio_seconds),
             synthesis_seconds=max(0.0, output_metrics.synthesis_seconds),
             playback_seconds=max(0.0, output_metrics.playback_seconds),
             barge_in_detected=output_metrics.barge_in_detected,
             tts_cancel_latency_ms=max(0.0, output_metrics.tts_cancel_latency_ms),
             barge_in_to_stt_ms=max(0.0, output_metrics.barge_in_to_stt_ms),
-            total_seconds=max(0.0, time.monotonic() - turn_started),
+            total_seconds=max(0.0, turn_finished - turn_started),
         )
 
         session.total_turns += 1
@@ -1039,6 +1135,143 @@ class VoiceConversationUseCase:
 
         return output_metrics
 
+    def _handle_stream_fragment(
+        self,
+        fragment: str,
+        delivery: _StreamingVoiceDelivery,
+        session: VoiceConversationSession,
+        emit: Callable[[str, bool], None],
+        voice_debug: bool,
+        processing_started: float,
+    ) -> bool:
+        if delivery.interrupted:
+            return False
+        if not fragment:
+            return True
+        if delivery.first_fragment_seconds is None:
+            delivery.first_fragment_seconds = max(
+                0.0,
+                time.monotonic() - processing_started,
+            )
+        delivery.buffer += fragment
+        segments, delivery.buffer = self._take_stream_segments(delivery.buffer)
+        for segment in segments:
+            self._speak_stream_segment(
+                segment,
+                delivery,
+                session,
+                emit,
+                voice_debug,
+            )
+            if delivery.interrupted:
+                return False
+        return True
+
+    def _finish_streaming_delivery(
+        self,
+        delivery: _StreamingVoiceDelivery,
+        session: VoiceConversationSession,
+        emit: Callable[[str, bool], None],
+        voice_debug: bool,
+        should_speak_response: bool,
+    ) -> SpeechOutputMetrics:
+        if (
+            should_speak_response
+            and delivery.buffer.strip()
+            and not delivery.interrupted
+        ):
+            self._speak_stream_segment(
+                delivery.buffer,
+                delivery,
+                session,
+                emit,
+                voice_debug,
+            )
+        delivery.buffer = ""
+
+        if delivery.tts_started:
+            self._emit_voice_flow("fin TTS", emit, voice_debug)
+            if not delivery.metrics.barge_in_detected:
+                time.sleep(0.2)
+            self._emit_voice_flow("vuelta a escucha", emit, voice_debug)
+        return delivery.metrics
+
+    def _speak_stream_segment(
+        self,
+        segment: str,
+        delivery: _StreamingVoiceDelivery,
+        session: VoiceConversationSession,
+        emit: Callable[[str, bool], None],
+        voice_debug: bool,
+    ) -> None:
+        spoken = self._format_response_for_voice(segment)
+        if not spoken:
+            return
+        if not delivery.tts_started:
+            delivery.tts_started = True
+            self._set_state(session, VoiceConversationState.SPEAKING, emit)
+            self._emit_voice_flow("inicio TTS", emit, voice_debug)
+
+        segment_started = time.monotonic()
+        metrics = self._speak_response(
+            spoken,
+            session,
+            emit,
+            voice_debug,
+        )
+        if delivery.first_audio_at is None:
+            delivery.first_audio_at = (
+                segment_started + max(0.0, metrics.first_audio_seconds)
+            )
+        delivery.metrics = self._merge_speech_metrics(delivery.metrics, metrics)
+        if metrics.barge_in_detected:
+            delivery.interrupted = True
+
+    def _take_stream_segments(self, text: str) -> tuple[list[str], str]:
+        segments: list[str] = []
+        consumed = 0
+        boundary_pattern = re.compile(
+            r"""[.!?](?:["')\]]*)?(?:\s+|$)|[;:](?:\s+|$)"""
+        )
+        for match in boundary_pattern.finditer(text):
+            candidate = text[consumed:match.end()].strip()
+            if (
+                len(self._format_response_for_voice(candidate))
+                < self._MIN_STREAM_SEGMENT_CHARACTERS
+            ):
+                continue
+            segments.append(candidate)
+            consumed = match.end()
+        return segments, text[consumed:]
+
+    def _merge_speech_metrics(
+        self,
+        current: SpeechOutputMetrics,
+        new: SpeechOutputMetrics,
+    ) -> SpeechOutputMetrics:
+        first_audio_seconds = (
+            current.first_audio_seconds
+            if current.synthesis_seconds > 0.0 or current.playback_seconds > 0.0
+            else new.first_audio_seconds
+        )
+        return SpeechOutputMetrics(
+            synthesis_seconds=current.synthesis_seconds + new.synthesis_seconds,
+            first_audio_seconds=first_audio_seconds,
+            playback_seconds=current.playback_seconds + new.playback_seconds,
+            barge_in_detected=current.barge_in_detected or new.barge_in_detected,
+            tts_cancel_latency_ms=max(
+                current.tts_cancel_latency_ms,
+                new.tts_cancel_latency_ms,
+            ),
+            barge_in_to_stt_ms=max(
+                current.barge_in_to_stt_ms,
+                new.barge_in_to_stt_ms,
+            ),
+            tts_cancel_confirmed=(
+                current.tts_cancel_confirmed or new.tts_cancel_confirmed
+            ),
+        )
+
     def _emit_turn_metrics(
         self,
         metrics: VoiceTurnMetrics,
@@ -1052,6 +1285,9 @@ class VoiceConversationUseCase:
             emit(f"STT: {metrics.stt_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Atlas: {metrics.atlas_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Modelo: {metrics.model_seconds * 1000:.0f} ms", diagnostic=False)
+            emit(f"Primer token: {metrics.first_token_seconds * 1000:.0f} ms", diagnostic=False)
+            emit(f"Primer audio: {metrics.first_audio_seconds * 1000:.0f} ms", diagnostic=False)
+            emit(f"Tras primer audio: {metrics.post_first_audio_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Síntesis TTS: {metrics.synthesis_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Reproducción: {metrics.playback_seconds * 1000:.0f} ms", diagnostic=False)
             emit(f"Total: {metrics.total_seconds * 1000:.0f} ms", diagnostic=False)
@@ -1073,6 +1309,9 @@ class VoiceConversationUseCase:
                 f"captura={metrics.capture_seconds:.3f}s "
                 f"stt={metrics.stt_seconds:.3f}s "
                 f"procesamiento={metrics.atlas_seconds:.3f}s "
+                f"primer_token={metrics.first_token_seconds:.3f}s "
+                f"primer_audio={metrics.first_audio_seconds:.3f}s "
+                f"post_audio={metrics.post_first_audio_seconds:.3f}s "
                 f"tts={metrics.synthesis_seconds + metrics.playback_seconds:.3f}s "
                 f"total={metrics.total_seconds:.3f}s",
                 emit,
@@ -1083,22 +1322,37 @@ class VoiceConversationUseCase:
         prompt: str,
         process_text: Callable[[str], str],
         route_label: str,
+        process_text_stream=None,
+        fragment_sink=None,
     ) -> str:
         if route_label != "modelo":
             return process_text(prompt)
 
-        return self._process_text_with_timeout(prompt, process_text)
+        return self._process_text_with_timeout(
+            prompt,
+            process_text,
+            process_text_stream=process_text_stream,
+            fragment_sink=fragment_sink,
+        )
 
     def _process_text_with_timeout(
         self,
         prompt: str,
         process_text: Callable[[str], str],
+        *,
+        process_text_stream=None,
+        fragment_sink=None,
     ) -> str:
         result_queue: queue.Queue[tuple[bool, str | BaseException]] = queue.Queue(maxsize=1)
 
         def run() -> None:
             try:
-                result_queue.put((True, process_text(prompt)))
+                value = (
+                    process_text_stream(prompt, fragment_sink)
+                    if callable(process_text_stream) and callable(fragment_sink)
+                    else process_text(prompt)
+                )
+                result_queue.put((True, value))
             except BaseException as error:
                 result_queue.put((False, error))
             finally:
@@ -1237,6 +1491,7 @@ class VoiceConversationUseCase:
         result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
         cancel_attempted = False
         cancel_request_accepted = False
+        forced_stop_confirmed = False
         empty_capture_attempts = 0
         detected = False
         cancel_latency_ms = 0.0
@@ -1314,15 +1569,30 @@ class VoiceConversationUseCase:
                     continue
 
                 empty_capture_attempts = 0
+                clean_text = self._clean_transcription_text(transcription.text)
+                echo_prefix_removed, clean_text = self._strip_tts_echo_prefix(
+                    clean_text,
+                    response,
+                )
+                if echo_prefix_removed:
+                    self._emit_voice_flow(
+                        "BARGE_IN tts_echo_prefix_removed=True",
+                        emit,
+                        voice_debug,
+                    )
+                    self._emit_voice_flow(
+                        f"BARGE_IN cleaned_transcript={clean_text!r}",
+                        emit,
+                        voice_debug,
+                    )
                 accepted_text = self._accepted_barge_in_text(
-                    transcription,
+                    replace(transcription, text=clean_text),
                     response,
                 )
                 if accepted_text is None:
                     worker.join(timeout=0.01)
                     continue
 
-                clean_text = self._clean_transcription_text(transcription.text)
                 interruption_recognized, _remainder = (
                     self._strip_interruption_prefix(clean_text)
                 )
@@ -1356,6 +1626,17 @@ class VoiceConversationUseCase:
                 )
                 cancel_attempted = True
                 worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
+                if worker.is_alive():
+                    self._emit_voice_flow(
+                        "BARGE_IN force_close_requested=True",
+                        emit,
+                        voice_debug,
+                    )
+                    force_close_requested = self._force_close_speech_output()
+                    worker.join(timeout=self._TTS_WORKER_JOIN_TIMEOUT_SECONDS)
+                    forced_stop_confirmed = bool(
+                        force_close_requested and not worker.is_alive()
+                    )
                 cancel_latency_ms = max(
                     0.0,
                     (time.monotonic() - cancel_started) * 1000.0,
@@ -1378,10 +1659,14 @@ class VoiceConversationUseCase:
             if not isinstance(output_metrics, SpeechOutputMetrics):
                 output_metrics = SpeechOutputMetrics()
             if detected:
+                cancel_confirmed = bool(
+                    output_metrics.tts_cancel_confirmed
+                    or forced_stop_confirmed
+                )
                 tts_stopped = bool(
                     cancel_request_accepted
                     and not worker.is_alive()
-                    and output_metrics.tts_cancel_confirmed
+                    and cancel_confirmed
                 )
                 self._emit_voice_flow(
                     f"BARGE_IN tts_stopped={tts_stopped}",
@@ -1391,6 +1676,10 @@ class VoiceConversationUseCase:
             return replace(
                 output_metrics,
                 barge_in_detected=detected,
+                tts_cancel_confirmed=(
+                    output_metrics.tts_cancel_confirmed
+                    or forced_stop_confirmed
+                ),
                 tts_cancel_latency_ms=cancel_latency_ms,
                 barge_in_to_stt_ms=barge_in_to_stt_ms,
             )
@@ -1442,7 +1731,23 @@ class VoiceConversationUseCase:
         )
         if has_interruption_prefix and not candidate_text:
             return ""
+        normalized_clean = self._normalize_echo_text(clean_text)
+        normalized_response = self._normalize_echo_text(spoken_response)
+        if normalized_clean and normalized_clean in normalized_response:
+            return None
         if has_interruption_prefix:
+            echo_removed, residual_segments = self._strip_tts_echo_fragments(
+                candidate_text,
+                spoken_response,
+            )
+            if echo_removed:
+                human_candidates = self._human_barge_in_candidates(
+                    transcription,
+                    residual_segments,
+                )
+                if len(human_candidates) != 1:
+                    return ""
+                return human_candidates[0]
             clean_text = candidate_text
 
         if self._is_tts_echo(clean_text, spoken_response):
@@ -1467,6 +1772,127 @@ class VoiceConversationUseCase:
             return True, ""
         return True, remainder.strip()
 
+    def _strip_tts_echo_prefix(
+        self,
+        transcription: str,
+        spoken_response: str,
+    ) -> tuple[bool, str]:
+        """Remove only a strong leading match with the active TTS segment."""
+        if not self._tts_speaking:
+            return False, transcription
+
+        transcription_words = list(re.finditer(r"\w+", transcription))
+        response_words = list(re.finditer(r"\w+", spoken_response))
+        matched_tokens = 0
+
+        for response_start in range(len(response_words)):
+            candidate_tokens = 0
+            for transcription_word, response_word in zip(
+                transcription_words,
+                response_words[response_start:],
+            ):
+                captured = self._normalize_echo_text(transcription_word.group())
+                spoken = self._normalize_echo_text(response_word.group())
+                if not captured or not spoken:
+                    break
+                if captured != spoken:
+                    similarity = SequenceMatcher(
+                        None,
+                        captured,
+                        spoken,
+                        autojunk=False,
+                    ).ratio()
+                    if similarity < self._MIN_TTS_ECHO_TOKEN_SIMILARITY:
+                        break
+                candidate_tokens += 1
+            matched_tokens = max(matched_tokens, candidate_tokens)
+
+        if matched_tokens < self._MIN_TTS_ECHO_PREFIX_TOKENS:
+            return False, transcription
+
+        matched_characters = sum(
+            len(self._normalize_echo_text(word.group()))
+            for word in transcription_words[:matched_tokens]
+        )
+        if matched_characters < self._MIN_TTS_ECHO_PREFIX_CHARACTERS:
+            return False, transcription
+
+        residual = transcription[transcription_words[matched_tokens - 1].end():]
+        residual = re.sub(r"^\s*[,.;:-]\s*", "", residual)
+        return True, residual.strip()
+
+    def _strip_tts_echo_fragments(
+        self,
+        transcription: str,
+        spoken_response: str,
+    ) -> tuple[bool, list[str]]:
+        """Remove only exact multi-token blocks from the active TTS text."""
+        transcription_words = list(re.finditer(r"\w+", transcription))
+        response_words = list(re.finditer(r"\w+", spoken_response))
+        transcription_tokens = [
+            self._normalize_echo_text(word.group())
+            for word in transcription_words
+        ]
+        response_tokens = [
+            self._normalize_echo_text(word.group())
+            for word in response_words
+        ]
+        echo_blocks = []
+        for block in SequenceMatcher(
+            None,
+            transcription_tokens,
+            response_tokens,
+            autojunk=False,
+        ).get_matching_blocks():
+            if block.size < self._MIN_TTS_ECHO_PREFIX_TOKENS:
+                continue
+            matched_characters = sum(
+                len(token)
+                for token in transcription_tokens[block.a:block.a + block.size]
+            )
+            if matched_characters < self._MIN_TTS_ECHO_PREFIX_CHARACTERS:
+                continue
+            echo_blocks.append(block)
+
+        if not echo_blocks:
+            return False, [transcription]
+
+        residual_segments: list[str] = []
+        cursor = 0
+        for block in echo_blocks:
+            start = transcription_words[block.a].start()
+            end = transcription_words[block.a + block.size - 1].end()
+            residual_segments.append(transcription[cursor:start])
+            cursor = end
+        residual_segments.append(transcription[cursor:])
+        return True, residual_segments
+
+    def _human_barge_in_candidates(
+        self,
+        transcription: SpeechTranscriptionResult,
+        residual_segments: list[str],
+    ) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for segment in residual_segments:
+            parts = re.split(r"\bpara\s*[,.;:!?-]+\s*", segment, flags=re.IGNORECASE)
+            for part in parts:
+                candidate = part.strip(" \t\r\n,;:")
+                words = re.findall(r"\w+", candidate)
+                if not candidate or (
+                    len(words) < 2 and not self._is_close_command(candidate)
+                ):
+                    continue
+                accepted = self._accepted_transcription_text(
+                    replace(transcription, text=candidate),
+                    trim_edge_punctuation=False,
+                )
+                normalized = self._normalize_echo_text(accepted or "")
+                if accepted and normalized not in seen:
+                    seen.add(normalized)
+                    candidates.append(accepted)
+        return candidates
+
     def _is_tts_echo(
         self,
         transcription: str,
@@ -1479,12 +1905,53 @@ class VoiceConversationUseCase:
         if normalized_transcription in normalized_response:
             return True
 
-        transcription_tokens = set(normalized_transcription.split())
-        response_tokens = set(normalized_response.split())
+        transcription_tokens = normalized_transcription.split()
+        response_tokens = normalized_response.split()
         if not transcription_tokens:
             return False
-        overlap = len(transcription_tokens & response_tokens)
-        return overlap / len(transcription_tokens) >= 0.8
+
+        content_tokens = [
+            token
+            for token in transcription_tokens
+            if len(token) >= self._MIN_TTS_ECHO_CONTENT_TOKEN_CHARACTERS
+        ]
+        if content_tokens:
+            matched_content = sum(
+                any(
+                    self._tts_echo_tokens_match(captured, spoken)
+                    for spoken in response_tokens
+                )
+                for captured in content_tokens
+            )
+            if (
+                matched_content / len(content_tokens)
+                >= self._MIN_TTS_ECHO_CONTENT_COVERAGE
+            ):
+                return True
+
+        transcription_token_set = set(transcription_tokens)
+        response_token_set = set(response_tokens)
+        overlap = len(transcription_token_set & response_token_set)
+        return overlap / len(transcription_token_set) >= 0.8
+
+    def _tts_echo_tokens_match(self, captured: str, spoken: str) -> bool:
+        if captured == spoken:
+            return True
+
+        shorter_length = min(len(captured), len(spoken))
+        if shorter_length < self._MIN_TTS_ECHO_CONTENT_TOKEN_CHARACTERS:
+            return False
+
+        common_prefix = 0
+        for captured_character, spoken_character in zip(captured, spoken):
+            if captured_character != spoken_character:
+                break
+            common_prefix += 1
+
+        return (
+            common_prefix >= self._MIN_TTS_ECHO_COMMON_PREFIX_CHARACTERS
+            and common_prefix / shorter_length >= 0.7
+        )
 
     def _normalize_echo_text(self, text: str) -> str:
         normalized = self._normalize(text)
@@ -1507,6 +1974,18 @@ class VoiceConversationUseCase:
             return False
         try:
             return bool(cancel())
+        except Exception:
+            return False
+
+    def _force_close_speech_output(self) -> bool:
+        if self._speech_output_engine is None:
+            return False
+        close = getattr(self._speech_output_engine, "close", None)
+        if not callable(close):
+            return False
+        try:
+            close()
+            return True
         except Exception:
             return False
 

@@ -92,6 +92,34 @@ def test_stream_messages_yields_content_in_order_and_ignores_empty_chunks(monkey
     ]
 
 
+def test_phase_17_4_stream_messages_records_first_fragment_and_total_wall_time(
+    monkeypatch,
+) -> None:
+    fake_client = _FakeOllamaClient()
+    fake_client.stream_chunks = [
+        {"model": "glm4:9b", "message": {"content": "Primera. "}},
+        {
+            "model": "glm4:9b",
+            "message": {"content": "Segunda."},
+            "load_duration": 400_000_000,
+            "eval_duration": 2_000_000_000,
+            "total_duration": 2_600_000_000,
+        },
+    ]
+    ticks = iter((10.0, 11.25, 12.75))
+    monkeypatch.setattr(prompt_client_module.ollama, "Client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(prompt_client_module, "perf_counter", lambda: next(ticks))
+    client = PromptClient()
+
+    assert list(client.stream_messages("glm4:9b", [{"role": "user", "content": "hola"}])) == [
+        "Primera. ",
+        "Segunda.",
+    ]
+    assert client.last_metrics["first_fragment_seconds"] == 1.25
+    assert client.last_metrics["wall_total_seconds"] == 2.75
+    assert client.last_metrics["load_seconds"] == 0.4
+
+
 def test_stream_messages_does_not_modify_or_extend_messages(monkeypatch) -> None:
     fake_client = _FakeOllamaClient()
     fake_client.stream_chunks = [{"message": {"content": "ok"}}]
@@ -143,7 +171,17 @@ def test_prompt_client_reports_native_ollama_metrics_and_warm_reuse(
     client.ask_messages("glm-local", [{"role": "user", "content": "uno"}])
     client.ask_messages("glm-local", [{"role": "user", "content": "dos"}])
 
-    assert client.last_metrics == {
+    assert {
+        key: client.last_metrics[key]
+        for key in (
+            "model",
+            "load_seconds",
+            "generation_seconds",
+            "total_seconds",
+            "reused_loaded_model",
+            "keep_alive",
+        )
+    } == {
         "model": "glm-local",
         "load_seconds": 0.25,
         "generation_seconds": 2.5,
@@ -151,6 +189,8 @@ def test_prompt_client_reports_native_ollama_metrics_and_warm_reuse(
         "reused_loaded_model": True,
         "keep_alive": "10m",
     }
+    assert client.last_metrics["first_fragment_seconds"] >= 0.0
+    assert client.last_metrics["wall_total_seconds"] >= 0.0
     output = capsys.readouterr().out
     assert "modelo=glm-local" in output
     assert "carga=0.250s" in output

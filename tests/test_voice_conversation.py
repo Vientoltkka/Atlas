@@ -2630,6 +2630,40 @@ class InterruptibleSpeechOutputEngine(FakeSpeechOutputEngine):
         self.released.set()
 
 
+class CloseRequiredSpeechOutputEngine(FakeSpeechOutputEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = threading.Event()
+        self.started = threading.Event()
+        self.released = threading.Event()
+        self.cancel_calls = 0
+        self.close_calls = 0
+        self.active_calls = 0
+
+    def speak(self, text: str) -> None:
+        self.calls.append(text)
+        if len(self.calls) != 1:
+            return
+        self.active_calls += 1
+        self.active.set()
+        self.started.set()
+        try:
+            if not self.released.wait(timeout=2.0):
+                raise RuntimeError("TTS persistente de prueba no cerrado")
+        finally:
+            self.active_calls -= 1
+            self.active.clear()
+
+    def cancel(self) -> bool:
+        self.cancel_calls += 1
+        return True
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+        self.released.set()
+
+
 class FirstCaptureThenBargeSpeech(FakeSpeechEngine):
     def __init__(
         self,
@@ -2887,6 +2921,558 @@ def test_phase_17_3c_empty_barge_in_captures_are_bounded() -> None:
     use_case._speak_with_barge_in("respuesta larga", lambda *_args: None, False)
 
     assert speech.transcribe_calls <= 2
+
+
+def test_phase_17_4_starts_tts_before_stream_completion_without_duplicate_text() -> None:
+    events: list[str] = []
+    output = FakeSpeechOutputEngine(events=events)
+    speech = FakeSpeechEngine([speech_result("explica el entrenamiento"), speech_result("salir")])
+    full_response = (
+        "Primera frase suficientemente larga para poder hablarla. "
+        "Segunda frase que completa la respuesta."
+    )
+
+    def stream_response(_prompt: str, fragment_sink) -> str:
+        events.append("model:first-fragment")
+        assert fragment_sink("Primera frase suficientemente larga para poder hablarla. ") is True
+        events.append("model:between-fragments")
+        assert fragment_sink("Segunda frase que completa la respuesta.") is True
+        events.append("model:completed")
+        return full_response
+
+    result = make_use_case(speech, output=output, diagnostics_enabled=False).execute_manual(
+        process_text=lambda _text: (_ for _ in ()).throw(
+            AssertionError("the blocking model path must not run")
+        ),
+        process_text_stream=stream_response,
+    )
+
+    assert events.index("tts start:Primera frase suficientemente larga para poder hablarla.") < events.index(
+        "model:completed"
+    )
+    assert output.calls == [
+        "Primera frase suficientemente larga para poder hablarla.",
+        "Segunda frase que completa la respuesta.",
+    ]
+    assert " ".join(output.calls) == full_response
+    assert result.session.turns[0].response == full_response
+    assert result.session.turns[0].metrics.first_token_seconds >= 0.0
+    assert result.session.turns[0].metrics.first_audio_seconds >= 0.2
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_4_does_not_speak_an_incomplete_stream_fragment() -> None:
+    use_case = make_use_case(
+        FakeSpeechEngine([]),
+        output=FakeSpeechOutputEngine(),
+    )
+
+    segments, remainder = use_case._take_stream_segments(
+        "Este fragmento sigue incompleto"
+    )
+    assert segments == []
+    assert remainder == "Este fragmento sigue incompleto"
+
+    segments, remainder = use_case._take_stream_segments(
+        remainder + " hasta que llega el cierre seguro. "
+    )
+    assert segments == ["Este fragmento sigue incompleto hasta que llega el cierre seguro."]
+    assert remainder == ""
+
+
+def test_phase_17_4_streaming_barge_in_stops_generation_and_dispatches_one_query() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica hyrox"),
+            speech_result("Para, ¿qué hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    stream_calls: list[str] = []
+    normal_calls: list[str] = []
+
+    def stream_response(prompt: str, fragment_sink) -> str:
+        stream_calls.append(prompt.splitlines()[0])
+        keep_streaming = fragment_sink(
+            "Esta respuesta inicial es suficientemente larga para empezar a hablar. "
+        )
+        assert keep_streaming is False
+        return "Esta respuesta inicial es suficientemente larga para empezar a hablar. "
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda prompt: normal_calls.append(prompt.splitlines()[0])
+        or "Son las doce en punto.",
+        process_text_stream=stream_response,
+    )
+
+    assert stream_calls == ["explica hyrox"]
+    assert normal_calls == ["¿qué hora es?"]
+    assert output.calls == [
+        "Esta respuesta inicial es suficientemente larga para empezar a hablar.",
+        "Son las doce en punto.",
+    ]
+    assert result.session.total_turns == 2
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_4a_tts_echo_prefix_is_removed_before_barge_in_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    output = InterruptibleSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica el entrenamiento"),
+            speech_result("Entrenamiento intenso, para qu\u00e9 hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    use_case = make_use_case(speech, output=output)
+    result = use_case.execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0])
+        or (
+            "Entrenamiento intenso, funcional, variado, grupal."
+            if len(processed) == 1
+            else "Son las doce en punto."
+        ),
+    )
+
+    expected_query = "qu\u00e9 hora es?"
+    assert processed == ["explica el entrenamiento", expected_query]
+    assert processed.count(expected_query) == 1
+    assert output.cancel_calls == 1
+    assert not use_case._tts_workers
+    assert result.session.total_turns == 2
+    assert result.session.ended_reason == "explicit_close"
+    debug = "\n".join(result.messages)
+    assert "BARGE_IN tts_echo_prefix_removed=True" in debug
+    assert "BARGE_IN cleaned_transcript='para qu\u00e9 hora es?'" in debug
+    assert "BARGE_IN interruption_recognized=True" in debug
+
+
+def test_phase_17_4a_echo_without_stop_word_keeps_only_recognized_residual() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    spoken = "Entrenamiento intenso, funcional, variado, grupal."
+    transcript = "Entrenamiento intenso, que hora es?"
+    use_case._tts_speaking = True
+
+    removed, cleaned = use_case._strip_tts_echo_prefix(transcript, spoken)
+    interruption_recognized, _remainder = use_case._strip_interruption_prefix(
+        cleaned
+    )
+    accepted = use_case._accepted_barge_in_text(
+        speech_result(cleaned),
+        spoken,
+    )
+
+    assert removed is True
+    assert cleaned == "que hora es?"
+    assert interruption_recognized is False
+    assert accepted == "que hora es?"
+
+
+def test_phase_17_4a_fuzzy_leading_tts_syllable_is_still_identified_as_echo() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    use_case._tts_speaking = True
+
+    removed, cleaned = use_case._strip_tts_echo_prefix(
+        "Trenamiento intenso, que hora es?",
+        "Entrenamiento intenso, funcional, variado, grupal.",
+    )
+
+    assert removed is True
+    assert cleaned == "que hora es?"
+
+
+def test_phase_17_4a_para_as_preposition_is_not_a_stop_command() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    spoken = "Entrenamiento intenso, funcional, variado, grupal."
+    transcript = "qu\u00e9 ejercicios son buenos para correr"
+    use_case._tts_speaking = True
+
+    removed, cleaned = use_case._strip_tts_echo_prefix(transcript, spoken)
+    interruption_recognized, remainder = use_case._strip_interruption_prefix(
+        cleaned
+    )
+    accepted = use_case._accepted_barge_in_text(
+        speech_result(cleaned),
+        spoken,
+    )
+
+    assert removed is False
+    assert cleaned == transcript
+    assert interruption_recognized is False
+    assert remainder == transcript
+    assert accepted == transcript
+
+
+def test_phase_17_4a_echo_cleanup_is_disabled_without_active_tts() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    transcript = "Entrenamiento intenso, para qu\u00e9 hora es?"
+
+    removed, cleaned = use_case._strip_tts_echo_prefix(
+        transcript,
+        "Entrenamiento intenso, funcional, variado, grupal.",
+    )
+
+    assert use_case._tts_speaking is False
+    assert removed is False
+    assert cleaned == transcript
+
+
+def test_phase_17_4c_stop_invalidates_entire_segmented_tts_turn() -> None:
+    output = CloseRequiredSpeechOutputEngine()
+
+    class StopBeforeNextCaptureSpeech(FakeSpeechEngine):
+        def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+            if self.transcribe_calls == 1:
+                assert output.active.wait(timeout=1.0)
+            elif self.transcribe_calls > 1:
+                assert output.active.is_set() is False
+            return super().transcribe_once(capture_settings)
+
+    speech = StopBeforeNextCaptureSpeech(
+        [
+            speech_result("respuesta segmentada"),
+            speech_result("para"),
+            speech_result("salir"),
+        ]
+    )
+    segments = [
+        "Segmento uno suficientemente largo para iniciar la voz. ",
+        "Segmento dos suficientemente largo que nunca debe sonar. ",
+        "Segmento tres suficientemente largo que tampoco debe sonar.",
+    ]
+    emitted: list[str] = []
+
+    def stream_response(_prompt: str, fragment_sink) -> str:
+        for segment in segments:
+            emitted.append(segment)
+            if fragment_sink(segment) is False:
+                break
+        return "".join(emitted)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "ruta bloqueante no usada",
+        process_text_stream=stream_response,
+    )
+
+    assert emitted == [segments[0]]
+    assert output.calls == [segments[0].strip()]
+    assert output.cancel_calls == 1
+    assert output.close_calls >= 1
+    assert output.active.is_set() is False
+    assert result.session.total_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_4c_exit_during_streamed_tts_closes_without_more_segments() -> None:
+    output = CloseRequiredSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [speech_result("respuesta segmentada"), speech_result("salir")],
+        output,
+    )
+    segments = [
+        "Segmento uno suficientemente largo para iniciar la voz. ",
+        "Segmento dos suficientemente largo que nunca debe sonar. ",
+        "Segmento tres suficientemente largo que tampoco debe sonar.",
+    ]
+
+    def stream_response(_prompt: str, fragment_sink) -> str:
+        emitted: list[str] = []
+        for segment in segments:
+            emitted.append(segment)
+            if fragment_sink(segment) is False:
+                break
+        return "".join(emitted)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "ruta bloqueante no usada",
+        process_text_stream=stream_response,
+    )
+
+    assert output.calls == [segments[0].strip()]
+    assert output.active.is_set() is False
+    assert result.session.total_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+    assert result.session.transcript_history == ["respuesta segmentada"]
+
+
+def test_phase_17_4c_query_waits_for_old_segment_to_stop_and_dispatches_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    output = CloseRequiredSpeechOutputEngine()
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("respuesta segmentada"),
+            speech_result("Para, \u00bfqu\u00e9 hora es?"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    segments = [
+        "Segmento uno suficientemente largo para iniciar la voz. ",
+        "Segmento dos suficientemente largo que nunca debe sonar. ",
+        "Segmento tres suficientemente largo que tampoco debe sonar.",
+    ]
+    processed: list[str] = []
+
+    def process_text(text: str) -> str:
+        assert output.active.is_set() is False
+        processed.append(text.splitlines()[0])
+        return "respuesta local"
+
+    def stream_response(_prompt: str, fragment_sink) -> str:
+        emitted: list[str] = []
+        for segment in segments:
+            emitted.append(segment)
+            if fragment_sink(segment) is False:
+                break
+        return "".join(emitted)
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=process_text,
+        process_text_stream=stream_response,
+    )
+
+    assert output.calls == [segments[0].strip(), "respuesta local"]
+    assert processed == ["\u00bfqu\u00e9 hora es?"]
+    debug = "\n".join(result.messages)
+    assert debug.count("BARGE_IN pending_query='\u00bfqu\u00e9 hora es?'") == 1
+    assert debug.count("BARGE_IN dispatch query='\u00bfqu\u00e9 hora es?'") == 1
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_4c_final_physical_echo_cascade_dispatches_only_human_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_DEBUG", "1")
+    output = InterruptibleSpeechOutputEngine()
+    spoken = (
+        "CrossFit s\u00ed incluye levantamiento de pesas y combina t\u00e9cnicas "
+        "variadas de fuerza y resistencia."
+    )
+    mixed = (
+        "Para, CrossFit s\u00ed incluye levantamiento de pesas, "
+        "\u00bfqu\u00e9 hora es?, t\u00e9cnicas variadas de fuerza."
+    )
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica crossfit en cuatro frases"),
+            speech_result("levantar"),
+            speech_result("CrossFit se incluye levantarte"),
+            speech_result(mixed),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    def process_text(text: str) -> str:
+        prompt = text.splitlines()[0]
+        processed.append(prompt)
+        return spoken if len(processed) == 1 else "respuesta local"
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=process_text,
+    )
+
+    assert processed == [
+        "explica crossfit en cuatro frases",
+        "\u00bfqu\u00e9 hora es?",
+    ]
+    assert output.calls == [spoken, "respuesta local"]
+    assert output.cancel_calls == 1
+    assert result.session.transcript_history == processed
+    debug = "\n".join(result.messages)
+    assert debug.count("BARGE_IN pending_query='\u00bfqu\u00e9 hora es?'") == 1
+    assert debug.count("BARGE_IN dispatch query='\u00bfqu\u00e9 hora es?'") == 1
+    assert "BARGE_IN pending_query='levantar'" not in debug
+    assert "BARGE_IN pending_query='CrossFit se incluye levantarte'" not in debug
+
+
+def test_phase_17_4c_physical_echo_after_stop_is_not_dispatched() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    spoken = (
+        "Un estilo de entrenamiento. CrossFit combina t\u00e9cnicas variadas de "
+        "fuerza, resistencia, flexibilidad y velocidad."
+    )
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica crossfit"),
+            speech_result("para, si combina t\u00e9cnicas variadas de puertas para, si"),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0]) or spoken,
+    )
+
+    assert processed == ["explica crossfit"]
+    assert output.calls == [spoken]
+    assert output.cancel_calls == 1
+    assert result.session.total_turns == 1
+    assert result.session.ended_reason == "explicit_close"
+
+
+def test_phase_17_4c_interleaved_tts_keeps_exactly_one_human_query() -> None:
+    output = InterruptibleSpeechOutputEngine()
+    spoken = (
+        "Un estilo de entrenamiento. CrossFit combina t\u00e9cnicas variadas de "
+        "fuerza, resistencia, flexibilidad y velocidad."
+    )
+    mixed = (
+        "Para, CrossFit combina t\u00e9cnicas variadas de fuerza, "
+        "\u00bfqu\u00e9 hora es?, resistencia, flexibilidad y velocidad."
+    )
+    speech = FirstCaptureThenBargeSpeech(
+        [
+            speech_result("explica crossfit"),
+            speech_result(mixed),
+            speech_result("salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda text: processed.append(text.splitlines()[0])
+        or (spoken if len(processed) == 1 else "respuesta local"),
+    )
+
+    assert processed == ["explica crossfit", "\u00bfqu\u00e9 hora es?"]
+    assert output.cancel_calls == 1
+    assert result.session.total_turns == 2
+    assert result.session.transcript_history == [
+        "explica crossfit",
+        "\u00bfqu\u00e9 hora es?",
+    ]
+
+
+def test_phase_17_4c_pure_tts_echo_is_not_a_human_interruption() -> None:
+    spoken = (
+        "Un estilo de entrenamiento. CrossFit combina t\u00e9cnicas variadas de "
+        "fuerza, resistencia, flexibilidad y velocidad."
+    )
+    use_case = make_use_case(FakeSpeechEngine([]))
+    use_case._tts_speaking = True
+
+    accepted = use_case._accepted_barge_in_text(
+        speech_result("CrossFit combina t\u00e9cnicas variadas de fuerza"),
+        spoken,
+    )
+
+    assert accepted is None
+
+
+def test_phase_17_4b_partial_tts_echo_preserves_time_query_and_exit() -> None:
+    class EveryCallInterruptibleOutput(FakeSpeechOutputEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self._condition = threading.Condition()
+            self._active_release: threading.Event | None = None
+            self.cancel_calls = 0
+
+        def speak(self, text: str) -> None:
+            release = threading.Event()
+            with self._condition:
+                self.calls.append(text)
+                self._active_release = release
+                self._condition.notify_all()
+            if not release.wait(timeout=2.0):
+                raise RuntimeError("TTS de prueba no interrumpido")
+            with self._condition:
+                if self._active_release is release:
+                    self._active_release = None
+
+        def cancel(self) -> bool:
+            with self._condition:
+                self.cancel_calls += 1
+                release = self._active_release
+            if release is None:
+                return False
+            release.set()
+            return True
+
+        def wait_until_speaking(self, call_number: int) -> None:
+            with self._condition:
+                ready = self._condition.wait_for(
+                    lambda: len(self.calls) >= call_number,
+                    timeout=1.0,
+                )
+            assert ready is True
+
+    class BargeInOnEveryTts(FakeSpeechEngine):
+        def __init__(
+            self,
+            results: list[SpeechTranscriptionResult],
+            output: EveryCallInterruptibleOutput,
+        ) -> None:
+            super().__init__(results)
+            self._output = output
+
+        def transcribe_once(self, capture_settings=None) -> SpeechTranscriptionResult:
+            if self.transcribe_calls > 0:
+                self._output.wait_until_speaking(self.transcribe_calls)
+            return super().transcribe_once(capture_settings)
+
+    output = EveryCallInterruptibleOutput()
+    speech = BargeInOnEveryTts(
+        [
+            speech_result("explica el entrenamiento"),
+            speech_result("funcional, variado, Para, \u00bfqu\u00e9 hora es?"),
+            speech_result("doce de la tarde, salir"),
+        ],
+        output,
+    )
+    processed: list[str] = []
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run for the time query")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(
+            add_user=lambda _prompt: None,
+            add_assistant=lambda _response: None,
+            history=list,
+        ),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    def process_text(text: str) -> str:
+        prompt = text.splitlines()[0]
+        processed.append(prompt)
+        if prompt == "explica el entrenamiento":
+            return "Entrenamiento intenso, funcional, variado, grupal."
+        return orchestrator.process_voice_prompt(text, confirm=lambda _prompt: "")
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=process_text,
+    )
+
+    assert processed == ["explica el entrenamiento", "\u00bfqu\u00e9 hora es?"]
+    assert output.calls == [
+        "Entrenamiento intenso, funcional, variado, grupal.",
+        "Son las seis y doce de la tarde.",
+    ]
+    assert output.cancel_calls == 2
+    assert result.session.response_history[-1] == "Son las seis y doce de la tarde."
+    assert result.session.total_turns == 2
+    assert result.session.ended_reason == "explicit_close"
 
 
 def test_phase_17_3a_lingering_tts_worker_does_not_block_request_or_exit() -> None:

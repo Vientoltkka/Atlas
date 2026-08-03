@@ -23,6 +23,7 @@ class SpeechOutputMetrics:
     """Monotonic timings for one local TTS delivery."""
 
     synthesis_seconds: float = 0.0
+    first_audio_seconds: float = 0.0
     playback_seconds: float = 0.0
     barge_in_detected: bool = False
     tts_cancel_latency_ms: float = 0.0
@@ -101,6 +102,19 @@ class Pyttsx3SpeechOutputEngine:
         self._cancel_requested.clear()
         synthesis_started = time.monotonic()
         engine = self._load_engine()
+        first_audio_at: list[float] = []
+        callback_token = None
+        connect = getattr(engine, "connect", None)
+
+        if callable(connect):
+            def mark_first_audio(*_args) -> None:
+                if not first_audio_at:
+                    first_audio_at.append(time.monotonic())
+
+            try:
+                callback_token = connect("started-utterance", mark_first_audio)
+            except Exception:
+                callback_token = None
 
         try:
             self._stop_if_busy(engine)
@@ -117,6 +131,12 @@ class Pyttsx3SpeechOutputEngine:
             self._discard_failed_engine(engine)
             raise RuntimeError(str(error)) from error
         finally:
+            disconnect = getattr(engine, "disconnect", None)
+            if callback_token is not None and callable(disconnect):
+                try:
+                    disconnect(callback_token)
+                except Exception:
+                    pass
             with self._engine_lock:
                 self._playback_active = False
                 self._external_loop_active = False
@@ -127,6 +147,14 @@ class Pyttsx3SpeechOutputEngine:
 
         return SpeechOutputMetrics(
             synthesis_seconds=synthesis_seconds,
+            first_audio_seconds=max(
+                0.0,
+                (
+                    first_audio_at[0] - synthesis_started
+                    if first_audio_at
+                    else synthesis_seconds
+                ),
+            ),
             playback_seconds=playback_seconds,
             tts_cancel_confirmed=cancel_confirmed,
         )
@@ -139,19 +167,19 @@ class Pyttsx3SpeechOutputEngine:
             raise RuntimeError("Dependencia no disponible: pyttsx3.") from error
 
     def cancel(self) -> bool:
-        """Stop active playback once."""
+        """Request cancellation once the engine owns an utterance."""
         with self._engine_lock:
             if (
                 self._engine is None
-                or not self._playback_active
                 or self._cancel_requested.is_set()
             ):
                 return False
             self._cancel_requested.set()
             engine = self._engine
+            playback_active = self._playback_active
             external_loop_active = self._external_loop_active
 
-        if not external_loop_active:
+        if playback_active and not external_loop_active:
             stop = getattr(engine, "stop", None)
             if callable(stop):
                 stop()
@@ -207,6 +235,11 @@ class Pyttsx3SpeechOutputEngine:
         use_external_loop: bool,
     ) -> bool:
         if not use_external_loop:
+            if self._cancel_requested.is_set():
+                stop = getattr(engine, "stop", None)
+                if callable(stop):
+                    stop()
+                return True
             engine.runAndWait()
             is_busy = getattr(engine, "isBusy", None)
             return bool(

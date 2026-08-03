@@ -137,7 +137,80 @@ def test_pyttsx3_reports_separate_monotonic_synthesis_and_playback(
     )
 
     assert metrics.synthesis_seconds == pytest.approx(0.1)
+    assert metrics.first_audio_seconds == pytest.approx(0.1)
     assert metrics.playback_seconds == pytest.approx(0.3)
+
+
+def test_phase_17_4_pyttsx3_uses_started_utterance_for_first_audio_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CallbackEngine(FakePyttsx3Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.callback = None
+            self.disconnected = None
+
+        def connect(self, event_name: str, callback):
+            assert event_name == "started-utterance"
+            self.callback = callback
+            return "token-1"
+
+        def disconnect(self, token) -> None:
+            self.disconnected = token
+
+        def runAndWait(self) -> None:
+            self.run_and_wait_calls += 1
+            assert self.callback is not None
+            self.callback("utterance")
+
+    engine = CallbackEngine()
+    fake_module = FakePyttsx3Module([engine])
+    ticks = iter((1.0, 1.1, 1.2, 1.25, 1.5))
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    monkeypatch.setattr(
+        "use_cases.speech_output_engine.time.monotonic",
+        lambda: next(ticks),
+    )
+
+    metrics = Pyttsx3SpeechOutputEngine(SpeechOutputSettings()).speak_with_metrics(
+        "respuesta"
+    )
+
+    assert metrics.first_audio_seconds == pytest.approx(0.25)
+    assert engine.disconnected == "token-1"
+
+
+def test_phase_17_4c_cancel_accepts_request_while_utterance_is_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowSayEngine(FakePyttsx3Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.say_started = threading.Event()
+            self.allow_say = threading.Event()
+
+        def say(self, text: str) -> None:
+            self.say_started.set()
+            if not self.allow_say.wait(timeout=2.0):
+                raise RuntimeError("encolado TTS de prueba no liberado")
+            super().say(text)
+
+    engine = SlowSayEngine()
+    fake_module = FakePyttsx3Module([engine])
+    monkeypatch.setitem(__import__("sys").modules, "pyttsx3", fake_module)
+    output = Pyttsx3SpeechOutputEngine(SpeechOutputSettings())
+    worker = threading.Thread(target=output.speak, args=("respuesta larga",))
+    worker.start()
+    assert engine.say_started.wait(timeout=1.0)
+
+    stop_requested = output.cancel()
+    engine.allow_say.set()
+    worker.join(timeout=1.0)
+
+    assert stop_requested is True
+    assert worker.is_alive() is False
+    assert engine.stop_calls == 1
+
 
 def test_pyttsx3_cancel_stops_active_playback_once(
     monkeypatch: pytest.MonkeyPatch,

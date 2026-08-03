@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import os
+from time import perf_counter
 from typing import Any
 
 import ollama
@@ -34,6 +35,8 @@ class PromptClient:
         messages: list[dict[str, str]],
     ) -> str:
         """Send exactly the provided messages to the selected model."""
+        started = perf_counter()
+        first_fragment_seconds: float | None = None
         stream = self._client.chat(
             model=model,
             messages=messages,
@@ -46,10 +49,17 @@ class PromptClient:
             final_chunk = chunk
             content = self._extract_stream_content(chunk)
             if content:
+                if first_fragment_seconds is None:
+                    first_fragment_seconds = perf_counter() - started
                 fragments.append(content)
         if final_chunk is None:
             raise ValueError("Ollama returned an empty response stream.")
-        self._record_metrics(model, final_chunk)
+        self._record_metrics(
+            model,
+            final_chunk,
+            first_fragment_seconds=first_fragment_seconds,
+            wall_total_seconds=perf_counter() - started,
+        )
         return "".join(fragments)
 
     def stream_messages(
@@ -58,6 +68,9 @@ class PromptClient:
         messages: list[dict[str, str]],
     ) -> Iterator[str]:
         """Stream exactly the provided messages and yield content fragments."""
+        started = perf_counter()
+        first_fragment_seconds: float | None = None
+        final_chunk: Any = None
         stream = self._client.chat(
             model=model,
             messages=messages,
@@ -65,12 +78,31 @@ class PromptClient:
             keep_alive=self._keep_alive,
         )
 
-        for chunk in stream:
-            content = self._extract_stream_content(chunk)
-            if content:
-                yield content
+        try:
+            for chunk in stream:
+                final_chunk = chunk
+                content = self._extract_stream_content(chunk)
+                if content:
+                    if first_fragment_seconds is None:
+                        first_fragment_seconds = perf_counter() - started
+                    yield content
+        finally:
+            if final_chunk is not None:
+                self._record_metrics(
+                    model,
+                    final_chunk,
+                    first_fragment_seconds=first_fragment_seconds,
+                    wall_total_seconds=perf_counter() - started,
+                )
 
-    def _record_metrics(self, requested_model: str, response: Any) -> None:
+    def _record_metrics(
+        self,
+        requested_model: str,
+        response: Any,
+        *,
+        first_fragment_seconds: float | None = None,
+        wall_total_seconds: float | None = None,
+    ) -> None:
         model = str(self._response_value(response, "model") or requested_model)
         load_seconds = self._duration_seconds(response, "load_duration")
         generation_seconds = self._duration_seconds(response, "eval_duration")
@@ -83,6 +115,8 @@ class PromptClient:
             "load_seconds": load_seconds,
             "generation_seconds": generation_seconds,
             "total_seconds": total_seconds,
+            "first_fragment_seconds": max(0.0, first_fragment_seconds or 0.0),
+            "wall_total_seconds": max(0.0, wall_total_seconds or 0.0),
             "reused_loaded_model": reused_loaded_model,
             "keep_alive": self._keep_alive,
         }
@@ -95,6 +129,8 @@ class PromptClient:
                 f"carga={load_seconds:.3f}s "
                 f"generacion={generation_seconds:.3f}s "
                 f"total={total_seconds:.3f}s "
+                f"primer_fragmento={max(0.0, first_fragment_seconds or 0.0):.3f}s "
+                f"pared_total={max(0.0, wall_total_seconds or 0.0):.3f}s "
                 f"modelo_reutilizado={'si' if reused_loaded_model else 'no'} "
                 f"keep_alive={self._keep_alive}"
             )

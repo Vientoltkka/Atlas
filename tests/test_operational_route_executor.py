@@ -168,6 +168,30 @@ def test_direct_response_invokes_only_conversational_handler() -> None:
     assert calls == [request]
 
 
+def test_phase_17_4_direct_response_streams_fragments_without_changing_route() -> None:
+    request = _gateway().from_voice("explica hyrox")
+    streamed: list[str] = []
+
+    def stream_response(_request, _context):
+        yield "Primera frase. "
+        yield "Segunda frase. "
+        yield "No debe consumirse."
+
+    executor = _executor(direct_streaming_responder=stream_response)
+
+    result = executor.execute(
+        request,
+        _decision(RequestRoute.DIRECT_RESPONSE),
+        output_fragment_sink=lambda fragment: streamed.append(fragment)
+        or fragment != "Segunda frase. ",
+    )
+
+    assert result.status is RouteExecutionStatus.COMPLETED
+    assert result.route is RequestRoute.DIRECT_RESPONSE
+    assert result.output == "Primera frase. Segunda frase. "
+    assert streamed == ["Primera frase. ", "Segunda frase. "]
+
+
 def test_direct_response_failure_is_safe_and_typed() -> None:
     request = _gateway().from_text("hola")
 

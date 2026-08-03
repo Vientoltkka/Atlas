@@ -349,11 +349,13 @@ class DirectResponseRouteHandler(_BaseRouteHandler):
     def __init__(
         self,
         responder: Callable[[AtlasRequest], Any] | None,
+        streaming_responder: Callable[[AtlasRequest], Any] | None = None,
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(clock=clock)
         self._responder = responder
+        self._streaming_responder = streaming_responder
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
         return self.execute_with_context(request, decision, None)
@@ -392,6 +394,56 @@ class DirectResponseRouteHandler(_BaseRouteHandler):
             started_at=started,
             status=RouteExecutionStatus.COMPLETED,
             output=output,
+            target="direct_response",
+            action="route_execution_completed",
+        )
+
+    def execute_streaming_with_context(
+        self,
+        request: AtlasRequest,
+        decision: RouteDecision,
+        context: OperationalContext | None,
+        fragment_sink: Callable[[str], bool | None],
+    ) -> RouteExecutionResult:
+        """Stream one direct response while preserving the normal route result."""
+        if self._streaming_responder is None:
+            result = self.execute_with_context(request, decision, context)
+            if result.status is RouteExecutionStatus.COMPLETED:
+                rendered = _present_output(result.output)
+                if rendered:
+                    fragment_sink(rendered)
+            return result
+
+        started = self._clock()
+        stream = None
+        try:
+            stream = _invoke_contextual_callable(
+                self._streaming_responder,
+                request,
+                context,
+            )
+            fragments: list[str] = []
+            for fragment in stream:
+                if not isinstance(fragment, str):
+                    raise TypeError("Direct response stream yielded a non-text fragment.")
+                if not fragment:
+                    continue
+                fragments.append(fragment)
+                if fragment_sink(fragment) is False:
+                    break
+        except Exception as cause:
+            return self._failure(request, decision, started, "direct_response", cause)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+        return self._result(
+            request,
+            decision,
+            started_at=started,
+            status=RouteExecutionStatus.COMPLETED,
+            output="".join(fragments),
             target="direct_response",
             action="route_execution_completed",
         )
@@ -1478,6 +1530,8 @@ class OperationalRouteExecutor:
         self,
         request: AtlasRequest,
         decision: RouteDecision,
+        *,
+        output_fragment_sink: Callable[[str], bool | None] | None = None,
     ) -> RouteExecutionResult:
         started = self._clock()
         handler_name: str | None = None
@@ -1546,11 +1600,24 @@ class OperationalRouteExecutor:
                     recoverable=True,
                 )
             execute_with_context = getattr(handler, "execute_with_context", None)
-            result = (
-                execute_with_context(request, decision, context)
-                if callable(execute_with_context)
-                else handler.execute(request, decision)
+            execute_streaming_with_context = getattr(
+                handler,
+                "execute_streaming_with_context",
+                None,
             )
+            if output_fragment_sink is not None and callable(execute_streaming_with_context):
+                result = execute_streaming_with_context(
+                    request,
+                    decision,
+                    context,
+                    output_fragment_sink,
+                )
+            else:
+                result = (
+                    execute_with_context(request, decision, context)
+                    if callable(execute_with_context)
+                    else handler.execute(request, decision)
+                )
             result = replace(
                 result,
                 metadata={
@@ -1833,6 +1900,7 @@ class RouteExecutionPresenter:
 def build_default_route_handlers(
     *,
     direct_responder: Callable[[AtlasRequest], Any] | None = None,
+    direct_streaming_responder: Callable[[AtlasRequest], Any] | None = None,
     memory: object | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_executor: ToolExecutor | None = None,
@@ -1849,6 +1917,7 @@ def build_default_route_handlers(
     handlers: dict[RequestRoute, RouteHandler] = {
         RequestRoute.DIRECT_RESPONSE: DirectResponseRouteHandler(
             direct_responder,
+            direct_streaming_responder,
             clock=clock,
         ),
         RequestRoute.MEMORY_QUERY: MemoryRouteHandler(memory, clock=clock),

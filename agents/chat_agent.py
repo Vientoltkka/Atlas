@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from agents.base_agent import BaseAgent
 from models.prompt_client import PromptClient
 
@@ -27,6 +29,17 @@ class ChatAgent(BaseAgent):
     ) -> str:
 
         return self._client.ask(
+            model=model,
+            messages=messages,
+        )
+
+    def stream(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+    ) -> Iterator[str]:
+        """Yield one conversational response through PromptClient streaming."""
+        return self._client.stream_messages(
             model=model,
             messages=messages,
         )
