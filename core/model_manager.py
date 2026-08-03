@@ -6,6 +6,11 @@ from typing import Protocol
 
 from core.execution_resources import (
     ExecutionResourceCatalog,
+    ExecutionResourceOptimizer,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirements,
+    NoCompatibleResourceError,
+    OptimizationGoal,
     ResourceCandidate,
     ResourceHealthStatus,
     ResourceType,
@@ -62,10 +67,57 @@ class ModelDescriptor:
             raise TypeError("available and local must be bool values.")
         if type(self.priority) is not int:
             raise TypeError("priority must be an int.")
+        if self.priority < 0:
+            raise ValueError("priority must be non-negative.")
         for name in ("relative_cost", "relative_latency"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, (int, float)) or value < 0):
                 raise ValueError(f"{name} must be non-negative when provided.")
+
+@dataclass(frozen=True, slots=True)
+class ModelSelectionRequest:
+    """Deterministic requirements for selecting one registered model."""
+
+    task: str
+    prefer_local: bool | None = None
+    maximum_relative_cost: float | None = None
+    maximum_relative_latency: float | None = None
+    preferred_model_id: str | None = None
+    preferred_provider_id: str | None = None
+    allow_fallback: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, str) or not self.task.strip():
+            raise ValueError("task must be a non-empty string.")
+        object.__setattr__(self, "task", self.task.strip().lower())
+        if self.prefer_local is not None and type(self.prefer_local) is not bool:
+            raise TypeError("prefer_local must be a bool or None.")
+        if type(self.allow_fallback) is not bool:
+            raise TypeError("allow_fallback must be a bool.")
+        for name in ("maximum_relative_cost", "maximum_relative_latency"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, (int, float)) or value < 0):
+                raise ValueError(f"{name} must be non-negative when provided.")
+        for name in ("preferred_model_id", "preferred_provider_id"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{name} must be a non-empty string when provided.")
+                object.__setattr__(self, name, value.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSelectionResult:
+    """Controlled outcome of deterministic model selection."""
+
+    success: bool
+    logical_model_id: str | None
+    physical_model_name: str | None
+    provider_id: str | None
+    reason: str
+    is_fallback: bool
+    descriptor: ModelDescriptor | None
+    error_code: str | None = None
 
 class ModelManager:
     """Expose the model inventory and preserve the current task selection."""
@@ -77,6 +129,14 @@ class ModelManager:
         "chat": "chat-local",
         "vision": "vision-local",
         "project": "project-local",
+    }
+
+    _TASK_CAPABILITIES: Mapping[str, str] = {
+        "chat": "chat",
+        "coding": "coding",
+        "project": "project",
+        "vision": "vision",
+        "reasoning": "reasoning",
     }
 
     _DEFAULT_DESCRIPTORS: tuple[ModelDescriptor, ...] = (
@@ -92,7 +152,7 @@ class ModelManager:
             logical_id="chat-local",
             provider_id="ollama",
             model_name="glm4:9b",
-            capabilities=("general_chat", "fast_response", "local"),
+            capabilities=("general_chat", "chat", "fast_response", "local"),
             priority=90,
         ),
         ModelDescriptor(
@@ -107,7 +167,13 @@ class ModelManager:
             logical_id="project-local",
             provider_id="ollama",
             model_name="glm-5.2-local:latest",
-            capabilities=("general_chat", "coding", "reasoning", "local"),
+            capabilities=(
+                "general_chat",
+                "project",
+                "coding",
+                "reasoning",
+                "local",
+            ),
             priority=95,
             fallback_logical_ids=("coding-local", "chat-local"),
         ),
@@ -183,6 +249,114 @@ class ModelManager:
             available=descriptor.available and descriptor.model_name in installed,
         )
 
+    def select_model(self, request: ModelSelectionRequest) -> ModelSelectionResult:
+        """Select one model by capability through the shared resource optimizer."""
+        if not isinstance(request, ModelSelectionRequest):
+            raise TypeError("request must be a ModelSelectionRequest.")
+
+        preferred = (
+            self.resolve_model(request.preferred_model_id)
+            if request.preferred_model_id is not None
+            else None
+        )
+        if request.preferred_model_id is not None and preferred is None:
+            return self._selection_failure()
+
+        allowed_model_names: set[str] | None = None
+        if preferred is not None:
+            allowed_ids = [preferred.logical_id]
+            if request.allow_fallback:
+                allowed_ids.extend(preferred.fallback_logical_ids)
+            allowed_model_names = {
+                descriptor.model_name
+                for logical_id in allowed_ids
+                if (descriptor := self.resolve_model(logical_id)) is not None
+            }
+
+        catalog = self.resource_catalog()
+        if allowed_model_names is not None:
+            catalog = ExecutionResourceCatalog(
+                tuple(
+                    candidate
+                    for candidate in catalog.list_candidates()
+                    if candidate.resource_id in allowed_model_names
+                )
+            )
+
+        capability = self._TASK_CAPABILITIES.get(request.task, request.task)
+        requirements = ExecutionResourceRequirements(
+            required_capabilities=(capability,),
+            maximum_estimated_cost=request.maximum_relative_cost,
+            maximum_latency_seconds=request.maximum_relative_latency,
+            preferred_model_ids=(preferred.model_name,) if preferred is not None else (),
+            preferred_provider_ids=(request.preferred_provider_id,)
+            if request.preferred_provider_id is not None
+            else (),
+        )
+        preferred_catalogs: list[ExecutionResourceCatalog] = []
+        if request.preferred_provider_id is not None:
+            preferred_catalogs.append(
+                ExecutionResourceCatalog(
+                    tuple(
+                        candidate
+                        for candidate in catalog.list_candidates()
+                        if candidate.provider_id == request.preferred_provider_id
+                    )
+                )
+            )
+        if request.prefer_local is True:
+            preferred_catalogs.append(
+                ExecutionResourceCatalog(
+                    tuple(
+                        candidate
+                        for candidate in catalog.list_candidates()
+                        if candidate.local
+                    )
+                )
+            )
+        preferred_catalogs.append(catalog)
+
+        decision = None
+        for candidate_catalog in preferred_catalogs:
+            try:
+                decision = ExecutionResourceOptimizer(
+                    ExecutionResourcePolicy(
+                        enabled=True,
+                        optimization_goal=OptimizationGoal.BALANCED,
+                    )
+                ).select(
+                    step_id="model_selection",
+                    requirements=requirements,
+                    catalog=candidate_catalog,
+                )
+                break
+            except NoCompatibleResourceError:
+                continue
+        if decision is None:
+            return self._selection_failure()
+
+        descriptor = self.resolve_model(decision.selected_resource_id or "")
+        if descriptor is None:
+            return self._selection_failure(
+                error_code="SELECTED_MODEL_NOT_RESOLVABLE"
+            )
+        is_fallback = (
+            preferred is not None
+            and descriptor.logical_id != preferred.logical_id
+        )
+        return ModelSelectionResult(
+            success=True,
+            logical_model_id=descriptor.logical_id,
+            physical_model_name=descriptor.model_name,
+            provider_id=descriptor.provider_id,
+            reason=(
+                "Selected declared fallback model."
+                if is_fallback
+                else f"Selected compatible model ({decision.reason.value})."
+            ),
+            is_fallback=is_fallback,
+            descriptor=descriptor,
+        )
     def list_model_descriptors(
         self,
         *,
@@ -232,6 +406,7 @@ class ModelManager:
                     resource_type=ResourceType.MODEL,
                     provider_id=descriptor.provider_id,
                     capabilities=descriptor.capabilities,
+                    quality_tier=descriptor.priority,
                     estimated_cost=descriptor.relative_cost,
                     estimated_latency=descriptor.relative_latency,
                     local=descriptor.local,
@@ -260,6 +435,22 @@ class ModelManager:
             local=True,
         )
 
+
+    @staticmethod
+    def _selection_failure(
+        *,
+        error_code: str = "NO_COMPATIBLE_MODEL",
+    ) -> ModelSelectionResult:
+        return ModelSelectionResult(
+            success=False,
+            logical_model_id=None,
+            physical_model_name=None,
+            provider_id=None,
+            reason="No compatible registered model is available.",
+            is_fallback=False,
+            descriptor=None,
+            error_code=error_code,
+        )
 
 def _model_resource_id(model: object) -> str:
     if isinstance(model, str):
