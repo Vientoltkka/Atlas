@@ -231,6 +231,213 @@ def test_declarative_fallback_is_used_only_when_allowed() -> None:
     assert allowed.is_fallback is True
 
 
+def test_available_primary_wins_before_authorized_higher_priority_fallback() -> None:
+    primary = _descriptor(
+        "primary-chat",
+        "primary:latest",
+        "chat",
+        priority=1,
+        fallbacks=("fallback-chat",),
+    )
+    fallback = _descriptor(
+        "fallback-chat",
+        "fallback:latest",
+        "chat",
+        priority=100,
+    )
+    manager = _manager(primary, fallback)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="primary-chat",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is True
+    assert result.logical_model_id == "primary-chat"
+    assert result.is_fallback is False
+
+
+def test_fallback_chain_reaches_second_available_model() -> None:
+    primary = _descriptor(
+        "primary-chat",
+        "primary:latest",
+        "chat",
+        fallbacks=("fallback-one",),
+    )
+    fallback_one = _descriptor(
+        "fallback-one",
+        "fallback-one:latest",
+        "chat",
+        fallbacks=("fallback-two",),
+    )
+    fallback_two = _descriptor("fallback-two", "fallback-two:latest", "chat")
+    manager = ModelManager(
+        StaticModelSource(["fallback-two:latest"]),
+        (primary, fallback_one, fallback_two),
+    )
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="primary-chat",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is True
+    assert result.logical_model_id == "fallback-two"
+    assert result.physical_model_name == "fallback-two:latest"
+    assert result.is_fallback is True
+
+
+def test_exhausted_fallback_chain_returns_structured_failure() -> None:
+    primary = _descriptor(
+        "primary-chat",
+        "primary:latest",
+        "chat",
+        available=False,
+        fallbacks=("fallback-one",),
+    )
+    fallback_one = _descriptor(
+        "fallback-one",
+        "fallback-one:latest",
+        "chat",
+        available=False,
+        fallbacks=("fallback-two",),
+    )
+    fallback_two = _descriptor(
+        "fallback-two",
+        "fallback-two:latest",
+        "chat",
+        available=False,
+    )
+    manager = _manager(primary, fallback_one, fallback_two)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="primary-chat",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "NO_COMPATIBLE_MODEL"
+
+
+def test_fallback_without_required_capability_is_rejected() -> None:
+    primary = _descriptor(
+        "primary-reasoning",
+        "primary:latest",
+        "reasoning",
+        available=False,
+        fallbacks=("chat-only",),
+    )
+    chat_only = _descriptor("chat-only", "chat-only:latest", "chat")
+    manager = _manager(primary, chat_only)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="reasoning",
+            preferred_model_id="primary-reasoning",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "NO_COMPATIBLE_MODEL"
+
+
+def test_cyclic_fallback_metadata_terminates_with_structured_failure() -> None:
+    primary = _descriptor(
+        "cycle-a",
+        "cycle-a:latest",
+        "chat",
+        available=False,
+        fallbacks=("cycle-b",),
+    )
+    fallback = _descriptor(
+        "cycle-b",
+        "cycle-b:latest",
+        "chat",
+        available=False,
+        fallbacks=("cycle-a",),
+    )
+    manager = _manager(primary, fallback)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="cycle-a",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "NO_COMPATIBLE_MODEL"
+
+
+def test_fallback_selection_is_deterministic_for_same_chain() -> None:
+    primary = _descriptor(
+        "primary-chat",
+        "primary:latest",
+        "chat",
+        available=False,
+        fallbacks=("fallback-low", "fallback-high"),
+    )
+    fallback_low = _descriptor(
+        "fallback-low",
+        "fallback-low:latest",
+        "chat",
+        priority=1,
+    )
+    fallback_high = _descriptor(
+        "fallback-high",
+        "fallback-high:latest",
+        "chat",
+        priority=100,
+    )
+    manager = _manager(primary, fallback_low, fallback_high)
+    request = ModelSelectionRequest(
+        task="chat",
+        preferred_model_id="primary-chat",
+        allow_fallback=True,
+    )
+
+    first = manager.select_model(request)
+    second = manager.select_model(request)
+
+    assert first.logical_model_id == "fallback-high"
+    assert second.logical_model_id == "fallback-high"
+    assert first.reason == second.reason
+
+
+def test_nonexistent_declared_fallback_is_never_selected() -> None:
+    primary = _descriptor(
+        "primary-chat",
+        "primary:latest",
+        "chat",
+        available=False,
+        fallbacks=("missing-fallback",),
+    )
+    manager = _manager(primary)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="primary-chat",
+            allow_fallback=True,
+        )
+    )
+
+    assert result.success is False
+    assert result.logical_model_id is None
+    assert result.physical_model_name is None
+
+
 def test_preferred_provider_favors_compatible_provider() -> None:
     first = _descriptor(
         "provider-a-chat",

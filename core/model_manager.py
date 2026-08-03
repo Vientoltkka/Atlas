@@ -271,26 +271,29 @@ class ModelManager:
         if request.preferred_model_id is not None and preferred is None:
             return self._selection_failure()
 
-        allowed_model_names: set[str] | None = None
-        if preferred is not None:
-            allowed_ids = [preferred.logical_id]
-            if request.allow_fallback:
-                allowed_ids.extend(preferred.fallback_logical_ids)
-            allowed_model_names = {
-                descriptor.model_name
-                for logical_id in allowed_ids
-                if (descriptor := self.resolve_model(logical_id)) is not None
-            }
-
         catalog = self.resource_catalog()
-        if allowed_model_names is not None:
-            catalog = ExecutionResourceCatalog(
-                tuple(
-                    candidate
-                    for candidate in catalog.list_candidates()
-                    if candidate.resource_id in allowed_model_names
+        selection_catalogs = [catalog]
+        if preferred is not None:
+            selection_catalogs = [
+                ExecutionResourceCatalog(
+                    tuple(
+                        candidate
+                        for candidate in catalog.list_candidates()
+                        if candidate.resource_id == preferred.model_name
+                    )
                 )
-            )
+            ]
+            if request.allow_fallback:
+                fallback_model_names = self._fallback_model_names(preferred)
+                selection_catalogs.append(
+                    ExecutionResourceCatalog(
+                        tuple(
+                            candidate
+                            for candidate in catalog.list_candidates()
+                            if candidate.resource_id in fallback_model_names
+                        )
+                    )
+                )
 
         capability = self._TASK_CAPABILITIES.get(request.task, request.task)
         requirements = ExecutionResourceRequirements(
@@ -302,45 +305,48 @@ class ModelManager:
             if request.preferred_provider_id is not None
             else (),
         )
-        preferred_catalogs: list[ExecutionResourceCatalog] = []
-        if request.preferred_provider_id is not None:
-            preferred_catalogs.append(
-                ExecutionResourceCatalog(
-                    tuple(
-                        candidate
-                        for candidate in catalog.list_candidates()
-                        if candidate.provider_id == request.preferred_provider_id
-                    )
-                )
-            )
-        if request.prefer_local is True:
-            preferred_catalogs.append(
-                ExecutionResourceCatalog(
-                    tuple(
-                        candidate
-                        for candidate in catalog.list_candidates()
-                        if candidate.local
-                    )
-                )
-            )
-        preferred_catalogs.append(catalog)
-
         decision = None
-        for candidate_catalog in preferred_catalogs:
-            try:
-                decision = ExecutionResourceOptimizer(
-                    ExecutionResourcePolicy(
-                        enabled=True,
-                        optimization_goal=OptimizationGoal.BALANCED,
+        for selection_catalog in selection_catalogs:
+            preferred_catalogs: list[ExecutionResourceCatalog] = []
+            if request.preferred_provider_id is not None:
+                preferred_catalogs.append(
+                    ExecutionResourceCatalog(
+                        tuple(
+                            candidate
+                            for candidate in selection_catalog.list_candidates()
+                            if candidate.provider_id == request.preferred_provider_id
+                        )
                     )
-                ).select(
-                    step_id="model_selection",
-                    requirements=requirements,
-                    catalog=candidate_catalog,
                 )
+            if request.prefer_local is True:
+                preferred_catalogs.append(
+                    ExecutionResourceCatalog(
+                        tuple(
+                            candidate
+                            for candidate in selection_catalog.list_candidates()
+                            if candidate.local
+                        )
+                    )
+                )
+            preferred_catalogs.append(selection_catalog)
+
+            for candidate_catalog in preferred_catalogs:
+                try:
+                    decision = ExecutionResourceOptimizer(
+                        ExecutionResourcePolicy(
+                            enabled=True,
+                            optimization_goal=OptimizationGoal.BALANCED,
+                        )
+                    ).select(
+                        step_id="model_selection",
+                        requirements=requirements,
+                        catalog=candidate_catalog,
+                    )
+                    break
+                except NoCompatibleResourceError:
+                    continue
+            if decision is not None:
                 break
-            except NoCompatibleResourceError:
-                continue
         if decision is None:
             return self._selection_failure()
 
@@ -366,6 +372,32 @@ class ModelManager:
             is_fallback=is_fallback,
             descriptor=descriptor,
         )
+
+    def _fallback_model_names(
+        self,
+        preferred: ModelDescriptor,
+    ) -> set[str]:
+        """Return the finite transitive set of declared fallback model names."""
+        model_names: set[str] = set()
+        visited = {preferred.logical_id}
+        pending = list(preferred.fallback_logical_ids)
+        position = 0
+
+        while position < len(pending):
+            logical_id = pending[position]
+            position += 1
+            if logical_id in visited:
+                continue
+            visited.add(logical_id)
+
+            descriptor = self._descriptors.get(logical_id)
+            if descriptor is None:
+                continue
+            model_names.add(descriptor.model_name)
+            pending.extend(descriptor.fallback_logical_ids)
+
+        return model_names
+
     def list_model_descriptors(
         self,
         *,
