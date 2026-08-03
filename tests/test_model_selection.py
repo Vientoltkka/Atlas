@@ -257,6 +257,87 @@ def test_preferred_provider_favors_compatible_provider() -> None:
     assert result.logical_model_id == "provider-b-chat"
     assert result.provider_id == "provider-b"
 
+
+def test_valid_preferred_model_is_selected_over_higher_priority_candidate() -> None:
+    preferred = _descriptor(
+        "preferred-chat",
+        "preferred:latest",
+        "chat",
+        priority=1,
+    )
+    higher_priority = _descriptor(
+        "higher-priority-chat",
+        "higher:latest",
+        "chat",
+        priority=100,
+    )
+    manager = _manager(preferred, higher_priority)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="preferred-chat",
+        )
+    )
+
+    assert result.success is True
+    assert result.logical_model_id == "preferred-chat"
+    assert result.physical_model_name == "preferred:latest"
+
+
+def test_unknown_provider_preference_preserves_available_ollama_selection() -> None:
+    manager = _manager(
+        _descriptor(
+            "ollama-chat",
+            "ollama:latest",
+            "chat",
+            provider_id="ollama",
+        )
+    )
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_provider_id="missing-provider",
+        )
+    )
+
+    assert result.success is True
+    assert result.logical_model_id == "ollama-chat"
+    assert result.provider_id == "ollama"
+
+
+def test_cost_and_latency_limits_do_not_invent_missing_metadata() -> None:
+    unknown = _descriptor(
+        "unknown-metadata-chat",
+        "unknown:latest",
+        "chat",
+        priority=100,
+        cost=None,
+        latency=None,
+    )
+    known = _descriptor(
+        "known-metadata-chat",
+        "known:latest",
+        "chat",
+        priority=1,
+        cost=1.0,
+        latency=1.0,
+    )
+    manager = _manager(unknown, known)
+
+    result = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            maximum_relative_cost=2.0,
+            maximum_relative_latency=2.0,
+        )
+    )
+
+    assert result.success is True
+    assert result.logical_model_id == "known-metadata-chat"
+
+
 def test_choose_model_historical_compatibility_remains_unchanged() -> None:
     manager = ModelManager(
         StaticModelSource(

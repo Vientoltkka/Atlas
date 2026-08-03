@@ -17,6 +17,7 @@ from core.hybrid_execution_planner import (
     StructuredPlanProviderResult,
     build_structured_planning_prompt,
 )
+from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
 from core.planner import Planner
 from tools.argument_schema import ArgumentField, ArgumentSchema, ArgumentSchemaRegistry
 from tools.base_tool import BaseTool
@@ -135,6 +136,24 @@ class ModelManagerFake:
         if isinstance(self.models, Exception):
             raise self.models
         return self.models
+
+
+class StaticModelSource:
+    def __init__(self, models: list[str]) -> None:
+        self._models = models
+
+    def list_models(self) -> list[str]:
+        return list(self._models)
+
+
+class RecordingSelectionModelManager(ModelManager):
+    def __init__(self, models: list[str]) -> None:
+        super().__init__(StaticModelSource(models))
+        self.selection_requests: list[ModelSelectionRequest] = []
+
+    def select_model(self, request: ModelSelectionRequest) -> ModelSelectionResult:
+        self.selection_requests.append(request)
+        return super().select_model(request)
 
 
 class _StreamingProviderForTest:
@@ -925,6 +944,57 @@ def test_prompt_client_adapter_rejects_unavailable_model_before_prompt_call() ->
     assert result.success is False
     assert result.error_code == "STRUCTURED_PLAN_MODEL_UNAVAILABLE"
     assert model_manager.calls == 1
+    assert prompt_client.calls == []
+
+
+def test_structured_planning_selects_configured_preference_through_model_manager(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_MODEL", "project-local")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED", "false")
+    prompt_client = PromptClientFake(_model_json())
+    model_manager = RecordingSelectionModelManager(["glm-5.2-local:latest"])
+    provider = Bootstrap.build_structured_plan_provider(
+        prompt_client=prompt_client,
+        model_manager=model_manager,
+    )
+    assert provider is not None
+
+    result = provider.generate_plan("lee", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert model_manager.selection_requests == [
+        ModelSelectionRequest(
+            task="reasoning",
+            preferred_model_id="project-local",
+            allow_fallback=False,
+        )
+    ]
+    assert prompt_client.ask_messages_calls[0][0] == "glm-5.2-local:latest"
+    assert result.model_name == "glm-5.2-local:latest"
+
+
+def test_structured_planning_rejects_incompatible_preference_without_fallback() -> None:
+    prompt_client = PromptClientFake(_model_json())
+    model_manager = RecordingSelectionModelManager(["glm4:9b"])
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="chat-local",
+        model_manager=model_manager,
+    )
+
+    result = provider.generate_plan("lee", json.dumps({"tools": []}))
+
+    assert result.success is False
+    assert result.error_code == "STRUCTURED_PLAN_MODEL_UNAVAILABLE"
+    assert model_manager.selection_requests == [
+        ModelSelectionRequest(
+            task="reasoning",
+            preferred_model_id="chat-local",
+            allow_fallback=False,
+        )
+    ]
     assert prompt_client.calls == []
 
 

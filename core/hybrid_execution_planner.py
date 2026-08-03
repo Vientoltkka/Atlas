@@ -15,6 +15,7 @@ from core.deterministic_multi_tool_planner import (
     MultiToolPlanningResult,
 )
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
+from core.model_manager import ModelSelectionRequest
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.argument_schema import ArgumentSchemaRegistry
 from tools.intent_selector import ToolSelector
@@ -268,9 +269,9 @@ class PromptClientStructuredPlanProvider:
             )
         catalog_filter_metrics = _catalog_filter_metrics(catalog_json)
 
-        availability_error = self._model_availability_error(model_name)
-        if availability_error is not None:
-            return availability_error
+        model_name, selection_error = self._resolve_model_name(model_name)
+        if selection_error is not None:
+            return selection_error
 
         prompt_build_started = time.monotonic()
         prompt = build_structured_planning_prompt(
@@ -533,10 +534,10 @@ class PromptClientStructuredPlanProvider:
             )
         catalog_filter_metrics = _catalog_filter_metrics(catalog_json)
 
-        availability_error = self._model_availability_error(model_name)
-        if availability_error is not None:
+        model_name, selection_error = self._resolve_model_name(model_name)
+        if selection_error is not None:
             emit_progress("failed", message="structured plan model is unavailable", force=True)
-            return with_progress(availability_error)
+            return with_progress(selection_error)
 
         prompt_build_started = time.monotonic()
         prompt = build_structured_planning_prompt(
@@ -795,6 +796,54 @@ class PromptClientStructuredPlanProvider:
         if not callable(stream_messages):
             raise RuntimeError("Prompt client does not support streaming messages.")
         return stream_messages(model=model_name, messages=messages)
+
+    def _resolve_model_name(
+        self,
+        preferred_model: str,
+    ) -> tuple[str, StructuredPlanProviderResult | None]:
+        if self._model_manager is None:
+            return preferred_model, None
+
+        select_model = getattr(self._model_manager, "select_model", None)
+        if not callable(select_model):
+            return preferred_model, self._model_availability_error(preferred_model)
+
+        try:
+            selection = select_model(
+                ModelSelectionRequest(
+                    task="reasoning",
+                    preferred_model_id=preferred_model,
+                    allow_fallback=False,
+                )
+            )
+        except TimeoutError as error:
+            return preferred_model, self._error_result(
+                str(error),
+                HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_TIMEOUT.value,
+                model_name=preferred_model,
+            )
+        except Exception as error:
+            return preferred_model, self._error_result(
+                str(error),
+                HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_ERROR.value,
+                model_name=preferred_model,
+            )
+
+        selected_model = getattr(selection, "physical_model_name", None)
+        if not getattr(selection, "success", False) or not isinstance(selected_model, str):
+            return preferred_model, self._error_result(
+                f"Structured plan model '{preferred_model}' is not compatible or available.",
+                HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
+                model_name=preferred_model,
+            )
+        selected_model = selected_model.strip()
+        if not selected_model:
+            return preferred_model, self._error_result(
+                f"Structured plan model '{preferred_model}' is not compatible or available.",
+                HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
+                model_name=preferred_model,
+            )
+        return selected_model, None
 
     def _model_availability_error(
         self,

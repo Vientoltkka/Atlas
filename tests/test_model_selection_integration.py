@@ -123,7 +123,7 @@ def test_real_routes_use_selector_result_once_before_agent_execution(
     )
 
     assert response == "ok"
-    assert [request.task for request in manager.selection_requests] == [task]
+    assert manager.selection_requests == [ModelSelectionRequest(task=task)]
     assert manager.selection_results[0].logical_model_id == logical_id
     assert manager.selection_results[0].provider_id == "ollama"
     assert manager.selection_results[0].is_fallback is False
