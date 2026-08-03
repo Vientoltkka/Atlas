@@ -196,6 +196,15 @@ class ModelManager:
         return self._client.list_models()
 
     def choose_model(self, task: str) -> str:
+        """Compatibility facade preferring deterministic capability selection."""
+        selection = self.select_model(ModelSelectionRequest(task=task))
+        if selection.success and selection.physical_model_name is not None:
+            return selection.physical_model_name
+
+        return self._choose_model_legacy(task)
+
+    def _choose_model_legacy(self, task: str) -> str:
+        """Preserve the pre-18.3 first-available compatibility behavior."""
         models = self.list_models()
 
         if not models:
