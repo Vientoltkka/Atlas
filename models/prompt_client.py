@@ -39,6 +39,40 @@ class PromptClient:
         """Send a conversation to the selected model."""
         return self.ask_messages(model=model, messages=messages)
 
+    def check_model_health(self, model: str) -> None:
+        """Verify one model with a minimal non-streaming inference request."""
+        try:
+            response = self._client.chat(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                stream=False,
+                keep_alive=self._keep_alive,
+                options={"num_predict": 1},
+            )
+        except InferenceBackendError:
+            raise
+        except (
+            ollama.ResponseError,
+            ollama.RequestError,
+            httpx.RequestError,
+            TimeoutError,
+            ConnectionError,
+        ) as error:
+            raise InferenceBackendError(model, str(error)) from error
+
+        try:
+            content = self._extract_content(response)
+        except (AttributeError, KeyError, TypeError) as error:
+            raise InferenceBackendError(
+                model,
+                "Ollama returned a malformed health-check response.",
+            ) from error
+        if not isinstance(content, str) or not content.strip():
+            raise InferenceBackendError(
+                model,
+                "Ollama returned an empty health-check response.",
+            )
+
     def ask_messages(
         self,
         model: str,

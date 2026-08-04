@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TypeVar
 
+from core.model_health import ModelHealthChecker, ModelHealthResult
 from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
 from models.prompt_client import InferenceBackendError
 
@@ -32,6 +33,28 @@ class ModelSelectionError(RuntimeError):
     def __init__(self, result: ModelSelectionResult) -> None:
         self.result = result
         super().__init__(result.reason)
+
+
+class ModelHealthCheckError(RuntimeError):
+    """No healthy model remained in the authorized selection chain."""
+
+    def __init__(
+        self,
+        *,
+        initial_logical_model_id: str,
+        attempted_logical_model_ids: tuple[str, ...],
+        allow_fallback: bool,
+        last_result: ModelHealthResult,
+    ) -> None:
+        self.initial_logical_model_id = initial_logical_model_id
+        self.attempted_logical_model_ids = attempted_logical_model_ids
+        self.allow_fallback = allow_fallback
+        self.last_result = last_result
+        super().__init__(
+            "Model health check failed after "
+            f"{len(attempted_logical_model_ids)} attempt(s); "
+            "no further authorized fallback is available."
+        )
 
 
 class InferenceFallbackExhaustedError(RuntimeError):
@@ -71,8 +94,14 @@ class InferenceStreamInterruptedError(RuntimeError):
 class ModelInferenceRunner:
     """Run one inference through a finite ModelManager-authorized chain."""
 
-    def __init__(self, model_manager: ModelManager) -> None:
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        *,
+        health_checker: ModelHealthChecker | None = None,
+    ) -> None:
         self._model_manager = model_manager
+        self._health_checker = health_checker
         self.last_result: ModelInferenceResult | None = None
 
     def run(
@@ -94,6 +123,17 @@ class ModelInferenceRunner:
             logical_id, physical_name = self._selection_identity(current)
             attempted.append(logical_id)
             attempted_physical.append(physical_name)
+            health_result = self._check_health(current)
+            if health_result is not None and not health_result.healthy:
+                fallback_reason = health_result.reason
+                current = self._next_after_unhealthy(
+                    request,
+                    initial,
+                    attempted,
+                    attempted_physical,
+                    health_result,
+                )
+                continue
             try:
                 value = infer(physical_name)
             except InferenceBackendError as error:
@@ -140,6 +180,17 @@ class ModelInferenceRunner:
             logical_id, physical_name = self._selection_identity(current)
             attempted.append(logical_id)
             attempted_physical.append(physical_name)
+            health_result = self._check_health(current)
+            if health_result is not None and not health_result.healthy:
+                fallback_reason = health_result.reason
+                current = self._next_after_unhealthy(
+                    request,
+                    initial,
+                    attempted,
+                    attempted_physical,
+                    health_result,
+                )
+                continue
             emitted = False
             try:
                 for fragment in infer(physical_name):
@@ -181,6 +232,44 @@ class ModelInferenceRunner:
             raise ModelSelectionError(selection)
         self._selection_identity(selection)
         return selection
+
+    def _check_health(
+        self,
+        selection: ModelSelectionResult,
+    ) -> ModelHealthResult | None:
+        if self._health_checker is None:
+            return None
+        logical_id, physical_name = self._selection_identity(selection)
+        provider_id = selection.provider_id
+        if not provider_id:
+            raise ModelSelectionError(selection)
+        return self._health_checker.check(
+            logical_model_id=logical_id,
+            physical_model_name=physical_name,
+            provider_id=provider_id,
+        )
+
+    def _next_after_unhealthy(
+        self,
+        request: ModelSelectionRequest,
+        initial: ModelSelectionResult,
+        attempted: list[str],
+        attempted_physical: list[str],
+        health_result: ModelHealthResult,
+    ) -> ModelSelectionResult:
+        next_selection = self._model_manager.select_fallback(
+            request,
+            initial_model_id=self._selection_identity(initial)[0],
+            attempted_model_ids=(*attempted, *attempted_physical),
+        )
+        if next_selection.success:
+            return next_selection
+        raise ModelHealthCheckError(
+            initial_logical_model_id=self._selection_identity(initial)[0],
+            attempted_logical_model_ids=tuple(attempted),
+            allow_fallback=request.allow_fallback,
+            last_result=health_result,
+        )
 
     @staticmethod
     def _selection_identity(selection: ModelSelectionResult) -> tuple[str, str]:

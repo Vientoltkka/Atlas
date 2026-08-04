@@ -21,6 +21,7 @@ from bootstrap.capability_resolver import build_core_capability_resolver
 from bootstrap.execution_plan_library import build_core_execution_plan_library
 from bootstrap.workflow_selector import build_core_workflow_selector
 from core.capability_execution_service import CapabilityExecutionService
+from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager, ModelSelectionRequest
 from core.multi_capability_planner import MultiCapabilityPlanner
@@ -442,6 +443,7 @@ class Bootstrap:
         prompt_client: PromptClient | None = None,
         model_manager: ModelManager | None = None,
         *,
+        health_checker: ModelHealthChecker | None = None,
         structured_plan_provider_enabled: bool | None = None,
         structured_plan_model: str | None = None,
         structured_plan_streaming_enabled: bool | None = None,
@@ -497,10 +499,17 @@ class Bootstrap:
         if not config.enabled:
             return None
 
+        resolved_prompt_client = prompt_client or PromptClient()
+        resolved_health_checker = health_checker
+        if resolved_health_checker is None and callable(
+            getattr(resolved_prompt_client, "check_model_health", None)
+        ):
+            resolved_health_checker = OllamaModelHealthChecker(resolved_prompt_client)
         return PromptClientStructuredPlanProvider.from_config(
-            prompt_client or PromptClient(),
+            resolved_prompt_client,
             config,
             model_manager=model_manager or ModelManager(),
+            health_checker=resolved_health_checker,
             diagnostic_sink=diagnostic_sink,
         )
 
@@ -684,6 +693,7 @@ class Bootstrap:
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
         model_manager = ModelManager()
         prompt_client = PromptClient()
+        model_health_checker = OllamaModelHealthChecker(prompt_client)
         hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", True)
         provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
         structured_plan_streaming_enabled = _read_bool(
@@ -745,6 +755,7 @@ class Bootstrap:
             structured_plan_provider = Bootstrap.build_structured_plan_provider(
                 prompt_client,
                 model_manager,
+                health_checker=model_health_checker,
                 structured_plan_provider_enabled=provider_enabled,
                 structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             )
@@ -1047,7 +1058,10 @@ class Bootstrap:
             messages.append({"role": "user", "content": request.content})
             return messages
 
-        direct_inference_runner = ModelInferenceRunner(model_manager)
+        direct_inference_runner = ModelInferenceRunner(
+            model_manager,
+            health_checker=model_health_checker,
+        )
         direct_selection_request = ModelSelectionRequest(
             task="chat",
             allow_fallback=True,
@@ -1130,6 +1144,7 @@ class Bootstrap:
             planner=planner,
             router=router,
             model_manager=model_manager,
+            model_health_checker=model_health_checker,
             memory=memory,
             registry=registry,
             write_file=write_file,

@@ -15,6 +15,7 @@ from core.deterministic_multi_tool_planner import (
     MultiToolPlanningResult,
 )
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
+from core.model_health import ModelHealthChecker
 from core.model_inference import ModelInferenceRunner
 from core.model_manager import ModelSelectionRequest, ModelSelectionResult
 from core.planner import ExecutionPlan, ExecutionStep
@@ -191,6 +192,7 @@ class PromptClientStructuredPlanProvider:
         provider_name: str = "prompt_client",
         enabled: bool = True,
         model_manager: Any | None = None,
+        health_checker: ModelHealthChecker | None = None,
         max_objective_chars: int = 4000,
         max_catalog_chars: int = 50000,
         max_response_chars: int = 30000,
@@ -203,6 +205,7 @@ class PromptClientStructuredPlanProvider:
         self._provider_name = provider_name
         self._enabled = enabled
         self._model_manager = model_manager
+        self._health_checker = health_checker
         self._max_objective_chars = max_objective_chars
         self._max_catalog_chars = max_catalog_chars
         self._max_response_chars = max_response_chars
@@ -217,6 +220,7 @@ class PromptClientStructuredPlanProvider:
         config: StructuredPlanProviderConfig,
         *,
         model_manager: Any | None = None,
+        health_checker: ModelHealthChecker | None = None,
         diagnostic_sink: Any | None = None,
     ) -> "PromptClientStructuredPlanProvider":
         """Build an adapter from explicit immutable configuration."""
@@ -226,6 +230,7 @@ class PromptClientStructuredPlanProvider:
             provider_name=config.provider_name,
             enabled=config.enabled,
             model_manager=model_manager,
+            health_checker=health_checker,
             max_objective_chars=config.max_objective_chars,
             max_catalog_chars=config.max_catalog_chars,
             max_response_chars=config.max_response_chars,
@@ -306,7 +311,10 @@ class PromptClientStructuredPlanProvider:
         try:
             inference_runner = None
             if self._model_manager is not None and initial_selection is not None:
-                inference_runner = ModelInferenceRunner(self._model_manager)
+                inference_runner = ModelInferenceRunner(
+                    self._model_manager,
+                    health_checker=self._health_checker,
+                )
                 response = inference_runner.run(
                     ModelSelectionRequest(
                         task="reasoning",
@@ -593,7 +601,10 @@ class PromptClientStructuredPlanProvider:
         received_chars = 0
         inference_runner = None
         if self._model_manager is not None and initial_selection is not None:
-            inference_runner = ModelInferenceRunner(self._model_manager)
+            inference_runner = ModelInferenceRunner(
+                self._model_manager,
+                health_checker=self._health_checker,
+            )
             stream_iterator = inference_runner.stream(
                 ModelSelectionRequest(
                     task="reasoning",

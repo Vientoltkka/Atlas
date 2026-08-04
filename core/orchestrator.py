@@ -37,6 +37,7 @@ from core.atlas_request_normalizer import (
     normalization_failure_to_routing_result,
     unavailable_atlas_request_normalizer_result,
 )
+from core.model_health import ModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager, ModelSelectionRequest
 from core.planner import Planner
@@ -97,6 +98,7 @@ class AtlasOrchestrator:
         memory: ConversationMemory,
         registry: AgentRegistry,
         write_file: WriteFileUseCase,
+        model_health_checker: ModelHealthChecker | None = None,
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
         correction_interaction: CorrectionInteractionUseCase | None = None,
         desktop_interaction: DesktopInteractionUseCase | None = None,
@@ -132,7 +134,10 @@ class AtlasOrchestrator:
         self._planner = planner
         self._router = router
         self._model_manager = model_manager
-        self._model_inference_runner = ModelInferenceRunner(model_manager)
+        self._model_inference_runner = ModelInferenceRunner(
+            model_manager,
+            health_checker=model_health_checker,
+        )
         self._memory = memory
         self._registry = registry
         self._write_file = write_file
