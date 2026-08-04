@@ -1,5 +1,6 @@
 """Bootstrap module for Atlas."""
 
+import math
 import os
 import sys
 from pathlib import Path
@@ -23,7 +24,8 @@ from bootstrap.workflow_selector import build_core_workflow_selector
 from core.capability_execution_service import CapabilityExecutionService
 from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
-from core.model_manager import ModelManager, ModelSelectionRequest
+from core.model_manager import ModelManager
+from core.model_selection_policy import ModelSelectionPolicy
 from core.multi_capability_planner import MultiCapabilityPlanner
 from core.orchestrator import AtlasOrchestrator
 from core.operational_request_router import OperationalRequestRouter
@@ -439,11 +441,26 @@ class Bootstrap:
         )
 
     @staticmethod
+    def build_model_selection_policy() -> ModelSelectionPolicy:
+        """Build the immutable runtime preferences used by model requests."""
+        return ModelSelectionPolicy(
+            preferred_provider=_read_text("ATLAS_MODEL_PREFERRED_PROVIDER"),
+            prefer_local=_read_optional_bool("ATLAS_MODEL_PREFER_LOCAL"),
+            max_cost=_read_optional_float("ATLAS_MODEL_MAX_COST"),
+            max_latency=_read_optional_float("ATLAS_MODEL_MAX_LATENCY"),
+            allow_fallback=_read_optional_bool(
+                "ATLAS_MODEL_ALLOW_FALLBACK",
+                default=True,
+            ),
+        )
+
+    @staticmethod
     def build_structured_plan_provider(
         prompt_client: PromptClient | None = None,
         model_manager: ModelManager | None = None,
         *,
         health_checker: ModelHealthChecker | None = None,
+        model_selection_policy: ModelSelectionPolicy | None = None,
         structured_plan_provider_enabled: bool | None = None,
         structured_plan_model: str | None = None,
         structured_plan_streaming_enabled: bool | None = None,
@@ -509,6 +526,7 @@ class Bootstrap:
             resolved_prompt_client,
             config,
             model_manager=model_manager or ModelManager(),
+            model_selection_policy=model_selection_policy,
             health_checker=resolved_health_checker,
             diagnostic_sink=diagnostic_sink,
         )
@@ -692,6 +710,7 @@ class Bootstrap:
         schema_registry = Bootstrap.build_argument_schema_registry()
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
         model_manager = ModelManager()
+        model_selection_policy = Bootstrap.build_model_selection_policy()
         prompt_client = PromptClient()
         model_health_checker = OllamaModelHealthChecker(prompt_client)
         hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", True)
@@ -756,6 +775,7 @@ class Bootstrap:
                 prompt_client,
                 model_manager,
                 health_checker=model_health_checker,
+                model_selection_policy=model_selection_policy,
                 structured_plan_provider_enabled=provider_enabled,
                 structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             )
@@ -1062,10 +1082,7 @@ class Bootstrap:
             model_manager,
             health_checker=model_health_checker,
         )
-        direct_selection_request = ModelSelectionRequest(
-            task="chat",
-            allow_fallback=True,
-        )
+        direct_selection_request = model_selection_policy.create_request(task="chat")
 
         def direct_responder(request, context):
             chat_agent = registry.get("chat")
@@ -1080,9 +1097,14 @@ class Bootstrap:
                         messages=messages,
                     ),
                 )
-            except ModelSelectionError:
+            except ModelSelectionError as error:
+                if model_selection_policy != ModelSelectionPolicy():
+                    raise
                 return chat_agent.run(
-                    model=model_manager.choose_model("chat"),
+                    model=model_manager.choose_model(
+                        "chat",
+                        selection_result=error.result,
+                    ),
                     messages=messages,
                 )
 
@@ -1102,9 +1124,14 @@ class Bootstrap:
                         messages=messages,
                     ),
                 )
-            except ModelSelectionError:
+            except ModelSelectionError as error:
+                if model_selection_policy != ModelSelectionPolicy():
+                    raise
                 yield from stream(
-                    model=model_manager.choose_model("chat"),
+                    model=model_manager.choose_model(
+                        "chat",
+                        selection_result=error.result,
+                    ),
                     messages=messages,
                 )
 
@@ -1144,6 +1171,7 @@ class Bootstrap:
             planner=planner,
             router=router,
             model_manager=model_manager,
+            model_selection_policy=model_selection_policy,
             model_health_checker=model_health_checker,
             memory=memory,
             registry=registry,
@@ -1219,6 +1247,46 @@ def _read_bool(
         file=sys.stderr,
     )
     return False
+
+
+def _read_optional_bool(
+    name: str,
+    default: bool | None = None,
+) -> bool | None:
+    raw = os.getenv(name, "").strip().lower()
+
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+
+    print(
+        f"Warning: invalid boolean value for {name}; using {default}.",
+        file=sys.stderr,
+    )
+    return default
+
+
+def _read_optional_float(
+    name: str,
+) -> float | None:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        print(
+            f"Warning: invalid non-negative number for {name}; using None.",
+            file=sys.stderr,
+        )
+        return None
+    return value
 
 
 def _read_text(

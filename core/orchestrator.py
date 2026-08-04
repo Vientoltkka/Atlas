@@ -39,7 +39,8 @@ from core.atlas_request_normalizer import (
 )
 from core.model_health import ModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
-from core.model_manager import ModelManager, ModelSelectionRequest
+from core.model_manager import ModelManager
+from core.model_selection_policy import ModelSelectionPolicy
 from core.planner import Planner
 from core.router import Router
 from core.request_gateway import (
@@ -99,6 +100,7 @@ class AtlasOrchestrator:
         registry: AgentRegistry,
         write_file: WriteFileUseCase,
         model_health_checker: ModelHealthChecker | None = None,
+        model_selection_policy: ModelSelectionPolicy | None = None,
         refactoring_interaction: RefactoringInteractionUseCase | None = None,
         correction_interaction: CorrectionInteractionUseCase | None = None,
         desktop_interaction: DesktopInteractionUseCase | None = None,
@@ -134,6 +136,11 @@ class AtlasOrchestrator:
         self._planner = planner
         self._router = router
         self._model_manager = model_manager
+        self._model_selection_policy = (
+            model_selection_policy
+            if model_selection_policy is not None
+            else ModelSelectionPolicy()
+        )
         self._model_inference_runner = ModelInferenceRunner(
             model_manager,
             health_checker=model_health_checker,
@@ -692,18 +699,20 @@ class AtlasOrchestrator:
         if supports_fallback:
             try:
                 response = self._model_inference_runner.run(
-                    ModelSelectionRequest(
-                        task=agent_name,
-                        allow_fallback=True,
-                    ),
+                    self._model_selection_policy.create_request(task=agent_name),
                     lambda selected_model: agent.run(
                         model=selected_model,
                         messages=messages,
                     ),
                 )
-            except ModelSelectionError:
+            except ModelSelectionError as error:
+                if self._model_selection_policy != ModelSelectionPolicy():
+                    raise
                 response = agent.run(
-                    model=self._model_manager.choose_model(agent_name),
+                    model=self._model_manager.choose_model(
+                        agent_name,
+                        selection_result=error.result,
+                    ),
                     messages=messages,
                 )
         else:

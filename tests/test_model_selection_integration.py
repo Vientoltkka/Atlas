@@ -9,6 +9,8 @@ from core.model_manager import (
     ModelSelectionRequest,
     ModelSelectionResult,
 )
+from core.model_selection_policy import ModelSelectionPolicy
+from core.model_inference import InferenceFallbackExhaustedError
 from models.prompt_client import InferenceBackendError
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Plan
@@ -24,8 +26,12 @@ class StaticModelSource:
 
 
 class RecordingModelManager(ModelManager):
-    def __init__(self, models: list[str]) -> None:
-        super().__init__(StaticModelSource(models))
+    def __init__(
+        self,
+        models: list[str],
+        descriptors: tuple[ModelDescriptor, ...] = (),
+    ) -> None:
+        super().__init__(StaticModelSource(models), descriptors)
         self.selection_requests: list[ModelSelectionRequest] = []
         self.selection_results: list[ModelSelectionResult] = []
 
@@ -94,6 +100,7 @@ def _orchestrator(
     task: str,
     manager: ModelManager,
     agent,
+    policy: ModelSelectionPolicy | None = None,
 ) -> AtlasOrchestrator:
     return AtlasOrchestrator(
         planner=FixedPlanner(task),
@@ -102,6 +109,7 @@ def _orchestrator(
         memory=Memory(),
         registry=Registry(task, agent),
         write_file=WriteFile(),
+        model_selection_policy=policy,
     )
 
 
@@ -165,6 +173,7 @@ def test_no_compatible_model_uses_existing_choose_model_degradation() -> None:
     assert response == "ok"
     assert manager.selection_results[0].success is False
     assert manager.selection_results[0].error_code == "NO_COMPATIBLE_MODEL"
+    assert len(manager.selection_requests) == 1
     assert agent.models == ["legacy-only:latest"]
 
 
@@ -225,3 +234,107 @@ def test_inference_failure_reaches_authorized_fallback_response() -> None:
 
     assert response == "respuesta fallback"
     assert agent.models == ["primary:latest", "fallback:latest"]
+
+
+def test_runtime_policy_fields_reach_agent_selection_request() -> None:
+    manager = RecordingModelManager(
+        ["policy-chat:latest"],
+        (
+            ModelDescriptor(
+                logical_id="policy-chat",
+                provider_id="ollama",
+                model_name="policy-chat:latest",
+                capabilities=("chat",),
+                relative_cost=1.0,
+                relative_latency=1.0,
+                priority=1000,
+            ),
+        ),
+    )
+    agent = RecordingAgent()
+    policy = ModelSelectionPolicy(
+        preferred_provider="ollama",
+        prefer_local=True,
+        max_cost=3.0,
+        max_latency=2.0,
+        allow_fallback=False,
+    )
+
+    _orchestrator("chat", manager, agent, policy).process_prompt(
+        "hola",
+        confirm=lambda _prompt: "",
+    )
+
+    assert manager.selection_requests == [
+        ModelSelectionRequest(
+            task="chat",
+            preferred_provider_id="ollama",
+            prefer_local=True,
+            maximum_relative_cost=3.0,
+            maximum_relative_latency=2.0,
+            allow_fallback=False,
+        )
+    ]
+
+
+def test_runtime_policy_can_forbid_inference_fallback() -> None:
+    manager = ModelManager(
+        StaticModelSource(["primary:latest", "fallback:latest"]),
+        (
+            ModelDescriptor(
+                logical_id="runtime-primary-no-fallback",
+                provider_id="ollama",
+                model_name="primary:latest",
+                capabilities=("chat",),
+                priority=1000,
+                fallback_logical_ids=("runtime-fallback-no-fallback",),
+            ),
+            ModelDescriptor(
+                logical_id="runtime-fallback-no-fallback",
+                provider_id="ollama",
+                model_name="fallback:latest",
+                capabilities=("chat",),
+                priority=999,
+            ),
+        ),
+    )
+
+    class AlwaysFailingAgent:
+        def __init__(self) -> None:
+            self.models: list[str] = []
+
+        def run(self, model: str, messages: list[dict[str, str]]) -> str:
+            self.models.append(model)
+            raise InferenceBackendError(model, "simulated backend failure")
+
+    agent = AlwaysFailingAgent()
+
+    with pytest.raises(InferenceFallbackExhaustedError) as error:
+        _orchestrator(
+            "chat",
+            manager,
+            agent,
+            ModelSelectionPolicy(allow_fallback=False),
+        ).process_prompt("hola", confirm=lambda _prompt: "")
+
+    assert error.value.allow_fallback is False
+    assert agent.models == ["primary:latest"]
+
+
+def test_policy_from_one_request_does_not_contaminate_the_next() -> None:
+    manager = RecordingModelManager(["glm4:9b"])
+    agent = RecordingAgent()
+
+    _orchestrator(
+        "chat",
+        manager,
+        agent,
+        ModelSelectionPolicy(preferred_provider="ollama"),
+    ).process_prompt("primera", confirm=lambda _prompt: "")
+    _orchestrator("chat", manager, agent).process_prompt(
+        "segunda",
+        confirm=lambda _prompt: "",
+    )
+
+    assert manager.selection_requests[0].preferred_provider_id == "ollama"
+    assert manager.selection_requests[1].preferred_provider_id is None

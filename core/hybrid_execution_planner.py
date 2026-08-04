@@ -17,7 +17,8 @@ from core.deterministic_multi_tool_planner import (
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
 from core.model_health import ModelHealthChecker
 from core.model_inference import ModelInferenceRunner
-from core.model_manager import ModelSelectionRequest, ModelSelectionResult
+from core.model_manager import ModelSelectionResult
+from core.model_selection_policy import ModelSelectionPolicy
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.argument_schema import ArgumentSchemaRegistry
 from tools.intent_selector import ToolSelector
@@ -193,6 +194,7 @@ class PromptClientStructuredPlanProvider:
         enabled: bool = True,
         model_manager: Any | None = None,
         health_checker: ModelHealthChecker | None = None,
+        model_selection_policy: ModelSelectionPolicy | None = None,
         max_objective_chars: int = 4000,
         max_catalog_chars: int = 50000,
         max_response_chars: int = 30000,
@@ -205,6 +207,11 @@ class PromptClientStructuredPlanProvider:
         self._provider_name = provider_name
         self._enabled = enabled
         self._model_manager = model_manager
+        self._model_selection_policy = (
+            model_selection_policy
+            if model_selection_policy is not None
+            else ModelSelectionPolicy()
+        )
         self._health_checker = health_checker
         self._max_objective_chars = max_objective_chars
         self._max_catalog_chars = max_catalog_chars
@@ -221,6 +228,7 @@ class PromptClientStructuredPlanProvider:
         *,
         model_manager: Any | None = None,
         health_checker: ModelHealthChecker | None = None,
+        model_selection_policy: ModelSelectionPolicy | None = None,
         diagnostic_sink: Any | None = None,
     ) -> "PromptClientStructuredPlanProvider":
         """Build an adapter from explicit immutable configuration."""
@@ -231,6 +239,7 @@ class PromptClientStructuredPlanProvider:
             enabled=config.enabled,
             model_manager=model_manager,
             health_checker=health_checker,
+            model_selection_policy=model_selection_policy,
             max_objective_chars=config.max_objective_chars,
             max_catalog_chars=config.max_catalog_chars,
             max_response_chars=config.max_response_chars,
@@ -316,10 +325,9 @@ class PromptClientStructuredPlanProvider:
                     health_checker=self._health_checker,
                 )
                 response = inference_runner.run(
-                    ModelSelectionRequest(
+                    self._model_selection_policy.create_request(
                         task="reasoning",
                         preferred_model_id=initial_selection.logical_model_id,
-                        allow_fallback=True,
                     ),
                     lambda selected_model: self._ask_explicit_messages(
                         selected_model,
@@ -606,10 +614,9 @@ class PromptClientStructuredPlanProvider:
                 health_checker=self._health_checker,
             )
             stream_iterator = inference_runner.stream(
-                ModelSelectionRequest(
+                self._model_selection_policy.create_request(
                     task="reasoning",
                     preferred_model_id=initial_selection.logical_model_id,
-                    allow_fallback=True,
                 ),
                 lambda selected_model: self._stream_explicit_messages(
                     selected_model,
@@ -872,10 +879,9 @@ class PromptClientStructuredPlanProvider:
 
         try:
             selection = select_model(
-                ModelSelectionRequest(
+                self._model_selection_policy.create_request(
                     task="reasoning",
                     preferred_model_id=preferred_model,
-                    allow_fallback=True,
                 )
             )
         except TimeoutError as error:

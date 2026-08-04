@@ -18,6 +18,7 @@ from core.hybrid_execution_planner import (
     build_structured_planning_prompt,
 )
 from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
+from core.model_selection_policy import ModelSelectionPolicy
 from core.planner import Planner
 from tools.argument_schema import ArgumentField, ArgumentSchema, ArgumentSchemaRegistry
 from tools.base_tool import BaseTool
@@ -1575,3 +1576,36 @@ def test_structured_parser_can_be_used_directly() -> None:
 
     assert result.success is True
     assert result.plan is not None
+
+
+def test_structured_planning_preserves_explicit_model_and_receives_runtime_policy(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_MODEL", "project-local")
+    prompt_client = PromptClientFake(_model_json())
+    model_manager = RecordingSelectionModelManager(["glm-5.2-local:latest"])
+    policy = ModelSelectionPolicy(
+        preferred_provider="ollama",
+        prefer_local=True,
+        allow_fallback=False,
+    )
+    provider = Bootstrap.build_structured_plan_provider(
+        prompt_client=prompt_client,
+        model_manager=model_manager,
+        model_selection_policy=policy,
+    )
+    assert provider is not None
+
+    result = provider.generate_plan("lee", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert model_manager.selection_requests == [
+        ModelSelectionRequest(
+            task="reasoning",
+            preferred_model_id="project-local",
+            preferred_provider_id="ollama",
+            prefer_local=True,
+            allow_fallback=False,
+        )
+    ]

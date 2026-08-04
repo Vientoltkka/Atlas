@@ -195,9 +195,22 @@ class ModelManager:
     def list_models(self) -> list[str]:
         return self._client.list_models()
 
-    def choose_model(self, task: str) -> str:
+    def choose_model(
+        self,
+        task: str,
+        *,
+        selection_result: ModelSelectionResult | None = None,
+    ) -> str:
         """Compatibility facade preferring deterministic capability selection."""
-        selection = self.select_model(ModelSelectionRequest(task=task))
+        if selection_result is not None and not isinstance(
+            selection_result, ModelSelectionResult
+        ):
+            raise TypeError("selection_result must be a ModelSelectionResult or None.")
+        selection = (
+            selection_result
+            if selection_result is not None
+            else self.select_model(ModelSelectionRequest(task=task))
+        )
         if selection.success and selection.physical_model_name is not None:
             return selection.physical_model_name
 
