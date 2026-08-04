@@ -21,7 +21,8 @@ from bootstrap.capability_resolver import build_core_capability_resolver
 from bootstrap.execution_plan_library import build_core_execution_plan_library
 from bootstrap.workflow_selector import build_core_workflow_selector
 from core.capability_execution_service import CapabilityExecutionService
-from core.model_manager import ModelManager
+from core.model_inference import ModelInferenceRunner, ModelSelectionError
+from core.model_manager import ModelManager, ModelSelectionRequest
 from core.multi_capability_planner import MultiCapabilityPlanner
 from core.orchestrator import AtlasOrchestrator
 from core.operational_request_router import OperationalRequestRouter
@@ -1046,14 +1047,30 @@ class Bootstrap:
             messages.append({"role": "user", "content": request.content})
             return messages
 
+        direct_inference_runner = ModelInferenceRunner(model_manager)
+        direct_selection_request = ModelSelectionRequest(
+            task="chat",
+            allow_fallback=True,
+        )
+
         def direct_responder(request, context):
             chat_agent = registry.get("chat")
             if chat_agent is None:
                 raise RuntimeError("Agent 'chat' is not registered.")
-            return chat_agent.run(
-                model=model_manager.choose_model("chat"),
-                messages=direct_messages(request, context),
-            )
+            messages = direct_messages(request, context)
+            try:
+                return direct_inference_runner.run(
+                    direct_selection_request,
+                    lambda selected_model: chat_agent.run(
+                        model=selected_model,
+                        messages=messages,
+                    ),
+                )
+            except ModelSelectionError:
+                return chat_agent.run(
+                    model=model_manager.choose_model("chat"),
+                    messages=messages,
+                )
 
         def direct_streaming_responder(request, context):
             chat_agent = registry.get("chat")
@@ -1062,10 +1079,20 @@ class Bootstrap:
             stream = getattr(chat_agent, "stream", None)
             if not callable(stream):
                 raise RuntimeError("Agent 'chat' does not support streaming.")
-            yield from stream(
-                model=model_manager.choose_model("chat"),
-                messages=direct_messages(request, context),
-            )
+            messages = direct_messages(request, context)
+            try:
+                yield from direct_inference_runner.stream(
+                    direct_selection_request,
+                    lambda selected_model: stream(
+                        model=selected_model,
+                        messages=messages,
+                    ),
+                )
+            except ModelSelectionError:
+                yield from stream(
+                    model=model_manager.choose_model("chat"),
+                    messages=messages,
+                )
 
         operational_route_executor = OperationalRouteExecutor(
             build_default_route_handlers(

@@ -7,7 +7,17 @@ import os
 from time import perf_counter
 from typing import Any
 
+import httpx
 import ollama
+
+
+class InferenceBackendError(RuntimeError, ValueError):
+    """Failure attributable to the configured inference backend or its response."""
+
+    def __init__(self, model: str, reason: str) -> None:
+        self.model = model
+        self.reason = reason.strip() or "Inference backend failed."
+        super().__init__(f"Inference failed for model '{model}': {self.reason}")
 
 
 class PromptClient:
@@ -37,23 +47,37 @@ class PromptClient:
         """Send exactly the provided messages to the selected model."""
         started = perf_counter()
         first_fragment_seconds: float | None = None
-        stream = self._client.chat(
-            model=model,
-            messages=messages,
-            stream=True,
-            keep_alive=self._keep_alive,
-        )
         fragments: list[str] = []
         final_chunk: Any = None
-        for chunk in stream:
-            final_chunk = chunk
-            content = self._extract_stream_content(chunk)
-            if content:
-                if first_fragment_seconds is None:
-                    first_fragment_seconds = perf_counter() - started
-                fragments.append(content)
+        try:
+            stream = self._client.chat(
+                model=model,
+                messages=messages,
+                stream=True,
+                keep_alive=self._keep_alive,
+            )
+            for chunk in stream:
+                final_chunk = chunk
+                content = self._extract_stream_content(chunk)
+                if content:
+                    if first_fragment_seconds is None:
+                        first_fragment_seconds = perf_counter() - started
+                    fragments.append(content)
+        except InferenceBackendError:
+            raise
+        except (
+            ollama.ResponseError,
+            ollama.RequestError,
+            httpx.RequestError,
+            TimeoutError,
+            ConnectionError,
+        ) as error:
+            raise InferenceBackendError(model, str(error)) from error
         if final_chunk is None:
-            raise ValueError("Ollama returned an empty response stream.")
+            raise InferenceBackendError(
+                model,
+                "Ollama returned an empty response stream.",
+            )
         self._record_metrics(
             model,
             final_chunk,
@@ -71,21 +95,33 @@ class PromptClient:
         started = perf_counter()
         first_fragment_seconds: float | None = None
         final_chunk: Any = None
-        stream = self._client.chat(
-            model=model,
-            messages=messages,
-            stream=True,
-            keep_alive=self._keep_alive,
-        )
-
+        yielded_content = False
         try:
-            for chunk in stream:
-                final_chunk = chunk
-                content = self._extract_stream_content(chunk)
-                if content:
-                    if first_fragment_seconds is None:
-                        first_fragment_seconds = perf_counter() - started
-                    yield content
+            try:
+                stream = self._client.chat(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    keep_alive=self._keep_alive,
+                )
+                for chunk in stream:
+                    final_chunk = chunk
+                    content = self._extract_stream_content(chunk)
+                    if content:
+                        if first_fragment_seconds is None:
+                            first_fragment_seconds = perf_counter() - started
+                        yield content
+                        yielded_content = True
+            except InferenceBackendError:
+                raise
+            except (
+                ollama.ResponseError,
+                ollama.RequestError,
+                httpx.RequestError,
+                TimeoutError,
+                ConnectionError,
+            ) as error:
+                raise InferenceBackendError(model, str(error)) from error
         finally:
             if final_chunk is not None:
                 self._record_metrics(
@@ -94,6 +130,11 @@ class PromptClient:
                     first_fragment_seconds=first_fragment_seconds,
                     wall_total_seconds=perf_counter() - started,
                 )
+        if not yielded_content:
+            raise InferenceBackendError(
+                model,
+                "Ollama returned no observable stream content.",
+            )
 
     def _record_metrics(
         self,

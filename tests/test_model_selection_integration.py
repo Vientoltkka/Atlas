@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from agents.chat_agent import ChatAgent
-from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
+from core.model_manager import (
+    ModelDescriptor,
+    ModelManager,
+    ModelSelectionRequest,
+    ModelSelectionResult,
+)
+from models.prompt_client import InferenceBackendError
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Plan
 from core.router import Router
@@ -123,7 +129,9 @@ def test_real_routes_use_selector_result_once_before_agent_execution(
     )
 
     assert response == "ok"
-    assert manager.selection_requests == [ModelSelectionRequest(task=task)]
+    assert manager.selection_requests == [
+        ModelSelectionRequest(task=task, allow_fallback=True)
+    ]
     assert manager.selection_results[0].logical_model_id == logical_id
     assert manager.selection_results[0].provider_id == "ollama"
     assert manager.selection_results[0].is_fallback is False
@@ -174,3 +182,46 @@ def test_same_real_route_and_catalog_remain_deterministic_without_double_selecti
         "chat-local",
         "chat-local",
     ]
+
+
+def test_inference_failure_reaches_authorized_fallback_response() -> None:
+    manager = ModelManager(
+        StaticModelSource(["primary:latest", "fallback:latest"]),
+        (
+            ModelDescriptor(
+                logical_id="runtime-primary",
+                provider_id="ollama",
+                model_name="primary:latest",
+                capabilities=("chat",),
+                priority=1000,
+                fallback_logical_ids=("runtime-fallback",),
+            ),
+            ModelDescriptor(
+                logical_id="runtime-fallback",
+                provider_id="ollama",
+                model_name="fallback:latest",
+                capabilities=("chat",),
+                priority=999,
+            ),
+        ),
+    )
+
+    class FailingThenSuccessfulAgent:
+        def __init__(self) -> None:
+            self.models: list[str] = []
+
+        def run(self, model: str, messages: list[dict[str, str]]) -> str:
+            self.models.append(model)
+            if model == "primary:latest":
+                raise InferenceBackendError(model, "simulated backend failure")
+            return "respuesta fallback"
+
+    agent = FailingThenSuccessfulAgent()
+
+    response = _orchestrator("chat", manager, agent).process_prompt(
+        "hola",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "respuesta fallback"
+    assert agent.models == ["primary:latest", "fallback:latest"]

@@ -15,7 +15,8 @@ from core.deterministic_multi_tool_planner import (
     MultiToolPlanningResult,
 )
 from core.execution_plan_validator import ExecutionPlanValidator, PlanValidationResult
-from core.model_manager import ModelSelectionRequest
+from core.model_inference import ModelInferenceRunner
+from core.model_manager import ModelSelectionRequest, ModelSelectionResult
 from core.planner import ExecutionPlan, ExecutionStep
 from tools.argument_schema import ArgumentSchemaRegistry
 from tools.intent_selector import ToolSelector
@@ -269,7 +270,7 @@ class PromptClientStructuredPlanProvider:
             )
         catalog_filter_metrics = _catalog_filter_metrics(catalog_json)
 
-        model_name, selection_error = self._resolve_model_name(model_name)
+        model_name, selection_error, initial_selection = self._resolve_model_name(model_name)
         if selection_error is not None:
             return selection_error
 
@@ -303,7 +304,24 @@ class PromptClientStructuredPlanProvider:
         )
         started = time.monotonic()
         try:
-            response = self._ask_explicit_messages(model_name, list(prompt.messages))
+            inference_runner = None
+            if self._model_manager is not None and initial_selection is not None:
+                inference_runner = ModelInferenceRunner(self._model_manager)
+                response = inference_runner.run(
+                    ModelSelectionRequest(
+                        task="reasoning",
+                        preferred_model_id=initial_selection.logical_model_id,
+                        allow_fallback=True,
+                    ),
+                    lambda selected_model: self._ask_explicit_messages(
+                        selected_model,
+                        list(prompt.messages),
+                    ),
+                    initial_selection=initial_selection,
+                )
+                model_name = inference_runner.last_result.final_physical_model_name
+            else:
+                response = self._ask_explicit_messages(model_name, list(prompt.messages))
         except TimeoutError as error:
             return StructuredPlanProviderResult(
                 success=False,
@@ -534,7 +552,7 @@ class PromptClientStructuredPlanProvider:
             )
         catalog_filter_metrics = _catalog_filter_metrics(catalog_json)
 
-        model_name, selection_error = self._resolve_model_name(model_name)
+        model_name, selection_error, initial_selection = self._resolve_model_name(model_name)
         if selection_error is not None:
             emit_progress("failed", message="structured plan model is unavailable", force=True)
             return with_progress(selection_error)
@@ -573,8 +591,28 @@ class PromptClientStructuredPlanProvider:
         chunks: list[str] = []
         chunk_count = 0
         received_chars = 0
+        inference_runner = None
+        if self._model_manager is not None and initial_selection is not None:
+            inference_runner = ModelInferenceRunner(self._model_manager)
+            stream_iterator = inference_runner.stream(
+                ModelSelectionRequest(
+                    task="reasoning",
+                    preferred_model_id=initial_selection.logical_model_id,
+                    allow_fallback=True,
+                ),
+                lambda selected_model: self._stream_explicit_messages(
+                    selected_model,
+                    list(prompt.messages),
+                ),
+                initial_selection=initial_selection,
+            )
+        else:
+            stream_iterator = self._stream_explicit_messages(
+                model_name,
+                list(prompt.messages),
+            )
         try:
-            for chunk in self._stream_explicit_messages(model_name, list(prompt.messages)):
+            for chunk in stream_iterator:
                 if _control_should_cancel(control):
                     emit_progress("failed", received_chars=received_chars, chunk_count=chunk_count, message="stream cancelled", force=True)
                     return with_progress(
@@ -675,6 +713,11 @@ class PromptClientStructuredPlanProvider:
                     catalog_sent_tools=catalog_filter_metrics.get("catalog_sent_tools"),
                     catalog_token_reduction=catalog_filter_metrics.get("catalog_token_reduction"),
                 )
+            )
+
+        if inference_runner is not None and inference_runner.last_result is not None:
+            model_name = (
+                inference_runner.last_result.final_physical_model_name
             )
 
         response = "".join(chunks)
@@ -800,50 +843,74 @@ class PromptClientStructuredPlanProvider:
     def _resolve_model_name(
         self,
         preferred_model: str,
-    ) -> tuple[str, StructuredPlanProviderResult | None]:
+    ) -> tuple[
+        str,
+        StructuredPlanProviderResult | None,
+        ModelSelectionResult | None,
+    ]:
         if self._model_manager is None:
-            return preferred_model, None
+            return preferred_model, None, None
 
         select_model = getattr(self._model_manager, "select_model", None)
         if not callable(select_model):
-            return preferred_model, self._model_availability_error(preferred_model)
+            return (
+                preferred_model,
+                self._model_availability_error(preferred_model),
+                None,
+            )
 
         try:
             selection = select_model(
                 ModelSelectionRequest(
                     task="reasoning",
                     preferred_model_id=preferred_model,
-                    allow_fallback=False,
+                    allow_fallback=True,
                 )
             )
         except TimeoutError as error:
-            return preferred_model, self._error_result(
-                str(error),
-                HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_TIMEOUT.value,
-                model_name=preferred_model,
+            return (
+                preferred_model,
+                self._error_result(
+                    str(error),
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_TIMEOUT.value,
+                    model_name=preferred_model,
+                ),
+                None,
             )
         except Exception as error:
-            return preferred_model, self._error_result(
-                str(error),
-                HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_ERROR.value,
-                model_name=preferred_model,
+            return (
+                preferred_model,
+                self._error_result(
+                    str(error),
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_PROVIDER_ERROR.value,
+                    model_name=preferred_model,
+                ),
+                None,
             )
 
         selected_model = getattr(selection, "physical_model_name", None)
         if not getattr(selection, "success", False) or not isinstance(selected_model, str):
-            return preferred_model, self._error_result(
-                f"Structured plan model '{preferred_model}' is not compatible or available.",
-                HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
-                model_name=preferred_model,
+            return (
+                preferred_model,
+                self._error_result(
+                    f"Structured plan model '{preferred_model}' is not compatible or available.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
+                    model_name=preferred_model,
+                ),
+                None,
             )
         selected_model = selected_model.strip()
         if not selected_model:
-            return preferred_model, self._error_result(
-                f"Structured plan model '{preferred_model}' is not compatible or available.",
-                HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
-                model_name=preferred_model,
+            return (
+                preferred_model,
+                self._error_result(
+                    f"Structured plan model '{preferred_model}' is not compatible or available.",
+                    HybridPlanningErrorCode.STRUCTURED_PLAN_MODEL_UNAVAILABLE.value,
+                    model_name=preferred_model,
+                ),
+                None,
             )
-        return selected_model, None
+        return selected_model, None, selection
 
     def _model_availability_error(
         self,

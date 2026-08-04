@@ -37,7 +37,8 @@ from core.atlas_request_normalizer import (
     normalization_failure_to_routing_result,
     unavailable_atlas_request_normalizer_result,
 )
-from core.model_manager import ModelManager
+from core.model_inference import ModelInferenceRunner, ModelSelectionError
+from core.model_manager import ModelManager, ModelSelectionRequest
 from core.planner import Planner
 from core.router import Router
 from core.request_gateway import (
@@ -131,6 +132,7 @@ class AtlasOrchestrator:
         self._planner = planner
         self._router = router
         self._model_manager = model_manager
+        self._model_inference_runner = ModelInferenceRunner(model_manager)
         self._memory = memory
         self._registry = registry
         self._write_file = write_file
@@ -677,13 +679,33 @@ class AtlasOrchestrator:
                 f"Agent '{agent_name}' is not registered."
             )
 
-        model = self._model_manager.choose_model(
-            agent_name
+        messages = self._memory.history()
+        supports_fallback = all(
+            callable(getattr(self._model_manager, name, None))
+            for name in ("select_model", "select_fallback")
         )
-        response = agent.run(
-            model=model,
-            messages=self._memory.history(),
-        )
+        if supports_fallback:
+            try:
+                response = self._model_inference_runner.run(
+                    ModelSelectionRequest(
+                        task=agent_name,
+                        allow_fallback=True,
+                    ),
+                    lambda selected_model: agent.run(
+                        model=selected_model,
+                        messages=messages,
+                    ),
+                )
+            except ModelSelectionError:
+                response = agent.run(
+                    model=self._model_manager.choose_model(agent_name),
+                    messages=messages,
+                )
+        else:
+            response = agent.run(
+                model=self._model_manager.choose_model(agent_name),
+                messages=messages,
+            )
         self._memory.add_assistant(response)
 
         return response

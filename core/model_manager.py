@@ -398,6 +398,70 @@ class ModelManager:
 
         return model_names
 
+    def select_fallback(
+        self,
+        request: ModelSelectionRequest,
+        *,
+        initial_model_id: str,
+        attempted_model_ids: Iterable[str],
+    ) -> ModelSelectionResult:
+        """Select the next compatible model from one declared fallback chain."""
+        if not isinstance(request, ModelSelectionRequest):
+            raise TypeError("request must be a ModelSelectionRequest.")
+        if not request.allow_fallback:
+            return self._selection_failure(error_code="FALLBACK_NOT_ALLOWED")
+
+        initial = self.resolve_model(initial_model_id)
+        if initial is None:
+            return self._selection_failure(error_code="INITIAL_MODEL_NOT_RESOLVABLE")
+
+        attempted = set(_normalized_values(attempted_model_ids))
+        for descriptor in self._fallback_descriptors(initial):
+            if (
+                descriptor.logical_id in attempted
+                or descriptor.model_name in attempted
+            ):
+                continue
+            selection = self.select_model(
+                replace(
+                    request,
+                    preferred_model_id=descriptor.logical_id,
+                    allow_fallback=False,
+                )
+            )
+            if selection.success:
+                return replace(
+                    selection,
+                    reason="Selected next declared fallback after inference failure.",
+                    is_fallback=True,
+                )
+
+        return self._selection_failure(error_code="FALLBACK_CHAIN_EXHAUSTED")
+
+    def _fallback_descriptors(
+        self,
+        initial: ModelDescriptor,
+    ) -> tuple[ModelDescriptor, ...]:
+        """Return declared transitive fallbacks once, preserving declaration order."""
+        descriptors: list[ModelDescriptor] = []
+        visited = {initial.logical_id}
+        pending = list(initial.fallback_logical_ids)
+        position = 0
+
+        while position < len(pending):
+            logical_id = pending[position]
+            position += 1
+            if logical_id in visited:
+                continue
+            visited.add(logical_id)
+            descriptor = self._descriptors.get(logical_id)
+            if descriptor is None:
+                continue
+            descriptors.append(descriptor)
+            pending.extend(descriptor.fallback_logical_ids)
+
+        return tuple(descriptors)
+
     def list_model_descriptors(
         self,
         *,

@@ -968,7 +968,7 @@ def test_structured_planning_selects_configured_preference_through_model_manager
         ModelSelectionRequest(
             task="reasoning",
             preferred_model_id="project-local",
-            allow_fallback=False,
+            allow_fallback=True,
         )
     ]
     assert prompt_client.ask_messages_calls[0][0] == "glm-5.2-local:latest"
@@ -992,7 +992,7 @@ def test_structured_planning_rejects_incompatible_preference_without_fallback() 
         ModelSelectionRequest(
             task="reasoning",
             preferred_model_id="chat-local",
-            allow_fallback=False,
+            allow_fallback=True,
         )
     ]
     assert prompt_client.calls == []
