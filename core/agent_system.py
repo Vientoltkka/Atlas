@@ -39,6 +39,8 @@ from core.agent_handler_registration import (
 from core.agent_manifest import AgentManifestLoader
 from core.multi_agent import MultiAgentCoordinator, MultiAgentResolver
 from core.skill_system import SkillSystem, build_skill_system
+from core.skill_executor import SkillHandlerRegistry
+from core.capability_execution_service import CapabilityExecutionService
 from core.agent_registration import (
     AgentRegistrationPolicy,
     AgentRegistrationRequest,
@@ -48,6 +50,7 @@ from core.agent_registration import (
 )
 from core.agent_registry import AgentRegistry
 from core.agent_resolver import AgentResolver
+from tools.executor import ToolExecutor
 
 
 MAX_AGENT_SYSTEM_METADATA_ITEMS = 16
@@ -257,6 +260,9 @@ class AgentSystemBuilder:
         multi_agent_resolver: MultiAgentResolver | None = None,
         multi_agent_coordinator: MultiAgentCoordinator | None = None,
         skill_system: SkillSystem | None = None,
+        tool_executor: ToolExecutor | None = None,
+        capability_execution_service: CapabilityExecutionService | None = None,
+        skill_handler_registry: SkillHandlerRegistry | None = None,
         agent_delegation_service: AgentDelegationService | None = None,
         agent_delegation_chain_service: AgentDelegationChainService | None = None,
         agent_delegation_coordinator: AgentDelegationCoordinator | None = None,
@@ -279,6 +285,9 @@ class AgentSystemBuilder:
         self._multi_agent_resolver = multi_agent_resolver
         self._multi_agent_coordinator = multi_agent_coordinator
         self._skill_system = skill_system
+        self._tool_executor = tool_executor
+        self._capability_execution_service = capability_execution_service
+        self._skill_handler_registry = skill_handler_registry
         self._agent_delegation_service = agent_delegation_service
         self._agent_delegation_chain_service = agent_delegation_chain_service
         self._agent_delegation_coordinator = agent_delegation_coordinator
@@ -344,7 +353,16 @@ class AgentSystemBuilder:
             if self._multi_agent_coordinator is not None
             else MultiAgentCoordinator(multi_agent_resolver, executor)
         )
-        skill_system = self._skill_system if self._skill_system is not None else build_skill_system()
+        skill_system = (
+            self._skill_system
+            if self._skill_system is not None
+            else build_skill_system(
+                tool_executor=self._tool_executor,
+                capability_execution_service=self._capability_execution_service,
+                agent_executor=executor,
+                skill_handler_registry=self._skill_handler_registry,
+            )
+        )
         agent_delegation_service = (
             self._agent_delegation_service
             if self._agent_delegation_service is not None

@@ -817,7 +817,10 @@ class Bootstrap:
             execution_plan_libraries=execution_plan_libraries,
             execution_plan_registry=execution_plan_registry,
         )
-        agent_system_result = build_core_agent_system()
+        agent_system_result = build_core_agent_system(
+            tool_executor=tool_executor,
+            capability_execution_service=capability_execution_service,
+        )
         agent_system = agent_system_result.system if agent_system_result.system is not None else None
         atlas_router = build_core_atlas_router(
             capability_execution_service=capability_execution_service,

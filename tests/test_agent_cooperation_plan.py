@@ -45,6 +45,7 @@ from core.agent_registry import (
     AgentType,
 )
 from core.multi_agent import MultiAgentExecutionPolicy, MultiAgentExecutionRequest
+from core.skill_executor import SkillHandlerRegistry
 from core.skill_registry import SkillDefinition, SkillExecutionTargetType
 
 
@@ -93,7 +94,9 @@ def _definition(
 
 
 def _system(*, fail: tuple[str, ...] = (), agents: tuple[AgentDefinition, ...] | None = None):
-    built = build_core_agent_system()
+    skill_handlers = SkillHandlerRegistry()
+    skill_handlers.register("handler.allowed", lambda inputs: {"result": inputs.get("value")})
+    built = build_core_agent_system(skill_handler_registry=skill_handlers)
     assert built.system is not None
     system = built.system
     definitions = agents or (

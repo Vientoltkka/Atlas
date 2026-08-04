@@ -49,6 +49,8 @@ from core.multi_agent import (
     MultiAgentExecutionStatus,
 )
 from core.skill_registry import SkillDefinition, SkillNotFoundError, validate_skill_id
+from core.skill_executor import SkillExecutionRequest, SkillExecutionResult, SkillExecutionStatus
+from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
 from core.skill_system import SkillSystem
 
 
@@ -149,6 +151,7 @@ class AgentCooperationTaskStatus(str, Enum):
     AGENT_RESOLUTION_FAILED = "AGENT_RESOLUTION_FAILED"
     AGENT_EXECUTION_FAILED = "AGENT_EXECUTION_FAILED"
     SKILL_AUTHORIZATION_FAILED = "SKILL_AUTHORIZATION_FAILED"
+    SKILL_EXECUTION_FAILED = "SKILL_EXECUTION_FAILED"
     LIMIT_REACHED = "LIMIT_REACHED"
     OUTPUT_BINDING_FAILED = "OUTPUT_BINDING_FAILED"
 
@@ -490,6 +493,7 @@ class AgentCooperationTaskResult:
         | AgentDelegationChainResult
         | MultiAgentExecutionResult
         | AgentDelegationCoordinationResult
+        | SkillExecutionResult
         | None
     ) = None
     error_code: str | None = None
@@ -510,6 +514,7 @@ class AgentCooperationTaskResult:
             AgentDelegationChainResult,
             MultiAgentExecutionResult,
             AgentDelegationCoordinationResult,
+            SkillExecutionResult,
         )
         if self.execution_result is not None and not isinstance(self.execution_result, allowed_results):
             raise InvalidAgentCooperationPlanError("execution_result has an unsupported type.")
@@ -817,6 +822,12 @@ class AgentCooperationPlanner:
                 "minimum_successful_tasks exceeds task count.",
             )
         for task in plan.tasks:
+            if len(task.required_skill_ids) > 1:
+                return (
+                    AgentCooperationPlanStatus.INVALID_PLAN,
+                    "MULTIPLE_SKILLS_UNSUPPORTED",
+                    "one task can execute at most one required skill.",
+                )
             if task.continue_on_failure and policy.failure_mode is not AgentCooperationFailureMode.CONTINUE_INDEPENDENT_TASKS:
                 return (
                     AgentCooperationPlanStatus.INVALID_PLAN,
@@ -970,6 +981,8 @@ class AgentCooperationPlanner:
                 safe_message="selected agent is not authorized for all required skills.",
                 position=position,
             )
+        if task.required_skill_ids:
+            return self._execute_skill(task, structured_input, agent, position)
         execution = self._agent_executor.execute(
             AgentExecutionRequest(
                 resolution_request=AgentResolutionRequest(
@@ -997,6 +1010,54 @@ class AgentCooperationPlanner:
             task.execution_type,
             agent_ids=(agent.agent_id,),
             output=output if execution.status is AgentExecutionStatus.COMPLETED else None,
+            execution_result=execution,
+            error_code=execution.error_code,
+            safe_message=execution.safe_message,
+            position=position,
+        )
+
+    def _execute_skill(
+        self,
+        task: AgentCooperationTask,
+        structured_input: Mapping[str, object],
+        agent: AgentDefinition,
+        position: int,
+    ) -> AgentCooperationTaskResult:
+        skill_id = task.required_skill_ids[0]
+        resolution = self._skill_system.skill_resolver.resolve(
+            SkillResolutionRequest(required_skill_ids=(skill_id,))
+        )
+        if resolution.status is not SkillResolutionStatus.RESOLVED or resolution.selected_skill is None:
+            return AgentCooperationTaskResult(
+                task.task_id,
+                AgentCooperationTaskStatus.SKILL_EXECUTION_FAILED,
+                task.execution_type,
+                agent_ids=(agent.agent_id,),
+                error_code=resolution.error_code or resolution.status.value,
+                safe_message="required skill could not be resolved.",
+                position=position,
+            )
+        execution = self._skill_system.skill_executor.execute(
+            SkillExecutionRequest(
+                skill=resolution.selected_skill,
+                inputs=structured_input,
+                agent=agent,
+                metadata={"route": "agent_cooperation_plan", "task_id": task.task_id},
+            )
+        )
+        output, _ = _safe_output(execution.output or {})
+        if execution.status is SkillExecutionStatus.COMPLETED:
+            status = AgentCooperationTaskStatus.SUCCESS
+        elif execution.status is SkillExecutionStatus.SKILL_NOT_AUTHORIZED:
+            status = AgentCooperationTaskStatus.SKILL_AUTHORIZATION_FAILED
+        else:
+            status = AgentCooperationTaskStatus.SKILL_EXECUTION_FAILED
+        return AgentCooperationTaskResult(
+            task.task_id,
+            status,
+            task.execution_type,
+            agent_ids=(agent.agent_id,),
+            output=output if execution.status is SkillExecutionStatus.COMPLETED else None,
             execution_result=execution,
             error_code=execution.error_code,
             safe_message=execution.safe_message,

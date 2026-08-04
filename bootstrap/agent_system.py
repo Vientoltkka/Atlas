@@ -20,9 +20,12 @@ from core.agent_handler_registration import AgentHandlerRegistrationService
 from core.agent_manifest import AgentManifestLoader
 from core.multi_agent import MultiAgentCoordinator, MultiAgentResolver
 from core.skill_system import SkillSystem
+from core.skill_executor import SkillHandlerRegistry
+from core.capability_execution_service import CapabilityExecutionService
 from core.agent_registration import AgentRegistrationService
 from core.agent_registry import AgentRegistry
 from core.agent_resolver import AgentResolver
+from tools.executor import ToolExecutor
 from core.agent_system import AgentSystemBuildRequest, AgentSystemBuildResult, AgentSystemBuilder
 
 
@@ -41,6 +44,9 @@ def build_core_agent_system(
     multi_agent_resolver: MultiAgentResolver | None = None,
     multi_agent_coordinator: MultiAgentCoordinator | None = None,
     skill_system: SkillSystem | None = None,
+    tool_executor: ToolExecutor | None = None,
+    capability_execution_service: CapabilityExecutionService | None = None,
+    skill_handler_registry: SkillHandlerRegistry | None = None,
     agent_delegation_service: AgentDelegationService | None = None,
     agent_delegation_chain_service: AgentDelegationChainService | None = None,
     agent_delegation_coordinator: AgentDelegationCoordinator | None = None,
@@ -66,6 +72,9 @@ def build_core_agent_system(
         multi_agent_resolver=multi_agent_resolver,
         multi_agent_coordinator=multi_agent_coordinator,
         skill_system=skill_system,
+        tool_executor=tool_executor,
+        capability_execution_service=capability_execution_service,
+        skill_handler_registry=skill_handler_registry,
         agent_delegation_service=agent_delegation_service,
         agent_delegation_chain_service=agent_delegation_chain_service,
         agent_delegation_coordinator=agent_delegation_coordinator,

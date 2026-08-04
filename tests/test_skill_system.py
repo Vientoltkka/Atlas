@@ -188,14 +188,16 @@ def test_resolver_by_id_capability_tag_agent_type_disabled_no_match_and_ambiguit
 def test_executor_handler_authorization_target_errors_and_sanitized_failure() -> None:
     handlers = SkillHandlerRegistry()
     handlers.register("handler.demo", lambda inputs: {"result": inputs["value"]})
-    executor = SkillExecutor(handler_registry=handlers)
     skill = _skill(handler_id="handler.demo")
+    failing_skill = _skill("skill.fail", handler_id="handler.fail")
+    registry = SkillRegistry((skill, failing_skill))
+    executor = SkillExecutor(skill_registry=registry, handler_registry=handlers)
 
     ok = executor.execute(SkillExecutionRequest(skill, inputs={"value": "ok"}, agent=_agent(metadata={"allowed_skill_ids": "skill.demo"})))
     denied = executor.execute(SkillExecutionRequest(skill, inputs={"value": "ok"}, agent=_agent(metadata={"denied_skill_ids": "skill.demo"})))
-    missing = SkillExecutor().execute(SkillExecutionRequest(skill, inputs={"value": "ok"}))
+    missing = SkillExecutor(skill_registry=registry).execute(SkillExecutionRequest(skill, inputs={"value": "ok"}))
     handlers.register("handler.fail", lambda _inputs: (_ for _ in ()).throw(RuntimeError("api_key leaked")))
-    failed = SkillExecutor(handler_registry=handlers).execute(SkillExecutionRequest(_skill("skill.fail", handler_id="handler.fail"), inputs={}))
+    failed = executor.execute(SkillExecutionRequest(failing_skill, inputs={}))
 
     assert ok.status is SkillExecutionStatus.COMPLETED
     assert dict(ok.output) == {"result": "ok"}

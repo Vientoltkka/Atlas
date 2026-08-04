@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
@@ -14,7 +14,13 @@ from core.agent_executor import AgentExecutionRequest, AgentExecutor
 from core.agent_registry import AgentDefinition
 from core.agent_resolver import AgentResolutionRequest
 from core.capability_execution_service import CapabilityExecutionRequest, CapabilityExecutionService
-from core.skill_registry import SkillDefinition, SkillExecutionTargetType, validate_skill_id
+from core.skill_registry import (
+    SkillDefinition,
+    SkillExecutionTargetType,
+    SkillNotFoundError,
+    SkillRegistry,
+    validate_skill_id,
+)
 from tools.executor import ToolExecutor
 
 
@@ -129,19 +135,37 @@ class SkillExecutor:
     def __init__(
         self,
         *,
+        skill_registry: SkillRegistry | None = None,
         tool_executor: ToolExecutor | None = None,
         capability_execution_service: CapabilityExecutionService | None = None,
         agent_executor: AgentExecutor | None = None,
         handler_registry: SkillHandlerRegistry | None = None,
     ) -> None:
+        self._skill_registry = skill_registry if skill_registry is not None else SkillRegistry()
         self._tool_executor = tool_executor
         self._capability_execution_service = capability_execution_service
         self._agent_executor = agent_executor
         self._handler_registry = handler_registry or SkillHandlerRegistry()
 
+    @property
+    def skill_registry(self) -> SkillRegistry:
+        """Return the authoritative registry used for every execution."""
+
+        return self._skill_registry
+
     def execute(self, request: SkillExecutionRequest) -> SkillExecutionResult:
         if not isinstance(request, SkillExecutionRequest):
             return _result(SkillExecutionStatus.INVALID_REQUEST, "", error_code="INVALID_REQUEST")
+        try:
+            registered_skill = self._skill_registry.get(request.skill.skill_id)
+        except SkillNotFoundError:
+            return _result(
+                SkillExecutionStatus.TARGET_UNAVAILABLE,
+                "",
+                request.skill.skill_id,
+                error_code="SKILL_NOT_REGISTERED",
+            )
+        request = replace(request, skill=registered_skill)
         signature = skill_execution_request_signature(request)
         events = [SkillExecutionEvent("skill_execution_started", "started", {"skill_id": request.skill.skill_id})]
         if not request.skill.enabled and not request.policy.allow_disabled:
