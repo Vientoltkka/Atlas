@@ -15,6 +15,10 @@ from bootstrap.atlas_request_adapter import build_core_atlas_request_adapter
 from bootstrap.atlas_request_normalizer import build_core_atlas_request_normalizer
 from bootstrap.atlas_router import build_core_atlas_router
 from bootstrap.agent_system import build_core_agent_system
+from bootstrap.skill_system import (
+    build_builtin_skill_handler_registry,
+    register_builtin_skills,
+)
 from bootstrap.capability_execution_service import build_capability_execution_service
 from bootstrap.capability_orchestrator import build_core_capability_orchestrator
 from bootstrap.capability_planner import build_core_capability_planner
@@ -817,11 +821,15 @@ class Bootstrap:
             execution_plan_libraries=execution_plan_libraries,
             execution_plan_registry=execution_plan_registry,
         )
+        skill_handler_registry = build_builtin_skill_handler_registry()
         agent_system_result = build_core_agent_system(
             tool_executor=tool_executor,
             capability_execution_service=capability_execution_service,
+            skill_handler_registry=skill_handler_registry,
         )
         agent_system = agent_system_result.system if agent_system_result.system is not None else None
+        if agent_system is not None:
+            register_builtin_skills(agent_system.skill_system)
         atlas_router = build_core_atlas_router(
             capability_execution_service=capability_execution_service,
             agent_system=agent_system,

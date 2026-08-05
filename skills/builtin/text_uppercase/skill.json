@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.text-uppercase",
+  "name": "Text Uppercase",
+  "version": "1.0",
+  "description": "Convert dynamic input text to uppercase.",
+  "enabled": true,
+  "input_names": [
+    "text"
+  ],
+  "output_names": [
+    "result"
+  ],
+  "execution_target": "handler.text-uppercase",
+  "execution_target_type": "handler",
+  "handler_id": "handler.text-uppercase"
+}
