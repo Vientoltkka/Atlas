@@ -8,7 +8,10 @@ from enum import Enum
 import hashlib
 import json
 import math
+from queue import Empty, Queue
+from threading import Thread
 from types import MappingProxyType
+from typing import cast
 
 from core.agent_executor import AgentExecutionRequest, AgentExecutor
 from core.agent_registry import AgentDefinition
@@ -44,6 +47,10 @@ class SkillExecutionError(RuntimeError):
 
 class InvalidSkillExecutionRequestError(SkillExecutionError):
     """Raised for malformed execution requests."""
+
+
+class _SkillExecutionTimeoutError(SkillExecutionError):
+    """Raised internally when a skill target exceeds its effective timeout."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,8 +202,40 @@ class SkillExecutor:
                 error_code="SKILL_INPUT_CONTRACT_VIOLATION",
                 safe_message="skill input contract violation",
             )
+        if len(request.inputs) > request.skill.limits.max_inputs:
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "input_limit"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_INPUT_LIMIT_EXCEEDED",
+                safe_message="skill input limit exceeded",
+            )
         try:
-            output = self._execute_target(request)
+            output = self._execute_target_with_timeout(request)
+        except _SkillExecutionTimeoutError:
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "timeout"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_EXECUTION_TIMEOUT",
+                safe_message="skill execution timeout",
+            )
         except (RuntimeError, ValueError, TypeError, OSError) as error:
             events.append(SkillExecutionEvent("skill_execution_failed", "failed", {"skill_id": request.skill.skill_id}))
             return _result(
@@ -227,8 +266,69 @@ class SkillExecutor:
                 error_code="SKILL_OUTPUT_CONTRACT_VIOLATION",
                 safe_message="skill output contract violation",
             )
+        if len(output) > request.skill.limits.max_outputs:
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "output_limit"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_OUTPUT_LIMIT_EXCEEDED",
+                safe_message="skill output limit exceeded",
+            )
+        if _result_item_limit_exceeded(output, request.skill.limits.max_result_items):
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "result_item_limit"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_RESULT_ITEM_LIMIT_EXCEEDED",
+                safe_message="skill result item limit exceeded",
+            )
         events.append(SkillExecutionEvent("skill_execution_succeeded", "finished", {"skill_id": request.skill.skill_id}))
         return _result(SkillExecutionStatus.COMPLETED, signature, request.skill.skill_id, output=_safe_output(output), events=events)
+
+    def _execute_target_with_timeout(self, request: SkillExecutionRequest) -> Mapping[str, object]:
+        timeout_seconds = min(
+            request.policy.timeout_seconds,
+            request.skill.limits.timeout_seconds,
+        )
+        outcome: Queue[tuple[bool, object]] = Queue(maxsize=1)
+
+        def execute_target() -> None:
+            try:
+                outcome.put((True, self._execute_target(request)))
+            except BaseException as error:
+                outcome.put((False, error))
+
+        worker = Thread(
+            target=execute_target,
+            name=f"atlas-skill-{request.skill.skill_id}",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            succeeded, value = outcome.get(timeout=timeout_seconds)
+        except Empty as error:
+            raise _SkillExecutionTimeoutError("skill execution timeout") from error
+        if not succeeded:
+            if isinstance(value, BaseException):
+                raise value
+            raise RuntimeError("skill target failed without an exception")
+        return cast(Mapping[str, object], value)
 
     def _execute_target(self, request: SkillExecutionRequest) -> Mapping[str, object]:
         skill = request.skill
@@ -327,6 +427,22 @@ def _field_value_matches(type_name: str, value: object) -> bool:
         return isinstance(value, Mapping)
     if type_name == "array":
         return isinstance(value, (list, tuple))
+    return False
+
+
+def _result_item_limit_exceeded(value: object, max_items: int) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            _result_item_limit_exceeded(child, max_items)
+            for child in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        if len(value) > max_items:
+            return True
+        return any(
+            _result_item_limit_exceeded(child, max_items)
+            for child in value
+        )
     return False
 
 
