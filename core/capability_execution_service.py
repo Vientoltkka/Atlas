@@ -27,6 +27,7 @@ from core.multi_capability_planner import (
     MultiCapabilityPlanningRequest,
     MultiCapabilityPlanningStatus,
 )
+from core.skill_execution_context import SkillExecutionContext
 
 
 MAX_CAPABILITY_EXECUTION_ITEMS = 64
@@ -100,6 +101,7 @@ class CapabilityExecutionRequest:
     agent_execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
     inputs: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
+    execution_context: SkillExecutionContext | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.objective, str) or not self.objective.strip():
@@ -120,6 +122,13 @@ class CapabilityExecutionRequest:
             raise InvalidCapabilityExecutionRequestError("confirmation_granted must be a bool.")
         if self.control is not None and not isinstance(self.control, ExecutionControl):
             raise InvalidCapabilityExecutionRequestError("control must be ExecutionControl or None.")
+        if self.execution_context is not None and not isinstance(
+            self.execution_context,
+            SkillExecutionContext,
+        ):
+            raise InvalidCapabilityExecutionRequestError(
+                "execution_context must be SkillExecutionContext or None."
+            )
         if self.replanning_policy is not None and not isinstance(self.replanning_policy, ReplanningPolicy):
             raise InvalidCapabilityExecutionRequestError("replanning_policy must be ReplanningPolicy or None.")
         if self.goal_driven_policy is not None and not isinstance(
@@ -225,11 +234,45 @@ class CapabilityExecutionService:
                 message="request must be CapabilityExecutionRequest.",
             )
 
+        control = request.control
+        if request.execution_context is not None:
+            context = request.execution_context
+            legacy_control = request.control
+
+            def should_cancel() -> bool:
+                if context.is_cancelled:
+                    return True
+                return bool(
+                    legacy_control is not None
+                    and legacy_control.should_cancel is not None
+                    and legacy_control.should_cancel()
+                )
+
+            control = ExecutionControl(
+                should_cancel=should_cancel,
+                cancellation_reason=(
+                    legacy_control.cancellation_reason
+                    if legacy_control is not None and legacy_control.should_cancel is not None
+                    else "Skill execution deadline expired."
+                ),
+                should_stop=None if legacy_control is None else legacy_control.should_stop,
+                interruption_reason=(
+                    "Execution interrupted by control signal."
+                    if legacy_control is None
+                    else legacy_control.interruption_reason
+                ),
+                interruption_resumable=(
+                    True
+                    if legacy_control is None
+                    else legacy_control.interruption_resumable
+                ),
+            )
+
         try:
             multi_result = (
                 None
                 if request.agent_execution_policy.enabled
-                else self._execute_multi_capability_request(request)
+                else self._execute_multi_capability_request(request, control)
             )
             if multi_result is not None:
                 return multi_result
@@ -237,10 +280,11 @@ class CapabilityExecutionService:
                 planning_request=_build_planning_request(request),
                 policy=CapabilityOrchestrationPolicy(
                     confirmation_granted=request.confirmation_granted,
-                    control=request.control,
+                    control=control,
                     replanning_policy=request.replanning_policy,
                     goal_driven_policy=request.goal_driven_policy,
                     agent_execution_policy=request.agent_execution_policy,
+                    execution_context=request.execution_context,
                 ),
                 inputs=request.inputs,
                 metadata=request.metadata,
@@ -258,6 +302,7 @@ class CapabilityExecutionService:
     def _execute_multi_capability_request(
         self,
         request: CapabilityExecutionRequest,
+        control: ExecutionControl | None = None,
     ) -> CapabilityExecutionResult | None:
         if self._multi_capability_planner is None:
             return None
@@ -281,10 +326,11 @@ class CapabilityExecutionService:
             planning.plan,
             policy=CapabilityOrchestrationPolicy(
                 confirmation_granted=request.confirmation_granted,
-                control=request.control,
+                control=control,
                 replanning_policy=request.replanning_policy,
                 goal_driven_policy=request.goal_driven_policy,
                 agent_execution_policy=request.agent_execution_policy,
+                execution_context=request.execution_context,
             ),
             inputs=request.inputs,
             metadata={

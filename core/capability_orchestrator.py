@@ -16,6 +16,7 @@ from core.agent_executor import (
 )
 from core.agent_registry import validate_agent_id
 from core.agent_resolver import AgentResolutionRequest
+from core.skill_execution_context import SkillExecutionContext
 from core.capability_planner import (
     CapabilityPlanner,
     CapabilityPlanningDecision,
@@ -166,6 +167,7 @@ class CapabilityOrchestrationPolicy:
     replanning_policy: ReplanningPolicy | None = None
     goal_driven_policy: GoalDrivenExecutionPolicy | None = None
     agent_execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
+    execution_context: SkillExecutionContext | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.confirmation_granted, bool):
@@ -184,6 +186,13 @@ class CapabilityOrchestrationPolicy:
         if not isinstance(self.agent_execution_policy, AgentExecutionPolicy):
             raise InvalidCapabilityOrchestrationRequestError(
                 "agent_execution_policy must be AgentExecutionPolicy."
+            )
+        if self.execution_context is not None and not isinstance(
+            self.execution_context,
+            SkillExecutionContext,
+        ):
+            raise InvalidCapabilityOrchestrationRequestError(
+                "execution_context must be SkillExecutionContext or None."
             )
 
 
@@ -489,6 +498,7 @@ class CapabilityOrchestrator:
             },
             required_capability_ids=policy.required_capability_ids,
             required_permission_ids=policy.required_permission_ids,
+            execution_context=request.policy.execution_context,
         )
         try:
             agent_result = self._agent_executor.execute(agent_request)

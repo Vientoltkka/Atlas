@@ -5,6 +5,7 @@ import pytest
 
 from bootstrap.bootstrap import Bootstrap
 from core.step_output_reference import StepOutputReference
+from core.skill_execution_context import SkillExecutionContext
 from tools.base_tool import BaseTool
 from tools.executor import ToolExecutor
 from tools.filesystem.read_file_tool import ReadFileTool
@@ -195,3 +196,20 @@ def test_bootstrap_tool_registry_lists_real_registered_tools() -> None:
     assert "desktop.close_window" in names
     assert len(names) == len(set(names))
     assert all(registry.descriptor(name).description for name in names)
+
+
+def test_tool_executor_propagates_skill_execution_context() -> None:
+    tool = CapturingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    execution_context = SkillExecutionContext()
+
+    result = ToolExecutor(registry).execute(
+        tool.name,
+        arguments={"value": "Atlas"},
+        execution_context=execution_context,
+    )
+
+    assert result == {"value": "Atlas"}
+    assert tool.context is not None
+    assert tool.context.execution_context is execution_context

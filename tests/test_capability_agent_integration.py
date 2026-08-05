@@ -42,6 +42,7 @@ from core.execution_plan_validator import ExecutionPlanValidator
 from core.multi_capability_planner import MultiCapabilityPlanner, MultiCapabilityPlanningRequest
 from core.planner import ExecutionPlan, ExecutionStep
 from core.workflow_selector import WorkflowSelector
+from core.skill_execution_context import SkillExecutionContext
 from tools.base_tool import BaseTool
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
@@ -373,3 +374,25 @@ def test_agent_policy_skips_multi_capability_path_in_service() -> None:
     assert result.status is CapabilityExecutionStatus.COMPLETED
     assert result.output == {"agent_id": "atlas.agent.echo", "value": 11}
     assert multi_planner.calls == 0
+
+
+def test_capability_service_propagates_cancelled_context_to_agent_pipeline() -> None:
+    tool = SpyTool()
+    planner = StaticPlanner(_decision(_plan()))
+    service = CapabilityExecutionService(
+        _orchestrator(planner, tool, agent_executor=_agent_executor())
+    )
+
+    result = service.execute(
+        CapabilityExecutionRequest(
+            agent_execution_policy=_agent_policy(),
+            execution_context=SkillExecutionContext(cancelled=True),
+        )
+    )
+
+    assert result.status is CapabilityExecutionStatus.CANCELLED
+    assert result.orchestration_result is not None
+    assert result.orchestration_result.agent_execution_result is not None
+    assert result.orchestration_result.agent_execution_result.status.value == "CANCELLED"
+    assert planner.calls == 0
+    assert tool.calls == 0

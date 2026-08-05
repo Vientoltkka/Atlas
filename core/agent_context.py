@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 from core.agent_registry import AgentDefinition
+from core.skill_execution_context import SkillExecutionContext
 
 
 SENSITIVE_KEY_PARTS = (
@@ -74,6 +75,7 @@ class AgentContextRequest:
     tool_results: Mapping[str, object] | None = None
     workflow_results: Mapping[str, object] | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+    execution_context: SkillExecutionContext | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent, AgentDefinition):
@@ -84,6 +86,8 @@ class AgentContextRequest:
                 object.__setattr__(self, field_name, _safe_identifier(value, field_name))
         if self.user_input is not None and not isinstance(self.user_input, str):
             raise InvalidAgentContextRequestError("user_input must be a string or None.")
+        if self.execution_context is not None and not isinstance(self.execution_context, SkillExecutionContext):
+            raise InvalidAgentContextRequestError("execution_context must be SkillExecutionContext or None.")
         object.__setattr__(self, "metadata", MappingProxyType(_sanitize_metadata(self.metadata)))
 
 
@@ -116,6 +120,7 @@ class AgentContext:
     metadata: Mapping[str, object]
     omitted_sections: tuple[str, ...]
     context_signature: str
+    execution_context: SkillExecutionContext | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "agent_id", _safe_identifier(self.agent_id, "agent_id"))
@@ -126,6 +131,8 @@ class AgentContext:
             object.__setattr__(self, name, MappingProxyType(dict(value)))
         object.__setattr__(self, "conversation_context", tuple(self.conversation_context))
         object.__setattr__(self, "omitted_sections", tuple(self.omitted_sections))
+        if self.execution_context is not None and not isinstance(self.execution_context, SkillExecutionContext):
+            raise InvalidAgentContextRequestError("execution_context must be SkillExecutionContext or None.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +290,7 @@ class AgentContextBuilder:
                 metadata=metadata,
                 omitted_sections=tuple(omitted),
                 context_signature=signature,
+                execution_context=request.execution_context,
             )
             return AgentContextResult(
                 status=AgentContextStatus.BUILT,

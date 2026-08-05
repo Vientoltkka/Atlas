@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from core.execution_arguments import contains_unresolved_execution_reference
+from core.skill_execution_context import SkillExecutionContext
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 from tools.tool_schema import ToolSchemaValidationException
@@ -26,6 +27,7 @@ class ToolExecutor:
         context: ToolContext | None = None,
         *,
         arguments: Mapping[str, object] | None = None,
+        execution_context: SkillExecutionContext | None = None,
     ):
         """Execute a registered tool."""
 
@@ -51,7 +53,7 @@ class ToolExecutor:
             normalized_arguments = dict(validation.normalized_arguments)
 
         if context is None:
-            active_context = ToolContext(parameters=normalized_arguments)
+            active_context = ToolContext(parameters=normalized_arguments, execution_context=execution_context)
         else:
             active_context = ToolContext(
                 parameters=normalized_arguments,
@@ -59,6 +61,7 @@ class ToolExecutor:
                 plan_signature=context.plan_signature,
                 previous_results=context.previous_results,
                 metadata=context.metadata,
+                execution_context=execution_context or context.execution_context,
             )
 
         return tool.execute(active_context)

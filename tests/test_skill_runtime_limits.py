@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import time
 
+from threading import Event
 import pytest
 
 from bootstrap.agent_system import build_core_agent_system
@@ -18,6 +19,7 @@ from core.agent_registry import (
     AgentPermissions,
     AgentType,
 )
+from core.skill_execution_context import SkillExecutionContext
 from core.skill_executor import (
     SkillExecutionRequest,
     SkillExecutionStatus,
@@ -351,3 +353,82 @@ def test_authorization_denied_is_rejected_without_execution() -> None:
     assert result.status is SkillExecutionStatus.SKILL_NOT_AUTHORIZED
     assert result.error_code == "SKILL_NOT_AUTHORIZED"
     assert executor.calls == 0
+
+
+def test_execution_context_tracks_deadline_and_explicit_cancellation() -> None:
+    context = SkillExecutionContext(deadline=time.monotonic() + 1.0)
+
+    assert context.is_cancelled is False
+    assert context.remaining_seconds is not None
+    assert 0.0 < context.remaining_seconds <= 1.0
+
+    context.cancel()
+
+    assert context.is_cancelled is True
+    assert context.remaining_seconds is not None
+
+
+def test_handler_receives_execution_context_without_breaking_legacy_handlers() -> None:
+    skill = _skill()
+    received: list[SkillExecutionContext] = []
+
+    def cooperative_handler(
+        _inputs: Mapping[str, object],
+        *,
+        execution_context: SkillExecutionContext,
+    ) -> Mapping[str, object]:
+        received.append(execution_context)
+        return {"result": "ok"}
+
+    cooperative = _handler_executor(skill, cooperative_handler).execute(
+        SkillExecutionRequest(skill)
+    )
+    legacy = _handler_executor(skill, lambda _inputs: {"result": "legacy"}).execute(
+        SkillExecutionRequest(skill)
+    )
+
+    assert cooperative.status is SkillExecutionStatus.COMPLETED
+    assert len(received) == 1
+    assert received[0].deadline is not None
+    assert legacy.status is SkillExecutionStatus.COMPLETED
+    assert legacy.output == {"result": "legacy"}
+
+
+def test_handler_internal_type_error_is_not_retried_as_legacy() -> None:
+    skill = _skill()
+    calls = {"count": 0}
+
+    def failing_handler(
+        _inputs: Mapping[str, object],
+        *,
+        execution_context: SkillExecutionContext | None = None,
+    ) -> Mapping[str, object]:
+        calls["count"] += 1
+        raise TypeError("internal handler failure")
+
+    result = _handler_executor(skill, failing_handler).execute(SkillExecutionRequest(skill))
+
+    assert result.status is SkillExecutionStatus.EXECUTION_FAILED
+    assert result.error_code == "TypeError"
+    assert calls["count"] == 1
+
+
+def test_cooperative_handler_observes_cancellation_after_timeout() -> None:
+    skill = _skill(timeout_seconds=1)
+    stopped = Event()
+
+    def cooperative_handler(
+        _inputs: Mapping[str, object],
+        *,
+        execution_context: SkillExecutionContext,
+    ) -> Mapping[str, object]:
+        while not execution_context.is_cancelled:
+            time.sleep(0.01)
+        stopped.set()
+        return {"result": "stopped"}
+
+    result = _handler_executor(skill, cooperative_handler).execute(SkillExecutionRequest(skill))
+
+    assert result.status is SkillExecutionStatus.EXECUTION_FAILED
+    assert result.error_code == "SKILL_EXECUTION_TIMEOUT"
+    assert stopped.wait(0.5)

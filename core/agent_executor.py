@@ -29,6 +29,7 @@ from core.agent_resolver import (
     AgentResolver,
     agent_resolution_request_signature,
 )
+from core.skill_execution_context import SkillExecutionContext
 
 
 MAX_AGENT_EXECUTION_IDS = 32
@@ -139,6 +140,7 @@ class AgentExecutionRequest:
     required_capability_ids: tuple[str, ...] = ()
     required_permission_ids: tuple[str, ...] = ()
     cancel_requested: bool = False
+    execution_context: SkillExecutionContext | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolution_request, AgentResolutionRequest):
@@ -151,6 +153,8 @@ class AgentExecutionRequest:
             raise InvalidAgentExecutionRequestError("user_input must be a string or None.")
         if not isinstance(self.cancel_requested, bool):
             raise InvalidAgentExecutionRequestError("cancel_requested must be a bool.")
+        if self.execution_context is not None and not isinstance(self.execution_context, SkillExecutionContext):
+            raise InvalidAgentExecutionRequestError("execution_context must be SkillExecutionContext or None.")
         object.__setattr__(
             self,
             "required_capability_ids",
@@ -349,6 +353,17 @@ class AgentExecutor:
                 error_code="CANCELLED",
                 safe_message="execution was cancelled before resolution.",
             )
+        if request.execution_context is not None and request.execution_context.is_cancelled:
+            events.append(_event("agent_execution_failed", AgentExecutionStatus.CANCELLED, request=request))
+            return _result(
+                AgentExecutionStatus.CANCELLED,
+                signature,
+                execution_id=request.execution_id,
+                correlation_id=request.correlation_id,
+                events=events,
+                error_code="CANCELLED",
+                safe_message="execution was cancelled before resolution.",
+            )
 
         resolution_result = self._agent_resolver.resolve(request.resolution_request)
         resolution_status = _map_resolution_status(resolution_result.status)
@@ -441,6 +456,7 @@ class AgentExecutor:
             tool_results=request.tool_results,
             workflow_results=request.workflow_results,
             metadata=request.metadata,
+            execution_context=request.execution_context,
         )
         context_result = self._agent_context_builder.build(context_request)
         if context_result.status is not AgentContextStatus.BUILT or context_result.context is None:
@@ -488,6 +504,21 @@ class AgentExecutor:
                 events=events,
                 error_code="HANDLER_UNAVAILABLE",
                 safe_message="handler id is incompatible with selected agent.",
+            )
+
+        if request.execution_context is not None and request.execution_context.is_cancelled:
+            events.append(_event("agent_execution_failed", AgentExecutionStatus.CANCELLED, request=request, agent=agent))
+            return _result(
+                AgentExecutionStatus.CANCELLED,
+                signature,
+                execution_id=request.execution_id,
+                correlation_id=request.correlation_id,
+                agent_id=agent.agent_id,
+                resolution_result=resolution_result,
+                context=context,
+                events=events,
+                error_code="CANCELLED",
+                safe_message="execution was cancelled before handler invocation.",
             )
 
         events.append(_event("agent_handler_started", AgentExecutionStatus.COMPLETED, request=request, agent=agent))

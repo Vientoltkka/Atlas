@@ -7,7 +7,9 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
+import inspect
 import math
+import time
 from queue import Empty, Queue
 from threading import Thread
 from types import MappingProxyType
@@ -17,6 +19,7 @@ from core.agent_executor import AgentExecutionRequest, AgentExecutor
 from core.agent_registry import AgentDefinition
 from core.agent_resolver import AgentResolutionRequest
 from core.capability_execution_service import CapabilityExecutionRequest, CapabilityExecutionService
+from core.skill_execution_context import SkillExecutionContext
 from core.skill_registry import (
     SkillDefinition,
     SkillExecutionTargetType,
@@ -119,9 +122,15 @@ class SkillHandlerRegistry:
     """Minimal explicit registry for safe skill handlers."""
 
     def __init__(self) -> None:
-        self._handlers: dict[str, Callable[[Mapping[str, object]], Mapping[str, object]]] = {}
+        self._handlers: dict[str, Callable[..., Mapping[str, object]]] = {}
 
-    def register(self, handler_id: str, handler: Callable[[Mapping[str, object]], Mapping[str, object]], *, replace: bool = False) -> None:
+    def register(
+        self,
+        handler_id: str,
+        handler: Callable[..., Mapping[str, object]],
+        *,
+        replace: bool = False,
+    ) -> None:
         normalized = validate_skill_id(handler_id)
         if not callable(handler):
             raise InvalidSkillExecutionRequestError("handler must be callable.")
@@ -129,7 +138,10 @@ class SkillHandlerRegistry:
             raise InvalidSkillExecutionRequestError("handler already registered.")
         self._handlers[normalized] = handler
 
-    def get(self, handler_id: str) -> Callable[[Mapping[str, object]], Mapping[str, object]]:
+    def get(
+        self,
+        handler_id: str,
+    ) -> Callable[..., Mapping[str, object]]:
         normalized = validate_skill_id(handler_id)
         try:
             return self._handlers[normalized]
@@ -306,11 +318,20 @@ class SkillExecutor:
             request.policy.timeout_seconds,
             request.skill.limits.timeout_seconds,
         )
+        deadline = time.monotonic() + timeout_seconds
+        context = SkillExecutionContext(deadline=deadline)
         outcome: Queue[tuple[bool, object]] = Queue(maxsize=1)
 
         def execute_target() -> None:
             try:
-                outcome.put((True, self._execute_target(request)))
+                target = self._execute_target
+                try:
+                    inspect.signature(target).bind(request, context)
+                except (TypeError, ValueError):
+                    value = target(request)
+                else:
+                    value = target(request, context)
+                outcome.put((True, value))
             except BaseException as error:
                 outcome.put((False, error))
 
@@ -323,24 +344,41 @@ class SkillExecutor:
         try:
             succeeded, value = outcome.get(timeout=timeout_seconds)
         except Empty as error:
+            context.cancel()
             raise _SkillExecutionTimeoutError("skill execution timeout") from error
+        if context.is_cancelled:
+            context.cancel()
+            raise _SkillExecutionTimeoutError("skill execution timeout")
         if not succeeded:
             if isinstance(value, BaseException):
                 raise value
             raise RuntimeError("skill target failed without an exception")
         return cast(Mapping[str, object], value)
 
-    def _execute_target(self, request: SkillExecutionRequest) -> Mapping[str, object]:
+    def _execute_target(
+        self,
+        request: SkillExecutionRequest,
+        context: SkillExecutionContext | None = None,
+    ) -> Mapping[str, object]:
+        if context is not None and context.is_cancelled:
+            raise _SkillExecutionTimeoutError("skill execution deadline already expired")
+
         skill = request.skill
         if skill.execution_target_type is SkillExecutionTargetType.TOOL:
             if self._tool_executor is None:
                 raise RuntimeError("tool executor is unavailable")
-            return {"result": self._tool_executor.execute(skill.execution_target, arguments=request.inputs)}
+            return {
+                "result": self._tool_executor.execute(
+                    skill.execution_target,
+                    arguments=request.inputs,
+                    execution_context=context,
+                )
+            }
         if skill.execution_target_type is SkillExecutionTargetType.CAPABILITY:
             if self._capability_execution_service is None:
                 raise RuntimeError("capability execution service is unavailable")
             result = self._capability_execution_service.execute(
-                CapabilityExecutionRequest(capability_id=skill.execution_target, inputs=request.inputs)
+                CapabilityExecutionRequest(capability_id=skill.execution_target, inputs=request.inputs, execution_context=context)
             )
             return {"status": result.status.value, "output": result.output or {}}
         if skill.execution_target_type is SkillExecutionTargetType.AGENT:
@@ -352,12 +390,17 @@ class SkillExecutor:
                     structured_input=request.inputs,
                     required_capability_ids=skill.required_capability_ids,
                     required_permission_ids=skill.required_permission_ids,
+                    execution_context=context,
                 )
             )
             return {"status": result.status.value, "output": result.output or {}}
         if skill.execution_target_type is SkillExecutionTargetType.HANDLER:
             handler = self._handler_registry.get(skill.handler_id or skill.execution_target)
-            return handler(request.inputs)
+            try:
+                inspect.signature(handler).bind(request.inputs, execution_context=context)
+            except (TypeError, ValueError):
+                return handler(request.inputs)
+            return handler(request.inputs, execution_context=context)
         raise RuntimeError("target type is invalid")
 
 

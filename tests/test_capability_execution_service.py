@@ -37,6 +37,7 @@ from core.goal_verifier import (
     OutputValidatorKind,
 )
 from core.goal_driven_execution import GoalDrivenExecutionPolicy
+from core.skill_execution_context import SkillExecutionContext
 from core.execution_plan_library import ExecutionPlanLibrary, WorkflowDefinition
 from core.execution_plan_registry import ExecutionPlanReference
 from core.execution_plan_validator import ExecutionPlanValidator
@@ -414,6 +415,34 @@ def test_execution_cancellation_is_mapped_without_running_tool() -> None:
 
     assert result.status is CapabilityExecutionStatus.CANCELLED
     assert result.execution_status == "cancelled"
+    assert tool.calls == 0
+
+
+def test_skill_execution_context_cancels_capability_without_running_tool() -> None:
+    tool = SpyTool()
+    execution_context = SkillExecutionContext(cancelled=True)
+    result = _service_with_static_planner(
+        StaticPlanner(_decision(CapabilityPlanningStatus.SELECTED, plan=_plan())),
+        _registry(tool),
+    ).execute(CapabilityExecutionRequest(execution_context=execution_context))
+
+    assert result.status is CapabilityExecutionStatus.CANCELLED
+    assert tool.calls == 0
+
+
+def test_skill_execution_context_preserves_legacy_capability_control() -> None:
+    tool = SpyTool()
+    result = _service_with_static_planner(
+        StaticPlanner(_decision(CapabilityPlanningStatus.SELECTED, plan=_plan())),
+        _registry(tool),
+    ).execute(
+        CapabilityExecutionRequest(
+            execution_context=SkillExecutionContext(),
+            control=ExecutionControl(should_cancel=lambda: True),
+        )
+    )
+
+    assert result.status is CapabilityExecutionStatus.CANCELLED
     assert tool.calls == 0
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import pytest
@@ -26,6 +26,7 @@ from core.agent_registry import (
     AgentType,
 )
 from core.agent_resolver import AgentResolutionRequest, AgentResolver
+from core.skill_execution_context import SkillExecutionContext
 
 
 @dataclass(frozen=True)
@@ -316,3 +317,27 @@ def test_bootstrap_builds_core_agent_executor():
 
     assert isinstance(result.output, MappingProxyType)
     assert result.status is AgentExecutionStatus.COMPLETED
+
+
+def test_agent_execution_context_is_propagated_to_handler_context() -> None:
+    execution_context = SkillExecutionContext()
+
+    result = _executor(_definition()).execute(
+        replace(_request(), execution_context=execution_context)
+    )
+
+    assert result.status is AgentExecutionStatus.COMPLETED
+    assert result.context is not None
+    assert result.context.execution_context is execution_context
+
+
+def test_cancelled_skill_execution_context_stops_agent_before_handler() -> None:
+    execution_context = SkillExecutionContext(cancelled=True)
+
+    result = _executor(_definition()).execute(
+        replace(_request(), execution_context=execution_context)
+    )
+
+    assert result.status is AgentExecutionStatus.CANCELLED
+    assert result.error_code == "CANCELLED"
+    assert result.context is None
