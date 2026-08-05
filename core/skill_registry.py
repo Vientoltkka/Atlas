@@ -19,6 +19,9 @@ MAX_SKILL_DESCRIPTION_LENGTH = 1_000
 MAX_SKILL_LIMIT = 10_000
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){0,2}$")
+_SKILL_FIELD_TYPE_NAMES = frozenset(
+    {"string", "integer", "number", "boolean", "object", "array"}
+)
 _SENSITIVE_KEY_PARTS = (
     "token",
     "access_token",
@@ -76,6 +79,21 @@ class SkillLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillFieldDefinition:
+    """One deterministic field in a typed skill contract."""
+
+    name: str
+    type_name: str
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier(self.name, "skill field name"))
+        object.__setattr__(self, "type_name", _skill_field_type(self.type_name))
+        if not isinstance(self.required, bool):
+            raise InvalidSkillDefinitionError("skill field required must be a bool.")
+
+
+@dataclass(frozen=True, slots=True)
 class SkillDefinition:
     """Immutable normalized definition of one reusable Atlas skill."""
 
@@ -96,6 +114,8 @@ class SkillDefinition:
     tags: tuple[str, ...] = ()
     handler_id: str | None = None
     workflow_reference: str | None = None
+    input_fields: tuple[SkillFieldDefinition, ...] = ()
+    output_fields: tuple[SkillFieldDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skill_id", validate_skill_id(self.skill_id))
@@ -109,6 +129,12 @@ class SkillDefinition:
         object.__setattr__(self, "allowed_agent_types", _agent_type_tuple(self.allowed_agent_types, "allowed_agent_types"))
         object.__setattr__(self, "input_names", _identifier_tuple(self.input_names, "input_names"))
         object.__setattr__(self, "output_names", _identifier_tuple(self.output_names, "output_names"))
+        object.__setattr__(self, "input_fields", _skill_field_tuple(self.input_fields, "input_fields"))
+        object.__setattr__(self, "output_fields", _skill_field_tuple(self.output_fields, "output_fields"))
+        if self.input_names and self.input_fields:
+            raise InvalidSkillDefinitionError("input_names cannot be combined with input_fields.")
+        if self.output_names and self.output_fields:
+            raise InvalidSkillDefinitionError("output_names cannot be combined with output_fields.")
         object.__setattr__(self, "execution_target", _identifier(self.execution_target, "execution_target"))
         object.__setattr__(self, "execution_target_type", _target_type(self.execution_target_type))
         if not isinstance(self.limits, SkillLimits):
@@ -228,6 +254,32 @@ def _identifier_tuple(values: Iterable[str], field_name: str) -> tuple[str, ...]
     normalized = tuple(dict.fromkeys(_identifier(value, field_name) for value in values))
     if len(normalized) > MAX_SKILL_ITEMS:
         raise InvalidSkillDefinitionError(f"{field_name} has too many items.")
+    return normalized
+
+
+def _skill_field_type(value: str) -> str:
+    if not isinstance(value, str):
+        raise InvalidSkillDefinitionError("skill field type must be a string.")
+    normalized = value.strip().lower()
+    if normalized not in _SKILL_FIELD_TYPE_NAMES:
+        raise InvalidSkillDefinitionError("skill field type is invalid.")
+    return normalized
+
+
+def _skill_field_tuple(
+    values: Iterable[SkillFieldDefinition],
+    field_name: str,
+) -> tuple[SkillFieldDefinition, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+        raise InvalidSkillDefinitionError(f"{field_name} must be an iterable.")
+    normalized = tuple(values)
+    if len(normalized) > MAX_SKILL_ITEMS:
+        raise InvalidSkillDefinitionError(f"{field_name} has too many items.")
+    if not all(isinstance(value, SkillFieldDefinition) for value in normalized):
+        raise InvalidSkillDefinitionError(f"{field_name} must contain skill fields.")
+    names = tuple(value.name for value in normalized)
+    if len(set(names)) != len(names):
+        raise InvalidSkillDefinitionError(f"{field_name} contains duplicate names.")
     return normalized
 
 

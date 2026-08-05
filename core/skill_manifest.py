@@ -10,7 +10,13 @@ import json
 import math
 from types import MappingProxyType
 
-from core.skill_registry import InvalidSkillDefinitionError, SkillDefinition, SkillExecutionTargetType, SkillLimits
+from core.skill_registry import (
+    InvalidSkillDefinitionError,
+    SkillDefinition,
+    SkillExecutionTargetType,
+    SkillFieldDefinition,
+    SkillLimits,
+)
 
 
 SKILL_SCHEMA_VERSION = "1.0"
@@ -28,6 +34,8 @@ _ALLOWED_FIELDS = frozenset(
         "allowed_agent_types",
         "input_names",
         "output_names",
+        "input_fields",
+        "output_fields",
         "execution_target",
         "execution_target_type",
         "limits",
@@ -37,6 +45,7 @@ _ALLOWED_FIELDS = frozenset(
         "workflow_reference",
     }
 )
+_ALLOWED_SKILL_FIELD_FIELDS = frozenset({"name", "type", "required"})
 _SENSITIVE_KEY_PARTS = (
     "token",
     "access_token",
@@ -116,6 +125,10 @@ class SkillManifestLoader:
             raise InvalidSkillManifestError("manifest contains unknown fields.")
         if raw.get("schema_version") != SKILL_SCHEMA_VERSION:
             raise InvalidSkillManifestError("schema_version is unsupported.")
+        if "input_names" in raw and "input_fields" in raw:
+            raise InvalidSkillManifestError("input_names cannot be combined with input_fields.")
+        if "output_names" in raw and "output_fields" in raw:
+            raise InvalidSkillManifestError("output_names cannot be combined with output_fields.")
         limits = raw.get("limits") or {}
         if not isinstance(limits, Mapping):
             raise InvalidSkillManifestError("limits must be a mapping.")
@@ -130,6 +143,8 @@ class SkillManifestLoader:
             allowed_agent_types=_tuple(raw.get("allowed_agent_types")),
             input_names=_tuple(raw.get("input_names")),
             output_names=_tuple(raw.get("output_names")),
+            input_fields=_skill_fields(raw.get("input_fields"), "input_fields"),
+            output_fields=_skill_fields(raw.get("output_fields"), "output_fields"),
             execution_target=_string(raw, "execution_target"),
             execution_target_type=_string_value(raw.get("execution_target_type"), SkillExecutionTargetType.TOOL.value),
             limits=SkillLimits(
@@ -233,6 +248,33 @@ def _tuple(value: object) -> tuple[str, ...]:
     if not all(isinstance(item, str) for item in value):
         raise InvalidSkillManifestError("expected string list values.")
     return tuple(value)
+
+
+def _skill_fields(
+    value: object,
+    field_name: str,
+) -> tuple[SkillFieldDefinition, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (tuple, list)):
+        raise InvalidSkillManifestError(f"{field_name} must be a list.")
+    fields: list[SkillFieldDefinition] = []
+    for raw_field in value:
+        if not isinstance(raw_field, Mapping):
+            raise InvalidSkillManifestError(f"{field_name} must contain objects.")
+        unknown = tuple(
+            sorted(key for key in raw_field if key not in _ALLOWED_SKILL_FIELD_FIELDS)
+        )
+        if unknown:
+            raise InvalidSkillManifestError(f"{field_name} contains unknown fields.")
+        fields.append(
+            SkillFieldDefinition(
+                name=_string(raw_field, "name"),
+                type_name=_string(raw_field, "type"),
+                required=_bool(raw_field.get("required", True), "required"),
+            )
+        )
+    return tuple(fields)
 
 
 def _bool(value: object, field_name: str) -> bool:

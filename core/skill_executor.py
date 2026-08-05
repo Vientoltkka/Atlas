@@ -17,6 +17,7 @@ from core.capability_execution_service import CapabilityExecutionRequest, Capabi
 from core.skill_registry import (
     SkillDefinition,
     SkillExecutionTargetType,
+    SkillFieldDefinition,
     SkillNotFoundError,
     SkillRegistry,
     validate_skill_id,
@@ -174,7 +175,11 @@ class SkillExecutor:
         if request.agent is not None and not _agent_authorized(request.agent, request.skill):
             events.append(SkillExecutionEvent("skill_execution_blocked", "blocked", {"reason": "unauthorized"}))
             return _result(SkillExecutionStatus.SKILL_NOT_AUTHORIZED, signature, request.skill.skill_id, events=events, error_code="SKILL_NOT_AUTHORIZED")
-        if not _contract_satisfied(request.skill.input_names, request.inputs):
+        if not _contract_satisfied(
+            request.skill.input_names,
+            request.skill.input_fields,
+            request.inputs,
+        ):
             events.append(
                 SkillExecutionEvent(
                     "skill_execution_failed",
@@ -202,7 +207,11 @@ class SkillExecutor:
                 error_code=type(error).__name__,
                 safe_message=str(error),
             )
-        if not _contract_satisfied(request.skill.output_names, output):
+        if not _contract_satisfied(
+            request.skill.output_names,
+            request.skill.output_fields,
+            output,
+        ):
             events.append(
                 SkillExecutionEvent(
                     "skill_execution_failed",
@@ -288,9 +297,37 @@ def _metadata_ids(value: object) -> tuple[str, ...]:
 
 def _contract_satisfied(
     required_names: tuple[str, ...],
+    typed_fields: tuple[SkillFieldDefinition, ...],
     values: object,
 ) -> bool:
-    return isinstance(values, Mapping) and all(name in values for name in required_names)
+    if not isinstance(values, Mapping):
+        return False
+    if not typed_fields:
+        return all(name in values for name in required_names)
+    for field in typed_fields:
+        if field.name not in values:
+            if field.required:
+                return False
+            continue
+        if not _field_value_matches(field.type_name, values[field.name]):
+            return False
+    return True
+
+
+def _field_value_matches(type_name: str, value: object) -> bool:
+    if type_name == "string":
+        return isinstance(value, str)
+    if type_name == "integer":
+        return type(value) is int
+    if type_name == "number":
+        return type(value) in (int, float)
+    if type_name == "boolean":
+        return type(value) is bool
+    if type_name == "object":
+        return isinstance(value, Mapping)
+    if type_name == "array":
+        return isinstance(value, (list, tuple))
+    return False
 
 
 def _result(

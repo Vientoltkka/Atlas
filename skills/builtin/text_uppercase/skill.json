@@ -5,11 +5,19 @@
   "version": "1.0",
   "description": "Convert dynamic input text to uppercase.",
   "enabled": true,
-  "input_names": [
-    "text"
+  "input_fields": [
+    {
+      "name": "text",
+      "type": "string",
+      "required": true
+    }
   ],
-  "output_names": [
-    "result"
+  "output_fields": [
+    {
+      "name": "result",
+      "type": "string",
+      "required": true
+    }
   ],
   "execution_target": "handler.text-uppercase",
   "execution_target_type": "handler",
