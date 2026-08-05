@@ -174,6 +174,22 @@ class SkillExecutor:
         if request.agent is not None and not _agent_authorized(request.agent, request.skill):
             events.append(SkillExecutionEvent("skill_execution_blocked", "blocked", {"reason": "unauthorized"}))
             return _result(SkillExecutionStatus.SKILL_NOT_AUTHORIZED, signature, request.skill.skill_id, events=events, error_code="SKILL_NOT_AUTHORIZED")
+        if not _contract_satisfied(request.skill.input_names, request.inputs):
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "input_contract"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_INPUT_CONTRACT_VIOLATION",
+                safe_message="skill input contract violation",
+            )
         try:
             output = self._execute_target(request)
         except (RuntimeError, ValueError, TypeError, OSError) as error:
@@ -185,6 +201,22 @@ class SkillExecutor:
                 events=events,
                 error_code=type(error).__name__,
                 safe_message=str(error),
+            )
+        if not _contract_satisfied(request.skill.output_names, output):
+            events.append(
+                SkillExecutionEvent(
+                    "skill_execution_failed",
+                    "failed",
+                    {"skill_id": request.skill.skill_id, "reason": "output_contract"},
+                )
+            )
+            return _result(
+                SkillExecutionStatus.EXECUTION_FAILED,
+                signature,
+                request.skill.skill_id,
+                events=events,
+                error_code="SKILL_OUTPUT_CONTRACT_VIOLATION",
+                safe_message="skill output contract violation",
             )
         events.append(SkillExecutionEvent("skill_execution_succeeded", "finished", {"skill_id": request.skill.skill_id}))
         return _result(SkillExecutionStatus.COMPLETED, signature, request.skill.skill_id, output=_safe_output(output), events=events)
@@ -252,6 +284,13 @@ def _metadata_ids(value: object) -> tuple[str, ...]:
     if not isinstance(value, str):
         return ()
     return tuple(validate_skill_id(part.strip()) for part in value.split(",") if part.strip())
+
+
+def _contract_satisfied(
+    required_names: tuple[str, ...],
+    values: object,
+) -> bool:
+    return isinstance(values, Mapping) and all(name in values for name in required_names)
 
 
 def _result(
