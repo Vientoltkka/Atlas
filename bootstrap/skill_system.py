@@ -18,6 +18,7 @@ from core.skill_registration import (
     SkillRegistrationService,
     SkillRegistrationStatus,
 )
+from core.skill_execution_context import SkillExecutionContext
 from core.skill_registry import SkillRegistry
 from core.skill_resolver import SkillResolver
 from core.skill_system import SkillSystem, build_skill_system
@@ -82,7 +83,13 @@ def register_builtin_skills(skill_system: SkillSystem) -> SkillRegistrationResul
     return result
 
 
-def _text_uppercase_handler(inputs: Mapping[str, object]) -> Mapping[str, object]:
+def _text_uppercase_handler(
+    inputs: Mapping[str, object],
+    *,
+    execution_context: SkillExecutionContext,
+) -> Mapping[str, object]:
+    if execution_context.is_cancelled or execution_context.remaining_seconds is None:
+        raise RuntimeError("text uppercase execution context is unavailable")
     text = inputs.get("text")
     if not isinstance(text, str):
         raise ValueError("text must be a string")

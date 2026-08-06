@@ -169,11 +169,59 @@ def test_automatic_planner_executes_builtin_skill_with_dynamic_input(
     assert skill_result.status is SkillExecutionStatus.COMPLETED
 
 
+def test_real_skills_block_runs_end_to_end_with_productive_handler() -> None:
+    system, registration = _runtime()
+    registered = system.skill_system.skill_registry.get(SKILL_ID)
+    resolution = system.skill_system.skill_resolver.resolve(
+        SkillResolutionRequest(required_skill_ids=(SKILL_ID,))
+    )
+    planning = system.agent_cooperation_automatic_planner.plan(
+        AgentCooperationPlanningRequest(
+            objective_id="objective.skills-e2e",
+            objective_type=AgentCooperationObjectiveType.ANALYSIS,
+            required_agent_ids=(AGENT_ID,),
+            required_skill_ids=(SKILL_ID,),
+            structured_input={"text": "Atlas end to end"},
+            policy=AgentCooperationPlanningPolicy(enabled=True),
+        )
+    )
+
+    assert registration.status is SkillRegistrationStatus.COMPLETED
+    assert registration.registered_skill_ids == (SKILL_ID,)
+    assert registered.execution_target_type is SkillExecutionTargetType.HANDLER
+    assert registered.handler_id == "handler.text-uppercase"
+    assert resolution.status is SkillResolutionStatus.RESOLVED
+    assert resolution.selected_skill is registered
+    assert planning.status is AgentCooperationPlanningStatus.SUCCESS
+    assert planning.plan is not None
+    assert planning.available_skill_ids == (SKILL_ID,)
+    assert planning.plan.tasks[0].required_skill_ids == (SKILL_ID,)
+
+    execution = _execute(system, planning.plan)
+
+    assert execution.status is AgentCooperationPlanStatus.SUCCESS
+    assert execution.outputs[planning.plan.tasks[0].task_id] == {
+        "result": "ATLAS END TO END"
+    }
+    task_result = execution.task_results[0]
+    skill_result = task_result.execution_result
+    assert skill_result is not None
+    assert skill_result.status is SkillExecutionStatus.COMPLETED
+    assert skill_result.output == {"result": "ATLAS END TO END"}
+    assert [event.name for event in skill_result.events] == [
+        "skill_execution_started",
+        "skill_execution_succeeded",
+    ]
+
+
 def test_missing_disabled_and_unregistered_skills_do_not_execute() -> None:
     system, _ = _runtime()
 
     missing = _execute(system, _plan("Atlas", skill_id="skill.missing"))
     registered = system.skill_system.skill_registry.get(SKILL_ID)
+    invalid = system.skill_system.skill_executor.execute(
+        SkillExecutionRequest(registered, inputs={"text": 7}, agent=_agent())
+    )
     system.skill_system.skill_registry.register(
         SkillDefinition(
             skill_id=registered.skill_id,
@@ -207,6 +255,8 @@ def test_missing_disabled_and_unregistered_skills_do_not_execute() -> None:
 
     assert missing.status is AgentCooperationPlanStatus.INVALID_PLAN
     assert missing.error_code == "SKILL_NOT_FOUND"
+    assert invalid.status is SkillExecutionStatus.EXECUTION_FAILED
+    assert invalid.error_code == "SKILL_INPUT_CONTRACT_VIOLATION"
     assert disabled.status is SkillExecutionStatus.SKILL_DISABLED
     assert disabled.output is None
     assert unregistered.status is SkillExecutionStatus.TARGET_UNAVAILABLE
