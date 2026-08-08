@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agents.registry import AgentRegistry
+from bootstrap.bootstrap import Bootstrap
 from core.autonomous_execution import (
     AutonomousExecutionOutcome,
     AutonomousExecutionResult,
@@ -43,6 +44,9 @@ from tools.argument_schema import (
     ArgumentValidator,
 )
 from tools.base_tool import BaseTool
+from tools.calendar.calendar_list_events_tool import (
+    CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
+)
 from tools.executor import ToolExecutor
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
@@ -296,6 +300,59 @@ def test_single_tool_missing_arguments_requires_clarification() -> None:
 
     assert result.status is RouteExecutionStatus.CLARIFICATION_REQUIRED
     assert result.requires_clarification is True
+    assert tool.calls == 0
+
+
+def test_calendar_single_tool_executes_with_normalized_arguments() -> None:
+    registry = ToolRegistry()
+    tool = _CalendarTool()
+    registry.register(tool, arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA)
+    tool_executor = ToolExecutor(registry)
+    schema_registry = Bootstrap.build_argument_schema_registry()
+    runner = SingleToolRunner(
+        Bootstrap.build_tool_selector(registry),
+        ArgumentValidator(schema_registry),
+        tool_executor,
+    )
+    request = _gateway().from_text(
+        "Lista eventos del calendario entre "
+        "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00 "
+        "max_results=3"
+    )
+
+    result = _executor(
+        tool_registry=registry,
+        tool_executor=tool_executor,
+        single_tool_runner=runner,
+    ).execute(
+        request,
+        _decision(RequestRoute.SINGLE_TOOL, target_tool_name=tool.name),
+    )
+
+    assert result.status is RouteExecutionStatus.COMPLETED
+    assert result.output == {
+        "time_min": "2026-08-09T09:00:00+01:00",
+        "time_max": "2026-08-09T10:00:00+01:00",
+        "max_results": 3,
+    }
+    assert tool.calls == 1
+
+
+def test_calendar_single_tool_without_range_requires_clarification() -> None:
+    registry = ToolRegistry()
+    tool = _CalendarTool()
+    registry.register(tool, arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA)
+
+    result = _executor(
+        tool_registry=registry,
+        tool_executor=ToolExecutor(registry),
+    ).execute(
+        _gateway().from_text("Lista eventos del calendario"),
+        _decision(RequestRoute.SINGLE_TOOL, target_tool_name=tool.name),
+    )
+
+    assert result.status is RouteExecutionStatus.CLARIFICATION_REQUIRED
+    assert result.output["missing_information"] == ("time_min", "time_max")
     assert tool.calls == 0
 
 
@@ -903,6 +960,23 @@ class _Tool(BaseTool):
     def execute(self, context):
         self.calls += 1
         return f"tool:{context.parameters['value']}"
+
+
+class _CalendarTool(BaseTool):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "calendar_list_events"
+
+    @property
+    def description(self) -> str:
+        return "List Google Calendar events in a time range."
+
+    def execute(self, context):
+        self.calls += 1
+        return dict(context.parameters)
 
 
 class _Agent:

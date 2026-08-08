@@ -171,6 +171,15 @@ class ExecutionDecisionEngine:
 
 _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "calendar_list_events",
+        "calendar.events.list",
+        (
+            r"\b(?:lista|listar|muestra|consulta|consultar|busca|buscar)\b.*\bcalendario\b",
+            r"\b(?:lista|listar|muestra|consulta|consultar|busca|buscar)\b.*\beventos?\b.*\bcalendar\b",
+            r"\b(?:list|show|search)\b.*\bcalendar\b.*\bevents?\b",
+        ),
+    ),
+    (
         "read_file",
         "file.read",
         (

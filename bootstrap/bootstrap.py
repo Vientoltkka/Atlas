@@ -99,6 +99,10 @@ from tools.calendar.calendar_list_events_tool import (
     CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
     CalendarListEventsTool,
 )
+from tools.calendar.calendar_request_parser import (
+    require_calendar_max_results,
+    require_rfc3339_timestamp,
+)
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
@@ -274,6 +278,7 @@ class Bootstrap:
             ("file.read", "read_file"),
             ("file.write", "write_file"),
             ("directory.list", "list_directory"),
+            ("calendar.events.list", "calendar_list_events"),
             ("project.tree", "project_tree"),
             ("desktop.application.open", "desktop.open_application"),
             ("desktop.file.open", "desktop.open_file"),
@@ -317,6 +322,34 @@ class Bootstrap:
                         str,
                         default=".",
                         description="Directory path.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "calendar.events.list",
+                (
+                    ArgumentField(
+                        "time_min",
+                        str,
+                        required=True,
+                        description="RFC3339 inclusive range start.",
+                        validator=require_rfc3339_timestamp,
+                    ),
+                    ArgumentField(
+                        "time_max",
+                        str,
+                        required=True,
+                        description="RFC3339 exclusive range end.",
+                        validator=require_rfc3339_timestamp,
+                    ),
+                    ArgumentField(
+                        "max_results",
+                        int,
+                        default=5,
+                        description="Maximum number of events.",
+                        validator=require_calendar_max_results,
                     ),
                 ),
             )

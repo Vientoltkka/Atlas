@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agents.registry import AgentRegistry
+from bootstrap.bootstrap import Bootstrap
 from core.operational_request_router import (
     OperationalRequestRouter,
     OperationalRouterConfig,
@@ -83,6 +84,19 @@ def test_single_tool_uses_only_registered_clear_tool() -> None:
     assert decision.route is RequestRoute.SINGLE_TOOL
     assert decision.target_tool_name == "desktop.open_vscode"
     assert tool.calls == 0
+
+
+def test_calendar_list_is_selected_instead_of_list_directory() -> None:
+    decision = _router(tools=Bootstrap.build_tool_registry()).classify(
+        _gateway().from_text(
+            "Lista eventos del calendario entre "
+            "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00"
+        )
+    )
+
+    assert decision.route is RequestRoute.SINGLE_TOOL
+    assert decision.target_tool_name == "calendar_list_events"
+    assert decision.target_tool_name != "list_directory"
 
 
 def test_missing_tool_is_not_single_tool() -> None:

@@ -861,6 +861,8 @@ def _memory_operation(text: str) -> MemoryOperation | None:
 
 
 def _single_tool_action(text: str) -> str | None:
+    if _is_calendar_list_request(text):
+        return "calendar_list"
     if text.startswith(("abre ", "abrir ", "open ")):
         return "open"
     if text.startswith(("lee ", "leer ", "read ")):
@@ -876,6 +878,23 @@ def _single_tool_action(text: str) -> str | None:
     if text in {"que hora es", "dime la hora", "hora actual"}:
         return "time"
     return None
+
+
+def _is_calendar_list_request(text: str) -> bool:
+    calendar_markers = ("calendario", "calendar")
+    action_markers = (
+        "lista ",
+        "listar ",
+        "muestra ",
+        "consulta ",
+        "consultar ",
+        "busca ",
+        "buscar ",
+        "list ",
+        "show ",
+        "search ",
+    )
+    return _contains_any(text, calendar_markers) and _contains_any(text, action_markers)
 
 
 def _ambiguous_missing_object(text: str) -> bool:
@@ -895,12 +914,15 @@ def _tool_matches(
     action: str,
     strict: bool,
 ) -> bool:
+    if action == "calendar_list":
+        return descriptor.name == "calendar_list_events"
     haystack = _normalize_for_matching(f"{descriptor.name} {descriptor.description}")
     action_markers = {
         "open": ("open", "abre", "abrir", "desktop", "application", "aplicacion", "vscode", "notepad"),
         "read": ("read", "lee", "leer", "file", "archivo"),
         "write": ("write", "escribe", "guardar", "file", "archivo"),
         "list": ("list", "listar", "folder", "carpeta"),
+        "calendar_list": ("calendar", "events", "calendario", "eventos"),
         "copy": ("clipboard", "portapapeles", "copy"),
         "status": ("status", "estado", "process", "proceso"),
         "time": ("time", "hora", "date", "fecha"),
@@ -944,6 +966,7 @@ def _tool_match_score(descriptor: ToolDescriptor, text: str, action: str) -> flo
         "read": "read_file",
         "write": "write_file",
         "list": "list_directory",
+        "calendar_list": "calendar_list_events",
     }.get(action)
     if descriptor.name == preferred_tool:
         score += 0.15

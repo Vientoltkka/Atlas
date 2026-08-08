@@ -80,6 +80,41 @@ def test_list_directory_with_path_builds_complete_proposal() -> None:
     assert dict(proposal.arguments) == {"path": "tools"}
 
 
+def test_calendar_request_builds_complete_normalized_proposal() -> None:
+    proposal = _proposal(
+        "Lista eventos del calendario entre "
+        "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00 "
+        "max_results=3"
+    )
+
+    assert proposal.status == ToolProposalStatus.COMPLETE
+    assert proposal.tool_name == "calendar.events.list"
+    assert dict(proposal.arguments) == {
+        "time_min": "2026-08-09T09:00:00+01:00",
+        "time_max": "2026-08-09T10:00:00+01:00",
+        "max_results": 3,
+    }
+
+
+def test_calendar_request_without_range_requires_clarification() -> None:
+    proposal = _proposal("Lista eventos del calendario")
+
+    assert proposal.status == ToolProposalStatus.INCOMPLETE
+    assert proposal.tool_name == "calendar.events.list"
+    assert proposal.missing_arguments == ("time_min", "time_max")
+    assert proposal.executable is False
+
+
+def test_calendar_request_without_rfc3339_timezone_requires_clarification() -> None:
+    proposal = _proposal(
+        "Lista eventos del calendario entre "
+        "2026-08-09T09:00:00 y 2026-08-09T10:00:00"
+    )
+
+    assert proposal.status == ToolProposalStatus.INCOMPLETE
+    assert proposal.missing_arguments == ("time_min", "time_max")
+
+
 def test_write_file_with_path_and_content_builds_complete_proposal() -> None:
     proposal = _proposal("Escribe hola en prueba.txt")
 

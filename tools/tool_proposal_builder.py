@@ -16,6 +16,7 @@ from tools.argument_schema import (
     ArgumentValidator,
     ArgumentSchemaRegistry,
 )
+from tools.calendar.calendar_request_parser import extract_calendar_arguments
 from tools.execution_decision import ExecutionDecision, ExecutionMode
 from tools.intent_selector import ToolIntent, ToolIntentNotSupportedError, ToolSelector
 from tools.registry import ToolNotRegisteredError, ToolRegistry
@@ -259,6 +260,11 @@ class ToolProposalBuilder:
             if _has_ambiguous_directory_target(normalized):
                 return _ExtractionResult({}, ("path",))
             return _ExtractionResult(_filter_fields({"path": _extract_directory_path(source_text, normalized)}, field_names))
+
+        if intent_action == "calendar.events.list":
+            return _ExtractionResult(
+                _filter_fields(extract_calendar_arguments(source_text), field_names)
+            )
 
         if intent_action == "file.write":
             path = _extract_path(source_text, normalized)

@@ -39,6 +39,7 @@ from memory.operational import (
     MemoryEntryNotFoundError,
     SensitiveMemoryRejectedError,
 )
+from tools.calendar.calendar_request_parser import extract_calendar_arguments
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from tools.single_tool_runner import SingleToolRunner, ToolRunResult
@@ -2190,6 +2191,9 @@ def _prepare_tool_arguments(
         candidate = request.metadata.get(key)
         if isinstance(candidate, Mapping):
             arguments.update(candidate)
+    if tool_name == "calendar_list_events":
+        for name, value in extract_calendar_arguments(request.content).items():
+            arguments.setdefault(name, value)
     parameters = tuple(getattr(schema, "parameters", ())) if schema is not None else ()
     known_names = _known_argument_names(tool_name)
     for name in known_names:
