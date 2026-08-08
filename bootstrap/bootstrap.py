@@ -95,6 +95,10 @@ from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
+from tools.calendar.calendar_list_events_tool import (
+    CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
+    CalendarListEventsTool,
+)
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
@@ -214,6 +218,10 @@ class Bootstrap:
                     ToolParameterSchema("path", str, default="."),
                 ),
             ),
+        )
+        tool_registry.register(
+            CalendarListEventsTool(),
+            arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
         )
         tool_registry.register(OpenApplicationTool())
         tool_registry.register(ListProcessesTool())
