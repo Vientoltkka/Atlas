@@ -214,6 +214,27 @@ def test_real_skills_block_runs_end_to_end_with_productive_handler() -> None:
     ]
 
 
+def test_real_text_entry_executes_builtin_skill_with_dynamic_input(
+    monkeypatch,
+    capsys,
+) -> None:
+    orchestrator = Bootstrap.build()
+    inputs = iter(
+        (
+            'Usa la Skill Text Uppercase con el texto "Atlas dinamico 20.2"',
+            "salir",
+        )
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+
+    orchestrator.start()
+
+    visible = capsys.readouterr().out
+    assert "Atlas:" in visible
+    assert "ATLAS DINAMICO 20.2" in visible
+    assert "Hasta pronto." in visible
+
+
 def test_missing_disabled_and_unregistered_skills_do_not_execute() -> None:
     system, _ = _runtime()
 

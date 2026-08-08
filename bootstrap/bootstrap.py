@@ -1210,6 +1210,11 @@ class Bootstrap:
             execution_authorization_gate=execution_authorization_gate,
             execution_dispatcher=execution_dispatcher,
             tool_registry=tool_registry,
+            skill_system=(
+                agent_system.skill_system
+                if agent_system is not None
+                else None
+            ),
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

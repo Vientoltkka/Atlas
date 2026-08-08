@@ -74,6 +74,9 @@ from core.structured_execution import (
     StructuredExecutionCoordinator,
     StructuredExecutionResponse,
 )
+from core.skill_executor import SkillExecutionRequest
+from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
+from core.skill_system import SkillSystem
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
@@ -125,6 +128,7 @@ class AtlasOrchestrator:
         execution_authorization_gate: ExecutionAuthorizationGate | None = None,
         execution_dispatcher: ExecutionDispatcher | None = None,
         tool_registry: ToolRegistry | None = None,
+        skill_system: SkillSystem | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -174,6 +178,7 @@ class AtlasOrchestrator:
         self._execution_authorization_gate = execution_authorization_gate
         self._execution_dispatcher = execution_dispatcher
         self._tool_registry = tool_registry
+        self._skill_system = skill_system
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -270,6 +275,11 @@ class AtlasOrchestrator:
                 continue
 
             request = self._request_gateway.from_text(prompt)
+            skill_response = self._process_skill_request(request)
+            if skill_response is not None:
+                self._print_atlas(skill_response)
+                continue
+
             direct_response = self._process_direct_conversation(
                 request,
                 status_sink=self._print_atlas,
@@ -416,6 +426,10 @@ class AtlasOrchestrator:
             return capability_status
 
         request = self._request_gateway.from_text(prompt)
+        skill_response = self._process_skill_request(request)
+        if skill_response is not None:
+            return skill_response
+
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
             return direct_response
@@ -723,6 +737,39 @@ class AtlasOrchestrator:
         self._memory.add_assistant(response)
 
         return response
+
+    def _process_skill_request(self, request: AtlasRequest) -> str | None:
+        """Resolve and execute an explicitly requested registered Skill."""
+        if self._skill_system is None:
+            return None
+
+        skill_id = _requested_skill_id(request.content, self._skill_system)
+        if skill_id is None:
+            return None
+
+        resolution = self._skill_system.skill_resolver.resolve(
+            SkillResolutionRequest(required_skill_ids=(skill_id,))
+        )
+        if (
+            resolution.status is not SkillResolutionStatus.RESOLVED
+            or resolution.selected_skill is None
+        ):
+            return "No pude resolver la Skill solicitada."
+
+        execution = self._skill_system.skill_executor.execute(
+            SkillExecutionRequest(
+                skill=resolution.selected_skill,
+                inputs=_skill_inputs_from_text(
+                    request.content,
+                    resolution.selected_skill,
+                ),
+                metadata={"source": "text", "request_id": request.request_id},
+            )
+        )
+        if not execution.completed:
+            return execution.safe_message or "No pude ejecutar la Skill solicitada."
+
+        return _present_skill_output(execution.output)
 
     def _handle_structured_execution(
         self,
@@ -1730,6 +1777,45 @@ def _classify_structured_confirmation_intent(
 
     return "ambiguous"
 
+
+def _requested_skill_id(prompt: str, skill_system: SkillSystem) -> str | None:
+    normalized = " ".join(prompt.casefold().split())
+    if "skill" not in normalized:
+        return None
+
+    for skill in skill_system.skill_registry.list_skills(enabled_only=True):
+        identifiers = (skill.skill_id.casefold(), skill.name.casefold())
+        if any(identifier in normalized for identifier in identifiers):
+            return skill.skill_id
+    return None
+
+
+def _skill_inputs_from_text(prompt: str, skill) -> dict[str, object]:
+    input_names = tuple(field.name for field in skill.input_fields) or tuple(
+        skill.input_names
+    )
+    if input_names != ("text",):
+        return {}
+
+    quoted = re.findall(r'''["']([^"']+)["']''', prompt)
+    if quoted:
+        return {"text": quoted[-1]}
+
+    match = re.search(
+        r"(?:con\s+el\s+texto|texto)\s*[:=]?\s*(.+)$",
+        prompt,
+        re.IGNORECASE,
+    )
+    return {"text": match.group(1).strip()} if match else {}
+
+
+def _present_skill_output(output) -> str:
+    values = dict(output or {})
+    if "result" in values:
+        return str(values["result"])
+    if len(values) == 1:
+        return str(next(iter(values.values())))
+    return "\n".join(f"{key}: {value}" for key, value in values.items())
 
 def _is_structured_resume_intent(
     prompt: str,
