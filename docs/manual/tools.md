@@ -10,6 +10,7 @@ Propósito: documentar herramientas registradas, schemas conversacionales, confi
 
 | tool_name | categoria | descripcion | argumentos | confirmacion | ejemplo | resultado | limitaciones |
 |---|---|---|---|---|---|---|---|
+| `calendar_list_events` | calendario | List Google Calendar events in a bounded time range (read-only). | req:time_min,time_max; opt:max_results | NO | `Lista eventos del calendario` | Eventos normalizados | Solo lectura, calendario principal, maximo 20 eventos |
 | `desktop.activate_window` | escritorio | Activate an existing desktop window. | sin schema conversacional registrado | NO | Uso interno estructurado con handle/título validado | Ventana activada | Sin intent conversacional directo |
 | `desktop.bring_window_to_front` | ventanas | Bring a window to the foreground. | sin schema conversacional registrado | NO | Uso interno con handle conocido | Ventana al frente | Requiere handle válido |
 | `desktop.capture_screenshot` | escritorio | Capture the full screen as PNG. | sin schema conversacional registrado | NO | Uso interno con output_dir opcional | Ruta PNG | Crea archivo de captura |

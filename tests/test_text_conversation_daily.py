@@ -24,6 +24,7 @@ def _configure_runtime(monkeypatch, tmp_path: Path):
 def _install_chat_responder(monkeypatch, orchestrator, responder):
     chat_agent = orchestrator._registry.get("chat")
     assert chat_agent is not None
+    monkeypatch.setattr(chat_agent._client, "check_model_health", lambda _model: None)
     monkeypatch.setattr(chat_agent._client, "ask", responder)
 
 
@@ -219,7 +220,7 @@ def test_capability_questions_use_real_registry_without_execution(
         confirm=lambda _prompt: "",
     )
 
-    assert "Herramientas registradas y disponibles: 40" in overview
+    assert "Herramientas registradas y disponibles: 41" in overview
     assert "Voz: opcional" in overview
     assert "no configurada" in voice
     assert "read_file esta disponible" in read
@@ -255,7 +256,7 @@ def test_confirmation_is_consumed_once_and_cancel_does_not_execute(
     repeated = orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
 
     assert "pendiente de confirmacion" in pending
-    assert unrelated.startswith("Herramientas disponibles (40):")
+    assert unrelated.startswith("Herramientas disponibles (41):")
     assert confirmed_target.exists()
     assert confirmed_target.read_text(encoding="utf-8") == original
     assert "No hay una confirmacion pendiente" in repeated
