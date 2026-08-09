@@ -426,6 +426,7 @@ class Planner:
         "file.read": "read_file",
         "file.write": "write_file",
         "directory.list": "list_directory",
+        "calendar.events.list": "calendar_list_events",
         "project.tree": "project_tree",
         "desktop.application.open": "desktop.open_application",
         "desktop.file.open": "desktop.open_file",

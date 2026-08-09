@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from agents.registry import AgentRegistry
+from bootstrap.bootstrap import Bootstrap
 from core.execution_plan_executor import (
     ExecutionControl,
     ExecutionPlanExecutor,
@@ -26,6 +27,7 @@ from tools.argument_schema import (
     ArgumentSchemaRegistry,
     ArgumentValidator,
 )
+from tools.calendar.calendar_list_events_tool import CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA
 from tools.base_tool import BaseTool
 from tools.executor import ToolExecutor
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
@@ -231,6 +233,49 @@ def _orchestrator(
         structured_planning_progress_enabled=structured_planning_progress_enabled,
     )
     return orchestrator, agent, planner_spy
+
+
+def test_process_prompt_calendar_complete_range_uses_structured_runtime() -> None:
+    calls: list[str] = []
+    registry = ToolRegistry()
+    calendar = SpyTool("calendar_list_events", {"events": []}, calls)
+    registry.register(
+        calendar,
+        arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
+    )
+    selector = Bootstrap.build_tool_selector(registry)
+    schema_registry = Bootstrap.build_argument_schema_registry()
+    planner = Planner(
+        tool_registry=registry,
+        tool_selector=selector,
+        schema_registry=schema_registry,
+        argument_validator=ArgumentValidator(schema_registry),
+    )
+    coordinator = StructuredExecutionCoordinator(
+        planner=planner,
+        validator=ExecutionPlanValidator(),
+        executor=ExecutionPlanExecutor(registry, ToolExecutor(registry)),
+    )
+    orchestrator, agent, _ = _orchestrator(
+        structured_execution_enabled=True,
+        structured_plan_execution_enabled=True,
+        coordinator=coordinator,
+    )
+
+    response = orchestrator.process_prompt(
+        "Lista eventos del calendario desde 2026-08-09T00:00:00+01:00 "
+        "hasta 2026-08-10T00:00:00+01:00",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "Ejecucion completada" in response
+    assert calls == ["calendar_list_events"]
+    assert calendar.contexts[0].parameters == {
+        "time_min": "2026-08-09T00:00:00+01:00",
+        "time_max": "2026-08-10T00:00:00+01:00",
+        "max_results": 5,
+    }
+    assert agent.calls == 0
 
 
 def test_feature_flag_disabled_preserves_previous_flow() -> None:
