@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from bootstrap.bootstrap import Bootstrap
+from core.operational_request_router import OperationalRequestRouter
+from core.operational_route_executor import RouteExecutionStatus
 from core.orchestrator import AtlasOrchestrator
+from core.router import Router
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
     ExecutionCoordinationStatus,
@@ -67,8 +71,39 @@ class _WriteFileFake:
         return "ok"
 
 
+class _OperationalExecutorFake:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, request, decision, **_kwargs):
+        self.calls += 1
+        return SimpleNamespace(
+            status=RouteExecutionStatus.COMPLETED,
+            output="respuesta directa operativa",
+            error=None,
+        )
+
+
 def _controller() -> ExecutionConversationController:
     return ExecutionConversationController(Bootstrap.build_execution_coordinator())
+
+
+def _operational_orchestrator(
+    controller: ExecutionConversationController,
+) -> tuple[AtlasOrchestrator, _OperationalExecutorFake, _AgentFake]:
+    executor = _OperationalExecutorFake()
+    agent = _AgentFake()
+    orchestrator = AtlasOrchestrator(
+        planner=_PlannerFake(),
+        router=Router(OperationalRequestRouter()),
+        model_manager=_ModelManagerFake(),
+        memory=_MemoryFake(),
+        registry=_RegistryFake(agent),
+        write_file=_WriteFileFake(),
+        execution_conversation=controller,
+        operational_route_executor=executor,
+    )
+    return orchestrator, executor, agent
 
 
 def test_direct_response_keeps_conversational_fallback() -> None:
@@ -903,4 +938,73 @@ def test_process_prompt_calendar_multiturn_end_to_end() -> None:
     )
     assert "{events" not in second
     assert tool.calls == 1
+    assert agent.calls == 0
+
+
+def test_process_prompt_pending_calendar_clarification_bypasses_direct_response() -> None:
+    controller, tool = _calendar_controller([])
+    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+
+    first = orchestrator.process_prompt(
+        "Lista eventos del calendario",
+        confirm=lambda _prompt: "",
+    )
+    second = orchestrator.process_prompt(
+        "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "Que rango quieres consultar?" in first
+    assert second == "No hay eventos en el rango solicitado."
+    assert tool.calls == 1
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_process_voice_prompt_pending_calendar_clarification_bypasses_direct_response() -> None:
+    controller, tool = _calendar_controller([])
+    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+
+    first = orchestrator.process_voice_prompt(
+        "Lista eventos del calendario",
+        confirm=lambda _prompt: "",
+    )
+    second = orchestrator.process_voice_prompt(
+        "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "Que rango quieres consultar?" in first
+    assert second == "No hay eventos en el rango solicitado."
+    assert tool.calls == 1
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_pending_confirmation_bypasses_direct_response(tmp_path: Path) -> None:
+    controller = _controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+    target = tmp_path / "notas.txt"
+
+    pending = orchestrator.process_prompt(
+        f"Escribe hola en {target}",
+        confirm=lambda _prompt: "",
+    )
+    confirmed = orchestrator.process_prompt("si", confirm=lambda _prompt: "")
+
+    assert "confirm" in pending.lower()
+    assert str(target) in confirmed
+    assert "Contenido escrito: hola" in confirmed
+    assert target.read_text(encoding="utf-8") == "hola"
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_direct_response_still_executes_without_pending_interaction() -> None:
+    orchestrator, direct_executor, agent = _operational_orchestrator(_controller())
+
+    response = orchestrator.process_prompt("Hola Atlas", confirm=lambda _prompt: "")
+
+    assert response == "respuesta directa operativa"
+    assert direct_executor.calls == 1
     assert agent.calls == 0

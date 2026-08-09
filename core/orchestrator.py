@@ -1274,6 +1274,11 @@ class AtlasOrchestrator:
             and self._structured_execution_coordinator.has_pending_execution()
         ):
             return None
+        if self._execution_conversation is not None and (
+            self._execution_conversation.pending_clarification is not None
+            or self._execution_conversation.pending_confirmation_id is not None
+        ):
+            return None
 
         decision = self._structured_route_decision(request)
         if decision is None:
