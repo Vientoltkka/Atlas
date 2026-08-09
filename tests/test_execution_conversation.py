@@ -772,3 +772,135 @@ def test_empty_input_keeps_pending_confirmation(tmp_path: Path) -> None:
     assert empty.result.status == ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
     assert controller.pending_confirmation_id == pending.result.confirmation_id
     assert target.exists() is False
+
+
+class _CalendarListEventsFake:
+    def __init__(self, events: list[dict[str, str]]) -> None:
+        self.calls = 0
+        self.arguments: list[dict[str, object]] = []
+        self._events = events
+
+    @property
+    def name(self) -> str:
+        return "calendar_list_events"
+
+    @property
+    def description(self) -> str:
+        return "List Google Calendar events in a time range."
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return False
+
+    def execute(self, context):
+        self.calls += 1
+        self.arguments.append(dict(context.parameters))
+        return {"events": self._events}
+
+
+def _calendar_controller(
+    events: list[dict[str, str]],
+) -> tuple[ExecutionConversationController, _CalendarListEventsFake]:
+    from tools.calendar.calendar_list_events_tool import (
+        CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
+    )
+    from tools.registry import ToolRegistry
+
+    tool = _CalendarListEventsFake(events)
+    registry = ToolRegistry()
+    registry.register(
+        tool,
+        arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
+    )
+    coordinator = Bootstrap.build_execution_coordinator(tool_registry=registry)
+    return ExecutionConversationController(coordinator), tool
+
+
+def test_calendar_missing_range_asks_for_explicit_clarification() -> None:
+    controller, tool = _calendar_controller([])
+
+    outcome = controller.handle("Lista eventos del calendario")
+
+    assert outcome.result.status == ExecutionCoordinationStatus.INFORMATION_REQUIRED
+    assert outcome.text == (
+        "Que rango quieres consultar? Indica time_min y time_max "
+        "en formato RFC3339 con zona horaria."
+    )
+    assert controller.pending_clarification is not None
+    assert controller.pending_clarification.requested_fields == ("time_min", "time_max")
+    assert tool.calls == 0
+
+
+def test_calendar_clarification_completes_range_and_executes_once() -> None:
+    controller, tool = _calendar_controller([])
+    controller.handle("Lista eventos del calendario")
+
+    outcome = controller.handle(
+        "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00"
+    )
+
+    assert outcome.result.status == ExecutionCoordinationStatus.EXECUTED
+    assert outcome.result.execution_result is not None
+    assert outcome.result.execution_result.execution_count == 1
+    assert tool.calls == 1
+    assert tool.arguments == [
+        {
+            "time_min": "2026-08-09T09:00:00+01:00",
+            "time_max": "2026-08-09T10:00:00+01:00",
+            "max_results": 5,
+        }
+    ]
+    assert outcome.text == "No hay eventos en el rango solicitado."
+
+
+def test_calendar_invalid_range_keeps_clarification_without_execution() -> None:
+    controller, tool = _calendar_controller([])
+    controller.handle("Lista eventos del calendario")
+
+    outcome = controller.handle(
+        "2026-08-09T10:00:00+01:00 y 2026-08-09T09:00:00+01:00"
+    )
+
+    assert outcome.result.status == ExecutionCoordinationStatus.INFORMATION_REQUIRED
+    assert controller.pending_clarification is not None
+    assert tool.calls == 0
+
+
+def test_process_prompt_calendar_multiturn_end_to_end() -> None:
+    events = [
+        {
+            "id": "evt_1",
+            "summary": "Review",
+            "start": "2026-08-09T12:00:00+01:00",
+            "end": "2026-08-09T12:30:00+01:00",
+        }
+    ]
+    controller, tool = _calendar_controller(events)
+    agent = _AgentFake()
+    orchestrator = AtlasOrchestrator(
+        planner=_PlannerFake(),
+        router=_RouterFake(),
+        model_manager=_ModelManagerFake(),
+        memory=_MemoryFake(),
+        registry=_RegistryFake(agent),
+        write_file=_WriteFileFake(),
+        execution_conversation=controller,
+    )
+
+    first = orchestrator.process_prompt(
+        "Lista eventos del calendario",
+        confirm=lambda _prompt: "",
+    )
+    second = orchestrator.process_prompt(
+        "2026-08-09T12:00:00+01:00 y 2026-08-09T13:00:00+01:00",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "Que rango quieres consultar?" in first
+    assert second == (
+        "Eventos encontrados:\n"
+        "- Review: 2026-08-09T12:00:00+01:00 - 2026-08-09T12:30:00+01:00"
+    )
+    assert "{events" not in second
+    assert tool.calls == 1
+    assert agent.calls == 0

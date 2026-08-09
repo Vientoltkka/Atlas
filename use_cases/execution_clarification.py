@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from tools.calendar.calendar_list_events_tool import validate_calendar_request
+from tools.calendar.calendar_request_parser import extract_calendar_arguments
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
     ExecutionCoordinationStatus,
@@ -92,6 +94,33 @@ class ClarificationResolver:
             if path is None:
                 return None
             return f"Lee el archivo {path}"
+
+        if tool_name == "calendar.events.list":
+            supplied = extract_calendar_arguments(response)
+            for field in requested:
+                if field in {"time_min", "time_max"}:
+                    value = supplied.get(field)
+                    if value is None:
+                        return None
+                    arguments[field] = value
+
+            if "max_results" in supplied:
+                arguments["max_results"] = supplied["max_results"]
+
+            try:
+                time_min, time_max, max_results = validate_calendar_request(
+                    arguments.get("time_min"),
+                    arguments.get("time_max"),
+                    arguments.get("max_results", 5),
+                )
+            except ValueError:
+                return None
+
+            return (
+                "Lista eventos del calendario con "
+                f"time_min={time_min} time_max={time_max} "
+                f"max_results={max_results}"
+            )
 
         if tool_name == "directory.list":
             path = extract_directory_answer(response)
@@ -196,6 +225,17 @@ class ClarificationQuestionPresenter:
 
         if tool_name == "directory.list" and "path" in field_set:
             return "Que carpeta quieres listar?"
+
+        if tool_name == "calendar.events.list":
+            if {"time_min", "time_max"}.issubset(field_set):
+                return (
+                    "Que rango quieres consultar? Indica time_min y time_max "
+                    "en formato RFC3339 con zona horaria."
+                )
+            if "time_min" in field_set:
+                return "Cual es el inicio del rango en formato RFC3339 con zona horaria?"
+            if "time_max" in field_set:
+                return "Cual es el final del rango en formato RFC3339 con zona horaria?"
 
         if tool_name == "file.write":
             if {"path", "content"}.issubset(field_set):

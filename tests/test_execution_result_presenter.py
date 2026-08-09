@@ -395,3 +395,46 @@ def test_failed_validation_and_unsupported_are_plain_text() -> None:
 
     assert "path: required argument is missing" in validation
     assert unsupported == "Atlas todavia no dispone de la capacidad necesaria para esa accion."
+
+
+def test_calendar_events_present_readable_text_without_internal_structure() -> None:
+    tool = _tool_result(
+        "calendar_list_events",
+        {
+            "events": [
+                {
+                    "id": "evt_1",
+                    "summary": "Planning",
+                    "start": "2026-08-09T10:00:00+01:00",
+                    "end": "2026-08-09T10:30:00+01:00",
+                }
+            ]
+        },
+        action="calendar.events.list",
+    )
+
+    text = ExecutionResultPresenter().present(
+        _coordination(ExecutionCoordinationStatus.EXECUTED, tool)
+    )
+
+    assert text == (
+        "Eventos encontrados:\n"
+        "- Planning: 2026-08-09T10:00:00+01:00 - 2026-08-09T10:30:00+01:00"
+    )
+    assert "evt_1" not in text
+    assert "{events" not in text
+
+
+def test_calendar_events_present_empty_result_clearly() -> None:
+    tool = _tool_result(
+        "calendar_list_events",
+        {"events": []},
+        action="calendar.events.list",
+    )
+
+    text = ExecutionResultPresenter().present(
+        _coordination(ExecutionCoordinationStatus.EXECUTED, tool)
+    )
+
+    assert text == "No hay eventos en el rango solicitado."
+    assert "{events" not in text

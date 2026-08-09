@@ -212,6 +212,9 @@ class ExecutionResultPresenter:
         if result.tool_name == "project_tree":
             return self._present_project_tree(result)
 
+        if result.tool_name == "calendar_list_events":
+            return self._present_calendar_events(result)
+
         if result.tool_name == "desktop.open_application":
             return self._present_open_application(result)
 
@@ -307,6 +310,40 @@ class ExecutionResultPresenter:
             text=f"Arbol del proyecto en {path}:\n{body}",
             summary=f"project tree {path}",
             details=(str(path),),
+        )
+
+    def _present_calendar_events(
+        self,
+        result: ToolRunResult,
+    ) -> PresentationResult:
+        payload = result.result if isinstance(result.result, Mapping) else {}
+        events = _as_sequence(payload.get("events"))
+
+        if not events:
+            return PresentationResult(
+                text="No hay eventos en el rango solicitado.",
+                summary="calendar empty",
+            )
+
+        lines = []
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            summary = str(event.get("summary") or "Sin titulo")
+            start = str(event.get("start") or "hora no indicada")
+            end = str(event.get("end") or "hora no indicada")
+            lines.append(f"- {summary}: {start} - {end}")
+
+        if not lines:
+            return PresentationResult(
+                text="No hay eventos en el rango solicitado.",
+                summary="calendar empty",
+            )
+
+        return PresentationResult(
+            text="Eventos encontrados:\n" + "\n".join(lines),
+            summary="calendar events",
+            details=(f"{len(lines)} eventos",),
         )
 
     def _present_open_application(
