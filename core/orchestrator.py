@@ -278,10 +278,15 @@ class AtlasOrchestrator:
                 self._print_atlas(capability_status)
                 continue
 
-            request = self._request_gateway.from_text(prompt)
+            request = self._request_gateway.from_text(prompt, user_id="local-user")
             skill_response = self._process_skill_request(request)
             if skill_response is not None:
                 self._print_atlas(skill_response)
+                continue
+
+            memory_response = self._process_memory_request(request)
+            if memory_response is not None:
+                self._print_atlas(memory_response)
                 continue
 
             direct_response = self._process_direct_conversation(

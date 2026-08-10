@@ -208,6 +208,50 @@ def test_text_loop_rejects_empty_input_without_closing(
     assert "Traceback" not in output
 
 
+def test_text_loop_routes_memory_through_productive_flow_and_rebuild(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ATLAS_PERSONAL_MEMORY_PATH",
+        str(tmp_path / "personal_memory.json"),
+    )
+    first = Bootstrap.build()
+    first_inputs = iter(
+        (
+            "recuerda que perfil principal profile.main: Smoke Principal",
+            "recuerda que profile.main.training.schedule_preference: "
+            "prefiero entrenar por la manana",
+            "que recuerdas de profile.main.training.schedule_preference",
+            "salir",
+        )
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(first_inputs))
+
+    first.start()
+
+    first_output = capsys.readouterr().out
+    assert "prefiero entrenar por la manana" in first_output
+    assert "capacidad necesaria" not in first_output
+
+    second = Bootstrap.build()
+    second_inputs = iter(
+        (
+            "que recuerdas de profile.main.training.schedule_preference",
+            "salir",
+        )
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(second_inputs))
+
+    second.start()
+
+    second_output = capsys.readouterr().out
+    assert "prefiero entrenar por la manana" in second_output
+    assert "capacidad necesaria" not in second_output
+
+
 def test_text_loop_treats_eof_as_clean_close(
     monkeypatch,
     tmp_path: Path,
