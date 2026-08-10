@@ -69,6 +69,7 @@ from core.structured_plan_replanner import ExecutionReplanner, ReplanPolicy
 
 from memory.conversation import ConversationMemory
 from memory.operational import MemoryPolicy
+from memory.repository import FileMemoryEntryRepository
 
 from models.prompt_client import PromptClient
 
@@ -837,7 +838,10 @@ class Bootstrap:
         )
         router = Router()
         memory_policy = MemoryPolicy()
-        memory = ConversationMemory(policy=memory_policy)
+        memory = ConversationMemory(
+            policy=memory_policy,
+            repository=FileMemoryEntryRepository(_personal_memory_path()),
+        )
 
         # -----------------------
         # Tools
@@ -1359,6 +1363,14 @@ def _execution_state_path() -> Path:
         return Path(configured).expanduser()
 
     return Path(".atlas") / "execution_state.json"
+
+
+def _personal_memory_path() -> Path:
+    configured = _read_text("ATLAS_PERSONAL_MEMORY_PATH")
+    if configured is not None:
+        return Path(configured).expanduser()
+
+    return Path(".atlas") / "personal_memory.json"
 
 
 def _execution_history_path() -> Path:

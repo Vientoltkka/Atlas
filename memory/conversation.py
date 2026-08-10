@@ -19,6 +19,7 @@ from memory.operational import (
     contains_secret_material,
     normalize_content,
 )
+from memory.repository import MemoryEntryRepository
 
 
 class ConversationMemory:
@@ -29,13 +30,33 @@ class ConversationMemory:
         *,
         policy: MemoryPolicy | None = None,
         clock: Callable[[], datetime] | None = None,
+        repository: MemoryEntryRepository | None = None,
     ) -> None:
         self._messages: list[dict[str, str]] = []
         self._entries: dict[str, MemoryEntry] = {}
         self._events: list[MemoryEvent] = []
         self._policy = policy or MemoryPolicy()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._counter = 0
+        self._repository = repository
+        persisted_entries = () if repository is None else repository.load()
+        persisted_sequence = (
+            0
+            if repository is None
+            else repository.last_memory_sequence
+        )
+        self._entries.update(
+            (entry.memory_id, entry) for entry in persisted_entries
+        )
+        self._counter = max(
+            persisted_sequence,
+            max(
+                (
+                    int(entry.memory_id.removeprefix("memory-"))
+                    for entry in persisted_entries
+                ),
+                default=0,
+            ),
+        )
         self._lock = RLock()
 
     @property
@@ -151,6 +172,12 @@ class ConversationMemory:
             memory_id = f"memory-{self._counter:06d}"
             entry = replace(probe, memory_id=memory_id)
             self._entries[memory_id] = entry
+            try:
+                self._persist_locked()
+            except Exception:
+                del self._entries[memory_id]
+                self._counter -= 1
+                raise
             self._record(
                 "memory_entry_stored",
                 request_id=source_request_id,
@@ -293,6 +320,11 @@ class ConversationMemory:
                 return current
             updated = replace(current, active=False, updated_at=self._clock())
             self._entries[memory_id] = updated
+            try:
+                self._persist_locked()
+            except Exception:
+                self._entries[memory_id] = current
+                raise
             self._record(
                 "memory_entry_forgotten",
                 request_id=source_request_id,
@@ -341,6 +373,11 @@ class ConversationMemory:
             if self._policy.deduplicate and duplicate is not None:
                 raise InvalidMemoryEntryError("Update would duplicate an existing memory entry.")
             self._entries[memory_id] = updated
+            try:
+                self._persist_locked()
+            except Exception:
+                self._entries[memory_id] = current
+                raise
             self._record(
                 "memory_entry_updated",
                 request_id=source_request_id,
@@ -351,6 +388,21 @@ class ConversationMemory:
                 reason_code="updated",
             )
             return updated
+
+    def _persist_locked(self) -> None:
+        if self._repository is None:
+            return
+        self._repository.save(
+            tuple(
+                entry
+                for entry in self._entries.values()
+                if entry.active
+                and entry.category is MemoryCategory.USER_PREFERENCE
+                and not entry.sensitive
+                and entry.source_request_id is not None
+            ),
+            last_memory_sequence=self._counter,
+        )
 
     def _find_duplicate(
         self,
