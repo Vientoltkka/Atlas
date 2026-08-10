@@ -313,7 +313,7 @@ def test_natural_structured_preferences_use_exact_locator_across_rebuild(
     )
     assert recovered_travel.output["items"] == ()
     payload = json.loads(memory_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert {
         (entry["domain"], entry["key"])
         for entry in payload["entries"]
@@ -321,3 +321,117 @@ def test_natural_structured_preferences_use_exact_locator_across_rebuild(
         ("nutrition", "food_preference"),
         ("training", "schedule_preference"),
     }
+
+
+def test_natural_profile_lifecycle_is_selective_and_survives_rebuild(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_runtime(monkeypatch, tmp_path)
+    first = Bootstrap.build()
+
+    stored_primary = _execute_scoped(
+        first,
+        "recuerda que perfil principal profile.main: Victor",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    stored_client = _execute_scoped(
+        first,
+        "recuerda que profile.client-a: Ana",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    stored_primary_preference = _execute_scoped(
+        first,
+        "recuerda que profile.main.training.schedule_preference: "
+        "prefiero entrenar por la manana",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    stored_client_preference = _execute_scoped(
+        first,
+        "recuerda que profile.client-a.training.schedule_preference: "
+        "prefiero entrenar por la tarde",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    queried_primary = _execute_scoped(
+        first,
+        "que recuerdas de profile.main",
+        user_id="user-a",
+    )
+    queried_client_preference = _execute_scoped(
+        first,
+        "que recuerdas de profile.client-a.training.schedule_preference",
+        user_id="user-a",
+    )
+    updated_client = _execute_scoped(
+        first,
+        "actualiza el recuerdo profile.client-a a Ana Maria",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    updated_client_preference = _execute_scoped(
+        first,
+        "actualiza mi preferencia profile.client-a.training.schedule_preference "
+        "a entrenar al mediodia",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    forgotten_primary_preference = _execute_scoped(
+        first,
+        "olvida profile.main.training.schedule_preference",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+
+    assert stored_primary.status is RouteExecutionStatus.COMPLETED
+    assert stored_primary.output["entry"]["profile_is_primary"] is True
+    assert stored_client.status is RouteExecutionStatus.COMPLETED
+    assert stored_primary_preference.status is RouteExecutionStatus.COMPLETED
+    assert stored_client_preference.status is RouteExecutionStatus.COMPLETED
+    assert queried_primary.output["count"] == 1
+    assert queried_primary.output["items"][0]["profile_name"] == "Victor"
+    assert queried_client_preference.output["count"] == 1
+    assert queried_client_preference.output["items"][0]["profile_id"] == "client-a"
+    assert updated_client.status is RouteExecutionStatus.COMPLETED
+    assert updated_client.output["entry"]["profile_name"] == "Ana Maria"
+    assert updated_client_preference.status is RouteExecutionStatus.COMPLETED
+    assert updated_client_preference.output["entry"]["content"] == (
+        "prefiero entrenar al mediodia"
+    )
+    assert forgotten_primary_preference.status is RouteExecutionStatus.COMPLETED
+
+    second = Bootstrap.build()
+    recovered_primary = _execute_scoped(
+        second,
+        "que recuerdas de profile.main",
+        user_id="user-a",
+    )
+    recovered_client = _execute_scoped(
+        second,
+        "que recuerdas de profile.client-a",
+        user_id="user-a",
+    )
+    recovered_primary_preference = _execute_scoped(
+        second,
+        "que recuerdas de profile.main.training.schedule_preference",
+        user_id="user-a",
+    )
+    recovered_client_preference = _execute_scoped(
+        second,
+        "que recuerdas de profile.client-a.training.schedule_preference",
+        user_id="user-a",
+    )
+
+    assert tuple(item["profile_name"] for item in recovered_primary.output["items"]) == (
+        "Victor",
+    )
+    assert tuple(item["profile_name"] for item in recovered_client.output["items"]) == (
+        "Ana Maria",
+    )
+    assert recovered_primary_preference.output["items"] == ()
+    assert tuple(
+        item["content"] for item in recovered_client_preference.output["items"]
+    ) == ("prefiero entrenar al mediodia",)

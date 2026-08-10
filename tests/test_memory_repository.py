@@ -41,6 +41,7 @@ def _store_preference(
     user_id: str = "user-a",
     domain: str | None = None,
     key: str | None = None,
+    profile_id: str | None = None,
 ):
     return memory.store_entry(
         content,
@@ -49,6 +50,29 @@ def _store_preference(
         user_id=user_id,
         domain=domain,
         key=key,
+        profile_id=profile_id,
+    )
+
+
+def _store_profile(
+    memory: ConversationMemory,
+    profile_id: str,
+    name: str,
+    *,
+    request_id: str,
+    user_id: str = "user-a",
+    role: str | None = None,
+    primary: bool = False,
+):
+    return memory.store_entry(
+        name,
+        category=MemoryCategory.USER_PROFILE,
+        source_request_id=request_id,
+        user_id=user_id,
+        profile_id=profile_id,
+        profile_name=name,
+        profile_role=role,
+        profile_is_primary=primary,
     )
 
 
@@ -79,7 +103,7 @@ def test_store_then_reconstruct_recovers_explicit_preference(tmp_path: Path) -> 
 
     assert recovered == (stored,)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["last_memory_sequence"] == 1
     assert payload["entries"][0]["category"] == "user_preference"
 
@@ -278,8 +302,15 @@ def test_repository_loads_v1_json_without_structured_fields(tmp_path: Path) -> N
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["schema_version"] = 1
     for entry in payload["entries"]:
-        entry.pop("domain")
-        entry.pop("key")
+        for key in (
+            "domain",
+            "key",
+            "profile_id",
+            "profile_name",
+            "profile_role",
+            "profile_is_primary",
+        ):
+            entry.pop(key)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     restarted = _memory(path)
@@ -289,6 +320,141 @@ def test_repository_loads_v1_json_without_structured_fields(tmp_path: Path) -> N
     assert restarted.get_entry(stored.memory_id).key is None
 
 
+
+
+def test_repository_loads_v2_structured_preference_without_profile_id(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "personal_memory.json"
+    first = _memory(path)
+    stored = _store_preference(
+        first,
+        "prefiero entrenar por la tarde",
+        request_id="request-1",
+        domain="training",
+        key="schedule_preference",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    for entry in payload["entries"]:
+        for key in (
+            "profile_id",
+            "profile_name",
+            "profile_role",
+            "profile_is_primary",
+        ):
+            entry.pop(key)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restarted = _memory(path)
+
+    assert restarted.get_entry(stored.memory_id) == stored
+    assert restarted.get_entry(stored.memory_id).profile_id is None
+
+
+def test_profiles_are_isolated_selective_and_persistent(tmp_path: Path) -> None:
+    path = tmp_path / "personal_memory.json"
+    first = _memory(path)
+    primary = _store_profile(
+        first,
+        "main",
+        "Victor",
+        request_id="request-1",
+        primary=True,
+    )
+    client = _store_profile(
+        first,
+        "client-a",
+        "Ana",
+        request_id="request-2",
+        role="client",
+    )
+    primary_preference = _store_preference(
+        first,
+        "prefiero entrenar por la manana",
+        request_id="request-3",
+        profile_id="main",
+        domain="training",
+        key="schedule_preference",
+    )
+    client_preference = _store_preference(
+        first,
+        "prefiero entrenar por la tarde",
+        request_id="request-4",
+        profile_id="client-a",
+        domain="training",
+        key="schedule_preference",
+    )
+
+    assert first.retrieve_entries(
+        user_id="user-a",
+        profile_id="main",
+        domain="training",
+        key="schedule_preference",
+    ) == (primary_preference,)
+    assert first.retrieve_entries(
+        user_id="user-a",
+        profile_id="client-a",
+        domain="training",
+        key="schedule_preference",
+    ) == (client_preference,)
+
+    updated_client = first.update_entry(
+        client.memory_id,
+        content="Ana Maria",
+        source_request_id="request-5",
+    )
+    updated_client_preference = first.update_entry(
+        client_preference.memory_id,
+        content="prefiero entrenar al mediodia",
+        source_request_id="request-6",
+    )
+    first.forget_entry(
+        primary_preference.memory_id,
+        source_request_id="request-7",
+    )
+
+    restarted = _memory(path)
+    recovered_primary = restarted.retrieve_entries(
+        user_id="user-a",
+        profile_id="main",
+        categories=(MemoryCategory.USER_PROFILE,),
+    )
+    recovered_client = restarted.retrieve_entries(
+        user_id="user-a",
+        profile_id="client-a",
+        categories=(MemoryCategory.USER_PROFILE,),
+    )
+    recovered_primary_preference = restarted.retrieve_entries(
+        user_id="user-a",
+        profile_id="main",
+        domain="training",
+        key="schedule_preference",
+    )
+    recovered_client_preference = restarted.retrieve_entries(
+        user_id="user-a",
+        profile_id="client-a",
+        domain="training",
+        key="schedule_preference",
+    )
+
+    assert recovered_primary == (primary,)
+    assert recovered_primary[0].profile_is_primary is True
+    assert recovered_client == (updated_client,)
+    assert recovered_client[0].profile_name == "Ana Maria"
+    assert recovered_client[0].profile_role == "client"
+    assert recovered_primary_preference == ()
+    assert recovered_client_preference == (updated_client_preference,)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 3
+    assert {
+        (entry["profile_id"], entry["category"])
+        for entry in payload["entries"]
+    } == {
+        ("main", "user_profile"),
+        ("client-a", "user_profile"),
+        ("client-a", "user_preference"),
+    }
 def test_structured_persistence_rejects_unauthorized_sensitive_and_metrics(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +486,35 @@ def test_structured_persistence_rejects_unauthorized_sensitive_and_metrics(
             user_id="user-a",
             domain="nutrition",
             key="calorie_target",
+        )
+    with pytest.raises(SensitiveMemoryRejectedError):
+        memory.store_entry(
+            "Ana",
+            category=MemoryCategory.USER_PROFILE,
+            source_request_id="request-4",
+            user_id="user-a",
+            profile_id="client-a",
+            profile_name="Ana",
+            sensitive=True,
+        )
+    with pytest.raises(SensitiveMemoryRejectedError):
+        memory.store_entry(
+            "peso 80 kg",
+            category=MemoryCategory.USER_PROFILE,
+            source_request_id="request-5",
+            user_id="user-a",
+            profile_id="client-a",
+            profile_name="peso 80 kg",
+        )
+    with pytest.raises(SensitiveMemoryRejectedError):
+        memory.store_entry(
+            "prefiero comida italiana",
+            category=MemoryCategory.USER_PREFERENCE,
+            source_request_id="request-6",
+            user_id="user-a",
+            profile_id="client-a",
+            domain="nutrition",
+            key="food_preference",
         )
 
     assert json.loads(path.read_text(encoding="utf-8"))["entries"] == []

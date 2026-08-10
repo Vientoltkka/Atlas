@@ -64,6 +64,7 @@ _RESTRICTED_PREFERENCE_CONTENT = re.compile(
 
 class MemoryCategory(str, Enum):
     USER_PREFERENCE = "user_preference"
+    USER_PROFILE = "user_profile"
     USER_FACT = "user_fact"
     PROJECT_FACT = "project_fact"
     DECISION = "decision"
@@ -157,6 +158,10 @@ class MemoryEntry:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     domain: str | None = None
     key: str | None = None
+    profile_id: str | None = None
+    profile_name: str | None = None
+    profile_role: str | None = None
+    profile_is_primary: bool = False
 
     def __post_init__(self) -> None:
         _validate_id(self.memory_id, "memory_id")
@@ -171,6 +176,17 @@ class MemoryEntry:
             else MemoryCategory(self.category)
         )
         domain, key = normalize_preference_locator(self.domain, self.key)
+        profile_id = normalize_profile_id(self.profile_id)
+        profile_name = normalize_profile_text(
+            self.profile_name,
+            "profile_name",
+            128,
+        )
+        profile_role = normalize_profile_text(
+            self.profile_role,
+            "profile_role",
+            64,
+        )
         if (domain is not None or key is not None) and (
             category is not MemoryCategory.USER_PREFERENCE
         ):
@@ -180,6 +196,32 @@ class MemoryEntry:
         if domain is not None and self.user_id is None:
             raise InvalidMemoryEntryError(
                 "Structured user preferences require a user_id."
+            )
+        if type(self.profile_is_primary) is not bool:
+            raise InvalidMemoryEntryError("profile_is_primary must be a bool.")
+        if category is MemoryCategory.USER_PROFILE:
+            if profile_id is None or profile_name is None or self.user_id is None:
+                raise InvalidMemoryEntryError(
+                    "User profiles require profile_id, profile_name, and user_id."
+                )
+            if domain is not None or key is not None:
+                raise InvalidMemoryEntryError(
+                    "User profiles cannot define preference domain or key."
+                )
+        elif (
+            profile_name is not None
+            or profile_role is not None
+            or self.profile_is_primary
+        ):
+            raise InvalidMemoryEntryError(
+                "Profile attributes are only valid for user profiles."
+            )
+        if profile_id is not None and category not in {
+            MemoryCategory.USER_PROFILE,
+            MemoryCategory.USER_PREFERENCE,
+        }:
+            raise InvalidMemoryEntryError(
+                "profile_id is only valid for profiles and user preferences."
             )
         _require_aware(self.created_at, "created_at")
         _require_aware(self.updated_at, "updated_at")
@@ -210,6 +252,9 @@ class MemoryEntry:
         object.__setattr__(self, "category", category)
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "key", key)
+        object.__setattr__(self, "profile_id", profile_id)
+        object.__setattr__(self, "profile_name", profile_name)
+        object.__setattr__(self, "profile_role", profile_role)
         object.__setattr__(self, "importance", float(self.importance))
         object.__setattr__(self, "tags", tags)
         object.__setattr__(self, "metadata", freeze_safe_mapping(self.metadata))
@@ -277,6 +322,30 @@ def normalize_preference_locator(
     ):
         raise InvalidMemoryEntryError("Preference domain or key is invalid.")
     return normalized_domain, normalized_key
+
+
+def normalize_profile_id(profile_id: str | None) -> str | None:
+    if profile_id is None:
+        return None
+    normalized = profile_id.strip().casefold() if isinstance(profile_id, str) else ""
+    if not normalized or _ID_PATTERN.fullmatch(normalized) is None:
+        raise InvalidMemoryEntryError("profile_id is invalid.")
+    return normalized
+
+
+def normalize_profile_text(
+    value: str | None,
+    name: str,
+    max_length: int,
+) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split()) if isinstance(value, str) else ""
+    if not normalized or len(normalized) > max_length:
+        raise InvalidMemoryEntryError(f"{name} is invalid.")
+    if contains_secret_material(normalized):
+        raise InvalidMemoryEntryError(f"{name} contains a credential marker.")
+    return normalized
 
 
 def normalize_content(content: str) -> str:

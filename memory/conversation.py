@@ -20,6 +20,7 @@ from memory.operational import (
     contains_restricted_profile_data,
     normalize_content,
     normalize_preference_locator,
+    normalize_profile_id,
 )
 from memory.repository import MemoryEntryRepository
 
@@ -102,6 +103,10 @@ class ConversationMemory:
         conversation_id: str | None = None,
         domain: str | None = None,
         key: str | None = None,
+        profile_id: str | None = None,
+        profile_name: str | None = None,
+        profile_role: str | None = None,
+        profile_is_primary: bool = False,
         importance: float = 0.5,
         tags: Sequence[str] = (),
         sensitive: bool = False,
@@ -147,11 +152,18 @@ class ConversationMemory:
             key,
         )
         if (
-            normalized_category is MemoryCategory.USER_PREFERENCE
-            and contains_restricted_profile_data(
-                content,
-                domain=normalized_domain,
-                key=normalized_key,
+            normalized_category
+            in {
+                MemoryCategory.USER_PREFERENCE,
+                MemoryCategory.USER_PROFILE,
+            }
+            and (
+                contains_restricted_profile_data(
+                    content,
+                    domain=normalized_domain,
+                    key=normalized_key,
+                )
+                or (profile_id is not None and normalized_domain == "nutrition")
             )
         ):
             self._record(
@@ -179,6 +191,10 @@ class ConversationMemory:
                 conversation_id=conversation_id,
                 domain=normalized_domain,
                 key=normalized_key,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                profile_role=profile_role,
+                profile_is_primary=profile_is_primary,
                 importance=importance,
                 tags=tuple(tags),
                 active=True,
@@ -186,11 +202,23 @@ class ConversationMemory:
                 expires_at=expires_at,
                 metadata=metadata or {},
             )
-            occupied = self._find_structured_preference(probe)
-            if occupied is not None:
-                raise InvalidMemoryEntryError(
-                    "A preference already exists for this user, domain, and key."
-                )
+            if probe.category is MemoryCategory.USER_PROFILE:
+                if self._find_profile(probe.user_id, probe.profile_id) is not None:
+                    raise InvalidMemoryEntryError(
+                        "A profile already exists for this user and profile_id."
+                    )
+                if probe.profile_is_primary and self._find_primary_profile(
+                    probe.user_id
+                ) is not None:
+                    raise InvalidMemoryEntryError(
+                        "A primary profile already exists for this user."
+                    )
+            else:
+                occupied = self._find_structured_preference(probe)
+                if occupied is not None:
+                    raise InvalidMemoryEntryError(
+                        "A preference already exists for this profile, domain, and key."
+                    )
             if self._policy.deduplicate:
                 duplicate = self._find_duplicate(probe)
                 if duplicate is not None:
@@ -240,6 +268,7 @@ class ConversationMemory:
         conversation_id: str | None = None,
         domain: str | None = None,
         key: str | None = None,
+        profile_id: str | None = None,
         tags: Sequence[str] = (),
         categories: Sequence[MemoryCategory] = (),
         include_sensitive: bool = False,
@@ -258,6 +287,7 @@ class ConversationMemory:
             domain,
             key,
         )
+        normalized_profile_id = normalize_profile_id(profile_id)
         with self._lock:
             candidates = []
             for entry in self._entries.values():
@@ -279,6 +309,11 @@ class ConversationMemory:
                 if normalized_domain is not None and entry.domain != normalized_domain:
                     continue
                 if normalized_key is not None and entry.key != normalized_key:
+                    continue
+                if (
+                    normalized_profile_id is not None
+                    and entry.profile_id != normalized_profile_id
+                ):
                     continue
                 entry_tokens = frozenset(normalize_content(entry.content).split())
                 if query_tokens and not query_tokens.intersection(entry_tokens):
@@ -317,6 +352,7 @@ class ConversationMemory:
         conversation_id: str | None = None,
         domain: str | None = None,
         key: str | None = None,
+        profile_id: str | None = None,
         tags: Sequence[str] = (),
         categories: Sequence[MemoryCategory] = (),
         limit: int | None = None,
@@ -331,6 +367,7 @@ class ConversationMemory:
             domain,
             key,
         )
+        normalized_profile_id = normalize_profile_id(profile_id)
         with self._lock:
             entries = tuple(
                 entry
@@ -353,6 +390,10 @@ class ConversationMemory:
                 )
                 and (normalized_domain is None or entry.domain == normalized_domain)
                 and (normalized_key is None or entry.key == normalized_key)
+                and (
+                    normalized_profile_id is None
+                    or entry.profile_id == normalized_profile_id
+                )
             )
             return tuple(
                 sorted(
@@ -401,29 +442,65 @@ class ConversationMemory:
         sensitive: bool | None = None,
         expires_at: datetime | None = None,
         metadata: Mapping[str, Any] | None = None,
+        profile_name: str | None = None,
+        profile_role: str | None = None,
+        profile_is_primary: bool | None = None,
         source_request_id: str | None = None,
     ) -> MemoryEntry:
         """Update one exact entry while preserving its identity."""
         with self._lock:
             current = self.get_entry(memory_id)
             next_sensitive = current.sensitive if sensitive is None else sensitive
-            next_content = current.content if content is None else content
+            next_profile_name = current.profile_name
+            if profile_name is not None:
+                next_profile_name = profile_name
+            elif (
+                current.category is MemoryCategory.USER_PROFILE
+                and content is not None
+            ):
+                next_profile_name = content
+            if content is not None:
+                next_content = content
+            elif profile_name is not None:
+                next_content = profile_name
+            else:
+                next_content = current.content
             if next_sensitive and not self._policy.allow_sensitive_storage:
                 raise SensitiveMemoryRejectedError("Sensitive memory storage is disabled.")
             if contains_secret_material(next_content):
                 raise SensitiveMemoryRejectedError("Credential-like memory content is rejected.")
             if (
-                current.category is MemoryCategory.USER_PREFERENCE
-                and contains_restricted_profile_data(
-                    next_content,
-                    domain=current.domain,
-                    key=current.key,
+                current.category
+                in {
+                    MemoryCategory.USER_PREFERENCE,
+                    MemoryCategory.USER_PROFILE,
+                }
+                and (
+                    contains_restricted_profile_data(
+                        next_content,
+                        domain=current.domain,
+                        key=current.key,
+                    )
+                    or (current.profile_id is not None and current.domain == "nutrition")
                 )
             ):
                 raise SensitiveMemoryRejectedError(
                     "Medical, nutritional, anthropometric, and training-history data "
                     "cannot be stored as preferences."
                 )
+            next_primary = (
+                current.profile_is_primary
+                if profile_is_primary is None
+                else profile_is_primary
+            )
+            if current.category is MemoryCategory.USER_PROFILE and next_primary:
+                if self._find_primary_profile(
+                    current.user_id,
+                    exclude_memory_id=memory_id,
+                ) is not None:
+                    raise InvalidMemoryEntryError(
+                        "A primary profile already exists for this user."
+                    )
             updated = replace(
                 current,
                 content=next_content,
@@ -434,6 +511,11 @@ class ConversationMemory:
                 sensitive=next_sensitive,
                 expires_at=current.expires_at if expires_at is None else expires_at,
                 metadata=current.metadata if metadata is None else metadata,
+                profile_name=next_profile_name,
+                profile_role=(
+                    current.profile_role if profile_role is None else profile_role
+                ),
+                profile_is_primary=next_primary,
             )
             duplicate = self._find_duplicate(updated, exclude_memory_id=memory_id)
             if self._policy.deduplicate and duplicate is not None:
@@ -463,7 +545,11 @@ class ConversationMemory:
                 entry
                 for entry in self._entries.values()
                 if entry.active
-                and entry.category is MemoryCategory.USER_PREFERENCE
+                and entry.category
+                in {
+                    MemoryCategory.USER_PREFERENCE,
+                    MemoryCategory.USER_PROFILE,
+                }
                 and not entry.sensitive
                 and entry.source_request_id is not None
             ),
@@ -485,6 +571,7 @@ class ConversationMemory:
                 and entry.category is probe.category
                 and entry.tags == probe.tags
                 and entry.user_id == probe.user_id
+                and entry.profile_id == probe.profile_id
                 and entry.conversation_id == probe.conversation_id
             ):
                 return entry
@@ -501,8 +588,43 @@ class ConversationMemory:
                 entry.active
                 and entry.category is MemoryCategory.USER_PREFERENCE
                 and entry.user_id == probe.user_id
+                and entry.profile_id == probe.profile_id
                 and entry.domain == probe.domain
                 and entry.key == probe.key
+            ):
+                return entry
+        return None
+
+    def _find_profile(
+        self,
+        user_id: str | None,
+        profile_id: str | None,
+    ) -> MemoryEntry | None:
+        if profile_id is None:
+            return None
+        for entry in sorted(self._entries.values(), key=lambda item: item.memory_id):
+            if (
+                entry.active
+                and entry.category is MemoryCategory.USER_PROFILE
+                and entry.user_id == user_id
+                and entry.profile_id == profile_id
+            ):
+                return entry
+        return None
+
+    def _find_primary_profile(
+        self,
+        user_id: str | None,
+        *,
+        exclude_memory_id: str | None = None,
+    ) -> MemoryEntry | None:
+        for entry in sorted(self._entries.values(), key=lambda item: item.memory_id):
+            if (
+                entry.memory_id != exclude_memory_id
+                and entry.active
+                and entry.category is MemoryCategory.USER_PROFILE
+                and entry.user_id == user_id
+                and entry.profile_is_primary
             ):
                 return entry
         return None

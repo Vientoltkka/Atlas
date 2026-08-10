@@ -499,6 +499,7 @@ class MemoryRouteHandler(_BaseRouteHandler):
         started = self._clock()
         operation = decision.memory_operation
         preference_domain, preference_key = _memory_preference_locator(request)
+        profile_id = _memory_profile_id(request)
         if operation is None:
             return _clarification_result(
                 self,
@@ -546,15 +547,32 @@ class MemoryRouteHandler(_BaseRouteHandler):
                     "Que informacion quieres que recuerde?",
                     ("memory_content",),
                 )
+            category = _memory_category(request)
             try:
                 entry = store_entry(
                     content,
-                    category=_memory_category(request),
+                    category=category,
                     source_request_id=request.request_id,
                     user_id=request.user_id,
                     conversation_id=request.conversation_id,
                     domain=preference_domain,
                     key=preference_key,
+                    profile_id=profile_id,
+                    profile_name=(
+                        content
+                        if category is MemoryCategory.USER_PROFILE
+                        else None
+                    ),
+                    profile_role=(
+                        _memory_profile_role(request)
+                        if category is MemoryCategory.USER_PROFILE
+                        else None
+                    ),
+                    profile_is_primary=(
+                        _memory_profile_is_primary(request)
+                        if category is MemoryCategory.USER_PROFILE
+                        else False
+                    ),
                     importance=_memory_importance(request),
                     tags=_memory_tags(request),
                     sensitive=bool(request.metadata.get("sensitive", False)),
@@ -611,6 +629,7 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 conversation_id=request.conversation_id,
                 domain=preference_domain,
                 key=preference_key,
+                profile_id=profile_id,
                 tags=_memory_tags(request),
                 categories=_memory_categories_filter(request),
                 include_sensitive=False,
@@ -657,6 +676,7 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 conversation_id=request.conversation_id,
                 domain=preference_domain,
                 key=preference_key,
+                profile_id=profile_id,
                 tags=_memory_tags(request),
                 categories=_memory_categories_filter(request),
                 limit=_memory_limit(request),
@@ -780,6 +800,8 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 importance=_memory_optional_importance(request),
                 tags=_memory_optional_tags(request),
                 sensitive=_memory_optional_sensitive(request),
+                profile_role=_memory_optional_profile_role(request),
+                profile_is_primary=_memory_optional_profile_is_primary(request),
                 source_request_id=request.request_id,
             )
         except (
@@ -2321,22 +2343,55 @@ def _memory_preference_locator(
     )
 
 
+def _memory_profile_id(request: AtlasRequest) -> str | None:
+    explicit = request.metadata.get("profile_id")
+    if isinstance(explicit, str):
+        return explicit.strip().casefold()
+    match = re.search(
+        r"\bprofile\.(?P<profile_id>[a-z0-9][a-z0-9_-]*)"
+        r"(?=\.|:|\b)",
+        request.content,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return match.group("profile_id").casefold()
+
+
 def _memory_content(request: AtlasRequest) -> str:
     explicit = request.metadata.get("memory_content")
     if isinstance(explicit, str):
         return explicit.strip()
     domain, key = _memory_preference_locator(request)
+    profile_id = _memory_profile_id(request)
     normalized = re.sub(
         r"^\s*(?:recuerda(?:\s+que)?|remember(?:\s+that)?|guarda(?:\s+que)?)\s*",
         "",
         request.content,
         flags=re.IGNORECASE,
     )
+    if profile_id is not None:
+        normalized = re.sub(
+            rf"^\s*(?:perfil\s+principal\s+)?profile\."
+            rf"{re.escape(profile_id)}\.?\s*",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     if domain is not None and key is not None:
         locator = re.escape(f"{domain}.{key}")
         normalized = re.sub(
             rf"^\s*(?:(?:(?:mi|la)\s+)?preferencia(?:\s+de)?\s+|prefiero\s+)?"
             rf"{locator}\s*(?::|=|\bes\b|\bque\b)?\s*",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    elif profile_id is not None:
+        normalized = re.sub(
+            r"^\s*(?::|=|\bes\b|\bque\b)?\s*",
             "",
             normalized,
             count=1,
@@ -2349,7 +2404,10 @@ def _memory_query(request: AtlasRequest) -> str:
     explicit = request.metadata.get("memory_query")
     if isinstance(explicit, str):
         return explicit.strip()
-    if _memory_preference_locator(request) != (None, None):
+    if (
+        _memory_preference_locator(request) != (None, None)
+        or _memory_profile_id(request) is not None
+    ):
         return ""
     query = re.sub(
         r"^\s*(?:qu[e\u00e9]\s+recuerdas(?:\s+de)?|recupera|busca\s+en\s+memoria|memoria)\s*",
@@ -2368,6 +2426,8 @@ def _memory_category(request: AtlasRequest) -> MemoryCategory:
         return MemoryCategory(explicit)
     if _memory_preference_locator(request) != (None, None):
         return MemoryCategory.USER_PREFERENCE
+    if _memory_profile_id(request) is not None:
+        return MemoryCategory.USER_PROFILE
     normalized = request.content.casefold()
     if "prefiero" in normalized or "preferencia" in normalized:
         return MemoryCategory.USER_PREFERENCE
@@ -2411,6 +2471,32 @@ def _memory_optional_sensitive(request: AtlasRequest) -> bool | None:
     return bool(value) if value is not None else None
 
 
+def _memory_profile_role(request: AtlasRequest) -> str | None:
+    value = request.metadata.get("profile_role")
+    return value.strip() if isinstance(value, str) else None
+
+
+def _memory_optional_profile_role(request: AtlasRequest) -> str | None:
+    return _memory_profile_role(request) if "profile_role" in request.metadata else None
+
+
+def _memory_profile_is_primary(request: AtlasRequest) -> bool:
+    value = request.metadata.get("profile_is_primary")
+    if value is not None:
+        return bool(value)
+    profile_id = _memory_profile_id(request)
+    return bool(
+        re.search(r"\bperfil\s+principal\b", request.content, re.IGNORECASE)
+        or profile_id in {"main", "primary", "principal"}
+    )
+
+
+def _memory_optional_profile_is_primary(request: AtlasRequest) -> bool | None:
+    if "profile_is_primary" not in request.metadata:
+        return None
+    return bool(request.metadata["profile_is_primary"])
+
+
 def _memory_expires_at(request: AtlasRequest) -> datetime | None:
     value = request.metadata.get("expires_at")
     if not isinstance(value, str) or not value.strip():
@@ -2436,6 +2522,10 @@ def _memory_categories_filter(request: AtlasRequest) -> tuple[MemoryCategory, ..
         values = ()
     if values:
         return tuple(MemoryCategory(item) for item in values)
+    if _memory_preference_locator(request) != (None, None):
+        return (MemoryCategory.USER_PREFERENCE,)
+    if _memory_profile_id(request) is not None:
+        return (MemoryCategory.USER_PROFILE,)
     if re.search(r"\bpreferencias?\b", request.content, re.IGNORECASE):
         return (MemoryCategory.USER_PREFERENCE,)
     return ()
@@ -2474,15 +2564,17 @@ def _resolve_memory_id(
     if not callable(retrieve_entries):
         return None, False
     domain, key = _memory_preference_locator(request)
+    profile_id = _memory_profile_id(request)
     query = _memory_target_query(request)
-    if not query and domain is None:
+    if not query and domain is None and profile_id is None:
         return None, False
     matches = retrieve_entries(
-        "" if domain is not None else query,
+        "" if domain is not None or profile_id is not None else query,
         user_id=request.user_id,
         conversation_id=request.conversation_id,
         domain=domain,
         key=key,
+        profile_id=profile_id,
         categories=_memory_categories_filter(request),
         include_sensitive=False,
     )
@@ -2495,6 +2587,17 @@ def _memory_update_content(request: AtlasRequest, memory_id: str) -> str:
     explicit = request.metadata.get("memory_content")
     if isinstance(explicit, str):
         return explicit.strip()
+    profile_id = _memory_profile_id(request)
+    if profile_id is not None and _memory_preference_locator(request) == (None, None):
+        match = re.match(
+            rf"^\s*(?:actualiza\s+el\s+recuerdo|cambia\s+lo\s+que\s+recuerdas)"
+            rf"\s+(?:perfil\s+principal\s+)?profile\."
+            rf"{re.escape(profile_id)}\s+(?:a|por)\s+(?P<replacement>.+?)\s*$",
+            request.content,
+            flags=re.IGNORECASE,
+        )
+        if match is not None:
+            return match.group("replacement").strip()
     update_parts = _natural_preference_update_parts(request.content)
     if update_parts is not None:
         replacement = update_parts[1].strip()
@@ -2574,6 +2677,10 @@ def _memory_entry_view(entry: MemoryEntry) -> Mapping[str, Any]:
         "category": entry.category.value,
         "domain": entry.domain,
         "key": entry.key,
+        "profile_id": entry.profile_id,
+        "profile_name": entry.profile_name,
+        "profile_role": entry.profile_role,
+        "profile_is_primary": entry.profile_is_primary,
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
         "importance": entry.importance,

@@ -18,8 +18,9 @@ from memory.operational import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _LEGACY_SCHEMA_VERSION = 1
+_STRUCTURED_PREFERENCE_SCHEMA_VERSION = 2
 _MAX_FILE_BYTES = 1_000_000
 _MEMORY_ID_PATTERN = re.compile(r"^memory-(\d{6})$")
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "last_memory_sequence", "entries"})
@@ -41,7 +42,13 @@ _LEGACY_ENTRY_KEYS = frozenset(
         "metadata",
     }
 )
-_ENTRY_KEYS = _LEGACY_ENTRY_KEYS | {"domain", "key"}
+_STRUCTURED_PREFERENCE_ENTRY_KEYS = _LEGACY_ENTRY_KEYS | {"domain", "key"}
+_ENTRY_KEYS = _STRUCTURED_PREFERENCE_ENTRY_KEYS | {
+    "profile_id",
+    "profile_name",
+    "profile_role",
+    "profile_is_primary",
+}
 
 
 class MemoryRepositoryError(RuntimeError):
@@ -183,6 +190,7 @@ class FileMemoryEntryRepository:
         version = payload.get("schema_version")
         if type(version) is not int or version not in {
             _LEGACY_SCHEMA_VERSION,
+            _STRUCTURED_PREFERENCE_SCHEMA_VERSION,
             SCHEMA_VERSION,
         }:
             raise UnsupportedMemoryRepositoryVersion(
@@ -221,6 +229,10 @@ class FileMemoryEntryRepository:
             "conversation_id": entry.conversation_id,
             "domain": entry.domain,
             "key": entry.key,
+            "profile_id": entry.profile_id,
+            "profile_name": entry.profile_name,
+            "profile_role": entry.profile_role,
+            "profile_is_primary": entry.profile_is_primary,
             "importance": entry.importance,
             "tags": list(entry.tags),
             "active": entry.active,
@@ -237,11 +249,12 @@ class FileMemoryEntryRepository:
         *,
         schema_version: int,
     ) -> MemoryEntry:
-        expected_keys = (
-            _LEGACY_ENTRY_KEYS
-            if schema_version == _LEGACY_SCHEMA_VERSION
-            else _ENTRY_KEYS
-        )
+        if schema_version == _LEGACY_SCHEMA_VERSION:
+            expected_keys = _LEGACY_ENTRY_KEYS
+        elif schema_version == _STRUCTURED_PREFERENCE_SCHEMA_VERSION:
+            expected_keys = _STRUCTURED_PREFERENCE_ENTRY_KEYS
+        else:
+            expected_keys = _ENTRY_KEYS
         if not isinstance(payload, dict) or set(payload) != expected_keys:
             raise CorruptedMemoryRepositoryError(
                 "Personal memory entry has an invalid structure."
@@ -258,6 +271,10 @@ class FileMemoryEntryRepository:
             conversation_id=payload["conversation_id"],
             domain=payload.get("domain"),
             key=payload.get("key"),
+            profile_id=payload.get("profile_id"),
+            profile_name=payload.get("profile_name"),
+            profile_role=payload.get("profile_role"),
+            profile_is_primary=payload.get("profile_is_primary", False),
             importance=payload["importance"],
             tags=tuple(payload["tags"]),
             active=payload["active"],
@@ -271,7 +288,9 @@ class FileMemoryEntryRepository:
     @staticmethod
     def _validate_entries(entries: Sequence[MemoryEntry]) -> None:
         memory_ids: set[str] = set()
-        structured_preferences: set[tuple[str, str, str]] = set()
+        structured_preferences: set[tuple[str, str, str, str]] = set()
+        profiles: set[tuple[str, str]] = set()
+        primary_users: set[str] = set()
         for entry in entries:
             if not isinstance(entry, MemoryEntry):
                 raise CorruptedMemoryRepositoryError(
@@ -286,7 +305,11 @@ class FileMemoryEntryRepository:
                     "Personal memory contains duplicate memory_id values."
                 )
             if (
-                entry.category is not MemoryCategory.USER_PREFERENCE
+                entry.category
+                not in {
+                    MemoryCategory.USER_PREFERENCE,
+                    MemoryCategory.USER_PROFILE,
+                }
                 or not entry.active
                 or entry.sensitive
                 or entry.source_request_id is None
@@ -294,6 +317,24 @@ class FileMemoryEntryRepository:
                 raise CorruptedMemoryRepositoryError(
                     "Personal memory contains a category that is not persistable."
                 )
+            if entry.category is MemoryCategory.USER_PROFILE:
+                identity = (entry.user_id or "", entry.profile_id or "")
+                if identity in profiles:
+                    raise CorruptedMemoryRepositoryError(
+                        "Personal memory contains a duplicate profile."
+                    )
+                profiles.add(identity)
+                if entry.profile_is_primary:
+                    user_key = entry.user_id or ""
+                    if user_key in primary_users:
+                        raise CorruptedMemoryRepositoryError(
+                            "Personal memory contains multiple primary profiles."
+                        )
+                    primary_users.add(user_key)
+                if contains_restricted_profile_data(entry.content):
+                    raise CorruptedMemoryRepositoryError(
+                        "Personal memory contains restricted profile data."
+                    )
             if entry.domain is not None and entry.key is not None:
                 if contains_restricted_profile_data(
                     entry.content,
@@ -303,7 +344,16 @@ class FileMemoryEntryRepository:
                     raise CorruptedMemoryRepositoryError(
                         "Personal memory contains restricted profile data."
                     )
-                locator = (entry.user_id or "", entry.domain, entry.key)
+                if entry.profile_id is not None and entry.domain == "nutrition":
+                    raise CorruptedMemoryRepositoryError(
+                        "Personal memory contains unsupported profile nutrition data."
+                    )
+                locator = (
+                    entry.user_id or "",
+                    entry.profile_id or "",
+                    entry.domain,
+                    entry.key,
+                )
                 if locator in structured_preferences:
                     raise CorruptedMemoryRepositoryError(
                         "Personal memory contains a duplicate structured preference."
