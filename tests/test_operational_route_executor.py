@@ -28,6 +28,7 @@ from core.operational_route_executor import (
     DirectResponseRouteHandler,
     OperationalRouteExecutor,
     RouteExecutionPresenter,
+    RouteExecutionResult,
     RouteExecutionStatus,
     UnsupportedRouteHandler,
     build_default_route_handlers,
@@ -75,6 +76,20 @@ def _decision(
         matched_rules=(f"test.{route.value}",),
         created_at=NOW,
         **kwargs,
+    )
+
+
+def _completed_tool_result(tool_name: str, output) -> RouteExecutionResult:
+    return RouteExecutionResult(
+        request_id="request-1",
+        route=RequestRoute.SINGLE_TOOL,
+        status=RouteExecutionStatus.COMPLETED,
+        output=output,
+        error=None,
+        started_at=NOW,
+        finished_at=NOW,
+        duration=0.0,
+        target_tool_name=tool_name,
     )
 
 
@@ -915,6 +930,48 @@ def test_presenter_returns_safe_readable_text(route, status, expected) -> None:
 
     assert result.status is status
     assert expected in RouteExecutionPresenter().present(result)
+
+
+def test_presenter_shows_empty_calendar_result() -> None:
+    result = _completed_tool_result("calendar_list_events", {"events": []})
+
+    assert RouteExecutionPresenter().present(result) == (
+        "No hay eventos en el rango solicitado."
+    )
+
+
+def test_presenter_shows_normalized_calendar_events() -> None:
+    result = _completed_tool_result(
+        "calendar_list_events",
+        {
+            "events": [
+                {
+                    "id": "evt-1",
+                    "summary": "Revision",
+                    "start": "2026-08-10T10:00:00+01:00",
+                    "end": "2026-08-10T10:30:00+01:00",
+                },
+                {
+                    "id": "evt-2",
+                    "summary": "Planificacion",
+                    "start": "2026-08-10T12:00:00+01:00",
+                    "end": "2026-08-10T13:00:00+01:00",
+                },
+            ]
+        },
+    )
+
+    assert RouteExecutionPresenter().present(result) == (
+        "Eventos encontrados:\n"
+        "- Revision: 2026-08-10T10:00:00+01:00 - 2026-08-10T10:30:00+01:00\n"
+        "- Planificacion: 2026-08-10T12:00:00+01:00 - 2026-08-10T13:00:00+01:00"
+    )
+
+
+def test_presenter_keeps_generic_mapping_fallback_for_other_tools() -> None:
+    result = _completed_tool_result("other_tool", {"value": 1})
+
+    assert RouteExecutionPresenter().present(result) == "Operacion completada."
 
 
 def test_handler_selection_is_deterministic() -> None:

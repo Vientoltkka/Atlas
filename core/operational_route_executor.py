@@ -1880,6 +1880,8 @@ class RouteExecutionPresenter:
 
     def present(self, result: RouteExecutionResult) -> str:
         if result.status is RouteExecutionStatus.COMPLETED:
+            if getattr(result, "target_tool_name", None) == "calendar_list_events":
+                return _present_calendar_output(result.output)
             return _present_output(result.output) or "Operacion completada."
         if result.status is RouteExecutionStatus.WAITING_CONFIRMATION:
             tool = result.target_tool_name or "la accion"
@@ -2643,6 +2645,25 @@ def _present_output(output: Any) -> str:
         if "signal" in output:
             return str(output["signal"])
     return "Operacion completada." if output is not None else ""
+
+
+def _present_calendar_output(output: Any) -> str:
+    events = output.get("events") if isinstance(output, Mapping) else None
+    if not isinstance(events, (list, tuple)) or not events:
+        return "No hay eventos en el rango solicitado."
+
+    lines: list[str] = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        summary = str(event.get("summary") or "Sin titulo")
+        start = str(event.get("start") or "hora no indicada")
+        end = str(event.get("end") or "hora no indicada")
+        lines.append(f"- {summary}: {start} - {end}")
+
+    if not lines:
+        return "No hay eventos en el rango solicitado."
+    return "Eventos encontrados:\n" + "\n".join(lines)
 
 
 def _mapping_value(value: Any, key: str) -> Any:
