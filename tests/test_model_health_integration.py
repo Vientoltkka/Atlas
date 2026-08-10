@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 
+import ollama
+
 from core.hybrid_execution_planner import PromptClientStructuredPlanProvider
-from core.model_health import ModelHealthResult
+from core.model_health import (
+    ModelHealthErrorCode,
+    ModelHealthResult,
+    OllamaModelHealthChecker,
+)
 from core.model_manager import ModelDescriptor, ModelManager
 from models import prompt_client as prompt_client_module
 from models.prompt_client import PromptClient
@@ -37,6 +43,39 @@ def test_prompt_client_health_check_is_minimal_and_non_streaming(monkeypatch) ->
             "options": {"num_predict": 1},
         }
     ]
+
+
+def test_prompt_client_health_check_accepts_valid_whitespace_content(monkeypatch) -> None:
+    backend = CapturingOllamaClient()
+    backend.chat = lambda **_kwargs: {"message": {"content": "\n"}}
+    monkeypatch.setattr(
+        prompt_client_module.ollama,
+        "Client",
+        lambda **_kwargs: backend,
+    )
+
+    PromptClient().check_model_health("glm4:9b")
+
+
+def test_real_prompt_client_health_checker_rejects_unavailable_model(monkeypatch) -> None:
+    class MissingModelOllamaClient:
+        def chat(self, **_kwargs):
+            raise ollama.ResponseError("model not found", 404)
+
+    monkeypatch.setattr(
+        prompt_client_module.ollama,
+        "Client",
+        lambda **_kwargs: MissingModelOllamaClient(),
+    )
+
+    result = OllamaModelHealthChecker(PromptClient()).check(
+        logical_model_id="missing",
+        physical_model_name="missing:latest",
+        provider_id="ollama",
+    )
+
+    assert result.healthy is False
+    assert result.error_code is ModelHealthErrorCode.MODEL_UNAVAILABLE
 
 
 class StaticModelSource:

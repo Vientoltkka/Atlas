@@ -67,10 +67,10 @@ class PromptClient:
                 model,
                 "Ollama returned a malformed health-check response.",
             ) from error
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(content, str):
             raise InferenceBackendError(
                 model,
-                "Ollama returned an empty health-check response.",
+                "Ollama returned a non-text health-check response.",
             )
 
     def ask_messages(
