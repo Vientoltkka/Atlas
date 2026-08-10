@@ -849,13 +849,29 @@ def _system_command(text: str) -> SystemCommand | None:
 def _memory_operation(text: str) -> MemoryOperation | None:
     if text.startswith(("recuerda que ", "guarda esto", "guarda que ")):
         return MemoryOperation.STORE
-    if text.startswith(("que recuerdas sobre", "recuerdame lo que", "cual fue mi ultimo")):
+    if text.startswith(
+        (
+            "que recuerdas sobre",
+            "que recuerdas de ",
+            "recuerdame lo que",
+            "cual fue mi ultimo",
+        )
+    ):
         return MemoryOperation.RETRIEVE
     if text.startswith(("olvida ", "borra de tu memoria", "elimina de tu memoria")):
         return MemoryOperation.FORGET
     if text in {"que recuerdas", "lista memoria", "muestra memoria"}:
         return MemoryOperation.LIST
-    if text.startswith(("actualiza el recuerdo", "cambia lo que recuerdas")):
+    if text.startswith(
+        (
+            "actualiza el recuerdo",
+            "cambia lo que recuerdas",
+            "actualiza mi preferencia",
+            "actualiza la preferencia",
+            "cambia mi preferencia",
+            "cambia la preferencia",
+        )
+    ):
         return MemoryOperation.UPDATE
     return None
 

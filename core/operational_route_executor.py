@@ -723,6 +723,7 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 "operation": MemoryOperation.FORGET.value,
                 "memory_id": entry.memory_id,
                 "forgotten": not entry.active,
+                "entry": _memory_entry_view(entry),
             },
             side_effects_performed=True,
             target=MemoryOperation.FORGET.value,
@@ -2309,12 +2310,15 @@ def _memory_query(request: AtlasRequest) -> str:
     explicit = request.metadata.get("memory_query")
     if isinstance(explicit, str):
         return explicit.strip()
-    return re.sub(
-        r"^\s*(?:que\s+recuerdas(?:\s+de)?|recupera|busca\s+en\s+memoria|memoria)\s*",
+    query = re.sub(
+        r"^\s*(?:qu[e\u00e9]\s+recuerdas(?:\s+de)?|recupera|busca\s+en\s+memoria|memoria)\s*",
         "",
         request.content,
         flags=re.IGNORECASE,
     ).strip()
+    if query.casefold() in {"mi preferencia", "mis preferencias", "preferencias"}:
+        return ""
+    return query
 
 
 def _memory_category(request: AtlasRequest) -> MemoryCategory:
@@ -2387,7 +2391,11 @@ def _memory_categories_filter(request: AtlasRequest) -> tuple[MemoryCategory, ..
         values = tuple(str(item) for item in value)
     else:
         values = ()
-    return tuple(MemoryCategory(item) for item in values)
+    if values:
+        return tuple(MemoryCategory(item) for item in values)
+    if re.search(r"\bpreferencias?\b", request.content, re.IGNORECASE):
+        return (MemoryCategory.USER_PREFERENCE,)
+    return ()
 
 
 def _memory_limit(request: AtlasRequest) -> int | None:
@@ -2405,22 +2413,33 @@ def _resolve_memory_id(
 ) -> tuple[str | None, bool]:
     explicit = request.metadata.get("memory_id")
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip(), False
+        memory_id = explicit.strip()
+        return (
+            (memory_id, False)
+            if _memory_id_is_visible(memory, memory_id, request)
+            else (None, False)
+        )
     match = re.search(r"\bmemory-\d{6}\b", request.content, re.IGNORECASE)
     if match:
-        return match.group(0).lower(), False
+        memory_id = match.group(0).lower()
+        return (
+            (memory_id, False)
+            if _memory_id_is_visible(memory, memory_id, request)
+            else (None, False)
+        )
     retrieve_entries = getattr(memory, "retrieve_entries", None)
     if not callable(retrieve_entries):
         return None, False
-    query = re.sub(
-        r"^\s*(?:olvida|forget|actualiza|update)\s*",
-        "",
-        request.content,
-        flags=re.IGNORECASE,
-    ).strip()
+    query = _memory_target_query(request)
     if not query:
         return None, False
-    matches = retrieve_entries(query, include_sensitive=False)
+    matches = retrieve_entries(
+        query,
+        user_id=request.user_id,
+        conversation_id=request.conversation_id,
+        categories=_memory_categories_filter(request),
+        include_sensitive=False,
+    )
     if len(matches) == 1:
         return matches[0].memory_id, False
     return None, len(matches) > 1
@@ -2430,6 +2449,16 @@ def _memory_update_content(request: AtlasRequest, memory_id: str) -> str:
     explicit = request.metadata.get("memory_content")
     if isinstance(explicit, str):
         return explicit.strip()
+    update_parts = _natural_preference_update_parts(request.content)
+    if update_parts is not None:
+        replacement = update_parts[1].strip()
+        return (
+            replacement
+            if replacement.casefold().startswith("prefiero ")
+            else f"prefiero {replacement}"
+        )
+    if re.search(r"\bpreferencia\b", request.content, re.IGNORECASE):
+        return ""
     without_prefix = re.sub(
         r"^\s*(?:actualiza|update)\s*",
         "",
@@ -2438,6 +2467,58 @@ def _memory_update_content(request: AtlasRequest, memory_id: str) -> str:
     )
     without_id = re.sub(re.escape(memory_id), "", without_prefix, flags=re.IGNORECASE)
     return re.sub(r"^\s*(?:a|con|to)\s*", "", without_id, flags=re.IGNORECASE).strip()
+
+
+def _memory_target_query(request: AtlasRequest) -> str:
+    update_parts = _natural_preference_update_parts(request.content)
+    if update_parts is not None:
+        return update_parts[0].strip()
+    query = re.sub(
+        r"^\s*(?:olvida|forget|actualiza|update|cambia)\s*",
+        "",
+        request.content,
+        flags=re.IGNORECASE,
+    ).strip()
+    return re.sub(
+        r"^\s*(?:(?:mi|la)\s+)?preferencia(?:\s+de)?\s*",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _natural_preference_update_parts(content: str) -> tuple[str, str] | None:
+    match = re.match(
+        r"^\s*(?:actualiza|cambia)\s+(?:(?:mi|la)\s+)?preferencia"
+        r"(?:\s+de)?\s+(?P<target>.+?)\s+(?:a|por)\s+"
+        r"(?P<replacement>.+?)\s*$",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return match.group("target"), match.group("replacement")
+
+
+def _memory_id_is_visible(
+    memory: object,
+    memory_id: str,
+    request: AtlasRequest,
+) -> bool:
+    get_entry = getattr(memory, "get_entry", None)
+    if not callable(get_entry):
+        return True
+    try:
+        entry = get_entry(memory_id)
+    except MemoryEntryNotFoundError:
+        return True
+    return (
+        (request.user_id is None or entry.user_id in {None, request.user_id})
+        and (
+            request.conversation_id is None
+            or entry.conversation_id in {None, request.conversation_id}
+        )
+    )
 
 
 def _memory_entry_view(entry: MemoryEntry) -> Mapping[str, Any]:
@@ -2628,23 +2709,59 @@ def _present_output(output: Any) -> str:
             return summary
         operation = output.get("operation")
         if operation == MemoryOperation.STORE.value:
-            return f"Memoria guardada con id {output.get('memory_id', 'desconocido')}."
-        if operation == MemoryOperation.RETRIEVE.value:
-            count = int(output.get("count", 0))
+            content = _memory_output_content(output)
             return (
-                f"Se recuperaron {count} entradas de memoria."
-                if count
-                else "No se encontraron recuerdos coincidentes."
+                f"Preferencia guardada: {content}."
+                if content
+                else f"Memoria guardada con id {output.get('memory_id', 'desconocido')}."
+            )
+        if operation == MemoryOperation.RETRIEVE.value:
+            contents = _memory_output_contents(output)
+            if not contents:
+                return "No se encontraron recuerdos coincidentes."
+            if len(contents) == 1:
+                return f"Se recuperaron estos recuerdos: {contents[0]}."
+            return "Se recuperaron estos recuerdos:\n" + "\n".join(
+                f"- {item}" for item in contents
             )
         if operation == MemoryOperation.LIST.value:
             return f"Hay {int(output.get('count', 0))} entradas de memoria activas."
         if operation == MemoryOperation.FORGET.value:
-            return f"Entrada {output.get('memory_id', '')} olvidada.".strip()
+            content = _memory_output_content(output)
+            return (
+                f"Preferencia olvidada: {content}."
+                if content
+                else f"Entrada {output.get('memory_id', '')} olvidada.".strip()
+            )
         if operation == MemoryOperation.UPDATE.value:
-            return f"Entrada {output.get('memory_id', '')} actualizada.".strip()
+            content = _memory_output_content(output)
+            return (
+                f"Preferencia actualizada: {content}."
+                if content
+                else f"Entrada {output.get('memory_id', '')} actualizada.".strip()
+            )
         if "signal" in output:
             return str(output["signal"])
     return "Operacion completada." if output is not None else ""
+
+
+def _memory_output_content(output: Mapping[str, Any]) -> str:
+    entry = output.get("entry")
+    content = entry.get("content") if isinstance(entry, Mapping) else None
+    return str(content).strip() if isinstance(content, str) else ""
+
+
+def _memory_output_contents(output: Mapping[str, Any]) -> tuple[str, ...]:
+    items = output.get("items")
+    if not isinstance(items, (list, tuple)):
+        return ()
+    return tuple(
+        str(item["content"]).strip()
+        for item in items
+        if isinstance(item, Mapping)
+        and isinstance(item.get("content"), str)
+        and str(item["content"]).strip()
+    )
 
 
 def _present_calendar_output(output: Any) -> str:

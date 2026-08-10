@@ -47,7 +47,11 @@ from core.request_gateway import (
     AtlasRequest,
     RequestGateway,
 )
-from core.operational_request_router import RequestRoute, RouteDecision
+from core.operational_request_router import (
+    MemoryOperation,
+    RequestRoute,
+    RouteDecision,
+)
 from core.operational_route_executor import (
     OperationalRouteExecutor,
     RouteExecutionPresenter,
@@ -429,6 +433,10 @@ class AtlasOrchestrator:
         skill_response = self._process_skill_request(request)
         if skill_response is not None:
             return skill_response
+
+        memory_response = self._process_memory_request(request)
+        if memory_response is not None:
+            return memory_response
 
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
@@ -1164,6 +1172,10 @@ class AtlasOrchestrator:
         if capability_status is not None:
             return capability_status
 
+        memory_response = self._process_memory_request(request)
+        if memory_response is not None:
+            return memory_response
+
         direct_response = self._process_direct_conversation(
             request,
             raise_on_failure=True,
@@ -1257,6 +1269,41 @@ class AtlasOrchestrator:
                 ),
             )
         )
+
+    def _process_memory_request(self, request: AtlasRequest) -> str | None:
+        """Execute one explicit memory intent through the shared operational route."""
+        if self._operational_route_executor is None:
+            return None
+        decision = self._structured_route_decision(request)
+        if decision is None or decision.route is not RequestRoute.MEMORY_QUERY:
+            return None
+
+        executable_request = request
+        if (
+            decision.memory_operation
+            in {
+                MemoryOperation.STORE,
+                MemoryOperation.FORGET,
+                MemoryOperation.UPDATE,
+            }
+            and not request.safety_context.allow_side_effects
+            and not request.safety_context.contains_sensitive_data
+        ):
+            executable_request = replace(
+                request,
+                safety_context=replace(
+                    request.safety_context,
+                    allow_side_effects=True,
+                ),
+            )
+        result = self._operational_route_executor.execute(
+            executable_request,
+            decision,
+        )
+        response = self._route_execution_presenter.present(result)
+        self._memory.add_user(request.content)
+        self._memory.add_assistant(response)
+        return response
 
     def _process_direct_conversation(
         self,
