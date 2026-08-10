@@ -10,7 +10,10 @@ from bootstrap.bootstrap import Bootstrap, _personal_memory_path
 from core.operational_route_executor import RouteExecutionStatus
 from core.request_gateway import RequestSafetyContext
 from memory.conversation import ConversationMemory
-from memory.operational import MemoryCategory
+from memory.operational import (
+    MemoryCategory,
+    SensitiveMemoryRejectedError,
+)
 from memory.repository import (
     CorruptedMemoryRepositoryError,
     FileMemoryEntryRepository,
@@ -36,12 +39,16 @@ def _store_preference(
     *,
     request_id: str,
     user_id: str = "user-a",
+    domain: str | None = None,
+    key: str | None = None,
 ):
     return memory.store_entry(
         content,
         category=MemoryCategory.USER_PREFERENCE,
         source_request_id=request_id,
         user_id=user_id,
+        domain=domain,
+        key=key,
     )
 
 
@@ -72,7 +79,7 @@ def test_store_then_reconstruct_recovers_explicit_preference(tmp_path: Path) -> 
 
     assert recovered == (stored,)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["last_memory_sequence"] == 1
     assert payload["entries"][0]["category"] == "user_preference"
 
@@ -168,6 +175,156 @@ def test_persisted_preferences_remain_isolated_by_user_id(tmp_path: Path) -> Non
     assert restarted.list_entries(user_id="user-b") == (user_b,)
 
 
+def test_structured_preferences_are_selective_persistent_and_user_isolated(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "personal_memory.json"
+    first = _memory(path)
+    food_a = _store_preference(
+        first,
+        "prefiero comida italiana",
+        request_id="request-1",
+        user_id="user-a",
+        domain="nutrition",
+        key="food_preference",
+    )
+    training_schedule = _store_preference(
+        first,
+        "prefiero entrenar por la tarde",
+        request_id="request-2",
+        user_id="user-a",
+        domain="training",
+        key="schedule_preference",
+    )
+    travel_schedule = _store_preference(
+        first,
+        "prefiero viajar por la manana",
+        request_id="request-3",
+        user_id="user-a",
+        domain="travel",
+        key="schedule_preference",
+    )
+    food_b = _store_preference(
+        first,
+        "prefiero comida japonesa",
+        request_id="request-4",
+        user_id="user-b",
+        domain="nutrition",
+        key="food_preference",
+    )
+
+    assert first.retrieve_entries(
+        user_id="user-a",
+        domain="nutrition",
+        key="food_preference",
+    ) == (food_a,)
+    assert first.retrieve_entries(
+        user_id="user-b",
+        domain="nutrition",
+        key="food_preference",
+    ) == (food_b,)
+    assert first.retrieve_entries(
+        user_id="user-a",
+        domain="training",
+        key="schedule_preference",
+    ) == (training_schedule,)
+    assert first.retrieve_entries(
+        user_id="user-a",
+        domain="travel",
+        key="schedule_preference",
+    ) == (travel_schedule,)
+
+    updated_food_a = first.update_entry(
+        food_a.memory_id,
+        content="prefiero comida vegetariana",
+        source_request_id="request-5",
+    )
+    first.forget_entry(
+        travel_schedule.memory_id,
+        source_request_id="request-6",
+    )
+
+    restarted = _memory(path)
+    assert restarted.retrieve_entries(
+        user_id="user-a",
+        domain="nutrition",
+        key="food_preference",
+    ) == (updated_food_a,)
+    assert restarted.retrieve_entries(
+        user_id="user-b",
+        domain="nutrition",
+        key="food_preference",
+    ) == (food_b,)
+    assert restarted.retrieve_entries(
+        user_id="user-a",
+        domain="training",
+        key="schedule_preference",
+    ) == (training_schedule,)
+    assert restarted.retrieve_entries(
+        user_id="user-a",
+        domain="travel",
+        key="schedule_preference",
+    ) == ()
+
+
+def test_repository_loads_v1_json_without_structured_fields(tmp_path: Path) -> None:
+    path = tmp_path / "personal_memory.json"
+    first = _memory(path)
+    stored = _store_preference(
+        first,
+        "prefiero respuestas breves",
+        request_id="request-1",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    for entry in payload["entries"]:
+        entry.pop("domain")
+        entry.pop("key")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restarted = _memory(path)
+
+    assert restarted.get_entry(stored.memory_id) == stored
+    assert restarted.get_entry(stored.memory_id).domain is None
+    assert restarted.get_entry(stored.memory_id).key is None
+
+
+def test_structured_persistence_rejects_unauthorized_sensitive_and_metrics(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "personal_memory.json"
+    memory = _memory(path)
+    memory.store_entry(
+        "prefiero comida italiana",
+        category=MemoryCategory.USER_PREFERENCE,
+        user_id="user-a",
+        domain="nutrition",
+        key="food_preference",
+    )
+
+    with pytest.raises(SensitiveMemoryRejectedError):
+        memory.store_entry(
+            "prefiero comida japonesa",
+            category=MemoryCategory.USER_PREFERENCE,
+            source_request_id="request-2",
+            user_id="user-a",
+            domain="nutrition",
+            key="food_preference",
+            sensitive=True,
+        )
+    with pytest.raises(SensitiveMemoryRejectedError):
+        memory.store_entry(
+            "objetivo diario 2200",
+            category=MemoryCategory.USER_PREFERENCE,
+            source_request_id="request-3",
+            user_id="user-a",
+            domain="nutrition",
+            key="calorie_target",
+        )
+
+    assert json.loads(path.read_text(encoding="utf-8"))["entries"] == []
+
+
 def test_corrupt_file_fails_controlled_without_overwrite(tmp_path: Path) -> None:
     path = tmp_path / "personal_memory.json"
     original = "{not-json"
@@ -196,7 +353,7 @@ def test_incompatible_version_fails_controlled_without_overwrite(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "personal_memory.json"
-    original = '{"entries":[],"last_memory_sequence":0,"schema_version":2}'
+    original = '{"entries":[],"last_memory_sequence":0,"schema_version":999}'
     path.write_text(original, encoding="utf-8")
 
     with pytest.raises(UnsupportedMemoryRepositoryVersion):

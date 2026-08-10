@@ -11,14 +11,19 @@ import re
 from tempfile import NamedTemporaryFile
 from typing import Any, Protocol
 
-from memory.operational import MemoryCategory, MemoryEntry
+from memory.operational import (
+    MemoryCategory,
+    MemoryEntry,
+    contains_restricted_profile_data,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_LEGACY_SCHEMA_VERSION = 1
 _MAX_FILE_BYTES = 1_000_000
 _MEMORY_ID_PATTERN = re.compile(r"^memory-(\d{6})$")
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "last_memory_sequence", "entries"})
-_ENTRY_KEYS = frozenset(
+_LEGACY_ENTRY_KEYS = frozenset(
     {
         "memory_id",
         "content",
@@ -36,6 +41,7 @@ _ENTRY_KEYS = frozenset(
         "metadata",
     }
 )
+_ENTRY_KEYS = _LEGACY_ENTRY_KEYS | {"domain", "key"}
 
 
 class MemoryRepositoryError(RuntimeError):
@@ -175,7 +181,10 @@ class FileMemoryEntryRepository:
                 "Personal memory payload has an invalid structure."
             )
         version = payload.get("schema_version")
-        if type(version) is not int or version != SCHEMA_VERSION:
+        if type(version) is not int or version not in {
+            _LEGACY_SCHEMA_VERSION,
+            SCHEMA_VERSION,
+        }:
             raise UnsupportedMemoryRepositoryVersion(
                 f"Unsupported personal memory schema version: {version}."
             )
@@ -185,7 +194,10 @@ class FileMemoryEntryRepository:
                 "Personal memory entries must be a list."
             )
         try:
-            entries = tuple(self._entry_from_payload(item) for item in raw_entries)
+            entries = tuple(
+                self._entry_from_payload(item, schema_version=version)
+                for item in raw_entries
+            )
         except (AttributeError, KeyError, OverflowError, TypeError, ValueError) as error:
             raise CorruptedMemoryRepositoryError(
                 "Personal memory contains an invalid entry."
@@ -207,6 +219,8 @@ class FileMemoryEntryRepository:
             "source_request_id": entry.source_request_id,
             "user_id": entry.user_id,
             "conversation_id": entry.conversation_id,
+            "domain": entry.domain,
+            "key": entry.key,
             "importance": entry.importance,
             "tags": list(entry.tags),
             "active": entry.active,
@@ -218,8 +232,17 @@ class FileMemoryEntryRepository:
         }
 
     @staticmethod
-    def _entry_from_payload(payload: object) -> MemoryEntry:
-        if not isinstance(payload, dict) or set(payload) != _ENTRY_KEYS:
+    def _entry_from_payload(
+        payload: object,
+        *,
+        schema_version: int,
+    ) -> MemoryEntry:
+        expected_keys = (
+            _LEGACY_ENTRY_KEYS
+            if schema_version == _LEGACY_SCHEMA_VERSION
+            else _ENTRY_KEYS
+        )
+        if not isinstance(payload, dict) or set(payload) != expected_keys:
             raise CorruptedMemoryRepositoryError(
                 "Personal memory entry has an invalid structure."
             )
@@ -233,6 +256,8 @@ class FileMemoryEntryRepository:
             source_request_id=payload["source_request_id"],
             user_id=payload["user_id"],
             conversation_id=payload["conversation_id"],
+            domain=payload.get("domain"),
+            key=payload.get("key"),
             importance=payload["importance"],
             tags=tuple(payload["tags"]),
             active=payload["active"],
@@ -246,6 +271,7 @@ class FileMemoryEntryRepository:
     @staticmethod
     def _validate_entries(entries: Sequence[MemoryEntry]) -> None:
         memory_ids: set[str] = set()
+        structured_preferences: set[tuple[str, str, str]] = set()
         for entry in entries:
             if not isinstance(entry, MemoryEntry):
                 raise CorruptedMemoryRepositoryError(
@@ -268,6 +294,21 @@ class FileMemoryEntryRepository:
                 raise CorruptedMemoryRepositoryError(
                     "Personal memory contains a category that is not persistable."
                 )
+            if entry.domain is not None and entry.key is not None:
+                if contains_restricted_profile_data(
+                    entry.content,
+                    domain=entry.domain,
+                    key=entry.key,
+                ):
+                    raise CorruptedMemoryRepositoryError(
+                        "Personal memory contains restricted profile data."
+                    )
+                locator = (entry.user_id or "", entry.domain, entry.key)
+                if locator in structured_preferences:
+                    raise CorruptedMemoryRepositoryError(
+                        "Personal memory contains a duplicate structured preference."
+                    )
+                structured_preferences.add(locator)
             memory_ids.add(entry.memory_id)
 
     @staticmethod

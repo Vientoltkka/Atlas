@@ -17,7 +17,9 @@ from memory.operational import (
     MemoryPolicy,
     SensitiveMemoryRejectedError,
     contains_secret_material,
+    contains_restricted_profile_data,
     normalize_content,
+    normalize_preference_locator,
 )
 from memory.repository import MemoryEntryRepository
 
@@ -98,6 +100,8 @@ class ConversationMemory:
         source_request_id: str | None = None,
         user_id: str | None = None,
         conversation_id: str | None = None,
+        domain: str | None = None,
+        key: str | None = None,
         importance: float = 0.5,
         tags: Sequence[str] = (),
         sensitive: bool = False,
@@ -138,6 +142,31 @@ class ConversationMemory:
                 reason_code="credential_marker",
             )
             raise SensitiveMemoryRejectedError("Credential-like memory content is rejected.")
+        normalized_domain, normalized_key = normalize_preference_locator(
+            domain,
+            key,
+        )
+        if (
+            normalized_category is MemoryCategory.USER_PREFERENCE
+            and contains_restricted_profile_data(
+                content,
+                domain=normalized_domain,
+                key=normalized_key,
+            )
+        ):
+            self._record(
+                "sensitive_memory_rejected",
+                request_id=source_request_id,
+                memory_id=None,
+                category=normalized_category,
+                operation="store",
+                content_length=len(content),
+                reason_code="restricted_profile_data",
+            )
+            raise SensitiveMemoryRejectedError(
+                "Medical, nutritional, anthropometric, and training-history data "
+                "cannot be stored as preferences."
+            )
         with self._lock:
             probe = MemoryEntry(
                 memory_id="memory-probe",
@@ -148,6 +177,8 @@ class ConversationMemory:
                 source_request_id=source_request_id,
                 user_id=user_id,
                 conversation_id=conversation_id,
+                domain=normalized_domain,
+                key=normalized_key,
                 importance=importance,
                 tags=tuple(tags),
                 active=True,
@@ -155,6 +186,11 @@ class ConversationMemory:
                 expires_at=expires_at,
                 metadata=metadata or {},
             )
+            occupied = self._find_structured_preference(probe)
+            if occupied is not None:
+                raise InvalidMemoryEntryError(
+                    "A preference already exists for this user, domain, and key."
+                )
             if self._policy.deduplicate:
                 duplicate = self._find_duplicate(probe)
                 if duplicate is not None:
@@ -202,6 +238,8 @@ class ConversationMemory:
         *,
         user_id: str | None = None,
         conversation_id: str | None = None,
+        domain: str | None = None,
+        key: str | None = None,
         tags: Sequence[str] = (),
         categories: Sequence[MemoryCategory] = (),
         include_sensitive: bool = False,
@@ -215,6 +253,10 @@ class ConversationMemory:
         category_filter = frozenset(
             item if isinstance(item, MemoryCategory) else MemoryCategory(item)
             for item in categories
+        )
+        normalized_domain, normalized_key = normalize_preference_locator(
+            domain,
+            key,
         )
         with self._lock:
             candidates = []
@@ -233,6 +275,10 @@ class ConversationMemory:
                 if required_tags and not required_tags.intersection(entry.tags):
                     continue
                 if category_filter and entry.category not in category_filter:
+                    continue
+                if normalized_domain is not None and entry.domain != normalized_domain:
+                    continue
+                if normalized_key is not None and entry.key != normalized_key:
                     continue
                 entry_tokens = frozenset(normalize_content(entry.content).split())
                 if query_tokens and not query_tokens.intersection(entry_tokens):
@@ -269,6 +315,8 @@ class ConversationMemory:
         include_sensitive: bool = False,
         user_id: str | None = None,
         conversation_id: str | None = None,
+        domain: str | None = None,
+        key: str | None = None,
         tags: Sequence[str] = (),
         categories: Sequence[MemoryCategory] = (),
         limit: int | None = None,
@@ -278,6 +326,10 @@ class ConversationMemory:
         category_filter = frozenset(
             item if isinstance(item, MemoryCategory) else MemoryCategory(item)
             for item in categories
+        )
+        normalized_domain, normalized_key = normalize_preference_locator(
+            domain,
+            key,
         )
         with self._lock:
             entries = tuple(
@@ -299,6 +351,8 @@ class ConversationMemory:
                     not category_filter
                     or entry.category in category_filter
                 )
+                and (normalized_domain is None or entry.domain == normalized_domain)
+                and (normalized_key is None or entry.key == normalized_key)
             )
             return tuple(
                 sorted(
@@ -358,6 +412,18 @@ class ConversationMemory:
                 raise SensitiveMemoryRejectedError("Sensitive memory storage is disabled.")
             if contains_secret_material(next_content):
                 raise SensitiveMemoryRejectedError("Credential-like memory content is rejected.")
+            if (
+                current.category is MemoryCategory.USER_PREFERENCE
+                and contains_restricted_profile_data(
+                    next_content,
+                    domain=current.domain,
+                    key=current.key,
+                )
+            ):
+                raise SensitiveMemoryRejectedError(
+                    "Medical, nutritional, anthropometric, and training-history data "
+                    "cannot be stored as preferences."
+                )
             updated = replace(
                 current,
                 content=next_content,
@@ -420,6 +486,23 @@ class ConversationMemory:
                 and entry.tags == probe.tags
                 and entry.user_id == probe.user_id
                 and entry.conversation_id == probe.conversation_id
+            ):
+                return entry
+        return None
+
+    def _find_structured_preference(
+        self,
+        probe: MemoryEntry,
+    ) -> MemoryEntry | None:
+        if probe.domain is None or probe.key is None:
+            return None
+        for entry in sorted(self._entries.values(), key=lambda item: item.memory_id):
+            if (
+                entry.active
+                and entry.category is MemoryCategory.USER_PREFERENCE
+                and entry.user_id == probe.user_id
+                and entry.domain == probe.domain
+                and entry.key == probe.key
             ):
                 return entry
         return None

@@ -233,3 +233,91 @@ def test_natural_phrases_map_to_existing_memory_operations(
         decision = orchestrator.classify_prompt(text)
         assert decision.route is RequestRoute.MEMORY_QUERY
         assert decision.memory_operation is operation
+
+
+def test_natural_structured_preferences_use_exact_locator_across_rebuild(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    memory_path = _configure_runtime(monkeypatch, tmp_path)
+    first = Bootstrap.build()
+
+    stored_food = _execute_scoped(
+        first,
+        "recuerda que nutrition.food_preference: prefiero comida italiana",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    stored_training = _execute_scoped(
+        first,
+        "recuerda que training.schedule_preference: prefiero entrenar por la tarde",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    stored_travel = _execute_scoped(
+        first,
+        "recuerda que travel.schedule_preference: prefiero viajar por la manana",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    queried_food = _execute_scoped(
+        first,
+        "que recuerdas de nutrition.food_preference",
+        user_id="user-a",
+    )
+    updated_food = _execute_scoped(
+        first,
+        "actualiza mi preferencia nutrition.food_preference a comida vegetariana",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+    forgotten_travel = _execute_scoped(
+        first,
+        "olvida travel.schedule_preference",
+        user_id="user-a",
+        allow_side_effects=True,
+    )
+
+    assert stored_food.status is RouteExecutionStatus.COMPLETED
+    assert stored_training.status is RouteExecutionStatus.COMPLETED
+    assert stored_travel.status is RouteExecutionStatus.COMPLETED
+    assert queried_food.output["count"] == 1
+    assert queried_food.output["items"][0]["domain"] == "nutrition"
+    assert queried_food.output["items"][0]["key"] == "food_preference"
+    assert updated_food.status is RouteExecutionStatus.COMPLETED
+    assert updated_food.output["entry"]["content"] == "prefiero comida vegetariana"
+    assert forgotten_travel.status is RouteExecutionStatus.COMPLETED
+
+    second = Bootstrap.build()
+    recovered_food = _execute_scoped(
+        second,
+        "que recuerdas de nutrition.food_preference",
+        user_id="user-a",
+    )
+    recovered_training = _execute_scoped(
+        second,
+        "que recuerdas de training.schedule_preference",
+        user_id="user-a",
+    )
+    recovered_travel = _execute_scoped(
+        second,
+        "que recuerdas de travel.schedule_preference",
+        user_id="user-a",
+    )
+
+    assert tuple(item["content"] for item in recovered_food.output["items"]) == (
+        "prefiero comida vegetariana",
+    )
+    assert tuple(item["content"] for item in recovered_training.output["items"]) == (
+        "prefiero entrenar por la tarde",
+    )
+    assert recovered_travel.output["items"] == ()
+    payload = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert {
+        (entry["domain"], entry["key"])
+        for entry in payload["entries"]
+    } == {
+        ("nutrition", "food_preference"),
+        ("training", "schedule_preference"),
+    }

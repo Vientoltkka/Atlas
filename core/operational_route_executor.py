@@ -498,6 +498,7 @@ class MemoryRouteHandler(_BaseRouteHandler):
         del context
         started = self._clock()
         operation = decision.memory_operation
+        preference_domain, preference_key = _memory_preference_locator(request)
         if operation is None:
             return _clarification_result(
                 self,
@@ -552,6 +553,8 @@ class MemoryRouteHandler(_BaseRouteHandler):
                     source_request_id=request.request_id,
                     user_id=request.user_id,
                     conversation_id=request.conversation_id,
+                    domain=preference_domain,
+                    key=preference_key,
                     importance=_memory_importance(request),
                     tags=_memory_tags(request),
                     sensitive=bool(request.metadata.get("sensitive", False)),
@@ -606,6 +609,8 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 _memory_query(request),
                 user_id=request.user_id,
                 conversation_id=request.conversation_id,
+                domain=preference_domain,
+                key=preference_key,
                 tags=_memory_tags(request),
                 categories=_memory_categories_filter(request),
                 include_sensitive=False,
@@ -650,6 +655,8 @@ class MemoryRouteHandler(_BaseRouteHandler):
                 include_sensitive=False,
                 user_id=request.user_id,
                 conversation_id=request.conversation_id,
+                domain=preference_domain,
+                key=preference_key,
                 tags=_memory_tags(request),
                 categories=_memory_categories_filter(request),
                 limit=_memory_limit(request),
@@ -2293,16 +2300,48 @@ def _tool_has_side_effects(descriptor: object) -> bool:
     )
 
 
+def _memory_preference_locator(
+    request: AtlasRequest,
+) -> tuple[str | None, str | None]:
+    domain = request.metadata.get("memory_domain")
+    key = request.metadata.get("memory_key")
+    if domain is None and key is None:
+        match = re.search(
+            r"\b(?P<domain>[a-z][a-z0-9_]*)\."
+            r"(?P<key>[a-z][a-z0-9_]*_preference)\b",
+            request.content,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None, None
+        return match.group("domain").casefold(), match.group("key").casefold()
+    return (
+        domain.strip().casefold() if isinstance(domain, str) else None,
+        key.strip().casefold() if isinstance(key, str) else None,
+    )
+
+
 def _memory_content(request: AtlasRequest) -> str:
     explicit = request.metadata.get("memory_content")
     if isinstance(explicit, str):
         return explicit.strip()
+    domain, key = _memory_preference_locator(request)
     normalized = re.sub(
         r"^\s*(?:recuerda(?:\s+que)?|remember(?:\s+that)?|guarda(?:\s+que)?)\s*",
         "",
         request.content,
         flags=re.IGNORECASE,
     )
+    if domain is not None and key is not None:
+        locator = re.escape(f"{domain}.{key}")
+        normalized = re.sub(
+            rf"^\s*(?:(?:(?:mi|la)\s+)?preferencia(?:\s+de)?\s+|prefiero\s+)?"
+            rf"{locator}\s*(?::|=|\bes\b|\bque\b)?\s*",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     return normalized.strip()
 
 
@@ -2310,6 +2349,8 @@ def _memory_query(request: AtlasRequest) -> str:
     explicit = request.metadata.get("memory_query")
     if isinstance(explicit, str):
         return explicit.strip()
+    if _memory_preference_locator(request) != (None, None):
+        return ""
     query = re.sub(
         r"^\s*(?:qu[e\u00e9]\s+recuerdas(?:\s+de)?|recupera|busca\s+en\s+memoria|memoria)\s*",
         "",
@@ -2325,6 +2366,8 @@ def _memory_category(request: AtlasRequest) -> MemoryCategory:
     explicit = request.metadata.get("memory_category")
     if isinstance(explicit, str):
         return MemoryCategory(explicit)
+    if _memory_preference_locator(request) != (None, None):
+        return MemoryCategory.USER_PREFERENCE
     normalized = request.content.casefold()
     if "prefiero" in normalized or "preferencia" in normalized:
         return MemoryCategory.USER_PREFERENCE
@@ -2430,13 +2473,16 @@ def _resolve_memory_id(
     retrieve_entries = getattr(memory, "retrieve_entries", None)
     if not callable(retrieve_entries):
         return None, False
+    domain, key = _memory_preference_locator(request)
     query = _memory_target_query(request)
-    if not query:
+    if not query and domain is None:
         return None, False
     matches = retrieve_entries(
-        query,
+        "" if domain is not None else query,
         user_id=request.user_id,
         conversation_id=request.conversation_id,
+        domain=domain,
+        key=key,
         categories=_memory_categories_filter(request),
         include_sensitive=False,
     )
@@ -2526,6 +2572,8 @@ def _memory_entry_view(entry: MemoryEntry) -> Mapping[str, Any]:
         "memory_id": entry.memory_id,
         "content": entry.content,
         "category": entry.category.value,
+        "domain": entry.domain,
+        "key": entry.key,
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
         "importance": entry.importance,

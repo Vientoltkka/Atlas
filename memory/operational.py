@@ -22,6 +22,44 @@ _SECRET_TERMS = (
     "credential",
 )
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PREFERENCE_PART_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_RESTRICTED_PREFERENCE_PARTS = frozenset(
+    {
+        "anthropometric",
+        "anthropometrics",
+        "blood_pressure",
+        "body_fat",
+        "calorie",
+        "calories",
+        "glucose",
+        "health",
+        "height",
+        "history",
+        "log",
+        "macro",
+        "macros",
+        "measurement",
+        "measurements",
+        "medical",
+        "metric",
+        "metrics",
+        "nutrition_history",
+        "record",
+        "records",
+        "training_history",
+        "weight",
+    }
+)
+_RESTRICTED_PREFERENCE_CONTENT = re.compile(
+    r"\b(?:peso|weight|altura|height|grasa\s+corporal|body\s+fat|imc|bmi|"
+    r"presi[o\u00f3]n\s+arterial|blood\s+pressure|glucosa|glucose|"
+    r"colesterol|cholesterol|calor[i\u00ed]as?|calories|kcal|macros?)\b"
+    r"[^.\n]{0,24}\d|\d[^.\n]{0,24}\b(?:kg|cm|peso|weight|altura|height|"
+    r"grasa\s+corporal|body\s+fat|imc|bmi|presi[o\u00f3]n\s+arterial|"
+    r"blood\s+pressure|glucosa|glucose|colesterol|cholesterol|"
+    r"calor[i\u00ed]as?|calories|kcal|macros?)\b",
+    re.IGNORECASE,
+)
 
 
 class MemoryCategory(str, Enum):
@@ -117,6 +155,8 @@ class MemoryEntry:
     sensitive: bool = False
     expires_at: datetime | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    domain: str | None = None
+    key: str | None = None
 
     def __post_init__(self) -> None:
         _validate_id(self.memory_id, "memory_id")
@@ -130,6 +170,17 @@ class MemoryEntry:
             if isinstance(self.category, MemoryCategory)
             else MemoryCategory(self.category)
         )
+        domain, key = normalize_preference_locator(self.domain, self.key)
+        if (domain is not None or key is not None) and (
+            category is not MemoryCategory.USER_PREFERENCE
+        ):
+            raise InvalidMemoryEntryError(
+                "domain and key are only valid for user preferences."
+            )
+        if domain is not None and self.user_id is None:
+            raise InvalidMemoryEntryError(
+                "Structured user preferences require a user_id."
+            )
         _require_aware(self.created_at, "created_at")
         _require_aware(self.updated_at, "updated_at")
         if self.updated_at < self.created_at:
@@ -157,6 +208,8 @@ class MemoryEntry:
         )
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "category", category)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "key", key)
         object.__setattr__(self, "importance", float(self.importance))
         object.__setattr__(self, "tags", tags)
         object.__setattr__(self, "metadata", freeze_safe_mapping(self.metadata))
@@ -186,6 +239,44 @@ class MemoryEvent:
 def contains_secret_material(content: str) -> bool:
     normalized = content.casefold()
     return any(term in normalized for term in _SECRET_TERMS)
+
+
+def contains_restricted_profile_data(
+    content: str,
+    *,
+    domain: str | None = None,
+    key: str | None = None,
+) -> bool:
+    """Reject profile metrics and histories that are outside this memory block."""
+    locator_parts = {
+        part
+        for value in (domain, key)
+        if value
+        for part in re.split(r"[._-]+", value.casefold())
+    }
+    if locator_parts.intersection(_RESTRICTED_PREFERENCE_PARTS):
+        return True
+    return _RESTRICTED_PREFERENCE_CONTENT.search(content) is not None
+
+
+def normalize_preference_locator(
+    domain: str | None,
+    key: str | None,
+) -> tuple[str | None, str | None]:
+    if domain is None and key is None:
+        return None, None
+    if not isinstance(domain, str) or not isinstance(key, str):
+        raise InvalidMemoryEntryError(
+            "Preference domain and key must be provided together."
+        )
+    normalized_domain = domain.strip().casefold()
+    normalized_key = key.strip().casefold()
+    if (
+        _PREFERENCE_PART_PATTERN.fullmatch(normalized_domain) is None
+        or _PREFERENCE_PART_PATTERN.fullmatch(normalized_key) is None
+    ):
+        raise InvalidMemoryEntryError("Preference domain or key is invalid.")
+    return normalized_domain, normalized_key
 
 
 def normalize_content(content: str) -> str:
