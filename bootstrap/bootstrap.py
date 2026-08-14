@@ -1,4 +1,4 @@
-"""Bootstrap module for Atlas."""
+﻿"""Bootstrap module for Atlas."""
 
 import math
 import os
@@ -8,6 +8,7 @@ from pathlib import Path
 from agents.chat_agent import ChatAgent
 from agents.coding_agent import CodingAgent
 from agents.project_agent import ProjectAgent
+from agents.training_agent import TrainingAgent
 from agents.registry import AgentRegistry
 
 from bootstrap.atlas_request_classifier import build_core_atlas_request_classifier
@@ -1098,6 +1099,11 @@ class Bootstrap:
             )
         )
 
+        registry.register(
+            TrainingAgent(
+                prompt_client,
+            )
+        )
         registry.register(
             ProjectAgent(
                 prompt_client,
