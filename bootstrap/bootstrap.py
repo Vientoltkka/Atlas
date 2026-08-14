@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agents.chat_agent import ChatAgent
 from agents.coding_agent import CodingAgent
+from agents.nutrition_agent import NutritionAgent
 from agents.project_agent import ProjectAgent
 from agents.training_agent import TrainingAgent
 from agents.registry import AgentRegistry
@@ -1101,6 +1102,11 @@ class Bootstrap:
 
         registry.register(
             TrainingAgent(
+                prompt_client,
+            )
+        )
+        registry.register(
+            NutritionAgent(
                 prompt_client,
             )
         )
