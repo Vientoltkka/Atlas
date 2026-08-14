@@ -37,6 +37,7 @@ from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager
 from core.model_selection_policy import ModelSelectionPolicy
 from core.multi_capability_planner import MultiCapabilityPlanner
+from core.agent_orchestrator import AgentOrchestrator
 from core.orchestrator import AtlasOrchestrator
 from core.operational_request_router import OperationalRequestRouter
 from core.operational_route_executor import (
@@ -1259,7 +1260,7 @@ class Bootstrap:
         # Orchestrator
         # -----------------------
 
-        return AtlasOrchestrator(
+        orchestrator = AtlasOrchestrator(
             planner=planner,
             router=router,
             model_manager=model_manager,
@@ -1300,6 +1301,8 @@ class Bootstrap:
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
         )
+        orchestrator.agent_orchestrator = AgentOrchestrator(registry)
+        return orchestrator
 
 
 def _read_int(
