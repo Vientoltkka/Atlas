@@ -550,19 +550,22 @@ def test_personal_context_uses_domain_active_profile_user_and_five_entry_cap(
     _store_profile(memory, "client", "Cliente", request_id="profile-client")
     main_food = _store_preference(memory, "prefiero comida italiana", request_id="main-food", domain="nutrition", key="food_preference", profile_id="main")
     main_training = _store_preference(memory, "prefiero entrenar por la manana", request_id="main-training", domain="training", key="schedule_preference", profile_id="main")
-    client_food = _store_preference(memory, "prefiero comida japonesa", request_id="client-food", domain="nutrition", key="food_preference", profile_id="client")
+    client_context = _store_preference(memory, "prefiero avisos del cliente", request_id="client-context", domain="client", key="notification_preference", profile_id="client")
+    general_context = _store_preference(memory, "prefiero respuestas breves", request_id="general", domain="general", key="response_preference", profile_id="main")
     _store_preference(memory, "prefiero comida francesa", request_id="other-food", user_id="user-b", domain="nutrition", key="food_preference", profile_id="main")
     builder = OperationalContextBuilder(memory, clock=lambda: NOW)
 
     nutrition = builder.build(_personal_request("prepara un menu nutricional", "nutrition"), _direct_response_decision("nutrition"))
     training = builder.build(_personal_request("crea una rutina de entrenamiento", "training"), _direct_response_decision("training"))
     code = builder.build(_personal_request("revisa este codigo Python", "code"), _direct_response_decision("code"))
-    client = builder.build(_personal_request("prepara un menu para profile.client", "client"), _direct_response_decision("client"))
+    client = builder.build(_personal_request("consulta para profile.client", "client"), _direct_response_decision("client"))
+    general = builder.build(_personal_request("dame una recomendacion general", "general"), _direct_response_decision("general"))
 
     assert nutrition.relevant_memories == (main_food,)
     assert training.relevant_memories == (main_training,)
     assert code.relevant_memories == ()
-    assert client.relevant_memories == (client_food,)
+    assert client.relevant_memories == (client_context,)
+    assert general.relevant_memories == (general_context,)
 
     for index in range(6):
         _store_preference(memory, f"preferencia nutricional valida {index}", request_id=f"extra-{index}", domain="nutrition", key=f"extra_{index}_preference", profile_id="main")

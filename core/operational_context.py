@@ -48,7 +48,8 @@ _STOP_WORDS = frozenset(
 
 
 _MAX_CONTEXT_MEMORIES = 5
-_DOMAIN_MARKERS = {
+_INTENT_MARKERS = {
+    "client": frozenset({"client", "cliente", "perfil", "profile"}),
     "nutrition": frozenset(
         {
             "alimento",
@@ -336,7 +337,7 @@ class OperationalContextBuilder:
             limit=self._policy.max_entries_per_query,
         ))
         active_profile_id, allow_unscoped = _active_profile_scope(request, entries)
-        request_domain = _request_domain(request)
+        request_intent = _request_intent(request)
         scored: list[tuple[MemoryEntry, MemoryRelevanceScore]] = []
         for entry in entries:
             if not isinstance(entry, MemoryEntry):
@@ -346,7 +347,7 @@ class OperationalContextBuilder:
                 request,
                 active_profile_id=active_profile_id,
                 allow_unscoped=allow_unscoped,
-                request_domain=request_domain,
+                request_intent=request_intent,
             ) or _rejection_reason(entry, request, decision, allowed_categories, now)
             if reason is not None:
                 self._record(
@@ -369,7 +370,7 @@ class OperationalContextBuilder:
             )
             if (
                 not _entry_is_relevant(entry, score, decision.route)
-                and not _preference_domain_relevant(entry, request_domain)
+                and not _preference_domain_relevant(entry, request_intent)
             ):
                 self._record(
                     "memory_candidate_rejected",
@@ -626,12 +627,14 @@ def _request_tags(request: AtlasRequest) -> frozenset[str]:
     return frozenset(normalize_tag(item) for item in values if normalize_tag(item))
 
 
-def _request_domain(request: AtlasRequest) -> str | None:
+def _request_intent(request: AtlasRequest) -> str:
+    if re.search(r"\b(?:profile|perfil)\.[a-z0-9][a-z0-9_-]*\b", request.content, flags=re.IGNORECASE):
+        return "client"
     tokens = _significant_tokens(request.content)
-    for domain, markers in _DOMAIN_MARKERS.items():
+    for intent, markers in _INTENT_MARKERS.items():
         if tokens.intersection(markers):
-            return domain
-    return None
+            return intent
+    return "general"
 
 
 def _active_profile_scope(
@@ -667,7 +670,7 @@ def _personal_preference_rejection(
     *,
     active_profile_id: str | None,
     allow_unscoped: bool,
-    request_domain: str | None,
+    request_intent: str | None,
 ) -> str | None:
     if entry.category is not MemoryCategory.USER_PREFERENCE:
         return None
@@ -678,17 +681,17 @@ def _personal_preference_rejection(
             return "different_profile"
     elif entry.profile_id != active_profile_id:
         return "different_profile"
-    if entry.domain is not None and entry.domain != request_domain:
+    if entry.domain is not None and entry.domain != request_intent:
         return "incompatible_domain"
     return None
 
 
 def _preference_domain_relevant(
     entry: MemoryEntry,
-    request_domain: str | None,
+    request_intent: str | None,
 ) -> bool:
     return bool(
         entry.category is MemoryCategory.USER_PREFERENCE
         and entry.domain is not None
-        and entry.domain == request_domain
+        and entry.domain == request_intent
     )
