@@ -344,10 +344,6 @@ class FileMemoryEntryRepository:
                     raise CorruptedMemoryRepositoryError(
                         "Personal memory contains restricted profile data."
                     )
-                if entry.profile_id is not None and entry.domain == "nutrition":
-                    raise CorruptedMemoryRepositoryError(
-                        "Personal memory contains unsupported profile nutrition data."
-                    )
                 locator = (
                     entry.user_id or "",
                     entry.profile_id or "",

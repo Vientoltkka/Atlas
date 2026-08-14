@@ -163,7 +163,6 @@ class ConversationMemory:
                     domain=normalized_domain,
                     key=normalized_key,
                 )
-                or (profile_id is not None and normalized_domain == "nutrition")
             )
         ):
             self._record(
@@ -481,7 +480,6 @@ class ConversationMemory:
                         domain=current.domain,
                         key=current.key,
                     )
-                    or (current.profile_id is not None and current.domain == "nutrition")
                 )
             ):
                 raise SensitiveMemoryRejectedError(

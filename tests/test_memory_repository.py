@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from bootstrap.bootstrap import Bootstrap, _personal_memory_path
+from core.operational_context import OperationalContextBuilder
+from core.operational_request_router import RequestRoute, RouteDecision
 from core.operational_route_executor import RouteExecutionStatus
 from core.request_gateway import RequestSafetyContext
+from core.request_gateway import RequestGateway
 from memory.conversation import ConversationMemory
 from memory.operational import (
     MemoryCategory,
@@ -76,6 +79,23 @@ def _store_profile(
     )
 
 
+
+def _personal_request(content: str, request_id: str):
+    return RequestGateway(
+        clock=lambda: NOW,
+        id_generator=lambda: request_id,
+    ).from_text(content, request_id=request_id, user_id="user-a")
+
+
+def _direct_response_decision(request_id: str) -> RouteDecision:
+    return RouteDecision(
+        request_id=request_id,
+        route=RequestRoute.DIRECT_RESPONSE,
+        confidence=1.0,
+        reason="test direct response",
+        matched_rules=("test.direct_response",),
+        created_at=NOW,
+    )
 def test_missing_file_is_empty_and_is_not_created(tmp_path: Path) -> None:
     path = tmp_path / "personal_memory.json"
 
@@ -506,19 +526,51 @@ def test_structured_persistence_rejects_unauthorized_sensitive_and_metrics(
             profile_id="client-a",
             profile_name="peso 80 kg",
         )
-    with pytest.raises(SensitiveMemoryRejectedError):
-        memory.store_entry(
-            "prefiero comida italiana",
-            category=MemoryCategory.USER_PREFERENCE,
-            source_request_id="request-6",
-            user_id="user-a",
-            profile_id="client-a",
-            domain="nutrition",
-            key="food_preference",
-        )
+    stored_food = memory.store_entry(
+        "prefiero comida italiana",
+        category=MemoryCategory.USER_PREFERENCE,
+        source_request_id="request-6",
+        user_id="user-a",
+        profile_id="client-a",
+        domain="nutrition",
+        key="food_preference",
+    )
 
-    assert json.loads(path.read_text(encoding="utf-8"))["entries"] == []
+    entries = json.loads(path.read_text(encoding="utf-8"))["entries"]
+    assert len(entries) == 1
+    assert entries[0]["memory_id"] == stored_food.memory_id
+    assert entries[0]["profile_id"] == "client-a"
 
+
+def test_personal_context_uses_domain_active_profile_user_and_five_entry_cap(
+    tmp_path: Path,
+) -> None:
+    memory = _memory(tmp_path / "personal_memory.json")
+    _store_profile(memory, "main", "Principal", request_id="profile-main", primary=True)
+    _store_profile(memory, "client", "Cliente", request_id="profile-client")
+    main_food = _store_preference(memory, "prefiero comida italiana", request_id="main-food", domain="nutrition", key="food_preference", profile_id="main")
+    main_training = _store_preference(memory, "prefiero entrenar por la manana", request_id="main-training", domain="training", key="schedule_preference", profile_id="main")
+    client_food = _store_preference(memory, "prefiero comida japonesa", request_id="client-food", domain="nutrition", key="food_preference", profile_id="client")
+    _store_preference(memory, "prefiero comida francesa", request_id="other-food", user_id="user-b", domain="nutrition", key="food_preference", profile_id="main")
+    builder = OperationalContextBuilder(memory, clock=lambda: NOW)
+
+    nutrition = builder.build(_personal_request("prepara un menu nutricional", "nutrition"), _direct_response_decision("nutrition"))
+    training = builder.build(_personal_request("crea una rutina de entrenamiento", "training"), _direct_response_decision("training"))
+    code = builder.build(_personal_request("revisa este codigo Python", "code"), _direct_response_decision("code"))
+    client = builder.build(_personal_request("prepara un menu para profile.client", "client"), _direct_response_decision("client"))
+
+    assert nutrition.relevant_memories == (main_food,)
+    assert training.relevant_memories == (main_training,)
+    assert code.relevant_memories == ()
+    assert client.relevant_memories == (client_food,)
+
+    for index in range(6):
+        _store_preference(memory, f"preferencia nutricional valida {index}", request_id=f"extra-{index}", domain="nutrition", key=f"extra_{index}_preference", profile_id="main")
+    limited = builder.build(_personal_request("prepara una dieta", "limited"), _direct_response_decision("limited"))
+
+    assert len(limited.relevant_memories) == 5
+    assert limited.total_characters <= memory.policy.max_context_characters
+    assert limited.truncated is True
 
 def test_corrupt_file_fails_controlled_without_overwrite(tmp_path: Path) -> None:
     path = tmp_path / "personal_memory.json"

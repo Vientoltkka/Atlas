@@ -1,4 +1,4 @@
-"""Deterministic bounded operational context built from Atlas memory."""
+﻿"""Deterministic bounded operational context built from Atlas memory."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
+import re
 from typing import Any
 
 from core.operational_request_router import RequestRoute, RouteDecision
@@ -46,6 +47,44 @@ _STOP_WORDS = frozenset(
 )
 
 
+_MAX_CONTEXT_MEMORIES = 5
+_DOMAIN_MARKERS = {
+    "nutrition": frozenset(
+        {
+            "alimento",
+            "alimentos",
+            "comida",
+            "comidas",
+            "dieta",
+            "menu",
+            "men\u00fa",
+            "nutricion",
+            "nutrici\u00f3n",
+            "nutricional",
+        }
+    ),
+    "training": frozenset(
+        {
+            "ejercicio",
+            "ejercicios",
+            "entrenamiento",
+            "entrenar",
+            "equipamiento",
+            "gimnasio",
+            "rutina",
+        }
+    ),
+    "code": frozenset(
+        {
+            "codigo",
+            "c\u00f3digo",
+            "programacion",
+            "programaci\u00f3n",
+            "python",
+            "software",
+        }
+    ),
+}
 class OperationalContextError(RuntimeError):
     code = "OPERATIONAL_CONTEXT_ERROR"
 
@@ -290,16 +329,25 @@ class OperationalContextBuilder:
             return ()
         request_tokens = _significant_tokens(request.content)
         request_tags = _request_tags(request)
-        scored: list[tuple[MemoryEntry, MemoryRelevanceScore]] = []
-        for entry in list_entries(
+        entries = tuple(list_entries(
             active_only=True,
             include_expired=False,
             include_sensitive=False,
             limit=self._policy.max_entries_per_query,
-        ):
+        ))
+        active_profile_id, allow_unscoped = _active_profile_scope(request, entries)
+        request_domain = _request_domain(request)
+        scored: list[tuple[MemoryEntry, MemoryRelevanceScore]] = []
+        for entry in entries:
             if not isinstance(entry, MemoryEntry):
                 continue
-            reason = _rejection_reason(entry, request, decision, allowed_categories, now)
+            reason = _personal_preference_rejection(
+                entry,
+                request,
+                active_profile_id=active_profile_id,
+                allow_unscoped=allow_unscoped,
+                request_domain=request_domain,
+            ) or _rejection_reason(entry, request, decision, allowed_categories, now)
             if reason is not None:
                 self._record(
                     "memory_candidate_rejected",
@@ -319,7 +367,10 @@ class OperationalContextBuilder:
                 request_tags=request_tags,
                 now=now,
             )
-            if not _entry_is_relevant(entry, score, decision.route):
+            if (
+                not _entry_is_relevant(entry, score, decision.route)
+                and not _preference_domain_relevant(entry, request_domain)
+            ):
                 self._record(
                     "memory_candidate_rejected",
                     request,
@@ -358,9 +409,8 @@ class OperationalContextBuilder:
         self,
         scored: tuple[tuple[MemoryEntry, MemoryRelevanceScore], ...],
     ) -> tuple[tuple[MemoryEntry, ...], bool]:
-        selected = tuple(
-            entry for entry, _score in scored[: self._policy.max_context_entries]
-        )
+        limit = min(self._policy.max_context_entries, _MAX_CONTEXT_MEMORIES)
+        selected = tuple(entry for entry, _score in scored[:limit])
         return selected, len(scored) > len(selected)
 
     def _apply_character_limit(
@@ -537,7 +587,7 @@ def _entry_is_relevant(
             "concisos",
             "idioma",
             "espanol",
-            "español",
+            "espaÃ±ol",
             "respuesta",
             "respuestas",
             "tono",
@@ -574,3 +624,71 @@ def _request_tags(request: AtlasRequest) -> frozenset[str]:
     else:
         values = ()
     return frozenset(normalize_tag(item) for item in values if normalize_tag(item))
+
+
+def _request_domain(request: AtlasRequest) -> str | None:
+    tokens = _significant_tokens(request.content)
+    for domain, markers in _DOMAIN_MARKERS.items():
+        if tokens.intersection(markers):
+            return domain
+    return None
+
+
+def _active_profile_scope(
+    request: AtlasRequest,
+    entries: Sequence[MemoryEntry],
+) -> tuple[str | None, bool]:
+    explicit = request.metadata.get("profile_id")
+    if isinstance(explicit, str):
+        explicit = explicit.strip().casefold() or None
+    else:
+        match = re.search(
+            r"\bprofile\.(?P<profile_id>[a-z0-9][a-z0-9_-]*)\b",
+            request.content,
+            flags=re.IGNORECASE,
+        )
+        explicit = match.group("profile_id").casefold() if match else None
+    primary = next(
+        (
+            entry.profile_id
+            for entry in entries
+            if entry.category is MemoryCategory.USER_PROFILE
+            and entry.user_id == request.user_id
+            and entry.profile_is_primary
+        ),
+        None,
+    )
+    return explicit or primary, explicit is None or explicit == primary
+
+
+def _personal_preference_rejection(
+    entry: MemoryEntry,
+    request: AtlasRequest,
+    *,
+    active_profile_id: str | None,
+    allow_unscoped: bool,
+    request_domain: str | None,
+) -> str | None:
+    if entry.category is not MemoryCategory.USER_PREFERENCE:
+        return None
+    if entry.user_id is not None and entry.user_id != request.user_id:
+        return "different_user"
+    if entry.profile_id is None:
+        if not allow_unscoped:
+            return "different_profile"
+    elif entry.profile_id != active_profile_id:
+        return "different_profile"
+    if entry.domain is not None and entry.domain != request_domain:
+        return "incompatible_domain"
+    return None
+
+
+def _preference_domain_relevant(
+    entry: MemoryEntry,
+    request_domain: str | None,
+) -> bool:
+    return bool(
+        entry.category is MemoryCategory.USER_PREFERENCE
+        and entry.domain is not None
+        and entry.domain == request_domain
+    )
