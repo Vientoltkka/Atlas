@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from agents.chat_agent import ChatAgent
+from agents.code_agent import CodeAgent
 from agents.coding_agent import CodingAgent
 from agents.nutrition_agent import NutritionAgent
 from agents.project_agent import ProjectAgent
@@ -1097,6 +1098,11 @@ class Bootstrap:
                 prompt_client,
                 read_file,
                 write_file,
+            )
+        )
+        registry.register(
+            CodeAgent(
+                prompt_client,
             )
         )
 
