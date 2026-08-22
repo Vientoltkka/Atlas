@@ -8,6 +8,7 @@ from bootstrap.agent_system import build_core_agent_system
 from core.agent_context import AgentContext
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutionRequest, AgentExecutionStatus, AgentHandlerRegistry
+from core.agent_working_memory import AgentWorkingMemory
 from core.agent_handler_registration import AgentHandlerRegistrationItem, AgentHandlerRegistrationRequest
 from core.agent_manifest import AgentManifestLoader
 from core.agent_registration import AgentRegistrationPolicy, AgentRegistrationRequest
@@ -334,3 +335,11 @@ def test_compatibility_with_existing_phase_apis(tmp_path: Path) -> None:
     assert system.agent_resolver.resolve(
         AgentResolutionRequest(required_agent_ids=("atlas.agent.echo",), require_unique_top_score=False)
     ).selected_agent_id == "atlas.agent.echo"
+
+
+def test_working_memory_is_explicitly_composed_and_injectable() -> None:
+    memory = AgentWorkingMemory()
+    result = build_core_agent_system(agent_working_memory=memory)
+
+    assert result.system is not None
+    assert result.system.agent_working_memory is memory

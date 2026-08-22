@@ -21,6 +21,7 @@ from core.agent_registry import (
     AgentContextPolicy,
     AgentDefinition,
     AgentLimits,
+    AgentMemoryPolicy,
     AgentPermissions,
     AgentRegistry,
     AgentType,
@@ -65,6 +66,7 @@ def _definition(
     enabled: bool = True,
     context_policy: AgentContextPolicy | None = None,
     permissions: AgentPermissions | None = None,
+    memory_policy: AgentMemoryPolicy | None = None,
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
@@ -75,6 +77,7 @@ def _definition(
         limits=AgentLimits(max_steps=1, max_tool_calls=0, max_context_items=8),
         capabilities=AgentCapabilities(capabilities=capability_ids),
         context_policy=context_policy or AgentContextPolicy(allow_user_input=True),
+        memory_policy=memory_policy or AgentMemoryPolicy(),
         enabled=enabled,
     )
 
@@ -341,3 +344,37 @@ def test_cancelled_skill_execution_context_stops_agent_before_handler() -> None:
     assert result.status is AgentExecutionStatus.CANCELLED
     assert result.error_code == "CANCELLED"
     assert result.context is None
+
+
+@dataclass(frozen=True)
+class MemoryAwareHandler:
+    agent_id: str = "atlas.agent.echo"
+
+    def handle(self, context: AgentContext):
+        return {
+            "previous": dict(context.memory_context),
+            "result": "stored",
+        }
+
+
+def test_executor_hydrates_and_updates_scoped_working_memory() -> None:
+    definition = _definition(
+        permissions=AgentPermissions(can_modify_memory=True, requires_confirmation=False),
+        memory_policy=AgentMemoryPolicy(
+            can_read_memory=True,
+            can_write_memory=True,
+            max_memory_items=2,
+        ),
+    )
+    executor = _executor(definition, handlers=(MemoryAwareHandler(),))
+
+    first = executor.execute(_request())
+    second = executor.execute(_request())
+
+    assert first.status is AgentExecutionStatus.COMPLETED
+    assert first.output == {"previous": {}, "result": "stored"}
+    assert second.status is AgentExecutionStatus.COMPLETED
+    assert second.output == {
+        "previous": {"previous": {}, "result": "stored"},
+        "result": "stored",
+    }

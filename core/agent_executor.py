@@ -22,6 +22,7 @@ from core.agent_context import (
     AgentContextStatus,
 )
 from core.agent_registry import AgentDefinition, validate_agent_id
+from core.agent_working_memory import AgentWorkingMemory
 from core.agent_resolver import (
     AgentResolutionRequest,
     AgentResolutionResult,
@@ -303,6 +304,7 @@ class AgentExecutor:
         agent_resolver: AgentResolver,
         agent_context_builder: AgentContextBuilder,
         agent_handler_registry: AgentHandlerRegistry,
+        working_memory: AgentWorkingMemory | None = None,
     ) -> None:
         if not isinstance(agent_resolver, AgentResolver):
             raise AgentExecutionError("AgentExecutor requires AgentResolver.")
@@ -310,9 +312,12 @@ class AgentExecutor:
             raise AgentExecutionError("AgentExecutor requires AgentContextBuilder.")
         if not isinstance(agent_handler_registry, AgentHandlerRegistry):
             raise AgentExecutionError("AgentExecutor requires AgentHandlerRegistry.")
+        if working_memory is not None and not isinstance(working_memory, AgentWorkingMemory):
+            raise AgentExecutionError("working_memory must be AgentWorkingMemory or None.")
         self._agent_resolver = agent_resolver
         self._agent_context_builder = agent_context_builder
         self._agent_handler_registry = agent_handler_registry
+        self._working_memory = working_memory or AgentWorkingMemory()
 
     def execute(
         self,
@@ -443,6 +448,15 @@ class AgentExecutor:
                 safe_message="selected agent does not declare a required capability.",
             )
 
+        working_memory_context = self._working_memory.read(
+            agent.agent_id,
+            request.execution_id,
+            agent.memory_policy,
+        )
+        memory_context = _merged_memory_context(
+            request.memory_context,
+            working_memory_context,
+        )
         context_request = AgentContextRequest(
             agent=agent,
             task_id=request.task_id,
@@ -452,7 +466,7 @@ class AgentExecutor:
             structured_input=request.structured_input,
             shared_context=request.shared_context,
             conversation_context=request.conversation_context,
-            memory_context=request.memory_context,
+            memory_context=memory_context,
             tool_results=request.tool_results,
             workflow_results=request.workflow_results,
             metadata=request.metadata,
@@ -542,6 +556,12 @@ class AgentExecutor:
             )
 
         events.append(_event("agent_handler_succeeded", AgentExecutionStatus.COMPLETED, request=request, agent=agent))
+        self._working_memory.write(
+            agent.agent_id,
+            request.execution_id,
+            output,
+            agent.memory_policy,
+        )
         events.append(_event("agent_execution_completed", AgentExecutionStatus.COMPLETED, request=request, agent=agent))
         return _result(
             AgentExecutionStatus.COMPLETED,
@@ -555,6 +575,21 @@ class AgentExecutor:
             metadata={"sanitized_output_fields": sanitized_count},
             events=events,
         )
+
+
+def _merged_memory_context(
+    provided: Mapping[str, object] | None,
+    working: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    """Preserve caller context while letting the scoped snapshot take priority."""
+
+    if not working:
+        return provided
+    if provided is None:
+        return working
+    if not isinstance(provided, Mapping):
+        return provided
+    return {**provided, **working}
 
 
 def agent_execution_request_signature(

@@ -8,6 +8,7 @@ from core.agent_cooperation_automatic_execution import (
 from core.agent_cooperation_automatic_planner import AgentCooperationAutomaticPlanner
 from core.agent_cooperation_plan import AgentCooperationPlanner
 from core.agent_context import AgentContextBuilder
+from core.agent_working_memory import AgentWorkingMemory
 from core.agent_delegation import AgentDelegationService
 from core.agent_delegation_chain import AgentDelegationChainService
 from core.agent_delegation_coordinator import AgentDelegationCoordinator
@@ -40,6 +41,7 @@ def build_core_agent_system(
     agent_handler_registration_service: AgentHandlerRegistrationService | None = None,
     agent_resolver: AgentResolver | None = None,
     agent_context_builder: AgentContextBuilder | None = None,
+    agent_working_memory: AgentWorkingMemory | None = None,
     agent_executor: AgentExecutor | None = None,
     multi_agent_resolver: MultiAgentResolver | None = None,
     multi_agent_coordinator: MultiAgentCoordinator | None = None,
@@ -68,6 +70,7 @@ def build_core_agent_system(
         agent_handler_registration_service=agent_handler_registration_service,
         agent_resolver=agent_resolver,
         agent_context_builder=agent_context_builder,
+        agent_working_memory=agent_working_memory,
         agent_executor=agent_executor,
         multi_agent_resolver=multi_agent_resolver,
         multi_agent_coordinator=multi_agent_coordinator,

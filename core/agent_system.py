@@ -28,6 +28,7 @@ from core.agent_plan_replanner import AgentPlanReplanner, build_core_agent_plan_
 from core.agent_plan_supervisor import AgentPlanSupervisor, build_core_agent_plan_supervisor
 from core.agent_discovery import AgentDiscovery
 from core.agent_executor import AgentExecutor, AgentHandlerRegistry
+from core.agent_working_memory import AgentWorkingMemory
 from core.agent_handler_registration import (
     AgentHandlerRegistrationItem,
     AgentHandlerRegistrationPolicy,
@@ -99,6 +100,7 @@ class AgentSystem:
     agent_handler_registration_service: AgentHandlerRegistrationService
     agent_resolver: AgentResolver
     agent_context_builder: AgentContextBuilder
+    agent_working_memory: AgentWorkingMemory
     agent_executor: AgentExecutor
     multi_agent_resolver: MultiAgentResolver
     multi_agent_coordinator: MultiAgentCoordinator
@@ -132,6 +134,8 @@ class AgentSystem:
             raise InvalidAgentSystemBuildRequestError("agent_resolver must be AgentResolver.")
         if not isinstance(self.agent_context_builder, AgentContextBuilder):
             raise InvalidAgentSystemBuildRequestError("agent_context_builder must be AgentContextBuilder.")
+        if not isinstance(self.agent_working_memory, AgentWorkingMemory):
+            raise InvalidAgentSystemBuildRequestError("agent_working_memory must be AgentWorkingMemory.")
         if not isinstance(self.agent_executor, AgentExecutor):
             raise InvalidAgentSystemBuildRequestError("agent_executor must be AgentExecutor.")
         if not isinstance(self.multi_agent_resolver, MultiAgentResolver):
@@ -256,6 +260,7 @@ class AgentSystemBuilder:
         agent_handler_registration_service: AgentHandlerRegistrationService | None = None,
         agent_resolver: AgentResolver | None = None,
         agent_context_builder: AgentContextBuilder | None = None,
+        agent_working_memory: AgentWorkingMemory | None = None,
         agent_executor: AgentExecutor | None = None,
         multi_agent_resolver: MultiAgentResolver | None = None,
         multi_agent_coordinator: MultiAgentCoordinator | None = None,
@@ -281,6 +286,7 @@ class AgentSystemBuilder:
         self._agent_handler_registration_service = agent_handler_registration_service
         self._agent_resolver = agent_resolver
         self._agent_context_builder = agent_context_builder
+        self._agent_working_memory = agent_working_memory
         self._agent_executor = agent_executor
         self._multi_agent_resolver = multi_agent_resolver
         self._multi_agent_coordinator = multi_agent_coordinator
@@ -344,7 +350,16 @@ class AgentSystemBuilder:
         context_builder = (
             self._agent_context_builder if self._agent_context_builder is not None else AgentContextBuilder()
         )
-        executor = self._agent_executor if self._agent_executor is not None else AgentExecutor(resolver, context_builder, handler_registry)
+        working_memory = (
+            self._agent_working_memory
+            if self._agent_working_memory is not None
+            else AgentWorkingMemory()
+        )
+        executor = (
+            self._agent_executor
+            if self._agent_executor is not None
+            else AgentExecutor(resolver, context_builder, handler_registry, working_memory)
+        )
         multi_agent_resolver = (
             self._multi_agent_resolver if self._multi_agent_resolver is not None else MultiAgentResolver(registry)
         )
@@ -480,6 +495,7 @@ class AgentSystemBuilder:
             agent_handler_registration_service=handler_registration_service,
             agent_resolver=resolver,
             agent_context_builder=context_builder,
+            agent_working_memory=working_memory,
             agent_executor=executor,
             multi_agent_resolver=multi_agent_resolver,
             multi_agent_coordinator=multi_agent_coordinator,
