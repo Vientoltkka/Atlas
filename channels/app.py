@@ -12,11 +12,20 @@ from typing import Any, Callable
 from fastapi import FastAPI
 
 from channels.base_channel import InvalidChannelMessageError
-from channels.webhook_idempotency import IdempotencyStore
+from channels.webhook_idempotency import IdempotencyStore, SqliteIdempotencyStore
 from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
 from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
+
+
+def _build_store() -> IdempotencyStore | SqliteIdempotencyStore:
+    """Development default: in-memory. Set ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH
+    to enable a persistent store shared across processes and workers."""
+    db_path = os.environ.get("ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH", "")
+    if db_path:
+        return SqliteIdempotencyStore(db_path=db_path)
+    return IdempotencyStore()
 
 
 def create_webhook_app(
@@ -31,7 +40,7 @@ def create_webhook_app(
     if channel is None:
         channel = WhatsAppChannel()
     if store is None:
-        store = IdempotencyStore()
+        store = _build_store()
     if verify_token is None:
         verify_token = os.environ.get("ATLAS_WHATSAPP_VERIFY_TOKEN", "")
     if not verify_token:
