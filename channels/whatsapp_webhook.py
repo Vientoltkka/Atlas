@@ -184,6 +184,8 @@ def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
 
 
 def _message_text(message: Mapping[str, Any]) -> str:
+    if message.get("type") == "image":
+        return _image_caption(message)
     text = message.get("text")
     if isinstance(text, Mapping):
         body = text.get("body")
@@ -200,12 +202,28 @@ def _extract_sender_id(message: Mapping[str, Any]) -> str:
 
 def _is_supported_text_message(message: Mapping[str, Any]) -> bool:
     message_type = message.get("type")
+    if not isinstance(message_type, str):
+        return False
+    if message_type == "image":
+        # Image captions are processed as text; the image itself is ignored.
+        caption = _image_caption(message)
+        return bool(caption)
     return (
-        isinstance(message_type, str)
-        and message_type in SUPPORTED_MESSAGE_TYPES
+        message_type in SUPPORTED_MESSAGE_TYPES
         and isinstance(message.get("text"), Mapping)
         and isinstance(message["text"].get("body"), str)
     )
+
+
+def _image_caption(message: Mapping[str, Any]) -> str:
+    image = message.get("image")
+    if not isinstance(image, Mapping):
+        return ""
+    caption = image.get("caption")
+    if not isinstance(caption, str):
+        return ""
+    caption = caption.strip()
+    return caption or ""
 
 
 def _correlation_id(wamid: str) -> str:

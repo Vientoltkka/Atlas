@@ -289,3 +289,80 @@ def test_correlation_id_length_limit() -> None:
     assert executor.calls
     correlation_id = executor.calls[0].correlation_id
     assert correlation_id is not None and len(correlation_id) <= 128
+
+
+def _image_payload(wamid: str = "wamid.img1", caption: str | None = "Que entrenamiento hago hoy?") -> dict:
+    image: dict = {"id": "media123", "mime_type": "image/jpeg", "sha256": "abc"}
+    if caption is not None:
+        image["caption"] = caption
+    return {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {"id": wamid, "from": "34600111222", "type": "image", "image": image}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+
+def test_image_with_caption_processed_as_text() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    response = client.post("/webhook/whatsapp", json=_image_payload())
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "Que entrenamiento hago hoy?"
+
+
+def test_image_without_caption_sends_courtesy_and_skips_atlas() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    response = client.post("/webhook/whatsapp", json=_image_payload(caption=None))
+    assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert sender.sent and "texto" in sender.sent[0][1]
+
+
+def test_image_duplicate_wamid_executes_once() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    first = client.post("/webhook/whatsapp", json=_image_payload())
+    second = client.post("/webhook/whatsapp", json=_image_payload())
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(executor.calls) == 1
+
+
+def test_regression_text_audio_document_unchanged() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+
+    text_response = client.post("/webhook/whatsapp", json=text_payload())
+    audio_payload = {
+        "entry": [{"changes": [{"value": {"messages": [
+            {"id": "wamid.aud", "from": "34600", "type": "audio", "audio": {"id": "x"}}
+        ]}}]}]
+    }
+    document_payload = {
+        "entry": [{"changes": [{"value": {"messages": [
+            {"id": "wamid.doc", "from": "34600", "type": "document", "document": {"id": "y"}}
+        ]}}]}]
+    }
+    audio_response = client.post("/webhook/whatsapp", json=audio_payload)
+    document_response = client.post("/webhook/whatsapp", json=document_payload)
+
+    assert text_response.status_code == 200
+    assert audio_response.status_code == 200
+    assert document_response.status_code == 200
+    assert len(executor.calls) == 1  # only text executes Atlas
+    courtesy_count = sum(1 for _, body in sender.sent if "texto" in body)
+    assert courtesy_count == 2  # audio + document get the courtesy message
