@@ -133,3 +133,36 @@ def test_non_https_url_rejected(temp_dir) -> None:
     downloader = make_downloader(transport, temp_dir)
     with pytest.raises(MediaDownloadError):
         downloader.download("media123")
+
+
+def test_write_failure_leaves_no_partial_file(temp_dir) -> None:
+    """Simulated write failure: controlled error, fd closed, no leftovers."""
+    import os
+    from pathlib import Path as _Path
+
+    def transport(url: str, headers: dict):
+        if url.endswith("/media123"):
+            return 200, json.dumps(
+                {"url": DOWNLOAD_URL, "mime_type": "image/jpeg", "file_size": 5}
+            )
+        return 200, b"hello"
+
+    original_fdopen = os.fdopen
+
+    def failing_fdopen(fd, *args, **kwargs):
+        raise OSError("disk full")
+
+    os.fdopen = failing_fdopen
+    try:
+        downloader = WhatsAppMediaDownloader(
+            access_token="secret-token",
+            transport=transport,
+            temp_root=temp_dir,
+        )
+        with pytest.raises(MediaDownloadError):
+            downloader.download("media123")
+    finally:
+        os.fdopen = original_fdopen
+
+    # No partial file remains in the temp root.
+    assert list(_Path(temp_dir).glob("atlas-media-*")) == []

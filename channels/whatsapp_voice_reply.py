@@ -96,8 +96,18 @@ class WhatsAppVoiceReplyRenderer:
         Path(wav_path).unlink(missing_ok=True)
         try:
             engine = self._engine_factory()
-            engine.save_to_file(text, wav_path)
-            engine.runAndWait()
+            try:
+                engine.save_to_file(text, wav_path)
+                engine.runAndWait()
+            finally:
+                # Release SAPI/COM resources after every synthesis.
+                for shutdown in ("close", "stop"):
+                    release = getattr(engine, shutdown, None)
+                    if callable(release):
+                        try:
+                            release()
+                        except Exception:
+                            pass
         except Exception as error:
             _discard(wav_path)
             raise VoiceReplyError("text to speech synthesis failed.") from error

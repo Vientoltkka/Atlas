@@ -127,9 +127,17 @@ class WhatsAppMediaDownloader:
         try:
             with closing(os.fdopen(file_descriptor, "wb")) as handle:
                 handle.write(content)
-        except Exception:
+        except Exception as error:
+            # Ensure the reserved descriptor is released even if fdopen
+            # itself failed, otherwise the partial file cannot be removed.
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
             _discard(temp_path)
-            raise
+            raise MediaDownloadError(
+                "whatsapp media could not be written to temporary storage."
+            ) from error
         logger.info(
             "whatsapp media downloaded | bytes=%s | type=%s",
             len(content),
