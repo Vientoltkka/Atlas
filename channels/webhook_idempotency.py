@@ -11,6 +11,7 @@ Two interchangeable implementations share the same minimal contract:
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 from threading import Lock
 import sqlite3
@@ -72,8 +73,7 @@ class SqliteIdempotencyStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._ttl_seconds = ttl_seconds
         self._path = path
-        self._lock = Lock()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS whatsapp_idempotency (
@@ -86,12 +86,13 @@ class SqliteIdempotencyStore:
     def check_and_reserve(self, event_id: str) -> bool:
         """Return True and reserve ``event_id`` if it is new; False if duplicate."""
         now = time.time()
-        with self._lock, self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             self._evict_expired(connection, now)
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO whatsapp_idempotency (event_id, reserved_at) VALUES (?, ?)",
                 (event_id, now),
             )
+            connection.commit()
             return cursor.rowcount == 1
 
     def _evict_expired(self, connection: sqlite3.Connection, now: float) -> None:

@@ -99,3 +99,45 @@ class TestCrossImplementationContract:
     def test_in_memory_store_rejects_invalid_configuration(self) -> None:
         with pytest.raises(ValueError):
             IdempotencyStore(ttl_seconds=0)
+
+
+def _mp_reserve_worker(db_path: str, barrier, queue) -> None:
+    from channels.webhook_idempotency import SqliteIdempotencyStore
+
+    store = SqliteIdempotencyStore(db_path=db_path)
+    barrier.wait(timeout=30)
+    queue.put(store.check_and_reserve("wamid.multiprocess"))
+
+
+class TestMultiProcess:
+    def test_same_event_id_across_processes_reserves_exactly_once(self, tmp_dir) -> None:
+        import multiprocessing
+
+        db_path = str(Path(tmp_dir) / "idem.db")
+        # Initialize schema before forking workers.
+        SqliteIdempotencyStore(db_path=db_path)
+
+        context = multiprocessing.get_context("spawn")
+        processes = 4
+        barrier = context.Barrier(processes)
+        queue = context.Queue()
+        workers = [
+            context.Process(
+                target=_mp_reserve_worker,
+                args=(db_path, barrier, queue),
+            )
+            for _ in range(processes)
+        ]
+        for worker in workers:
+            worker.start()
+        results = [queue.get(timeout=60) for _ in range(processes)]
+        for worker in workers:
+            worker.join(timeout=30)
+        assert all(worker.exitcode == 0 for worker in workers)
+        assert results.count(True) == 1
+        assert results.count(False) == processes - 1
+
+        # No corruption: the database still answers consistently.
+        final = SqliteIdempotencyStore(db_path=db_path)
+        assert final.check_and_reserve("wamid.multiprocess") is False
+        assert final.check_and_reserve("wamid.other") is True
