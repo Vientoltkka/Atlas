@@ -35,6 +35,7 @@ def build_webhook_router(
     sender: Any,
     verify_token: str,
     store: Any,
+    transcriber: Any = None,
 ) -> APIRouter:
     """Compose the WhatsApp webhook router with injected dependencies."""
 
@@ -87,9 +88,22 @@ def build_webhook_router(
         recipient_id = _extract_sender_id(message)
         correlation_id = _correlation_id(wamid)
         pseudo_sender = _pseudonymize(recipient_id)
-        supported = _is_supported_text_message(message)
+        audio_media_id = _audio_media_id(message) if transcriber is not None else None
+        supported = _is_supported_text_message(message) or audio_media_id is not None
 
-        if supported:
+        if audio_media_id is not None:
+            background_tasks.add_task(
+                _process_audio_message,
+                channel=channel,
+                executor_fn=executor_fn,
+                sender=sender,
+                transcriber=transcriber,
+                media_id=audio_media_id,
+                recipient_id=recipient_id,
+                correlation_id=correlation_id,
+                pseudo_sender=pseudo_sender,
+            )
+        elif supported:
             background_tasks.add_task(
                 _process_message,
                 channel=channel,
@@ -153,6 +167,40 @@ def _process_message(
             sender.send_text(recipient_id, "Se ha producido un error procesando tu mensaje.")
         except Exception:
             logger.exception("whatsapp error notification delivery failed")
+
+
+def _process_audio_message(
+    *,
+    channel: WhatsAppChannel,
+    executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult],
+    sender: Any,
+    transcriber: Any,
+    media_id: str,
+    recipient_id: str,
+    correlation_id: str,
+    pseudo_sender: str,
+) -> None:
+    """Background task: download, transcribe and process an audio message."""
+    try:
+        transcript = transcriber.transcribe_media_id(media_id)
+        normalized = {
+            "id": correlation_id,
+            "from": pseudo_sender,
+            "text": transcript,
+        }
+        request = channel.parse_inbound(normalized)
+        result = executor_fn(request)
+        outbound = channel.format_outbound(result)
+        body = outbound.get("body")
+        if isinstance(body, str) and body.strip():
+            sender.send_text(recipient_id, body)
+    except Exception:
+        # Download or transcription failure: controlled courtesy response.
+        logger.exception("whatsapp audio processing failed")
+        try:
+            sender.send_text(recipient_id, "No he podido entender el mensaje.")
+        except Exception:
+            logger.exception("whatsapp courtesy delivery failed")
 
 
 def _send_courtesy_message(
@@ -224,6 +272,19 @@ def _image_caption(message: Mapping[str, Any]) -> str:
         return ""
     caption = caption.strip()
     return caption or ""
+
+
+def _audio_media_id(message: Mapping[str, Any]) -> str | None:
+    """Return the media id of an audio/voice message, or None."""
+    if message.get("type") not in ("audio", "voice"):
+        return None
+    payload = message.get("audio")
+    if not isinstance(payload, Mapping):
+        return None
+    media_id = payload.get("id")
+    if not isinstance(media_id, str) or not media_id.strip():
+        return None
+    return media_id.strip()
 
 
 def _correlation_id(wamid: str) -> str:

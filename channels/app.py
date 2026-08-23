@@ -28,13 +28,14 @@ def _build_store() -> IdempotencyStore | SqliteIdempotencyStore:
     return IdempotencyStore()
 
 
-def create_webhook_app(
+def build_webhook_app(
     *,
     channel: WhatsAppChannel | None = None,
     executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult] | None = None,
-    store: IdempotencyStore | None = None,
+    store: IdempotencyStore | SqliteIdempotencyStore | None = None,
     sender: Any = None,
     verify_token: str | None = None,
+    transcriber: Any = None,
 ) -> FastAPI:
     """Build the FastAPI app with all webhook dependencies injected."""
     if channel is None:
@@ -54,6 +55,8 @@ def create_webhook_app(
             phone_number_id=phone_number_id,
             max_attempts=max_attempts,
         )
+    if transcriber is None:
+        transcriber = _build_audio_transcriber()
     if executor_fn is None:
         raise ValueError("executor_fn is required.")
 
@@ -65,6 +68,47 @@ def create_webhook_app(
             sender=sender,
             verify_token=verify_token,
             store=store,
+            transcriber=transcriber,
         )
     )
     return app
+
+
+def _build_audio_transcriber() -> Any:
+    """Default audio pipeline: secure downloader + local faster-whisper.
+
+    Returns None when WhatsApp credentials are absent so that audio
+    messages degrade to the courtesy path instead of failing startup.
+    """
+    from channels.whatsapp_audio import WhatsAppAudioTranscriber
+    from channels.whatsapp_media import WhatsAppMediaDownloader
+
+    access_token = os.environ.get("ATLAS_WHATSAPP_ACCESS_TOKEN", "")
+    if not access_token:
+        return None
+    downloader = WhatsAppMediaDownloader(access_token=access_token)
+
+    class _ProviderHolder:
+        provider: Any = None
+
+    holder = _ProviderHolder()
+
+    def _provider():
+        if holder.provider is None:
+            from use_cases.speech_engine import FasterWhisperSpeechToTextProvider
+
+            holder.provider = FasterWhisperSpeechToTextProvider()
+        return holder.provider
+
+    class _LazyTranscriber:
+        def transcribe_media_id(self, media_id: str) -> str:
+            return WhatsAppAudioTranscriber(
+                downloader=downloader,
+                provider=_provider(),
+            ).transcribe_media_id(media_id)
+
+    return _LazyTranscriber()
+
+
+# Backwards-compatible alias used by earlier phases.
+create_webhook_app = build_webhook_app
