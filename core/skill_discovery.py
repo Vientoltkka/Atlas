@@ -100,7 +100,7 @@ class SkillDiscovery:
                     raise InvalidSkillDiscoveryRequestError("root directory is unsafe.")
                 directories = (path for path in root.rglob("*")) if request.recursive else (path for path in root.iterdir())
                 for path in sorted(directories, key=lambda item: str(item).lower()):
-                    if _hidden(path) or _unsafe_path(path):
+                    if _hidden(path.relative_to(root)) or _unsafe_path(path):
                         continue
                     if path.is_dir():
                         directories_seen += 1
