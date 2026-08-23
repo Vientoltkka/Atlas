@@ -48,9 +48,11 @@ def create_webhook_app(
     if sender is None:
         access_token = os.environ.get("ATLAS_WHATSAPP_ACCESS_TOKEN", "")
         phone_number_id = os.environ.get("ATLAS_WHATSAPP_PHONE_NUMBER_ID", "")
+        max_attempts = int(os.environ.get("ATLAS_WHATSAPP_SEND_MAX_ATTEMPTS", "3"))
         sender = WhatsAppGraphSender(
             access_token=access_token,
             phone_number_id=phone_number_id,
+            max_attempts=max_attempts,
         )
     if executor_fn is None:
         raise ValueError("executor_fn is required.")
