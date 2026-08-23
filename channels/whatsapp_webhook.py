@@ -36,6 +36,7 @@ def build_webhook_router(
     verify_token: str,
     store: Any,
     transcriber: Any = None,
+    voice_renderer: Any = None,
 ) -> APIRouter:
     """Compose the WhatsApp webhook router with injected dependencies."""
 
@@ -98,6 +99,7 @@ def build_webhook_router(
                 executor_fn=executor_fn,
                 sender=sender,
                 transcriber=transcriber,
+                voice_renderer=voice_renderer,
                 media_id=audio_media_id,
                 recipient_id=recipient_id,
                 correlation_id=correlation_id,
@@ -113,6 +115,7 @@ def build_webhook_router(
                 recipient_id=recipient_id,
                 correlation_id=correlation_id,
                 pseudo_sender=pseudo_sender,
+                voice_renderer=voice_renderer,
             )
         else:
             background_tasks.add_task(
@@ -129,6 +132,32 @@ def build_webhook_router(
     return router
 
 
+def _deliver_reply(sender: Any, voice_renderer: Any, recipient_id: str, body: str) -> None:
+    """Deliver the reply, preferring audio when a renderer is configured.
+
+    Any failure in the voice path falls back to plain text so that the
+    reply from Atlas is never lost.
+    """
+    if voice_renderer is None:
+        sender.send_text(recipient_id, body)
+        return
+    audio_path = None
+    try:
+        audio_path = voice_renderer.render(body)
+        media_id = sender.upload_media(str(audio_path), "audio/ogg")
+        sender.send_audio(recipient_id, media_id)
+        return
+    except Exception:
+        logger.exception("whatsapp voice reply failed | fallback=text")
+    finally:
+        if audio_path is not None:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("failed to remove whatsapp voice reply file")
+    sender.send_text(recipient_id, body)
+
+
 def _process_message(
     *,
     channel: WhatsAppChannel,
@@ -138,6 +167,7 @@ def _process_message(
     recipient_id: str,
     correlation_id: str,
     pseudo_sender: str,
+    voice_renderer: Any = None,
 ) -> None:
     """Background task: run Atlas and deliver the answer. Never raises."""
     if message is None:
@@ -153,7 +183,7 @@ def _process_message(
         outbound = channel.format_outbound(result)
         body = outbound.get("body")
         if isinstance(body, str) and body.strip():
-            sender.send_text(recipient_id, body)
+            _deliver_reply(sender, voice_renderer, recipient_id, body)
     except InvalidChannelMessageError as error:
         logger.warning("whatsapp inbound translation failed | error=%s", error)
         try:
@@ -175,6 +205,7 @@ def _process_audio_message(
     executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult],
     sender: Any,
     transcriber: Any,
+    voice_renderer: Any = None,
     media_id: str,
     recipient_id: str,
     correlation_id: str,
@@ -193,7 +224,7 @@ def _process_audio_message(
         outbound = channel.format_outbound(result)
         body = outbound.get("body")
         if isinstance(body, str) and body.strip():
-            sender.send_text(recipient_id, body)
+            _deliver_reply(sender, voice_renderer, recipient_id, body)
     except Exception:
         # Download or transcription failure: controlled courtesy response.
         logger.exception("whatsapp audio processing failed")

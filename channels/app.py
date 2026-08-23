@@ -36,6 +36,7 @@ def build_webhook_app(
     sender: Any = None,
     verify_token: str | None = None,
     transcriber: Any = None,
+    voice_renderer: Any = None,
 ) -> FastAPI:
     """Build the FastAPI app with all webhook dependencies injected."""
     if channel is None:
@@ -57,6 +58,10 @@ def build_webhook_app(
         )
     if transcriber is None:
         transcriber = _build_audio_transcriber()
+    if voice_renderer is None and os.environ.get(
+        "ATLAS_WHATSAPP_VOICE_REPLIES", ""
+    ).strip().lower() in ("1", "true", "yes", "on"):
+        voice_renderer = _build_voice_renderer()
     if executor_fn is None:
         raise ValueError("executor_fn is required.")
 
@@ -69,6 +74,7 @@ def build_webhook_app(
             verify_token=verify_token,
             store=store,
             transcriber=transcriber,
+            voice_renderer=voice_renderer,
         )
     )
     return app
@@ -112,3 +118,10 @@ def _build_audio_transcriber() -> Any:
 
 # Backwards-compatible alias used by earlier phases.
 create_webhook_app = build_webhook_app
+
+
+def _build_voice_renderer() -> Any:
+    """Default voice reply renderer backed by local pyttsx3 + PyAV."""
+    from channels.whatsapp_voice_reply import WhatsAppVoiceReplyRenderer
+
+    return WhatsAppVoiceReplyRenderer()
