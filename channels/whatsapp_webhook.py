@@ -1,0 +1,218 @@
+"""WhatsApp webhook endpoints for Atlas (Phase 2).
+
+Flow: parse -> extract -> idempotency reserve (BEFORE the HTTP 200) ->
+immediate 200 to Meta -> Atlas execution + outbound delivery as a
+FastAPI background task.
+
+HTTP policy: functional errors return 200 (so Meta does not retry);
+only real infrastructure failures return 500.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+from typing import Any, Callable, Mapping
+
+from fastapi import APIRouter, BackgroundTasks, Request, Response
+
+from channels.base_channel import InvalidChannelMessageError
+from channels.whatsapp_channel import WhatsAppChannel
+from core.agent_executor import AgentExecutionRequest, AgentExecutionResult, AgentExecutionStatus
+
+
+logger = logging.getLogger(__name__)
+
+SUPPORTED_MESSAGE_TYPES = frozenset({"text"})
+MAX_CORRELATION_ID_LENGTH = 128
+
+
+def build_webhook_router(
+    *,
+    channel: WhatsAppChannel,
+    executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult],
+    sender: Any,
+    verify_token: str,
+    store: Any,
+) -> APIRouter:
+    """Compose the WhatsApp webhook router with injected dependencies."""
+
+    router = APIRouter(prefix="/webhook/whatsapp")
+
+    @router.get("")
+    def verify_webhook(hub_mode: str = "", hub_verify_token: str = "", hub_challenge: str = "") -> Response:
+        expected = verify_token.encode("utf-8")
+        received = (hub_verify_token or "").encode("utf-8")
+        if hub_mode == "subscribe" and hmac.compare_digest(expected, received):
+            return Response(content=hub_challenge, media_type="text/plain", status_code=200)
+        return Response(status_code=403)
+
+    @router.post("")
+    async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            logger.warning("whatsapp webhook received unreadable json body")
+            return Response(status_code=400)
+
+        value = _extract_change_value(payload)
+        if value is None:
+            # Uninterpretable payloads must NOT trigger Meta retries.
+            logger.debug("whatsapp webhook payload without interpretable changes")
+            return Response(status_code=200)
+
+        statuses = value.get("statuses")
+        if isinstance(statuses, list) and statuses:
+            logger.debug("whatsapp webhook status acknowledgement ignored")
+            return Response(status_code=200)
+
+        messages = value.get("messages")
+        message = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], Mapping) else None
+        if message is None:
+            logger.debug("whatsapp webhook payload without messages")
+            return Response(status_code=200)
+
+        wamid = message.get("id")
+        if not isinstance(wamid, str) or not wamid.strip():
+            logger.debug("whatsapp webhook message without wamid")
+            return Response(status_code=200)
+        wamid = wamid.strip()
+
+        # Reserve BEFORE responding so concurrent duplicates cannot both execute.
+        if not store.check_and_reserve(wamid):
+            logger.debug("whatsapp webhook duplicate wamid ignored")
+            return Response(status_code=200)
+
+        recipient_id = _extract_sender_id(message)
+        correlation_id = _correlation_id(wamid)
+        pseudo_sender = _pseudonymize(recipient_id)
+        supported = _is_supported_text_message(message)
+
+        if supported:
+            background_tasks.add_task(
+                _process_message,
+                channel=channel,
+                executor_fn=executor_fn,
+                sender=sender,
+                message=message,
+                recipient_id=recipient_id,
+                correlation_id=correlation_id,
+                pseudo_sender=pseudo_sender,
+            )
+        else:
+            background_tasks.add_task(
+                _send_courtesy_message,
+                channel=channel,
+                executor_fn=None,
+                sender=sender,
+                result=None,
+                recipient_id=recipient_id,
+                courtesy="Solo puedo procesar mensajes de texto por ahora.",
+            )
+        return Response(status_code=200)
+
+    return router
+
+
+def _process_message(
+    *,
+    channel: WhatsAppChannel,
+    executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult],
+    sender: Any,
+    message: Mapping[str, Any] | None,
+    recipient_id: str,
+    correlation_id: str,
+    pseudo_sender: str,
+) -> None:
+    """Background task: run Atlas and deliver the answer. Never raises."""
+    if message is None:
+        return
+    try:
+        normalized = {
+            "id": correlation_id,
+            "from": pseudo_sender,
+            "text": _message_text(message),
+        }
+        request = channel.parse_inbound(normalized)
+        result = executor_fn(request)
+        outbound = channel.format_outbound(result)
+        body = outbound.get("body")
+        if isinstance(body, str) and body.strip():
+            sender.send_text(recipient_id, body)
+    except InvalidChannelMessageError as error:
+        logger.warning("whatsapp inbound translation failed | error=%s", error)
+        try:
+            sender.send_text(recipient_id, "No he podido entender el mensaje.")
+        except Exception:
+            logger.exception("whatsapp courtesy delivery failed")
+    except Exception:
+        # Functional failure: log it; Meta must not be asked to retry.
+        logger.exception("whatsapp background processing failed")
+        try:
+            sender.send_text(recipient_id, "Se ha producido un error procesando tu mensaje.")
+        except Exception:
+            logger.exception("whatsapp error notification delivery failed")
+
+
+def _send_courtesy_message(
+    *,
+    channel: WhatsAppChannel,
+    executor_fn: Any,
+    sender: Any,
+    result: Any,
+    recipient_id: str,
+    courtesy: str,
+) -> None:
+    try:
+        sender.send_text(recipient_id, courtesy)
+    except Exception:
+        logger.exception("whatsapp courtesy delivery failed")
+
+
+def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    entry = payload.get("entry")
+    if not isinstance(entry, list) or not entry or not isinstance(entry[0], Mapping):
+        return None
+    changes = entry[0].get("changes")
+    if not isinstance(changes, list) or not changes or not isinstance(changes[0], Mapping):
+        return None
+    value = changes[0].get("value")
+    return value if isinstance(value, Mapping) else None
+
+
+def _message_text(message: Mapping[str, Any]) -> str:
+    text = message.get("text")
+    if isinstance(text, Mapping):
+        body = text.get("body")
+        return body if isinstance(body, str) else ""
+    return text if isinstance(text, str) else ""
+
+
+def _extract_sender_id(message: Mapping[str, Any]) -> str:
+    sender_id = message.get("from")
+    if not isinstance(sender_id, str):
+        raise InvalidChannelMessageError("message is missing a valid 'from' sender.")
+    return sender_id.strip()
+
+
+def _is_supported_text_message(message: Mapping[str, Any]) -> bool:
+    message_type = message.get("type")
+    return (
+        isinstance(message_type, str)
+        and message_type in SUPPORTED_MESSAGE_TYPES
+        and isinstance(message.get("text"), Mapping)
+        and isinstance(message["text"].get("body"), str)
+    )
+
+
+def _correlation_id(wamid: str) -> str:
+    """Deterministic short identifier safe for AgentExecutionRequest (<=128)."""
+    return f"wa-{hashlib.sha256(wamid.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _pseudonymize(sender_id: str) -> str:
+    """Pseudonymized representation propagated towards Atlas core."""
+    return f"wa_{hashlib.sha256(sender_id.encode('utf-8')).hexdigest()[:12]}"

@@ -42,6 +42,11 @@ def main() -> int:
         help="Lista los dispositivos de entrada de audio disponibles.",
     )
     parser.add_argument(
+        "--whatsapp-webhook",
+        action="store_true",
+        help="Inicia el webhook de WhatsApp (FastAPI + uvicorn, workers=1).",
+    )
+    parser.add_argument(
         "--test-microphone",
         type=int,
         help="Prueba un microfono por indice sin cargar Whisper, Atlas ni TTS.",
@@ -80,6 +85,9 @@ def main() -> int:
         if args.test_microphone is not None:
             print(_test_microphone(args.test_microphone))
             return 0
+
+        if args.whatsapp_webhook:
+            return _run_whatsapp_webhook(logger)
 
         print(render_startup_banner(report))
         print()
@@ -171,11 +179,53 @@ def _test_microphone(index: int) -> str:
 def _requested_mode(args: argparse.Namespace) -> str:
     if args.list_microphones or args.test_microphone is not None:
         return "microphone"
+    if getattr(args, "whatsapp_webhook", False):
+        return "whatsapp"
     if args.voice:
         return "voice"
     if args.assistant:
         return "assistant"
     return "text"
+
+
+def _run_whatsapp_webhook(logger: logging.Logger) -> int:
+    """Start the WhatsApp webhook server (uvicorn, workers=1 for Phase 2)."""
+    import os
+
+    from channels.app import create_webhook_app
+    from bootstrap.agent_system import build_core_agent_system
+
+    if not os.environ.get("ATLAS_WHATSAPP_VERIFY_TOKEN"):
+        logger.error("WhatsApp webhook requiere ATLAS_WHATSAPP_VERIFY_TOKEN")
+        print(
+            "Falta ATLAS_WHATSAPP_VERIFY_TOKEN. "
+            "Configura las variables en .env (ver .env.example)."
+        )
+        return 1
+    if not os.environ.get("ATLAS_WHATSAPP_ACCESS_TOKEN") or not os.environ.get(
+        "ATLAS_WHATSAPP_PHONE_NUMBER_ID"
+    ):
+        logger.error("WhatsApp webhook requiere access token y phone number id")
+        print(
+            "Faltan ATLAS_WHATSAPP_ACCESS_TOKEN o ATLAS_WHATSAPP_PHONE_NUMBER_ID."
+        )
+        return 1
+
+    result = build_core_agent_system()
+    if result.system is None:
+        logger.error("No se pudo construir el sistema de agentes de Atlas")
+        print("Atlas no pudo inicializar el sistema de agentes. Revisa logs\\atlas.log.")
+        return 1
+    executor = result.system.agent_executor
+
+    app = create_webhook_app(executor_fn=executor.execute)
+
+    import uvicorn
+
+    port = int(os.environ.get("ATLAS_WHATSAPP_WEBHOOK_PORT", "8000"))
+    print(f"Atlas WhatsApp webhook escuchando en puerto {port} (workers=1)")
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
+    return 0
 
 
 def _atlas_class() -> Any:
