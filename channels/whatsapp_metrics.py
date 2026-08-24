@@ -18,6 +18,11 @@ AUDIO_RECEIVED = "audio_received"
 VOICE_REPLIES = "voice_replies"
 CHANNEL_ERRORS = "channel_errors"
 
+STATUS_SENT = "status_sent"
+STATUS_DELIVERED = "status_delivered"
+STATUS_READ = "status_read"
+STATUS_FAILED = "status_failed"
+
 _EVENTS = (
     MESSAGES_RECEIVED,
     MESSAGES_DUPLICATED,
@@ -25,7 +30,23 @@ _EVENTS = (
     AUDIO_RECEIVED,
     VOICE_REPLIES,
     CHANNEL_ERRORS,
+    STATUS_SENT,
+    STATUS_DELIVERED,
+    STATUS_READ,
+    STATUS_FAILED,
 )
+
+_STATUS_EVENT_BY_CODE = {
+    "sent": STATUS_SENT,
+    "delivered": STATUS_DELIVERED,
+    "read": STATUS_READ,
+    "failed": STATUS_FAILED,
+}
+
+
+def status_event(status: str) -> str | None:
+    """Map a WhatsApp status code to its counter event; None if unknown."""
+    return _STATUS_EVENT_BY_CODE.get(status.strip().casefold())
 
 
 class WhatsAppMetricsRecorder:

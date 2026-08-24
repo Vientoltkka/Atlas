@@ -26,6 +26,7 @@ from channels.whatsapp_metrics import (
     MESSAGES_FAILED,
     MESSAGES_RECEIVED,
     VOICE_REPLIES,
+    status_event,
     safe_record,
 )
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult, AgentExecutionStatus
@@ -76,7 +77,7 @@ def build_webhook_router(
 
         statuses = value.get("statuses")
         if isinstance(statuses, list) and statuses:
-            logger.debug("whatsapp webhook status acknowledgement ignored")
+            _record_status_ack(statuses[0], recorder)
             return Response(status_code=200)
 
         messages = value.get("messages")
@@ -277,6 +278,27 @@ def _send_courtesy_message(
         sender.send_text(recipient_id, courtesy)
     except Exception:
         logger.exception("whatsapp courtesy delivery failed")
+
+
+def _record_status_ack(status: Any, recorder: Any) -> None:
+    """Record one delivery-status acknowledgement (V4.0-F1).
+
+    Only the status code is observed; message ids, recipients and error
+    payloads are never logged or counted. Always safe against a broken
+    recorder.
+    """
+    if not isinstance(status, Mapping):
+        logger.debug("whatsapp webhook malformed status acknowledgement")
+        return
+    code = status.get("status")
+    event = status_event(code) if isinstance(code, str) else None
+    if event is None:
+        logger.debug(
+            "whatsapp webhook untracked status acknowledgement | known=false"
+        )
+        return
+    safe_record(recorder, event)
+    logger.debug("whatsapp webhook status acknowledged | state=%s", event)
 
 
 def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
