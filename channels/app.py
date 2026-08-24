@@ -6,13 +6,18 @@ and NOT safe for multiple workers. Shared persistence belongs to Phase 3.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Callable
 
 from fastapi import FastAPI
 
 from channels.base_channel import InvalidChannelMessageError
-from channels.webhook_idempotency import IdempotencyStore, SqliteIdempotencyStore
+from channels.webhook_idempotency import (
+    IdempotencyStore,
+    IdempotencyStoreInitError,
+    SqliteIdempotencyStore,
+)
 from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
 from channels.whatsapp_health import WhatsAppChannelHealthChecker
@@ -21,13 +26,32 @@ from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
 
 
+logger = logging.getLogger(__name__)
+
+
 def _build_store() -> IdempotencyStore | SqliteIdempotencyStore:
     """Development default: in-memory. Set ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH
-    to enable a persistent store shared across processes and workers."""
+    to enable a persistent store shared across processes and workers.
+
+    A persistent store that cannot be initialized is a hard startup
+    failure: silently falling back to the per-process in-memory store
+    would weaken the exactly-once guarantee without anyone noticing.
+    """
     db_path = os.environ.get("ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH", "")
-    if db_path:
+    if not db_path:
+        return IdempotencyStore()
+    try:
         return SqliteIdempotencyStore(db_path=db_path)
-    return IdempotencyStore()
+    except Exception as error:
+        logger.error(
+            "whatsapp idempotency store init failed | type=%s | env=ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH",
+            type(error).__name__,
+        )
+        raise IdempotencyStoreInitError(
+            "persistent whatsapp idempotency store is unavailable; "
+            "refusing to start without idempotency protection "
+            "(check ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH accessibility)."
+        ) from error
 
 
 def build_webhook_app(

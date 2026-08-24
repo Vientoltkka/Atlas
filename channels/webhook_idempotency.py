@@ -21,6 +21,14 @@ import time
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 
 
+class IdempotencyStoreInitError(RuntimeError):
+    """The persistent idempotency store could not be initialized.
+
+    Raised instead of silently degrading to a weaker store. The message
+    is diagnostic-only and never contains paths, tokens or user data.
+    """
+
+
 class IdempotencyStore:
     """Reserve event identifiers so duplicates are processed exactly once."""
 
@@ -70,18 +78,26 @@ class SqliteIdempotencyStore:
         path = Path(db_path)
         if not str(path):
             raise ValueError("db_path must be a non-empty path.")
-        path.parent.mkdir(parents=True, exist_ok=True)
         self._ttl_seconds = ttl_seconds
         self._path = path
-        with closing(self._connect()) as connection, connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS whatsapp_idempotency (
-                    event_id TEXT PRIMARY KEY,
-                    reserved_at REAL NOT NULL
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(self._connect()) as connection, connection:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS whatsapp_idempotency (
+                        event_id TEXT PRIMARY KEY,
+                        reserved_at REAL NOT NULL
+                    )
+                    """
                 )
-                """
-            )
+        except Exception as error:
+            # Fail loudly without leaking the filesystem location or any
+            # other sensitive detail in the exposed message.
+            raise IdempotencyStoreInitError(
+                "persistent whatsapp idempotency store is unavailable; "
+                "check the configured database accessibility."
+            ) from error
 
     def check_and_reserve(self, event_id: str) -> bool:
         """Return True and reserve ``event_id`` if it is new; False if duplicate."""
