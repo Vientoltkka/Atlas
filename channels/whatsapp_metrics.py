@@ -22,6 +22,7 @@ STATUS_SENT = "status_sent"
 STATUS_DELIVERED = "status_delivered"
 STATUS_READ = "status_read"
 STATUS_FAILED = "status_failed"
+RATE_LIMITED = "rate_limited"
 
 _EVENTS = (
     MESSAGES_RECEIVED,
@@ -34,6 +35,7 @@ _EVENTS = (
     STATUS_DELIVERED,
     STATUS_READ,
     STATUS_FAILED,
+    RATE_LIMITED,
 )
 
 _STATUS_EVENT_BY_CODE = {

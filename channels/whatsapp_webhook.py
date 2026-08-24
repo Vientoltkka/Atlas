@@ -25,6 +25,7 @@ from channels.whatsapp_metrics import (
     MESSAGES_DUPLICATED,
     MESSAGES_FAILED,
     MESSAGES_RECEIVED,
+    RATE_LIMITED,
     VOICE_REPLIES,
     status_event,
     safe_record,
@@ -48,6 +49,7 @@ def build_webhook_router(
     transcriber: Any = None,
     voice_renderer: Any = None,
     recorder: Any = None,
+    rate_limiter: Any = None,
 ) -> APIRouter:
     """Compose the WhatsApp webhook router with injected dependencies."""
 
@@ -91,6 +93,22 @@ def build_webhook_router(
             logger.debug("whatsapp webhook message without wamid")
             return Response(status_code=200)
         wamid = wamid.strip()
+
+        # Rate limit by pseudonymous sender BEFORE reserving idempotency so
+        # that rejected floods do not consume reservations (V4.0-F2).
+        if rate_limiter is not None:
+            raw_sender = message.get("from")
+            if isinstance(raw_sender, str) and raw_sender.strip():
+                sender_key = _pseudonymize(raw_sender.strip())
+                try:
+                    allowed = rate_limiter.allow(sender_key)
+                except Exception:
+                    logger.warning("whatsapp webhook rate limiter failed | fail-open")
+                    allowed = True
+                if not allowed:
+                    safe_record(recorder, RATE_LIMITED)
+                    logger.debug("whatsapp webhook rate limit exceeded")
+                    return Response(status_code=200)
 
         safe_record(recorder, MESSAGES_RECEIVED)
 

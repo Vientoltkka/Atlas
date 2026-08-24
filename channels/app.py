@@ -22,6 +22,7 @@ from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
 from channels.whatsapp_health import WhatsAppChannelHealthChecker
 from channels.whatsapp_metrics import WhatsAppMetricsRecorder
+from channels.whatsapp_rate_limit import WhatsAppRateLimiter
 from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
 
@@ -65,6 +66,7 @@ def build_webhook_app(
     voice_renderer: Any = None,
     recorder: WhatsAppMetricsRecorder | None = None,
     health_checker: WhatsAppChannelHealthChecker | None = None,
+    rate_limiter: WhatsAppRateLimiter | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with all webhook dependencies injected."""
     if channel is None:
@@ -102,6 +104,8 @@ def build_webhook_app(
             transcriber=transcriber,
             voice_renderer=voice_renderer,
         )
+    if rate_limiter is None:
+        rate_limiter = _build_rate_limiter()
 
     app = FastAPI(title="Atlas WhatsApp Webhook")
     app.state.whatsapp_health = health_checker
@@ -115,9 +119,27 @@ def build_webhook_app(
             transcriber=transcriber,
             voice_renderer=voice_renderer,
             recorder=recorder,
+            rate_limiter=rate_limiter,
         )
     )
     return app
+
+
+def _build_rate_limiter() -> WhatsAppRateLimiter:
+    """Anti-flood protection, disabled by default.
+
+    Set ATLAS_WHATSAPP_RATE_LIMIT_PER_MINUTE to a positive integer to
+    enable a per-sender sliding-window limit.
+    """
+    raw = os.environ.get("ATLAS_WHATSAPP_RATE_LIMIT_PER_MINUTE", "0").strip()
+    try:
+        limit = int(raw)
+    except ValueError:
+        logger.warning(
+            "invalid ATLAS_WHATSAPP_RATE_LIMIT_PER_MINUTE | value ignored | fallback=disabled"
+        )
+        limit = 0
+    return WhatsAppRateLimiter(limit_per_minute=max(limit, 0))
 
 
 def _build_health_checker(
