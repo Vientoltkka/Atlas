@@ -47,6 +47,11 @@ def main() -> int:
         help="Inicia el webhook de WhatsApp (FastAPI + uvicorn, workers=1).",
     )
     parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Inicia el Orbe de Atlas con una sesion de voz real.",
+    )
+    parser.add_argument(
         "--test-microphone",
         type=int,
         help="Prueba un microfono por indice sin cargar Whisper, Atlas ni TTS.",
@@ -55,7 +60,8 @@ def main() -> int:
     mode = _requested_mode(args)
     project_root = Path(__file__).resolve().parent
     _load_environment_file(project_root)
-    report = WindowsStartupPreflight(project_root).run(mode)
+    preflight_mode = "voice" if mode == "ui" else mode
+    report = WindowsStartupPreflight(project_root).run(preflight_mode)
 
     if not report.ready:
         print(render_startup_failure(report))
@@ -89,6 +95,9 @@ def main() -> int:
 
         if args.whatsapp_webhook:
             return _run_whatsapp_webhook(logger)
+
+        if getattr(args, "ui", False):
+            return _run_ui_orb(logger)
 
         print(render_startup_banner(report))
         print()
@@ -192,11 +201,89 @@ def _requested_mode(args: argparse.Namespace) -> str:
         return "microphone"
     if getattr(args, "whatsapp_webhook", False):
         return "whatsapp"
+    if getattr(args, "ui", False):
+        return "ui"
     if args.voice:
         return "voice"
     if args.assistant:
         return "assistant"
     return "text"
+
+
+def _run_ui_orb(logger: logging.Logger) -> int:
+    """Run the Atlas orb UI with a real voice session (V4.3-I3).
+
+    Qt lives on the main thread; the voice session runs on its own
+    thread and reaches the UI only through Qt signals. Closing is
+    controlled: stop request -> session end (STOPPING -> STOPPED) ->
+    Qt quit. The process is never killed while audio may be active.
+    """
+    import threading
+
+    from ui.atlas_bridge import AtlasUiBridge
+    from ui.orbe_app import (
+        create_application,
+        create_orb_window,
+        create_transcript_panel,
+    )
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    atlas = _atlas_class()()
+
+    app = create_application([])
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    bridge = AtlasUiBridge()
+    bridge.state_changed.connect(orb.apply_state)
+    bridge.message_received.connect(panel.append_message)
+
+    stop_event = threading.Event()
+
+    def typed_input():
+        # Polled by the voice loop; returning a close command ends the
+        # session through its normal STOPPING -> STOPPED path.
+        return "salir" if stop_event.is_set() else None
+
+    def run_session() -> None:
+        try:
+            atlas.start_voice(
+                state_listener=bridge.on_state,
+                typed_input=typed_input,
+            )
+        except Exception as exc:
+            logger.error(
+                "Fallo en la sesion de voz del Orbe | tipo=%s | detalle=%s",
+                type(exc).__name__,
+                sanitize_log_message(exc),
+            )
+            panel.append_message("La sesion de voz ha terminado por un error.")
+        finally:
+            bridge.notify_session_finished()
+
+    orb.stop_requested.connect(stop_event.set)
+    orb.quit_requested.connect(stop_event.set)
+
+    def on_session_finished() -> None:
+        if bridge.quit_on_finish:
+            app.quit()
+        else:
+            orb.apply_state(OrbVisualState.IDLE)
+
+    bridge.session_finished.connect(on_session_finished)
+    orb.quit_requested.connect(bridge.request_quit_on_finish)
+
+    session_thread = threading.Thread(target=run_session, daemon=True)
+    session_thread.start()
+
+    orb.show()
+    panel.show()
+    exit_code = app.exec()
+
+    if session_thread.is_alive():
+        stop_event.set()
+        session_thread.join(timeout=8)
+    logger.info("Sesion del Orbe finalizada")
+    return exit_code
 
 
 def _run_whatsapp_webhook(logger: logging.Logger) -> int:

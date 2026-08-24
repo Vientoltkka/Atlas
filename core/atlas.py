@@ -16,10 +16,17 @@ class Atlas:
 
         self._orchestrator.start()
 
-    def start_voice(self) -> None:
+    def start_voice(
+        self,
+        state_listener=None,
+        typed_input=None,
+    ) -> None:
         """Start Atlas in manual voice mode."""
 
-        self._orchestrator.start_voice()
+        self._orchestrator.start_voice(
+            state_listener=state_listener,
+            typed_input=typed_input,
+        )
 
     def start_assistant(self) -> None:
         """Start Atlas in permanent assistant mode."""

@@ -367,7 +367,11 @@ class AtlasOrchestrator:
 
             self._print_atlas(response)
 
-    def start_voice(self, state_listener=None) -> None:
+    def start_voice(
+        self,
+        state_listener=None,
+        typed_input=None,
+    ) -> None:
         """Start manual voice conversation mode without wake word."""
         print("Atlas iniciado en modo voz.")
         print()
@@ -391,6 +395,10 @@ class AtlasOrchestrator:
             execute_manual, "state_listener"
         ):
             voice_kwargs["state_listener"] = state_listener
+        if typed_input is not None and _accepts_keyword(
+            execute_manual, "typed_input"
+        ):
+            voice_kwargs["typed_input"] = typed_input
         if _accepts_keyword(execute_manual, "process_text_stream"):
             voice_kwargs["process_text_stream"] = (
                 lambda text, fragment_sink: self.process_voice_prompt(
