@@ -109,3 +109,130 @@ def test_drag_moves_window(qapp, orb) -> None:
 def test_fixed_orb_size(orb) -> None:
     assert orb.width() == orbe_app.ORB_SIZE
     assert orb.height() == orbe_app.ORB_SIZE
+
+
+# ---------------------------------------------------------------------------
+# V4.3-I4: animations, tray, position preferences
+# ---------------------------------------------------------------------------
+
+
+def test_animation_frame_is_pure_and_deterministic() -> None:
+    first = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
+    second = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
+    assert first == second
+    assert set(first.keys()) == {"scale", "alpha_factor", "rotation_deg"}
+
+
+def test_animation_frames_stay_within_sane_bounds_for_every_state() -> None:
+    for state in OrbVisualState:
+        for step in range(24):
+            frame = orbe_app.animation_frame(state, step * 0.1)
+            assert 0.85 <= frame["scale"] <= 1.10
+            assert 0.30 <= frame["alpha_factor"] <= 1.05
+            assert 0.0 <= frame["rotation_deg"] <= 360.0
+
+
+def test_static_states_have_no_animation() -> None:
+    for elapsed in (0.0, 0.7, 3.3):
+        for state in (OrbVisualState.DEGRADED,):
+            frame = orbe_app.animation_frame(state, elapsed)
+            assert frame["scale"] == 1.0
+            assert frame["alpha_factor"] == 1.0
+            assert frame["rotation_deg"] == 0.0
+
+
+def test_processing_rotates_and_listening_pulses() -> None:
+    quarter = orbe_app.animation_frame(OrbVisualState.PROCESSING, 0.5)
+    three_quarters = orbe_app.animation_frame(OrbVisualState.PROCESSING, 1.5)
+    # 2 s period: half period -> ~180 degrees of rotation.
+    assert quarter["rotation_deg"] == pytest.approx(90.0, abs=2.0)
+    assert three_quarters["rotation_deg"] == pytest.approx(270.0, abs=2.0)
+
+    peak = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
+    trough = orbe_app.animation_frame(OrbVisualState.LISTENING, 1.2)
+    assert peak["scale"] > trough["scale"]
+
+
+def test_apply_state_resets_animation_clock(qapp, orb) -> None:
+    from PySide6.QtCore import QTimer
+
+    orb.apply_state(OrbVisualState.LISTENING)
+    assert orb._timer.isActive()
+    orb.apply_state(OrbVisualState.DEGRADED)  # static state stops the timer
+    assert not orb._timer.isActive()
+
+
+def test_tray_is_created_with_detener_and_salir(qapp, orb) -> None:
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        pytest.skip("system tray not available in this environment")
+    assert orb.tray is not None
+    actions = [action.text() for action in orb.tray.contextMenu().actions()]
+    assert "Detener" in actions
+    assert "Salir" in actions
+
+
+def test_tray_menu_actions_emit_orb_signals(qapp, orb) -> None:
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        pytest.skip("system tray not available in this environment")
+    stop_calls: list[int] = []
+    quit_calls: list[int] = []
+    orb.stop_requested.connect(lambda: stop_calls.append(1))
+    orb.quit_requested.connect(lambda: quit_calls.append(1))
+
+    actions = {action.text(): action for action in orb.tray.contextMenu().actions()}
+    actions["Detener"].trigger()
+    actions["Salir"].trigger()
+
+    assert stop_calls == [1]
+    assert quit_calls == [1]
+
+
+def test_position_roundtrip_with_settings(qapp, tmp_path) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings_file = tmp_path / "orb.ini"
+    settings = QSettings(str(settings_file), QSettings.Format.IniFormat)
+    orb = orbe_app.create_orb_window(settings=settings)
+    orb.move(120, 90)
+    orb.save_position()
+
+    second = orbe_app.create_orb_window(settings=settings)
+    second.restore_position()
+    assert second.frameGeometry().topLeft().x() == 120
+    assert second.frameGeometry().topLeft().y() == 90
+    orb.close()
+    second.close()
+
+
+def test_restore_clamps_positions_outside_screen(qapp, tmp_path) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings_file = tmp_path / "orb-clamp.ini"
+    settings = QSettings(str(settings_file), QSettings.Format.IniFormat)
+    settings.setValue("pos_x", -5000)
+    settings.setValue("pos_y", 90000)
+
+    orb = orbe_app.create_orb_window(settings=settings)
+    orb.restore_position()
+    point = orb.frameGeometry().topLeft()
+    screen_bounds = orb.screen().availableGeometry()
+    assert point.x() >= screen_bounds.left()
+    assert point.y() >= screen_bounds.top()
+    orb.close()
+
+
+def test_close_event_saves_position(qapp, tmp_path) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings_file = tmp_path / "orb-close.ini"
+    settings = QSettings(str(settings_file), QSettings.Format.IniFormat)
+    orb = orbe_app.create_orb_window(settings=settings)
+    orb.move(55, 66)
+    orb.close()
+
+    assert int(settings.value("pos_x")) == 55
+    assert int(settings.value("pos_y")) == 66

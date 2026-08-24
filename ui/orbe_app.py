@@ -1,14 +1,20 @@
-"""Atlas Orbe shell (V4.3-I2): frameless translucent state window.
+"""Atlas Orbe shell (V4.3-I2/I3/I4): frameless translucent state window.
 
 Pure visual layer over the core: the orb only renders an
 ``OrbVisualState`` produced by ``use_cases.ui_state_mapper``. No audio,
 STT, TTS or orchestrator access happens here. The Qt import is local to
 this GUI module so the rest of Atlas never depends on PySide6.
+
+I4 adds per-state fine animation, a tray icon with Detener/Salir and
+window position preferences. States, colors/alpha and the existing
+signals are unchanged.
 """
 
 from __future__ import annotations
 
+import math
 import sys
+import time
 from typing import Sequence
 
 from use_cases.ui_state_mapper import OrbVisualState
@@ -38,10 +44,81 @@ DEMO_STATE_CYCLE: Sequence[OrbVisualState] = (
     OrbVisualState.STOPPING,
 )
 
+# Per-state fine animation tuning (period seconds; None = static).
+_ANIMATION_PERIODS: dict[OrbVisualState, float | None] = {
+    OrbVisualState.IDLE: 3.0,        # slow breathing scale
+    OrbVisualState.STARTING: 1.2,    # soft fade pulse
+    OrbVisualState.LISTENING: 1.6,   # breathing pulse
+    OrbVisualState.PROCESSING: 2.0,  # inner arc rotation
+    OrbVisualState.SPEAKING: 0.9,    # glow alpha pulse
+    OrbVisualState.RECOVERING: 0.6,  # quick blink
+    OrbVisualState.DEGRADED: None,   # static dim
+    OrbVisualState.STOPPING: 1.5,    # gentle shrink/fade
+}
+
+ANIMATION_FPS = 30
+
 
 def color_for_state(state: OrbVisualState) -> tuple[int, int, int, int]:
     """Deterministic RGBA for one visual state."""
     return _STATE_COLORS[state]
+
+
+def animation_period(state: OrbVisualState) -> float | None:
+    """Animation period in seconds, or None when the state is static."""
+    return _ANIMATION_PERIODS[state]
+
+
+def animation_frame(
+    state: OrbVisualState,
+    elapsed_seconds: float,
+) -> dict[str, float]:
+    """Deterministic animation frame for one state at one instant.
+
+    Returns scale (relative to base), alpha_factor (multiplier of the
+    base alpha) and rotation_deg (inner marker rotation). Pure function.
+    """
+    period = _ANIMATION_PERIODS[state]
+    if period is None or period <= 0:
+        return {"scale": 1.0, "alpha_factor": 1.0, "rotation_deg": 0.0}
+
+    phase = (elapsed_seconds % period) / period
+    wave = math.sin(2 * math.pi * phase)
+
+    if state is OrbVisualState.IDLE:
+        scale = 1.0 + 0.03 * wave
+        alpha_factor = 1.0
+        rotation_deg = 0.0
+    elif state is OrbVisualState.STARTING:
+        scale = 1.0
+        alpha_factor = 0.75 + 0.25 * (wave * 0.5 + 0.5)
+        rotation_deg = 0.0
+    elif state is OrbVisualState.LISTENING:
+        scale = 1.0 + 0.05 * wave
+        alpha_factor = 1.0
+        rotation_deg = 0.0
+    elif state is OrbVisualState.PROCESSING:
+        scale = 1.0
+        alpha_factor = 1.0
+        rotation_deg = 360.0 * phase
+    elif state is OrbVisualState.SPEAKING:
+        scale = 1.02 + 0.03 * (wave * 0.5 + 0.5)
+        alpha_factor = 0.85 + 0.15 * (wave * 0.5 + 0.5)
+        rotation_deg = 0.0
+    elif state is OrbVisualState.RECOVERING:
+        scale = 1.0
+        alpha_factor = 0.55 + 0.45 * abs(wave)
+        rotation_deg = 0.0
+    else:  # STOPPING
+        scale = 1.0 - 0.06 * phase
+        alpha_factor = 1.0 - 0.35 * phase
+        rotation_deg = 0.0
+
+    return {
+        "scale": round(scale, 4),
+        "alpha_factor": round(alpha_factor, 4),
+        "rotation_deg": round(rotation_deg, 2),
+    }
 
 
 def create_application(argv: list[str] | None = None):
@@ -54,11 +131,19 @@ def create_application(argv: list[str] | None = None):
     return QApplication(argv if argv is not None else sys.argv)
 
 
-def create_orb_window():
-    """Build the orb window; requires a live QApplication."""
-    from PySide6.QtCore import Qt, Signal
-    from PySide6.QtGui import QColor, QPainter
-    from PySide6.QtWidgets import QMenu, QWidget
+def create_orb_window(settings=None):
+    """Build the orb window; requires a live QApplication.
+
+    ``settings`` is an optional QSettings-like object used to persist
+    the window position (keys ``pos_x`` / ``pos_y``).
+    """
+    from PySide6.QtCore import Qt, QTimer, Signal
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+    from PySide6.QtWidgets import (
+        QMenu,
+        QSystemTrayIcon,
+        QWidget,
+    )
 
     class OrbWindow(QWidget):
         """Frameless translucent always-on-top circular state indicator."""
@@ -78,14 +163,107 @@ def create_orb_window():
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self._state = OrbVisualState.IDLE
             self._drag_offset = None
+            self._settings = settings
+            self._animation_started_at = time.monotonic()
+
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._on_animation_tick)
+
+            self._tray = None
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                self._build_tray()
+
+            self.restore_position()
 
         @property
         def state(self) -> OrbVisualState:
             return self._state
 
+        @property
+        def tray(self):
+            return self._tray
+
         def apply_state(self, state: OrbVisualState) -> None:
             self._state = OrbVisualState(state)
+            self._animation_started_at = time.monotonic()
+            self._update_tray_icon()
+            self._update_timer()
             self.update()
+
+        def _update_timer(self) -> None:
+            if animation_period(self._state) is None:
+                self._timer.stop()
+            else:
+                self._timer.start(int(1000 / ANIMATION_FPS))
+
+        def _on_animation_tick(self) -> None:
+            elapsed = time.monotonic() - self._animation_started_at
+            self._last_frame = animation_frame(self._state, elapsed)
+            self.update()
+
+        def current_frame(self) -> dict[str, float]:
+            """Latest deterministic animation frame for rendering."""
+            elapsed = time.monotonic() - self._animation_started_at
+            return animation_frame(self._state, elapsed)
+
+        # -- tray ------------------------------------------------------
+
+        def _build_tray(self) -> None:
+            menu = QMenu()
+            menu.addAction("Detener", self.stop_requested.emit)
+            menu.addAction("Salir", self.quit_requested.emit)
+            tray = QSystemTrayIcon(self._render_state_icon(), self)
+            tray.setContextMenu(menu)
+            tray.setToolTip("Atlas")
+            tray.show()
+            self._tray = tray
+
+        def _render_state_icon(self) -> QPixmap:
+            red, green, blue, alpha = color_for_state(self._state)
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QColor(red, green, blue, alpha))
+            painter.setPen(QColor(0, 0, 0, 0))
+            painter.drawEllipse(8, 8, 48, 48)
+            painter.end()
+            return pixmap
+
+        def _update_tray_icon(self) -> None:
+            if self._tray is not None:
+                self._tray.setIcon(QIcon(self._render_state_icon()))
+
+        # -- position preferences ---------------------------------------
+
+        def save_position(self) -> None:
+            """Persist the current window position when settings exist."""
+            if self._settings is None:
+                return
+            geometry = self.frameGeometry().topLeft()
+            self._settings.setValue("pos_x", int(geometry.x()))
+            self._settings.setValue("pos_y", int(geometry.y()))
+
+        def restore_position(self) -> None:
+            """Restore a previously saved position within screen bounds."""
+            if self._settings is None:
+                return
+            x = self._settings.value("pos_x")
+            y = self._settings.value("pos_y")
+            if x is None or y is None:
+                return
+            try:
+                target_x, target_y = int(x), int(y)
+            except (TypeError, ValueError):
+                return
+            screen = self.screen()
+            bounds = screen.availableGeometry() if screen is not None else None
+            if bounds is not None:
+                target_x = max(bounds.left(), min(target_x, bounds.right() - ORB_SIZE))
+                target_y = max(bounds.top(), min(target_y, bounds.bottom() - ORB_SIZE))
+            self.move(target_x, target_y)
+
+        # -- interaction -----------------------------------------------
 
         def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
             if event.button() == Qt.MouseButton.LeftButton:
@@ -106,15 +284,34 @@ def create_orb_window():
             menu.addAction("Salir", self.quit_requested.emit)
             menu.exec(event.globalPos())
 
+        def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            self.save_position()
+            super().closeEvent(event)
+
+        # -- painting ---------------------------------------------------
+
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            frame = self.current_frame()
+            red, green, blue, alpha = color_for_state(self._state)
+            alpha = max(0, min(255, int(alpha * frame["alpha_factor"])))
+            margin = int((ORB_SIZE // 10) * (2.0 - frame["scale"]))
+            diameter = max(1, ORB_SIZE - 2 * margin)
+            center = ORB_SIZE // 2
+
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            red, green, blue, alpha = color_for_state(self._state)
-            margin = ORB_SIZE // 10
-            diameter = ORB_SIZE - 2 * margin
             painter.setBrush(QColor(red, green, blue, alpha))
             painter.setPen(QColor(0, 0, 0, 0))
-            painter.drawEllipse(margin, margin, diameter, diameter)
+            painter.drawEllipse(center - diameter // 2, center - diameter // 2, diameter, diameter)
+
+            rotation = frame["rotation_deg"]
+            if rotation > 0.0:
+                painter.translate(center, center)
+                painter.rotate(rotation)
+                painter.setBrush(QColor(255, 255, 255, 90))
+                painter.drawPie(
+                    -diameter // 2, -diameter // 2, diameter, diameter, 0, 60 * 16
+                )
             painter.end()
 
     return OrbWindow()
