@@ -15,6 +15,7 @@ from channels.base_channel import InvalidChannelMessageError
 from channels.webhook_idempotency import IdempotencyStore, SqliteIdempotencyStore
 from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
+from channels.whatsapp_metrics import WhatsAppMetricsRecorder
 from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
 
@@ -37,10 +38,13 @@ def build_webhook_app(
     verify_token: str | None = None,
     transcriber: Any = None,
     voice_renderer: Any = None,
+    recorder: WhatsAppMetricsRecorder | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with all webhook dependencies injected."""
     if channel is None:
         channel = WhatsAppChannel()
+    if recorder is None:
+        recorder = WhatsAppMetricsRecorder()
     if store is None:
         store = _build_store()
     if verify_token is None:
@@ -75,6 +79,7 @@ def build_webhook_app(
             store=store,
             transcriber=transcriber,
             voice_renderer=voice_renderer,
+            recorder=recorder,
         )
     )
     return app

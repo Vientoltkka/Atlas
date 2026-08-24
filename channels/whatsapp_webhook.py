@@ -19,6 +19,15 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 
 from channels.base_channel import InvalidChannelMessageError
 from channels.whatsapp_channel import WhatsAppChannel
+from channels.whatsapp_metrics import (
+    CHANNEL_ERRORS,
+    AUDIO_RECEIVED,
+    MESSAGES_DUPLICATED,
+    MESSAGES_FAILED,
+    MESSAGES_RECEIVED,
+    VOICE_REPLIES,
+    safe_record,
+)
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult, AgentExecutionStatus
 
 
@@ -37,6 +46,7 @@ def build_webhook_router(
     store: Any,
     transcriber: Any = None,
     voice_renderer: Any = None,
+    recorder: Any = None,
 ) -> APIRouter:
     """Compose the WhatsApp webhook router with injected dependencies."""
 
@@ -81,9 +91,12 @@ def build_webhook_router(
             return Response(status_code=200)
         wamid = wamid.strip()
 
+        safe_record(recorder, MESSAGES_RECEIVED)
+
         # Reserve BEFORE responding so concurrent duplicates cannot both execute.
         if not store.check_and_reserve(wamid):
             logger.debug("whatsapp webhook duplicate wamid ignored")
+            safe_record(recorder, MESSAGES_DUPLICATED)
             return Response(status_code=200)
 
         recipient_id = _extract_sender_id(message)
@@ -93,6 +106,7 @@ def build_webhook_router(
         supported = _is_supported_text_message(message) or audio_media_id is not None
 
         if audio_media_id is not None:
+            safe_record(recorder, AUDIO_RECEIVED)
             background_tasks.add_task(
                 _process_audio_message,
                 channel=channel,
@@ -104,6 +118,7 @@ def build_webhook_router(
                 recipient_id=recipient_id,
                 correlation_id=correlation_id,
                 pseudo_sender=pseudo_sender,
+                recorder=recorder,
             )
         elif supported:
             background_tasks.add_task(
@@ -116,6 +131,7 @@ def build_webhook_router(
                 correlation_id=correlation_id,
                 pseudo_sender=pseudo_sender,
                 voice_renderer=voice_renderer,
+                recorder=recorder,
             )
         else:
             background_tasks.add_task(
@@ -132,7 +148,13 @@ def build_webhook_router(
     return router
 
 
-def _deliver_reply(sender: Any, voice_renderer: Any, recipient_id: str, body: str) -> None:
+def _deliver_reply(
+    sender: Any,
+    voice_renderer: Any,
+    recipient_id: str,
+    body: str,
+    recorder: Any = None,
+) -> None:
     """Deliver the reply, preferring audio when a renderer is configured.
 
     Any failure in the voice path falls back to plain text so that the
@@ -146,6 +168,7 @@ def _deliver_reply(sender: Any, voice_renderer: Any, recipient_id: str, body: st
         audio_path = voice_renderer.render(body)
         media_id = sender.upload_media(str(audio_path), "audio/ogg")
         sender.send_audio(recipient_id, media_id)
+        safe_record(recorder, VOICE_REPLIES)
         return
     except Exception:
         logger.exception("whatsapp voice reply failed | fallback=text")
@@ -168,6 +191,7 @@ def _process_message(
     correlation_id: str,
     pseudo_sender: str,
     voice_renderer: Any = None,
+    recorder: Any = None,
 ) -> None:
     """Background task: run Atlas and deliver the answer. Never raises."""
     if message is None:
@@ -183,20 +207,24 @@ def _process_message(
         outbound = channel.format_outbound(result)
         body = outbound.get("body")
         if isinstance(body, str) and body.strip():
-            _deliver_reply(sender, voice_renderer, recipient_id, body)
+            _deliver_reply(sender, voice_renderer, recipient_id, body, recorder=recorder)
     except InvalidChannelMessageError as error:
+        safe_record(recorder, MESSAGES_FAILED)
         logger.warning("whatsapp inbound translation failed | error=%s", error)
         try:
             sender.send_text(recipient_id, "No he podido entender el mensaje.")
         except Exception:
             logger.exception("whatsapp courtesy delivery failed")
+            safe_record(recorder, CHANNEL_ERRORS)
     except Exception:
         # Functional failure: log it; Meta must not be asked to retry.
+        safe_record(recorder, MESSAGES_FAILED)
         logger.exception("whatsapp background processing failed")
         try:
             sender.send_text(recipient_id, "Se ha producido un error procesando tu mensaje.")
         except Exception:
             logger.exception("whatsapp error notification delivery failed")
+            safe_record(recorder, CHANNEL_ERRORS)
 
 
 def _process_audio_message(
@@ -210,6 +238,7 @@ def _process_audio_message(
     recipient_id: str,
     correlation_id: str,
     pseudo_sender: str,
+    recorder: Any = None,
 ) -> None:
     """Background task: download, transcribe and process an audio message."""
     try:
@@ -224,9 +253,10 @@ def _process_audio_message(
         outbound = channel.format_outbound(result)
         body = outbound.get("body")
         if isinstance(body, str) and body.strip():
-            _deliver_reply(sender, voice_renderer, recipient_id, body)
+            _deliver_reply(sender, voice_renderer, recipient_id, body, recorder=recorder)
     except Exception:
         # Download or transcription failure: controlled courtesy response.
+        safe_record(recorder, MESSAGES_FAILED)
         logger.exception("whatsapp audio processing failed")
         try:
             sender.send_text(recipient_id, "No he podido entender el mensaje.")
