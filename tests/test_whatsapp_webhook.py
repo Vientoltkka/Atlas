@@ -354,7 +354,12 @@ def test_regression_text_audio_document_unchanged() -> None:
     }
     document_payload = {
         "entry": [{"changes": [{"value": {"messages": [
-            {"id": "wamid.doc", "from": "34600", "type": "document", "document": {"id": "y"}}
+            {
+                "id": "wamid.doc",
+                "from": "34600",
+                "type": "document",
+                "document": {"id": "y", "filename": "informe.pdf"},
+            }
         ]}}]}]
     }
     audio_response = client.post("/webhook/whatsapp", json=audio_payload)
@@ -363,6 +368,303 @@ def test_regression_text_audio_document_unchanged() -> None:
     assert text_response.status_code == 200
     assert audio_response.status_code == 200
     assert document_response.status_code == 200
-    assert len(executor.calls) == 1  # only text executes Atlas
+    # text + normalized document reach Atlas; audio without transcriber does not.
+    assert len(executor.calls) == 2
+    assert executor.calls[1].user_input == "[documento: informe.pdf]"
     courtesy_count = sum(1 for _, body in sender.sent if "texto" in body)
-    assert courtesy_count == 2  # audio + document get the courtesy message
+    assert courtesy_count == 1  # audio keeps the courtesy message
+
+
+# ---------------------------------------------------------------------------
+# V4.0-F4: inbound non-text message coverage
+# ---------------------------------------------------------------------------
+
+
+def _message_payload(wamid: str, mtype: str, block: dict | list) -> dict:
+    return {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {"id": wamid, "from": "34600111222", "type": mtype, mtype: block}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+
+def test_document_with_filename_and_caption_reaches_executor() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.doc1", "document",
+        {"id": "d1", "filename": "contrato.pdf", "caption": "revisa la clausula 3"},
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "[documento: contrato.pdf] revisa la clausula 3"
+
+
+def test_document_without_filename_uses_caption() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload("wamid.doc2", "document", {"id": "d2", "caption": "resumelo"})
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "[documento] resumelo"
+
+
+def test_document_without_caption_keeps_filename() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload("wamid.doc3", "document", {"id": "d3", "filename": "notas.txt"})
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "[documento: notas.txt]"
+
+
+def test_document_malformed_sends_courtesy() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    for block in ({"id": "x"}, {}, "no-mapping", None):
+        payload = _message_payload(f"wamid.docm-{id(block)}", "document", block)
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert sender.sent and all("texto" in body for _, body in sender.sent)
+
+
+def test_location_with_coordinates_reaches_executor() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.loc1", "location",
+        {"latitude": 40.4168, "longitude": -3.7038},
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "[ubicación: lat=40.4168, lng=-3.7038]"
+
+
+def test_location_with_name_and_address_included() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.loc2", "location",
+        {
+            "latitude": 40.4168,
+            "longitude": -3.7038,
+            "name": "Casa",
+            "address": "Calle Mayor 1",
+        },
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == (
+        "[ubicación: lat=40.4168, lng=-3.7038] Casa Calle Mayor 1"
+    )
+
+
+def test_location_invalid_coordinates_sends_courtesy() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    for block in ({}, {"latitude": "40", "longitude": -3.7}, {"latitude": True, "longitude": 0}):
+        payload = _message_payload(f"wamid.loci-{id(block)}", "location", block)
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert sender.sent and all("texto" in body for _, body in sender.sent)
+
+
+def test_contacts_display_name_reaches_executor() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.con1", "contacts",
+        [{"name": {"formatted_name": "Ana Garcia", "first_name": "Ana"}, "phones": []}],
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "[contacto: Ana Garcia]"
+
+
+def test_contacts_malformed_sends_courtesy() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    for block in ([], [{"phones": ["123"]}], [{"name": {}}], "bad"):
+        payload = _message_payload(f"wamid.conm-{id(block)}", "contacts", block)
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert sender.sent and all("texto" in body for _, body in sender.sent)
+
+
+def test_button_reply_title_reaches_executor() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.btn1", "interactive",
+        {"type": "button_reply", "button_reply": {"id": "btn_si", "title": "Confirmar"}},
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "Confirmar"
+
+
+def test_list_reply_title_reaches_executor() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.lst1", "interactive",
+        {"type": "list_reply", "list_reply": {"id": "row2", "title": "Ver agenda"}},
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0].user_input == "Ver agenda"
+
+
+def test_interactive_malformed_sends_courtesy() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    for block in ({}, {"button_reply": {}}, {"list_reply": "bad"}, None):
+        payload = _message_payload(f"wamid.intm-{id(block)}", "interactive", block)
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert sender.sent and all("texto" in body for _, body in sender.sent)
+
+
+def test_truly_unknown_types_keep_courtesy() -> None:
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    for wamid, mtype in (("wamid.stk", "sticker"), ("wamid.ord", "order"), ("wamid.xyz", "totally_new")):
+        payload = _message_payload(wamid, mtype, {})
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    assert len(executor.calls) == 0
+    assert len(sender.sent) == 3
+    assert all("texto" in body for _, body in sender.sent)
+
+
+def test_normalized_text_respects_max_length() -> None:
+    from channels.whatsapp_channel import MAX_WHATSAPP_TEXT_LENGTH
+
+    executor = make_executor()
+    client = make_client(executor=executor)
+    long_caption = "c" * (MAX_WHATSAPP_TEXT_LENGTH + 500)
+    payload = _message_payload(
+        "wamid.doclong", "document",
+        {"id": "d9", "filename": "a.pdf", "caption": long_caption},
+    )
+    response = client.post("/webhook/whatsapp", json=payload)
+    assert response.status_code == 200
+    assert len(executor.calls) == 1
+    user_input = executor.calls[0].user_input
+    assert len(user_input) <= MAX_WHATSAPP_TEXT_LENGTH
+
+
+def test_document_duplicate_wamid_executes_once() -> None:
+    executor = make_executor()
+    client = make_client(executor=executor)
+    payload = _message_payload(
+        "wamid.docdup", "document", {"id": "dd", "filename": "informe.pdf"}
+    )
+    first = client.post("/webhook/whatsapp", json=payload)
+    second = client.post("/webhook/whatsapp", json=payload)
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(executor.calls) == 1
+
+
+def test_rate_limit_applies_to_new_message_types() -> None:
+    from channels.whatsapp_rate_limit import WhatsAppRateLimiter
+
+    class OneShotLimiter:
+        def __init__(self) -> None:
+            self.allowed_first = True
+
+        def allow(self, sender_key: str) -> bool:
+            result = self.allowed_first
+            self.allowed_first = False
+            return result
+
+    executor = make_executor()
+    sender = FakeSender()
+    limiter = OneShotLimiter()
+    client = TestClient(
+        create_webhook_app(
+            executor_fn=executor,
+            store=FakeStore(),
+            sender=sender,
+            verify_token=VERIFY_TOKEN,
+            rate_limiter=limiter,
+        )
+    )
+    payloads = [
+        _message_payload("wamid.rl-doc", "document", {"id": "rld", "filename": "f.pdf"}),
+        _message_payload("wamid.rl-loc", "location", {"latitude": 1, "longitude": 2}),
+        _message_payload(
+            "wamid.rl-btn", "interactive",
+            {"type": "button_reply", "button_reply": {"title": "Si"}},
+        ),
+    ]
+    for index, payload in enumerate(payloads):
+        response = client.post("/webhook/whatsapp", json=payload)
+        assert response.status_code == 200
+    # Only the first request passes the limiter; later ones are dropped
+    # silently before idempotency and never reach Atlas.
+    assert len(executor.calls) == 1
+
+
+def test_f4_payload_content_never_leaks_into_logs(caplog: pytest.LogCaptureFixture) -> None:
+    import logging as logging_module
+
+    executor = make_executor()
+    sender = FakeSender()
+    client = make_client(executor=executor, sender=sender)
+    secret_filename = "contrato-secreto-xyz.pdf"
+    contact_name = "Persona-Muy-Privada"
+    address = "Calle-Privada-99"
+    with caplog.at_level(logging_module.DEBUG, logger="channels.whatsapp_webhook"):
+        client.post(
+            "/webhook/whatsapp",
+            json=_message_payload(
+                "wamid.pii1", "document",
+                {"id": "pii", "filename": secret_filename, "caption": "hola"},
+            ),
+        )
+        client.post(
+            "/webhook/whatsapp",
+            json=_message_payload(
+                "wamid.pii2", "location",
+                {"latitude": 1.5, "longitude": 2.5, "name": "Sitio", "address": address},
+            ),
+        )
+        client.post(
+            "/webhook/whatsapp",
+            json=_message_payload(
+                "wamid.pii3", "contacts",
+                [{"name": {"formatted_name": contact_name}}],
+            ),
+        )
+    serialized_logs = caplog.text
+    assert secret_filename not in serialized_logs
+    assert contact_name not in serialized_logs
+    assert address not in serialized_logs

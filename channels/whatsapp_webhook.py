@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 from typing import Any, Callable, Mapping
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response
@@ -33,9 +34,11 @@ from channels.whatsapp_metrics import (
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult, AgentExecutionStatus
 
 
+from channels.whatsapp_channel import MAX_WHATSAPP_TEXT_LENGTH
+
+
 logger = logging.getLogger(__name__)
 
-SUPPORTED_MESSAGE_TYPES = frozenset({"text"})
 MAX_CORRELATION_ID_LENGTH = 128
 
 
@@ -333,13 +336,35 @@ def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
 
 
 def _message_text(message: Mapping[str, Any]) -> str:
-    if message.get("type") == "image":
+    """Normalized textual representation of a supported inbound message.
+
+    Unsupported or malformed payloads return an empty string so the
+    caller falls back to the existing courtesy path. Payload content
+    (filenames, captions, contact names, coordinates) is treated as
+    untrusted data: it is labelled and clipped to the channel text
+    limit, and never logged.
+    """
+    message_type = message.get("type")
+    if not isinstance(message_type, str):
+        return ""
+    if message_type == "text":
+        text = message.get("text")
+        if isinstance(text, Mapping):
+            body = text.get("body")
+            if isinstance(body, str):
+                return body.strip()
+        return ""
+    if message_type == "image":
         return _image_caption(message)
-    text = message.get("text")
-    if isinstance(text, Mapping):
-        body = text.get("body")
-        return body if isinstance(body, str) else ""
-    return text if isinstance(text, str) else ""
+    if message_type == "document":
+        return _document_text(message.get("document"))
+    if message_type == "location":
+        return _location_text(message.get("location"))
+    if message_type == "contacts":
+        return _contacts_text(message.get("contacts"))
+    if message_type == "interactive":
+        return _interactive_text(message.get("interactive"))
+    return ""
 
 
 def _extract_sender_id(message: Mapping[str, Any]) -> str:
@@ -350,18 +375,91 @@ def _extract_sender_id(message: Mapping[str, Any]) -> str:
 
 
 def _is_supported_text_message(message: Mapping[str, Any]) -> bool:
-    message_type = message.get("type")
-    if not isinstance(message_type, str):
-        return False
-    if message_type == "image":
-        # Image captions are processed as text; the image itself is ignored.
-        caption = _image_caption(message)
-        return bool(caption)
-    return (
-        message_type in SUPPORTED_MESSAGE_TYPES
-        and isinstance(message.get("text"), Mapping)
-        and isinstance(message["text"].get("body"), str)
+    return bool(_message_text(message))
+
+
+def _clean_str(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _document_text(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    filename = _clean_str(payload.get("filename"))
+    caption = _clean_str(payload.get("caption"))
+    if filename:
+        text = f"[documento: {filename}]"
+        if caption:
+            text = f"{text} {caption}"
+    elif caption:
+        text = f"[documento] {caption}"
+    else:
+        return ""
+    return _clip(text)
+
+
+def _location_text(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    latitude = payload.get("latitude")
+    longitude = payload.get("longitude")
+    if not _is_coordinate(latitude) or not _is_coordinate(longitude):
+        return ""
+    text = f"[ubicación: lat={latitude}, lng={longitude}]"
+    name = _clean_str(payload.get("name"))
+    address = _clean_str(payload.get("address"))
+    if name:
+        text = f"{text} {name}"
+    if address:
+        text = f"{text} {address}"
+    return _clip(text)
+
+
+def _contacts_text(payload: Any) -> str:
+    if not isinstance(payload, list) or not payload:
+        return ""
+    first = payload[0]
+    if not isinstance(first, Mapping):
+        return ""
+    name_block = first.get("name")
+    if not isinstance(name_block, Mapping):
+        return ""
+    display_name = (
+        _clean_str(name_block.get("formatted_name"))
+        or _clean_str(name_block.get("first_name"))
+        or _clean_str(name_block.get("last_name"))
     )
+    if not display_name:
+        return ""
+    return _clip(f"[contacto: {display_name}]")
+
+
+def _interactive_text(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    for reply_key in ("button_reply", "list_reply"):
+        block = payload.get(reply_key)
+        if not isinstance(block, Mapping):
+            continue
+        title = _clean_str(block.get("title"))
+        if title:
+            return _clip(title)
+        identifier = _clean_str(block.get("id"))
+        if identifier:
+            return _clip(identifier)
+    return ""
+
+
+def _is_coordinate(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _clip(text: str) -> str:
+    return text[:MAX_WHATSAPP_TEXT_LENGTH]
 
 
 def _image_caption(message: Mapping[str, Any]) -> str:
