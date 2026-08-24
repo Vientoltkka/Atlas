@@ -22,6 +22,7 @@ from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
 from channels.whatsapp_health import WhatsAppChannelHealthChecker
 from channels.whatsapp_metrics import WhatsAppMetricsRecorder
+from channels.whatsapp_metrics_persistence import WhatsAppMetricsPersistence
 from channels.whatsapp_rate_limit import WhatsAppRateLimiter
 from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
@@ -72,7 +73,7 @@ def build_webhook_app(
     if channel is None:
         channel = WhatsAppChannel()
     if recorder is None:
-        recorder = WhatsAppMetricsRecorder()
+        recorder = _build_recorder()
     if store is None:
         store = _build_store()
     if verify_token is None:
@@ -109,6 +110,7 @@ def build_webhook_app(
 
     app = FastAPI(title="Atlas WhatsApp Webhook")
     app.state.whatsapp_health = health_checker
+    app.state.whatsapp_metrics = recorder
     app.include_router(
         build_webhook_router(
             channel=channel,
@@ -140,6 +142,22 @@ def _build_rate_limiter() -> WhatsAppRateLimiter:
         )
         limit = 0
     return WhatsAppRateLimiter(limit_per_minute=max(limit, 0))
+
+
+def _build_recorder() -> WhatsAppMetricsRecorder | WhatsAppMetricsPersistence:
+    """Metrics recorder, optionally backed by local JSON persistence.
+
+    Set ATLAS_WHATSAPP_METRICS_PATH to persist aggregated counters across
+    restarts (atomic writes, threshold-based flush). Without the variable
+    the recorder stays purely in-memory, exactly as before V4.0-F3.
+    """
+    recorder = WhatsAppMetricsRecorder()
+    metrics_path = os.environ.get("ATLAS_WHATSAPP_METRICS_PATH", "").strip()
+    if not metrics_path:
+        return recorder
+    persistence = WhatsAppMetricsPersistence(recorder=recorder, path=metrics_path)
+    persistence.load_existing()
+    return persistence
 
 
 def _build_health_checker(

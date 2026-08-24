@@ -70,6 +70,20 @@ class WhatsAppMetricsRecorder:
         with self._lock:
             return self._counters.get(event, 0)
 
+    def restore(self, counters: Any) -> None:
+        """Merge previously persisted counters into this recorder.
+
+        Only known events with valid non-negative integers are applied;
+        anything else is ignored. Never raises for malformed input.
+        """
+        if not isinstance(counters, dict):
+            return
+        with self._lock:
+            for event in _EVENTS:
+                value = counters.get(event)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    self._counters[event] += value
+
     def __repr__(self) -> str:
         return f"WhatsAppMetricsRecorder(counters={self.snapshot()})"
 
