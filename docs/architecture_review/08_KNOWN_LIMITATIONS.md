@@ -45,7 +45,9 @@ No se identifico un bloqueante reproducible en el flujo de texto congelado.
 ## Capacidades parciales o no disponibles
 
 - Voz y wake word: parciales y dependientes del entorno.
-- GUI, instalador, autoarranque y WhatsApp: no disponibles.
+- GUI, instalador y autoarranque: no disponibles. WhatsApp: canal
+  operativo via webhook (texto/audio/voice, imagen con caption,
+  documento, ubicacion, contactos y respuestas interactivas).
 - Web tool, RAG, embeddings y memoria vectorial: no disponibles.
 - Multiusuario, sincronizacion y ejecucion distribuida: no disponibles.
 - Rollback general: no disponible.

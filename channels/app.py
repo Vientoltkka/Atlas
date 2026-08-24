@@ -6,11 +6,14 @@ and NOT safe for multiple workers. Shared persistence belongs to Phase 3.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 from typing import Any, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from channels.base_channel import InvalidChannelMessageError
 from channels.webhook_idempotency import (
@@ -20,7 +23,7 @@ from channels.webhook_idempotency import (
 )
 from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
-from channels.whatsapp_health import WhatsAppChannelHealthChecker
+from channels.whatsapp_health import WhatsAppChannelHealthChecker, WhatsAppHealthStatus
 from channels.whatsapp_metrics import WhatsAppMetricsRecorder
 from channels.whatsapp_metrics_persistence import WhatsAppMetricsPersistence
 from channels.whatsapp_rate_limit import WhatsAppRateLimiter
@@ -124,6 +127,45 @@ def build_webhook_app(
             rate_limiter=rate_limiter,
         )
     )
+
+    @app.get("/health", include_in_schema=False)
+    def health_endpoint() -> Response:
+        """Local readiness probe (V4.1-F1).
+
+        Semantics: HEALTHY -> 200, DEGRADED -> 200 (operational with
+        reduced capabilities, reported in the body), UNHEALTHY -> 503.
+        The result payload only contains booleans-derived stable codes;
+        an unexpected checker failure becomes a controlled 503 without
+        internal details.
+        """
+        try:
+            result = health_checker.check()
+        except Exception:
+            logger.warning("whatsapp health endpoint check failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "UNHEALTHY", "checks": {}},
+            )
+        status_code = 200 if result.status is not WhatsAppHealthStatus.UNHEALTHY else 503
+        return JSONResponse(
+            status_code=status_code,
+            content={"status": result.status.value, "checks": dict(result.checks)},
+        )
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics_endpoint(request: Request) -> Response:
+        """Aggregated channel counters, protected by the verify token.
+
+        Requires ``Authorization: Bearer <ATLAS_WHATSAPP_VERIFY_TOKEN>``.
+        Rejections never reveal whether the token was wrong or missing
+        and never echo any secret.
+        """
+        expected = f"Bearer {verify_token}".encode("utf-8")
+        provided = request.headers.get("Authorization", "").encode("utf-8")
+        if not verify_token or not hmac.compare_digest(expected, provided):
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+        return JSONResponse(content=recorder.snapshot())
+
     return app
 
 
