@@ -12,3 +12,4 @@ sounddevice
 faster-whisper
 openwakeword==0.6.0
 pyttsx3
+PySide6
