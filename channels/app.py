@@ -15,6 +15,7 @@ from channels.base_channel import InvalidChannelMessageError
 from channels.webhook_idempotency import IdempotencyStore, SqliteIdempotencyStore
 from channels.whatsapp_channel import WhatsAppChannel
 from channels.whatsapp_sender import WhatsAppGraphSender
+from channels.whatsapp_health import WhatsAppChannelHealthChecker
 from channels.whatsapp_metrics import WhatsAppMetricsRecorder
 from channels.whatsapp_webhook import build_webhook_router
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
@@ -39,6 +40,7 @@ def build_webhook_app(
     transcriber: Any = None,
     voice_renderer: Any = None,
     recorder: WhatsAppMetricsRecorder | None = None,
+    health_checker: WhatsAppChannelHealthChecker | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with all webhook dependencies injected."""
     if channel is None:
@@ -68,8 +70,17 @@ def build_webhook_app(
         voice_renderer = _build_voice_renderer()
     if executor_fn is None:
         raise ValueError("executor_fn is required.")
+    if health_checker is None:
+        health_checker = _build_health_checker(
+            verify_token=verify_token,
+            store=store,
+            sender=sender,
+            transcriber=transcriber,
+            voice_renderer=voice_renderer,
+        )
 
     app = FastAPI(title="Atlas WhatsApp Webhook")
+    app.state.whatsapp_health = health_checker
     app.include_router(
         build_webhook_router(
             channel=channel,
@@ -83,6 +94,38 @@ def build_webhook_app(
         )
     )
     return app
+
+
+def _build_health_checker(
+    *,
+    verify_token: str,
+    store: Any,
+    sender: Any,
+    transcriber: Any,
+    voice_renderer: Any,
+) -> WhatsAppChannelHealthChecker:
+    """Build the channel diagnostic from the same wiring the app uses."""
+    access_token = os.environ.get("ATLAS_WHATSAPP_ACCESS_TOKEN", "")
+    phone_number_id = os.environ.get("ATLAS_WHATSAPP_PHONE_NUMBER_ID", "")
+    config = {
+        "verify_token": verify_token,
+        "access_token": access_token,
+        "phone_number_id": phone_number_id,
+    }
+    if sender is None:
+        sender_builder: Callable[[], Any] = lambda: WhatsAppGraphSender(
+            access_token=access_token,
+            phone_number_id=phone_number_id,
+        )
+    else:
+        sender_builder = lambda: sender
+    return WhatsAppChannelHealthChecker(
+        config=config,
+        store=store,
+        transcriber=transcriber,
+        voice_renderer=voice_renderer,
+        sender_builder=sender_builder,
+    )
 
 
 def _build_audio_transcriber() -> Any:
