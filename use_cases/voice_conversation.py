@@ -197,6 +197,7 @@ class VoiceConversationUseCase:
         clock: Callable[[], float] = time.monotonic,
         now_provider: Callable[[], datetime] | None = None,
         session_id_factory: Callable[[], str] | None = None,
+        state_listener: Callable[[VoiceConversationState], None] | None = None,
     ) -> None:
         if conversation_idle_timeout <= 0:
             raise ValueError("El timeout de inactividad debe ser mayor que cero.")
@@ -270,6 +271,10 @@ class VoiceConversationUseCase:
         self._clock = clock
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._session_id_factory = session_id_factory or (lambda: str(uuid4()))
+        self._state_listener = state_listener
+        self._session_state_listener: (
+            Callable[[VoiceConversationState], None] | None
+        ) = None
 
     def execute(
         self,
@@ -277,6 +282,7 @@ class VoiceConversationUseCase:
         process_text: Callable[[str], str],
         status_sink: Callable[[str], None] | None = None,
         process_text_stream=None,
+        state_listener: Callable[[VoiceConversationState], None] | None = None,
     ) -> VoiceConversationResult | None:
         """Run voice conversation mode for explicit activation commands."""
         if self._normalize(prompt) not in self._COMMANDS:
@@ -286,7 +292,9 @@ class VoiceConversationUseCase:
                 process_text,
                 status_sink,
                 process_text_stream=process_text_stream,
+                state_listener=state_listener,
             )
+        self._session_state_listener = state_listener
 
         messages: list[str] = []
 
@@ -374,8 +382,12 @@ class VoiceConversationUseCase:
         status_sink: Callable[[str], None] | None = None,
         typed_input: Callable[[], str | None] | None = None,
         process_text_stream=None,
+        state_listener: Callable[[VoiceConversationState], None] | None = None,
     ) -> VoiceConversationResult:
         """Run voice conversation mode without wake-word activation."""
+        # Session-scoped override of the constructor-level listener; the
+        # value stays active for this call and is replaced on the next one.
+        self._session_state_listener = state_listener
         messages: list[str] = []
 
         def emit(message: str, diagnostic: bool = True) -> None:
@@ -2698,6 +2710,14 @@ class VoiceConversationUseCase:
             session.states.append(state)
         if emit is not None:
             emit(f"Estado: {state.value}", diagnostic=True)
+        listener = self._session_state_listener or self._state_listener
+        if listener is not None:
+            try:
+                listener(state)
+            except Exception:
+                # Best-effort hook: a broken UI listener must never break
+                # the voice session.
+                pass
     def _end_session(
         self,
         session: VoiceConversationSession,

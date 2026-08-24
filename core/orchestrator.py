@@ -367,7 +367,7 @@ class AtlasOrchestrator:
 
             self._print_atlas(response)
 
-    def start_voice(self) -> None:
+    def start_voice(self, state_listener=None) -> None:
         """Start manual voice conversation mode without wake word."""
         print("Atlas iniciado en modo voz.")
         print()
@@ -387,6 +387,10 @@ class AtlasOrchestrator:
             "status_sink": print,
             "typed_input": self._read_typed_exit_command,
         }
+        if state_listener is not None and _accepts_keyword(
+            execute_manual, "state_listener"
+        ):
+            voice_kwargs["state_listener"] = state_listener
         if _accepts_keyword(execute_manual, "process_text_stream"):
             voice_kwargs["process_text_stream"] = (
                 lambda text, fragment_sink: self.process_voice_prompt(
@@ -397,7 +401,7 @@ class AtlasOrchestrator:
             )
         execute_manual(**voice_kwargs)
 
-    def start_assistant(self) -> None:
+    def start_assistant(self, state_listener=None) -> None:
         """Start permanent assistant mode with wake word."""
         if self._permanent_assistant is None:
             print("Atlas:")
@@ -405,14 +409,18 @@ class AtlasOrchestrator:
             print()
             return
 
-        self._permanent_assistant.run(
-            process_text=lambda text: self.process_voice_prompt(
+        run = self._permanent_assistant.run
+        assistant_kwargs = {
+            "process_text": lambda text: self.process_voice_prompt(
                 text,
                 confirm=input,
             ),
-            status_sink=print,
-            typed_input=self._read_typed_exit_command,
-        )
+            "status_sink": print,
+            "typed_input": self._read_typed_exit_command,
+        }
+        if state_listener is not None and _accepts_keyword(run, "state_listener"):
+            assistant_kwargs["state_listener"] = state_listener
+        run(**assistant_kwargs)
 
     def list_microphones(self) -> str:
         """Return available input microphones."""
