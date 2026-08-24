@@ -54,6 +54,7 @@ def main() -> int:
     args = parser.parse_args()
     mode = _requested_mode(args)
     project_root = Path(__file__).resolve().parent
+    _load_environment_file(project_root)
     report = WindowsStartupPreflight(project_root).run(mode)
 
     if not report.ready:
@@ -174,6 +175,16 @@ def _test_microphone(index: int) -> str:
     lines.append(f"RMS: {result.rms:.4f}")
     lines.append("Voz detectada: si" if result.voice_detected else "Voz detectada: no")
     return "\n".join(lines)
+
+
+def _load_environment_file(project_root: Path) -> None:
+    """Load .env without overriding variables already present in the
+    environment. Values are never logged."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(project_root / ".env")
 
 
 def _requested_mode(args: argparse.Namespace) -> str:

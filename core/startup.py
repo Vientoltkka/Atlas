@@ -7,6 +7,7 @@ from enum import Enum
 import importlib.util
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 from pathlib import Path
 import re
 import socket
@@ -18,6 +19,13 @@ from typing import Callable, Iterable
 ATLAS_VERSION = "1.0"
 SUPPORTED_PYTHON_MIN = (3, 11)
 SUPPORTED_PYTHON_MAX_EXCLUSIVE = (3, 15)
+
+WHATSAPP_REQUIRED_MODULES = ("fastapi", "uvicorn", "httpx")
+WHATSAPP_REQUIRED_ENV_VARS = (
+    "ATLAS_WHATSAPP_VERIFY_TOKEN",
+    "ATLAS_WHATSAPP_ACCESS_TOKEN",
+    "ATLAS_WHATSAPP_PHONE_NUMBER_ID",
+)
 
 
 class CheckStatus(str, Enum):
@@ -111,6 +119,8 @@ class WindowsStartupPreflight:
         checks.append(self._check_environment_file())
         checks.extend(self._check_modules(mode))
         checks.append(self._check_local_model_service())
+        if mode == "whatsapp":
+            checks.append(self._check_whatsapp_credentials())
 
         capabilities = ["texto"]
         if self._modules_available(self._VOICE_REQUIRED_MODULES):
@@ -228,6 +238,9 @@ class WindowsStartupPreflight:
         if mode == "microphone":
             required = ["numpy", "sounddevice"]
             optional = []
+        elif mode == "whatsapp":
+            required.extend(WHATSAPP_REQUIRED_MODULES)
+            optional = []
         elif mode == "voice":
             required.extend(self._VOICE_REQUIRED_MODULES)
             optional = list(self._VOICE_OPTIONAL_MODULES + self._ASSISTANT_MODULES)
@@ -258,6 +271,27 @@ class WindowsStartupPreflight:
                     "No disponible; se desactiva la capacidad asociada.",
                     "Instala requirements.txt si necesitas voz o wake word.",
                 )
+
+    def _check_whatsapp_credentials(self) -> StartupCheck:
+        """Require the WhatsApp credentials without ever showing values."""
+        missing = [
+            name
+            for name in WHATSAPP_REQUIRED_ENV_VARS
+            if not os.environ.get(name, "").strip()
+        ]
+        if not missing:
+            return StartupCheck(
+                "Credenciales WhatsApp",
+                CheckStatus.OK,
+                "Configuradas.",
+            )
+        return StartupCheck(
+            "Credenciales WhatsApp",
+            CheckStatus.ERROR,
+            f"Faltan variables de entorno: {', '.join(missing)}.",
+            "Define las variables en el entorno o en el archivo .env "
+            "(ver .env.example). No incluyas los valores en mensajes de error.",
+        )
 
     def _check_local_model_service(self) -> StartupCheck:
         if self._socket_probe("127.0.0.1", 11434, 0.15):

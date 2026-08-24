@@ -6,6 +6,7 @@ rich
 typer
 fastapi
 uvicorn
+httpx
 numpy
 sounddevice
 faster-whisper
