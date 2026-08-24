@@ -47,6 +47,7 @@ from core.request_gateway import (
     AtlasRequest,
     RequestGateway,
 )
+from core import skill_intent
 from core.operational_request_router import (
     MemoryOperation,
     RequestRoute,
@@ -1836,43 +1837,15 @@ def _classify_structured_confirmation_intent(
 
 
 def _requested_skill_id(prompt: str, skill_system: SkillSystem) -> str | None:
-    normalized = " ".join(prompt.casefold().split())
-    if "skill" not in normalized:
-        return None
-
-    for skill in skill_system.skill_registry.list_skills(enabled_only=True):
-        identifiers = (skill.skill_id.casefold(), skill.name.casefold())
-        if any(identifier in normalized for identifier in identifiers):
-            return skill.skill_id
-    return None
+    return skill_intent.requested_skill_id(prompt, skill_system)
 
 
 def _skill_inputs_from_text(prompt: str, skill) -> dict[str, object]:
-    input_names = tuple(field.name for field in skill.input_fields) or tuple(
-        skill.input_names
-    )
-    if input_names != ("text",):
-        return {}
-
-    quoted = re.findall(r'''["']([^"']+)["']''', prompt)
-    if quoted:
-        return {"text": quoted[-1]}
-
-    match = re.search(
-        r"(?:con\s+el\s+texto|texto)\s*[:=]?\s*(.+)$",
-        prompt,
-        re.IGNORECASE,
-    )
-    return {"text": match.group(1).strip()} if match else {}
+    return skill_intent.skill_inputs_from_text(prompt, skill)
 
 
 def _present_skill_output(output) -> str:
-    values = dict(output or {})
-    if "result" in values:
-        return str(values["result"])
-    if len(values) == 1:
-        return str(next(iter(values.values())))
-    return "\n".join(f"{key}: {value}" for key, value in values.items())
+    return skill_intent.present_skill_output(output)
 
 def _is_structured_resume_intent(
     prompt: str,
