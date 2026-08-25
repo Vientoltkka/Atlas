@@ -333,6 +333,11 @@ class SoundDeviceAudioCapture:
     _SHORT_UTTERANCE_NOISE_MULTIPLIER = 3.0
     _SHORT_UTTERANCE_PADDING_SECONDS = 0.20
     _PRE_ROLL_SECONDS = 0.45
+    # After a phrase starts, a later block only counts as voice when it
+    # reaches this fraction of the phrase's own median loudness (and the
+    # base threshold). This keeps sustained low-level echo/noise from
+    # being misclassified as continued speech and holding the turn open.
+    _POST_PHRASE_ECHO_FACTOR = 0.35
 
     def __init__(
         self,
@@ -843,12 +848,24 @@ class SoundDeviceAudioCapture:
         required_voice_duration = self._initial_voice_duration()
         tolerated_initial_silence = self._initial_silence_tolerance()
         trailing_silence = self._trailing_silence_duration()
+        phrase_levels: list[float] = []
 
         for mono, rms in zip(mono_chunks, block_rms_values):
             chunk_duration = len(mono) / self.sample_rate
             chunk_started_at = elapsed
             elapsed += chunk_duration
-            is_voice = rms >= voice_threshold
+
+            if voice_started:
+                # Post-start classification adapts to the phrase's own
+                # loudness so residual echo/noise cannot hold the turn.
+                phrase_levels.append(rms)
+                effective_threshold = max(
+                    voice_threshold,
+                    float(np.median(phrase_levels)) * self._POST_PHRASE_ECHO_FACTOR,
+                )
+                is_voice = rms >= effective_threshold
+            else:
+                is_voice = rms >= voice_threshold
 
             if not voice_started:
                 if is_voice:
@@ -1186,7 +1203,16 @@ class SoundDeviceAudioCapture:
         return max(self.chunk_duration, self._INITIAL_SILENCE_TOLERANCE_SECONDS)
 
     def _trailing_silence_duration(self) -> float:
-        return min(max(self._TRAILING_SILENCE_SECONDS, 0.7), 0.9)
+        """Effective trailing-silence window for closing a turn.
+
+        Respects the configured ``trailing_silence`` within safe bounds:
+        a floor avoids cutting words prematurely; a ceiling guarantees
+        the turn closes even with residual noise or TTS echo.
+        """
+        configured = self.trailing_silence
+        if configured is None or configured <= 0:
+            configured = self._TRAILING_SILENCE_SECONDS
+        return min(max(float(configured), 0.3), 1.5)
 
     def _has_complete_voice(
         self,

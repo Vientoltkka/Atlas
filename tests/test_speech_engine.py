@@ -299,7 +299,7 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     capture = SoundDeviceAudioCapture(
         sample_rate=10,
         initial_silence_timeout=1.0,
-        trailing_silence=0.2,
+        trailing_silence=0.5,
         chunk_duration=0.1,
         speech_threshold=0.05,
     )
@@ -314,7 +314,9 @@ def test_capture_audio_mono_sample_rate_and_phrase_boundaries() -> None:
     assert result.sample_rate == 10
     assert result.microphone_name == "Fake Mic"
     assert result.samples.ndim == 1
-    assert result.duration_seconds == pytest.approx(1.6)
+    # Configured trailing silence (0.5 s) is honored: turn closes after
+    # 2 pre-blocks + 6 voice + 5 silence blocks.
+    assert result.duration_seconds == pytest.approx(1.3)
 
 
 def test_capture_limits_max_duration() -> None:
@@ -388,6 +390,7 @@ def test_voice_commands_are_not_cut_before_phrase_is_complete(
         sample_rate=10,
         speech_threshold=0.006,
         initial_silence_timeout=1.0,
+        trailing_silence=0.8,
         chunk_duration=0.1,
         minimum_audio_duration=0.2,
     )
@@ -557,6 +560,7 @@ def test_short_utterance_preserves_three_consecutive_high_contrast_blocks() -> N
         sample_rate=10,
         speech_threshold=0.006,
         initial_silence_timeout=1.0,
+        trailing_silence=0.8,
         chunk_duration=0.1,
         minimum_audio_duration=0.2,
     )
@@ -621,6 +625,7 @@ def test_physical_short_utterance_above_noise_floor_reaches_stt_provider() -> No
         sample_rate=20,
         speech_threshold=0.008,
         initial_silence_timeout=1.0,
+        trailing_silence=0.8,
         chunk_duration=0.05,
         minimum_audio_duration=0.2,
     )
@@ -750,6 +755,7 @@ def test_short_utterance_capture_reaches_stt_provider() -> None:
         sample_rate=10,
         speech_threshold=0.006,
         initial_silence_timeout=1.0,
+        trailing_silence=0.8,
         chunk_duration=0.1,
         minimum_audio_duration=0.2,
     )
@@ -817,7 +823,8 @@ def test_phrase_finishes_after_post_speech_silence() -> None:
 
     assert result.completed is True
     assert result.end_reason == "silencio posterior detectado"
-    assert result.duration_seconds == pytest.approx(1.4)
+    # trailing_silence=1.0 is honored: 6 voice + 10 silence blocks.
+    assert result.duration_seconds == pytest.approx(1.6)
 
 
 def test_timeout_without_voice_still_returns_no_speech() -> None:
@@ -1495,3 +1502,240 @@ def test_bootstrap_injects_speech_interaction() -> None:
     orchestrator = Bootstrap.build()
 
     assert orchestrator._speech_interaction is not None
+
+
+# ---------------------------------------------------------------------------
+# V4.2 voice turn loop: trailing silence must honor configuration
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_silence_configuration_reaches_capture_window() -> None:
+    capture = SoundDeviceAudioCapture(trailing_silence=1.0)
+    assert capture._trailing_silence_duration() == pytest.approx(1.0)
+
+    from use_cases.speech_engine import SpeechCaptureSettings
+
+    from use_cases.speech_engine import SpeechCaptureSettings
+
+    capture._apply_settings(SpeechCaptureSettings(trailing_silence=0.4))
+    assert capture._trailing_silence_duration() == pytest.approx(0.4)
+
+
+def test_trailing_silence_bounds_are_enforced() -> None:
+    low = SoundDeviceAudioCapture(trailing_silence=0.05)
+    assert low._trailing_silence_duration() == pytest.approx(0.3)
+    high = SoundDeviceAudioCapture(trailing_silence=9.9)
+    assert high._trailing_silence_duration() == pytest.approx(1.5)
+    unset = SoundDeviceAudioCapture()
+    unset.trailing_silence = None
+    assert unset._trailing_silence_duration() == pytest.approx(
+        SoundDeviceAudioCapture._TRAILING_SILENCE_SECONDS
+    )
+
+
+def test_phrase_plus_silence_closes_the_turn() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    result = capture.capture_from_chunks(
+        [voice for _ in range(7)] + [silence for _ in range(8)],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.end_reason == "silencio posterior detectado"
+
+
+def test_short_silence_does_not_end_the_turn_prematurely() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    # voice + only 0.2 s of silence + more voice: the phrase continues.
+    chunks = (
+        [voice for _ in range(3)]
+        + [silence for _ in range(2)]
+        + [voice for _ in range(3)]
+        + [silence for _ in range(8)]
+    )
+    result = capture.capture_from_chunks(chunks, "Fake Mic")
+
+    assert result.completed is True
+    assert result.end_reason == "silencio posterior detectado"
+    # Both voice segments belong to one continuous turn.
+    assert result.accumulated_voice_ms >= 600.0
+
+
+def test_residual_noise_does_not_keep_the_turn_open_indefinitely() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    room = np.ones(1, dtype=np.float32) * 0.001  # residual/TTS-echo level
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    # Voice followed by sustained low-level residual noise: the adaptive
+    # threshold keeps classifying it as silence, so the trailing window
+    # still closes the turn.
+    result = capture.capture_from_chunks(
+        [voice for _ in range(7)] + [room for _ in range(12)],
+        "Fake Mic",
+    )
+
+    assert result.completed is True
+    assert result.end_reason == "silencio posterior detectado"
+
+
+def test_loud_sustained_interference_is_bounded_by_max_duration() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=1.2,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    # Loud bursts alternating with brief gaps keep resetting the trailing
+    # window: max_duration must still bound and close the turn.
+    chunks = [voice for _ in range(2)]
+    for _ in range(12):
+        chunks.append(silence)
+        chunks.append(voice)
+
+    result = capture.capture_from_chunks(chunks, "Fake Mic")
+
+    # The turn is force-closed by the max-duration guard and flagged.
+    assert "Duracion maxima alcanzada." in result.warnings
+
+
+def test_separate_phrases_become_separate_turns() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        speech_threshold=0.006,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    silence = np.zeros(1, dtype=np.float32)
+    voice = np.ones(1, dtype=np.float32) * 0.02
+
+    first = capture.capture_from_chunks(
+        [voice for _ in range(7)] + [silence for _ in range(6)],
+        "Fake Mic",
+    )
+    second = capture.capture_from_chunks(
+        [voice for _ in range(7)] + [silence for _ in range(6)],
+        "Fake Mic",
+    )
+
+    assert first.completed is True
+    assert first.end_reason == "silencio posterior detectado"
+    assert second.completed is True
+    assert second.end_reason == "silencio posterior detectado"
+    assert first.samples.size > 0 and second.samples.size > 0
+
+
+# ---------------------------------------------------------------------------
+# Post-phrase echo/noise must not hold the turn open (adaptive contrast)
+# ---------------------------------------------------------------------------
+
+
+def test_sustained_tts_echo_closes_the_turn() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=3.0,
+        speech_threshold=0.004,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    voice = np.ones(1, dtype=np.float32) * 0.02   # real speech level
+    echo = np.ones(1, dtype=np.float32) * 0.005   # above base threshold 0.004
+
+    result = capture.capture_from_chunks(
+        [voice for _ in range(8)] + [echo for _ in range(20)],
+        "Fake Mic",
+    )
+
+    # Echo is well below 35% of the phrase's own loudness: the trailing
+    # window must accumulate and close the turn despite being above the
+    # fixed initial threshold.
+    assert result.completed is True
+    assert result.end_reason == "silencio posterior detectado"
+
+
+def test_second_audible_phrase_after_echo_turn_is_captured() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=3.0,
+        speech_threshold=0.004,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    voice = np.ones(1, dtype=np.float32) * 0.02
+    echo = np.ones(1, dtype=np.float32) * 0.005
+
+    first = capture.capture_from_chunks(
+        [voice for _ in range(8)] + [echo for _ in range(12)],
+        "Fake Mic",
+    )
+    second = capture.capture_from_chunks(
+        [voice for _ in range(8)] + [np.zeros(1, dtype=np.float32) for _ in range(8)],
+        "Fake Mic",
+    )
+
+    assert first.completed is True
+    assert first.end_reason == "silencio posterior detectado"
+    assert second.completed is True
+    assert second.end_reason == "silencio posterior detectado"
+    assert second.samples.size > 0
+
+
+def test_quiet_continuation_still_counts_as_voice() -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=2.5,
+        speech_threshold=0.004,
+        initial_silence_timeout=1.0,
+        trailing_silence=0.4,
+        chunk_duration=0.1,
+        minimum_audio_duration=0.2,
+    )
+    loud = np.ones(1, dtype=np.float32) * 0.02
+    soft_tail = np.ones(1, dtype=np.float32) * 0.012  # 60% of phrase level
+
+    result = capture.capture_from_chunks(
+        [loud for _ in range(6)] + [soft_tail for _ in range(10)],
+        "Fake Mic",
+    )
+
+    # A soft but genuinely voiced tail stays inside the current turn.
+    assert result.end_reason != "silencio posterior detectado"
+    assert result.samples.size > 0
