@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
+import os
 import io
 import re
 import subprocess
 import sys
 import tokenize
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -43,6 +47,15 @@ class CorrectionTestResult:
     tests_failed: int
     success: bool
     output: str
+
+
+@dataclass(frozen=True)
+class CorrectionApplicationResult:
+    """Validated correction state retained for supervised closure."""
+
+    report: str
+    tests: CorrectionTestResult | None
+    rollback_status: str
 
 
 class CorrectionInteractionUseCase:
@@ -120,6 +133,21 @@ class CorrectionInteractionUseCase:
                 proposal=parsed_proposal,
             )
 
+            self._persist_audit(
+                root,
+                self._audit_record(
+                    relative_path=relative_path,
+                    proposal=parsed_proposal,
+                    original_content=content,
+                    proposed_content=parsed_proposal.proposed_file,
+                    apply_approved=None,
+                    commit_approved=None,
+                    tests=None,
+                    rollback_status="not_started",
+                    status="proposal_created",
+                ),
+            )
+
             answer = confirm(
                 "\n".join(
                     [
@@ -130,7 +158,21 @@ class CorrectionInteractionUseCase:
                 )
             )
 
-            if answer.strip().lower() not in ("s", "si", "sí", "y", "yes"):
+            if not self._affirmative(answer):
+                self._persist_audit(
+                    root,
+                    self._audit_record(
+                        relative_path=relative_path,
+                        proposal=parsed_proposal,
+                        original_content=content,
+                        proposed_content=parsed_proposal.proposed_file,
+                        apply_approved=False,
+                        commit_approved=None,
+                        tests=None,
+                        rollback_status="not_started",
+                        status="apply_cancelled",
+                    ),
+                )
                 return "\n".join(
                     [
                         "Corrección cancelada.",
@@ -138,14 +180,39 @@ class CorrectionInteractionUseCase:
                     ]
                 )
 
-            final_report = self._apply_confirmed_correction(
+            application = self._apply_confirmed_correction(
                 target_path=target_path,
                 original_content=content,
                 proposed_content=parsed_proposal.proposed_file,
                 project_root=root,
             )
 
-            return final_report
+            if application.tests is None:
+                self._persist_audit(
+                    root,
+                    self._audit_record(
+                        relative_path=relative_path,
+                        proposal=parsed_proposal,
+                        original_content=content,
+                        proposed_content=parsed_proposal.proposed_file,
+                        apply_approved=True,
+                        commit_approved=None,
+                        tests=None,
+                        rollback_status=application.rollback_status,
+                        status="validation_failed",
+                    ),
+                )
+                return application.report
+
+            return self._supervise_commit(
+                project_root=root,
+                relative_path=relative_path,
+                proposal=parsed_proposal,
+                original_content=content,
+                proposed_content=parsed_proposal.proposed_file,
+                application=application,
+                confirm=confirm,
+            )
         except Exception as error:
             return f"No se pudo generar la propuesta de corrección: {error}"
 
@@ -328,47 +395,270 @@ class CorrectionInteractionUseCase:
         original_content: str,
         proposed_content: str,
         project_root: Path,
-    ) -> str:
+    ) -> CorrectionApplicationResult:
         """Apply a confirmed correction with syntax validation, tests and rollback."""
-        written = False
+        write_attempted = False
 
         try:
             self._validate_python_source(proposed_content, target_path)
-            self._write_file.execute(str(target_path), proposed_content)
-            written = True
+            write_attempted = True
+            self._write_content(target_path, proposed_content)
             self._validate_written_file(target_path)
             test_result = self._run_tests(project_root)
-
             if not test_result.success:
                 raise RuntimeError(self._format_test_failure(test_result))
         except Exception as error:
-            if written:
-                self._write_file.execute(str(target_path), original_content)
-
-            return "\n".join(
-                [
-                    "Aplicando corrección...",
-                    "",
-                    "La corrección no superó la validación.",
-                    "Se restauró el contenido original.",
-                    "El proyecto no quedó parcialmente modificado.",
-                    f"Motivo: {error}",
-                ]
+            rollback_error = None
+            if write_attempted:
+                rollback_error = self._restore_original_content(
+                    target_path,
+                    original_content,
+                )
+            if rollback_error is not None:
+                return CorrectionApplicationResult(
+                    report="\n".join(
+                        [
+                            "Aplicando corrección...",
+                            "",
+                            "ERROR CRÍTICO: no se pudo restaurar el contenido original.",
+                            "El proyecto puede haber quedado parcialmente modificado.",
+                            f"Motivo de validación: {error}",
+                            f"Motivo de rollback: {rollback_error}",
+                        ]
+                    ),
+                    tests=None,
+                    rollback_status="failed",
+                )
+            return CorrectionApplicationResult(
+                report="\n".join(
+                    [
+                        "Aplicando corrección...",
+                        "",
+                        "La corrección no superó la validación.",
+                        "Se restauró el contenido original.",
+                        "El proyecto no quedó parcialmente modificado.",
+                        f"Motivo: {error}",
+                    ]
+                ),
+                tests=None,
+                rollback_status=("verified" if write_attempted else "not_required"),
             )
 
+        return CorrectionApplicationResult(
+            report="\n".join(
+                [
+                    "Aplicando corrección...",
+                    "Validación de sintaxis: correcta",
+                    f"Tests ejecutados: {test_result.tests_run}",
+                    f"Tests superados: {test_result.tests_passed}",
+                    f"Tests fallidos: {test_result.tests_failed}",
+                    "",
+                    "Corrección aplicada correctamente.",
+                    "Cambios aún sin commit.",
+                ]
+            ),
+            tests=test_result,
+            rollback_status="not_required",
+        )
+    def _supervise_commit(
+        self,
+        project_root: Path,
+        relative_path: str,
+        proposal: ParsedCorrectionProposal,
+        original_content: str,
+        proposed_content: str,
+        application: CorrectionApplicationResult,
+        confirm: Callable[[str], str],
+    ) -> str:
+        """Show the final diff and commit only after a second explicit approval."""
+        diff_result = self._git_command(
+            project_root,
+            ("diff", "--no-ext-diff", "--", relative_path),
+        )
+        if diff_result.returncode != 0:
+            return self._supervision_error(
+                project_root, relative_path, proposal, original_content, proposed_content,
+                application, "diff_failed", None, diff_result.stderr or diff_result.stdout,
+            )
+
+        final_diff = diff_result.stdout
+        commit_answer = confirm(
+            "\n".join(
+                [
+                    application.report,
+                    "",
+                    "Diff final:",
+                    final_diff or "(sin cambios detectados)",
+                    "",
+                    "¿Confirmas crear el commit de esta corrección? [s/N]: ",
+                ]
+            )
+        )
+        commit_approved = self._affirmative(commit_answer)
+        if not commit_approved:
+            self._persist_audit(
+                project_root,
+                self._audit_record(
+                    relative_path=relative_path, proposal=proposal,
+                    original_content=original_content, proposed_content=proposed_content,
+                    apply_approved=True, commit_approved=False, tests=application.tests,
+                    rollback_status=application.rollback_status, status="commit_cancelled",
+                    diff=final_diff,
+                ),
+            )
+            return application.report + "\n\nCommit no creado: aprobación humana explícita no recibida."
+
+        commit_message = f"fix: correct {relative_path}"
+        commit_result = self._git_command(
+            project_root,
+            ("commit", "--only", "-m", commit_message, "--", relative_path),
+        )
+        if commit_result.returncode != 0:
+            return self._supervision_error(
+                project_root, relative_path, proposal, original_content, proposed_content,
+                application, "commit_failed", True,
+                commit_result.stderr or commit_result.stdout, final_diff,
+            )
+
+        self._persist_audit(
+            project_root,
+            self._audit_record(
+                relative_path=relative_path, proposal=proposal,
+                original_content=original_content, proposed_content=proposed_content,
+                apply_approved=True, commit_approved=True, tests=application.tests,
+                rollback_status=application.rollback_status, status="committed",
+                diff=final_diff, commit_output=commit_result.stdout,
+            ),
+        )
+        return application.report + "\n\nCommit creado correctamente."
+
+    def _supervision_error(
+        self,
+        project_root: Path,
+        relative_path: str,
+        proposal: ParsedCorrectionProposal,
+        original_content: str,
+        proposed_content: str,
+        application: CorrectionApplicationResult,
+        status: str,
+        commit_approved: bool | None,
+        error: str,
+        diff: str = "",
+    ) -> str:
+        """Persist a failed closure and expose the recoverable state to the user."""
+        try:
+            self._persist_audit(
+                project_root,
+                self._audit_record(
+                    relative_path=relative_path, proposal=proposal,
+                    original_content=original_content, proposed_content=proposed_content,
+                    apply_approved=True, commit_approved=commit_approved,
+                    tests=application.tests, rollback_status=application.rollback_status,
+                    status=status, diff=diff, error=error,
+                ),
+            )
+        except Exception as audit_error:
+            error = f"{error}; auditoría no persistida: {audit_error}"
         return "\n".join(
             [
-                "Aplicando corrección...",
-                "Validación de sintaxis: correcta",
-                f"Tests ejecutados: {test_result.tests_run}",
-                f"Tests superados: {test_result.tests_passed}",
-                f"Tests fallidos: {test_result.tests_failed}",
+                application.report,
                 "",
-                "Corrección aplicada correctamente.",
-                "Cambios aún sin commit.",
+                f"ERROR CRÍTICO: cierre supervisado fallido ({status}).",
+                f"Detalle: {error}",
+                "Estado recuperable: los cambios validados se conservan sin ocultar.",
             ]
         )
 
+    def _audit_record(
+        self,
+        *,
+        relative_path: str,
+        proposal: ParsedCorrectionProposal,
+        original_content: str,
+        proposed_content: str,
+        apply_approved: bool | None,
+        commit_approved: bool | None,
+        tests: CorrectionTestResult | None,
+        rollback_status: str,
+        status: str,
+        diff: str = "",
+        commit_output: str = "",
+        error: str = "",
+    ) -> dict[str, object]:
+        """Build a complete, deterministic audit event without secrets."""
+        return {
+            "version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "path": relative_path,
+            "proposal": {"problem": proposal.problem, "risk": proposal.risk, "content": proposed_content},
+            "approval": {"apply": apply_approved, "commit": commit_approved},
+            "hashes": {
+                "original_sha256": self._sha256(original_content),
+                "proposed_sha256": self._sha256(proposed_content),
+                "diff_sha256": self._sha256(diff),
+            },
+            "tests": None if tests is None else {
+                "run": tests.tests_run, "passed": tests.tests_passed,
+                "failed": tests.tests_failed, "success": tests.success,
+            },
+            "rollback": rollback_status,
+            "commit_output": commit_output,
+            "error": error,
+        }
+
+    def _persist_audit(self, project_root: Path, record: dict[str, object]) -> None:
+        """Append and flush an ignored, recoverable JSONL audit record."""
+        audit_path = project_root / ".atlas" / "correction_audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _git_command(self, project_root: Path, arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        """Run only fixed Git subcommands without a shell."""
+        return subprocess.run(
+            ["git", *arguments], cwd=project_root, capture_output=True,
+            text=True, check=False,
+        )
+
+    def _sha256(self, content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _affirmative(self, answer: str) -> bool:
+        return answer.strip().lower() in ("s", "si", "sí", "y", "yes")
+    def _write_content(
+        self,
+        path: Path,
+        content: str,
+    ) -> str:
+        """Write only with a fresh one-use authorization when supported."""
+        authorize = getattr(self._write_file, "authorize", None)
+        if not callable(authorize):
+            return self._write_file.execute(str(path), content)
+
+        return self._write_file.execute(
+            str(path),
+            content,
+            authorization=authorize(),
+        )
+
+    def _restore_original_content(
+        self,
+        path: Path,
+        original_content: str,
+    ) -> Exception | None:
+        """Restore and read back the exact original content after a failed write."""
+        try:
+            self._write_content(path, original_content)
+            restored_content = self._read_file.execute(str(path))
+            if restored_content != original_content:
+                raise RuntimeError("la restauración leída no coincide exactamente")
+        except Exception as error:
+            return error
+
+        return None
     def _validate_python_source(
         self,
         source: str,

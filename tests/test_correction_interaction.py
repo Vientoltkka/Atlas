@@ -1,12 +1,24 @@
 from pathlib import Path
 
+import json
+import subprocess
+
+import pytest
+
 from core.orchestrator import AtlasOrchestrator
 from core.planner import Plan
+from tools.effect_permissions import ToolPermissionDeniedError
+from tools.executor import ToolExecutor
+from tools.filesystem.read_file_tool import ReadFileTool
+from tools.filesystem.write_file_tool import WriteFileTool
+from tools.registry import ToolRegistry
 from use_cases.correction_interaction import (
     CorrectionInteractionUseCase,
     CorrectionTestResult,
 )
 from use_cases.query_architecture_graph import ArchitectureQueryResult
+from use_cases.read_file import ReadFileUseCase
+from use_cases.write_file import WriteFileUseCase
 
 
 class _ReadFileFake:
@@ -598,6 +610,178 @@ def test_test_failure_rolls_back_to_original(tmp_path: Path) -> None:
     assert "La corrección no superó la validación." in response
     assert "tests fallidos: 1" in response
 
+
+def test_confirmed_correction_uses_real_executor_and_verifies_rollback(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "core" / "router.py"
+    original = "class Router:\n    pass\n"
+    proposed = "class Router:\n    value = 1\n"
+    _write(target, original)
+    registry = ToolRegistry()
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    executor = ToolExecutor(registry)
+    use_case = CorrectionInteractionUseCase(
+        ReadFileUseCase(executor),
+        WriteFileUseCase(executor),
+        _QueryArchitectureFake(),
+        _PromptClientFake(proposed),
+    )
+    use_case._run_tests = lambda project_root: CorrectionTestResult(
+        tests_run=1,
+        tests_passed=0,
+        tests_failed=1,
+        success=False,
+        output="1 failed",
+    )
+
+    response = use_case.execute(
+        "corrige core/router.py",
+        tmp_path,
+        _choose_model,
+        _ConfirmFake("s"),
+    )
+
+    assert target.read_text(encoding="utf-8") == original
+    assert response is not None
+    assert "Se restauró el contenido original." in response
+
+
+def test_write_file_use_case_requires_and_consumes_one_use_authorization(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "nota.txt"
+    registry = ToolRegistry()
+    registry.register(WriteFileTool())
+    write_file = WriteFileUseCase(ToolExecutor(registry))
+
+    with pytest.raises(ToolPermissionDeniedError):
+        write_file.execute(str(target), "denied")
+
+    authorization = write_file.authorize()
+    assert write_file.execute(str(target), "authorized", authorization=authorization)
+    assert target.read_text(encoding="utf-8") == "authorized"
+
+    with pytest.raises(ToolPermissionDeniedError):
+        write_file.execute(str(target), "reused", authorization=authorization)
+
+
+def test_rollback_failure_is_reported_as_critical(tmp_path: Path) -> None:
+    target = tmp_path / "core" / "router.py"
+    original = "class Router:\n    pass\n"
+    proposed = "class Router:\n    value = 1"
+    _write(target, original)
+    use_case, _, write_file, _, _ = _use_case(
+        content=original,
+        proposed_file=proposed,
+    )
+    write_file.fail_on_content = original
+    use_case._run_tests = lambda project_root: CorrectionTestResult(
+        tests_run=1,
+        tests_passed=0,
+        tests_failed=1,
+        success=False,
+        output="1 failed",
+    )
+
+    response = use_case.execute(
+        "corrige core/router.py",
+        tmp_path,
+        _choose_model,
+        _ConfirmFake("s"),
+    )
+
+    assert response is not None
+    assert "ERROR CRÍTICO: no se pudo restaurar" in response
+
+def _supervised_confirm(*answers: str):
+    remaining = iter(answers)
+    prompts: list[str] = []
+
+    def confirm(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(remaining)
+
+    return confirm, prompts
+
+
+def test_supervised_close_persists_audit_and_requires_second_approval(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "core" / "router.py"
+    proposed = "class Router:\n    value = 1"
+    _write(target)
+    use_case, _, _, _, _ = _use_case(proposed_file=proposed)
+    commands: list[tuple[str, ...]] = []
+
+    def fake_git(root: Path, arguments: tuple[str, ...]):
+        del root
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, stdout="diff --git a/core/router.py", stderr="")
+
+    use_case._git_command = fake_git
+    confirm, prompts = _supervised_confirm("s", "n")
+    response = use_case.execute("corrige core/router.py", tmp_path, _choose_model, confirm)
+
+    records = [json.loads(line) for line in (tmp_path / ".atlas" / "correction_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert target.read_text(encoding="utf-8") == proposed
+    assert len(prompts) == 2
+    assert "Diff final:" in prompts[1]
+    assert commands == [("diff", "--no-ext-diff", "--", "core/router.py")]
+    assert records[-1]["status"] == "commit_cancelled"
+    assert records[-1]["approval"] == {"apply": True, "commit": False}
+    assert records[-1]["tests"]["success"] is True
+    assert records[-1]["rollback"] == "not_required"
+    assert len(records[-1]["hashes"]["proposed_sha256"]) == 64
+    assert response is not None
+    assert "Commit no creado" in response
+
+
+def test_supervised_close_commits_only_after_explicit_second_approval(tmp_path: Path) -> None:
+    target = tmp_path / "core" / "router.py"
+    _write(target)
+    use_case, _, _, _, _ = _use_case(proposed_file="class Router:\n    value = 1")
+    commands: list[tuple[str, ...]] = []
+
+    def fake_git(root: Path, arguments: tuple[str, ...]):
+        del root
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, stdout="diff", stderr="")
+
+    use_case._git_command = fake_git
+    confirm, _ = _supervised_confirm("s", "s")
+    response = use_case.execute("corrige core/router.py", tmp_path, _choose_model, confirm)
+
+    assert commands[0] == ("diff", "--no-ext-diff", "--", "core/router.py")
+    assert commands[1] == ("commit", "--only", "-m", "fix: correct core/router.py", "--", "core/router.py")
+    assert response is not None
+    assert "Commit creado correctamente." in response
+
+
+def test_supervised_close_reports_commit_failure_and_preserves_state(tmp_path: Path) -> None:
+    target = tmp_path / "core" / "router.py"
+    proposed = "class Router:\n    value = 1"
+    _write(target)
+    use_case, _, _, _, _ = _use_case(proposed_file=proposed)
+
+    def fake_git(root: Path, arguments: tuple[str, ...]):
+        del root
+        if arguments[0] == "commit":
+            return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="commit rejected")
+        return subprocess.CompletedProcess(arguments, 0, stdout="diff", stderr="")
+
+    use_case._git_command = fake_git
+    confirm, _ = _supervised_confirm("s", "s")
+    response = use_case.execute("corrige core/router.py", tmp_path, _choose_model, confirm)
+    records = [json.loads(line) for line in (tmp_path / ".atlas" / "correction_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert target.read_text(encoding="utf-8") == proposed
+    assert records[-1]["status"] == "commit_failed"
+    assert records[-1]["error"] == "commit rejected"
+    assert response is not None
+    assert "ERROR CRÍTICO: cierre supervisado fallido (commit_failed)." in response
+    assert "Estado recuperable" in response
 
 def test_controlled_errors_do_not_show_traceback(tmp_path: Path) -> None:
     use_case, _, _, _, _ = _use_case()

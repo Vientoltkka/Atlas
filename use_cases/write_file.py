@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tools.effect_permissions import ToolEffectAuthorization
 from tools.executor import ToolExecutor
 from tools.tool_context import ToolContext
 
@@ -19,6 +20,8 @@ class WriteFileUseCase:
         self,
         path: str,
         content: str,
+        *,
+        authorization: ToolEffectAuthorization | None = None,
     ) -> str:
 
         context = ToolContext(
@@ -31,4 +34,9 @@ class WriteFileUseCase:
         return self._executor.execute(
             "write_file",
             context,
+            authorization=authorization,
         )
+
+    def authorize(self) -> ToolEffectAuthorization:
+        """Issue one explicit authorization for the next file write."""
+        return self._executor.authorize("write_file")
