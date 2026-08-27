@@ -12,6 +12,7 @@ import time
 import unicodedata
 
 from agents.registry import AgentRegistry
+from agents.coding_agent import PendingCodingChangeError
 
 from core.atlas_router import (
     AtlasRouter,
@@ -675,19 +676,20 @@ class AtlasOrchestrator:
         prompt = request.content
         coding_agent = self._registry.get("coding")
 
-        if (
-            prompt.strip().lower() == "s"
-            and coding_agent is not None
-            and coding_agent.generated_path is not None
-        ):
-            result = self._write_file.execute(
-                coding_agent.generated_path,
-                coding_agent.generated_content,
-            )
-            coding_agent.clear_generated()
-
-            return result
-
+        match = re.fullmatch(r"\s*aplicar\s+([A-Za-z0-9_-]+)\s*", prompt, re.IGNORECASE)
+        if match is not None:
+            authorize = getattr(coding_agent, "authorize_pending_change", None)
+            if not callable(authorize):
+                return "No hay una propuesta de código pendiente para aplicar."
+            try:
+                change = authorize(match.group(1))
+            except PendingCodingChangeError as error:
+                return str(error)
+            try:
+                result = self._write_file.execute(str(change.path), change.proposed_content)
+            except Exception as error:
+                return "La autorización fue consumida, pero no se pudo escribir la propuesta. Motivo: " + str(error)
+            return f"Cambio aplicado en '{change.relative_path}'.\n{result}"
         if self._desktop_interaction is not None:
             desktop_response = self._desktop_interaction.execute(
                 prompt,
