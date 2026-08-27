@@ -235,7 +235,9 @@ class SingleToolRunner:
                 validated_arguments=request.validated_arguments,
             )
 
-        if request.descriptor.requires_confirmation:
+        if request.descriptor.requires_confirmation or self._requires_authorization(
+            request.tool_name
+        ):
             return self._confirmation_required_result(request)
 
         return self._execute_request(request)
@@ -356,7 +358,10 @@ class SingleToolRunner:
         del self._pending_confirmations[confirmation_id]
         self._last_request = request
 
-        if not request.descriptor.requires_confirmation:
+        if not (
+            request.descriptor.requires_confirmation
+            or self._requires_authorization(request.tool_name)
+        ):
             return ToolRunResult(
                 success=False,
                 status="confirmation_not_required",
@@ -379,10 +384,15 @@ class SingleToolRunner:
         confirmation_id: str | None = None,
     ) -> ToolRunResult:
         try:
-            result = self._executor.execute(
-                request.tool_name,
-                ToolContext(parameters=dict(request.validated_arguments)),
-            )
+            context = ToolContext(parameters=dict(request.validated_arguments))
+            if confirmation_id is not None and self._requires_authorization(request.tool_name):
+                result = self._executor.execute(
+                    request.tool_name,
+                    context,
+                    authorization=self._executor.authorize(request.tool_name),
+                )
+            else:
+                result = self._executor.execute(request.tool_name, context)
         except Exception as error:
             self._execution_count += 1
             return self._error_result(
@@ -426,6 +436,10 @@ class SingleToolRunner:
             validated=validation.valid,
             executed=False,
         )
+
+    def _requires_authorization(self, tool_name: str) -> bool:
+        check = getattr(self._executor, "requires_explicit_authorization", None)
+        return bool(check(tool_name)) if callable(check) else False
 
     def _confirmation_required_result(
         self,

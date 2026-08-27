@@ -28,6 +28,11 @@ class BaseTool(ABC):
         """Return whether this tool must be explicitly confirmed before execution."""
         return False
 
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        """Return declared real-world effects requiring explicit authorization."""
+        return ()
     @abstractmethod
     def execute(
         self,

@@ -10,6 +10,7 @@ import pytest
 
 from core import windows_task
 from core.startup import WHATSAPP_REQUIRED_ENV_VARS
+from tools.effect_permissions import ToolEffectPermissionPolicy
 
 
 def _whatsapp_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,7 +105,12 @@ def test_install_invokes_schtasks_with_xml_file(
 
     monkeypatch.setattr(windows_task.subprocess, "run", fake_run)
 
-    exit_code = windows_task.install(tmp_path)
+    policy = ToolEffectPermissionPolicy()
+    exit_code = windows_task.install(
+        tmp_path,
+        permission_policy=policy,
+        authorization=policy.authorize("windows_task.install", ("windows.task",)),
+    )
 
     assert exit_code == 0
     args = captured["args"]
@@ -125,8 +131,13 @@ def test_install_failure_reports_error_without_secrets(
 
     monkeypatch.setattr(windows_task.subprocess, "run", fake_run)
 
+    policy = ToolEffectPermissionPolicy()
     with pytest.raises(windows_task.TaskError) as excinfo:
-        windows_task.install(tmp_path)
+        windows_task.install(
+            tmp_path,
+            permission_policy=policy,
+            authorization=policy.authorize("windows_task.install", ("windows.task",)),
+        )
     assert "access denied" in str(excinfo.value)
     assert "secret" not in str(excinfo.value)
 

@@ -24,6 +24,10 @@ class DesktopTool(BaseTool):
     ) -> None:
         self._controller = controller or WindowsDesktopController()
 
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        return ("desktop.control",)
     def _window_title(self, context: ToolContext) -> str:
         """Return a required target window title."""
         title = context.parameters.get("window_title")

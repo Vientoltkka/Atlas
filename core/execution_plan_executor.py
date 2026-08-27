@@ -497,6 +497,7 @@ class ExecutionPlanExecutor:
         """Execute a validated plan from a known in-memory checkpoint."""
         started = time.perf_counter()
         active_context = execution_context or ExecutionContext()
+        active_context.set_metadata("effect_authorization_granted", confirmation_granted)
         active_plan_stack = plan_stack + (id(plan),)
         trace = ExecutionTrace(execution_id=active_context.execution_id)
         if context_restored:
@@ -2428,6 +2429,14 @@ class ExecutionPlanExecutor:
 
         try:
             self._trace_schema_validation_started(trace, step, resolved_arguments)
+            authorization = (
+                self._tool_executor.authorize(step.tool)
+                if execution_context.metadata_snapshot().get(
+                    "effect_authorization_granted"
+                ) is True
+                and self._tool_executor.requires_explicit_authorization(step.tool)
+                else None
+            )
             output = self._tool_executor.execute(
                 step.tool,
                 ToolContext(
@@ -2437,6 +2446,7 @@ class ExecutionPlanExecutor:
                     previous_results=execution_context.results_snapshot(),
                     metadata={"executor": "ExecutionPlanExecutor"},
                 ),
+                authorization=authorization,
             )
             self._trace_schema_validation_succeeded(trace, step, resolved_arguments)
         except ToolNotRegisteredError as error:

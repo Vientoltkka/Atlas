@@ -22,6 +22,10 @@ class WriteFileTool(BaseTool):
     def requires_confirmation(self) -> bool:
         return True
 
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        return ("filesystem.write",)
     def semantic_metadata(self) -> dict[str, object]:
         """Return semantic metadata for catalog generation."""
         return {

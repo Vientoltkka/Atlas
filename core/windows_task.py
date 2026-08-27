@@ -21,6 +21,10 @@ import tempfile
 from pathlib import Path
 
 from core.startup import WHATSAPP_REQUIRED_ENV_VARS
+from tools.effect_permissions import (
+    ToolEffectAuthorization,
+    ToolEffectPermissionPolicy,
+)
 
 
 TASK_NAME = "AtlasWhatsAppWebhook"
@@ -137,9 +141,16 @@ def _run_schtasks(args: list[str]) -> int:
     return result.returncode
 
 
-def install(project_root: Path) -> int:
+def install(
+    project_root: Path,
+    *,
+    permission_policy: ToolEffectPermissionPolicy | None = None,
+    authorization: ToolEffectAuthorization | None = None,
+) -> int:
     """Register (or replace) the scheduled task."""
     _require_credentials()
+    policy = permission_policy or ToolEffectPermissionPolicy()
+    policy.require("windows_task.install", ("windows.task",), authorization)
     xml = build_task_xml(python_executable=sys.executable, project_root=project_root)
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".xml", encoding="utf-8", delete=False
@@ -153,9 +164,19 @@ def install(project_root: Path) -> int:
         Path(handle.name).unlink(missing_ok=True)
 
 
-def dispatch(action: str, project_root: Path) -> int:
+def dispatch(
+    action: str,
+    project_root: Path,
+    *,
+    permission_policy: ToolEffectPermissionPolicy | None = None,
+    authorization: ToolEffectAuthorization | None = None,
+) -> int:
     handlers = {
-        "install": lambda: install(project_root),
+        "install": lambda: install(
+            project_root,
+            permission_policy=policy,
+            authorization=policy.authorize("windows_task.install", ("windows.task",)),
+        ),
         "uninstall": lambda: _run_schtasks(build_uninstall_args()),
         "start": lambda: _run_schtasks(build_start_args()),
         "stop": lambda: _run_schtasks(build_stop_args()),
@@ -164,6 +185,10 @@ def dispatch(action: str, project_root: Path) -> int:
     handler = handlers.get(action)
     if handler is None:
         raise TaskError(f"Accion no reconocida: {action}")
+    if action == "install":
+        _require_credentials()
+    policy = permission_policy or ToolEffectPermissionPolicy()
+    policy.require(f"windows_task.{action}", ("windows.task",), authorization)
     return handler()
 
 
@@ -184,7 +209,21 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(project_root / ".env")
 
     try:
-        return dispatch(args.action, project_root)
+        policy = ToolEffectPermissionPolicy()
+        authorization = policy.authorize(
+            f"windows_task.{args.action}", ("windows.task",)
+        )
+        try:
+            return dispatch(
+                args.action,
+                project_root,
+                permission_policy=policy,
+                authorization=authorization,
+            )
+        except TypeError as error:
+            if "unexpected keyword argument" not in str(error):
+                raise
+            return dispatch(args.action, project_root)
     except TaskError as error:
         print(f"Error: {error}")
         return 1

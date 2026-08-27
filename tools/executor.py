@@ -6,6 +6,10 @@ from collections.abc import Mapping
 
 from core.execution_arguments import contains_unresolved_execution_reference
 from core.skill_execution_context import SkillExecutionContext
+from tools.effect_permissions import (
+    ToolEffectAuthorization,
+    ToolEffectPermissionPolicy,
+)
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 from tools.tool_schema import ToolSchemaValidationException
@@ -17,9 +21,19 @@ class ToolExecutor:
     def __init__(
         self,
         registry: ToolRegistry,
+        permission_policy: ToolEffectPermissionPolicy | None = None,
     ) -> None:
-
         self._registry = registry
+        self._permission_policy = permission_policy or ToolEffectPermissionPolicy()
+
+    def requires_explicit_authorization(self, tool_name: str) -> bool:
+        return self._permission_policy.requires_authorization(
+            getattr(self._registry.get(tool_name), "required_permissions", ())
+        )
+
+    def authorize(self, tool_name: str) -> ToolEffectAuthorization:
+        tool = self._registry.get(tool_name)
+        return self._permission_policy.authorize(tool_name, getattr(tool, "required_permissions", ()))
 
     def execute(
         self,
@@ -28,6 +42,7 @@ class ToolExecutor:
         *,
         arguments: Mapping[str, object] | None = None,
         execution_context: SkillExecutionContext | None = None,
+        authorization: ToolEffectAuthorization | None = None,
     ):
         """Execute a registered tool."""
 
@@ -64,4 +79,9 @@ class ToolExecutor:
                 execution_context=execution_context or context.execution_context,
             )
 
+        self._permission_policy.require(
+            tool_name,
+            getattr(tool, "required_permissions", ()),
+            authorization,
+        )
         return tool.execute(active_context)
