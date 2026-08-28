@@ -1,4 +1,4 @@
-﻿"""Bootstrap module for Atlas."""
+"""Bootstrap module for Atlas."""
 
 import math
 import os
@@ -35,6 +35,7 @@ from core.capability_execution_service import CapabilityExecutionService
 from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager
+from core.model_registry import load_model_descriptors_from_environment
 from core.model_selection_policy import ModelSelectionPolicy
 from core.multi_capability_planner import MultiCapabilityPlanner
 from core.agent_orchestrator import AgentOrchestrator
@@ -762,7 +763,11 @@ class Bootstrap:
         tool_selector = Bootstrap.build_tool_selector(tool_registry)
         schema_registry = Bootstrap.build_argument_schema_registry()
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
-        model_manager = ModelManager()
+        model_manager = ModelManager(
+            descriptors=load_model_descriptors_from_environment(
+                reserved_logical_ids=(item.logical_id for item in ModelManager._DEFAULT_DESCRIPTORS),
+            ),
+        )
         model_selection_policy = Bootstrap.build_model_selection_policy()
         prompt_client = PromptClient()
         model_health_checker = OllamaModelHealthChecker(prompt_client)

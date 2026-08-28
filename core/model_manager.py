@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+import math
 from typing import Protocol
 
 from core.execution_resources import (
@@ -47,6 +48,7 @@ class ModelDescriptor:
     available: bool = True
     relative_cost: float | None = None
     relative_latency: float | None = None
+    context_window: int | None = None
     local: bool = True
     priority: int = 0
     fallback_logical_ids: tuple[str, ...] = ()
@@ -71,8 +73,22 @@ class ModelDescriptor:
             raise ValueError("priority must be non-negative.")
         for name in ("relative_cost", "relative_latency"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, (int, float)) or value < 0):
-                raise ValueError(f"{name} must be non-negative when provided.")
+            if (
+                value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < 0
+                )
+            ):
+                raise ValueError(
+                    f"{name} must be finite and non-negative when provided."
+                )
+        if self.context_window is not None and (
+            type(self.context_window) is not int or self.context_window <= 0
+        ):
+            raise ValueError("context_window must be a positive int when provided.")
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionRequest:
