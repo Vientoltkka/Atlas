@@ -101,11 +101,17 @@ class ModelSelectionRequest:
     preferred_model_id: str | None = None
     preferred_provider_id: str | None = None
     allow_fallback: bool = False
+    required_capabilities: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, str) or not self.task.strip():
             raise ValueError("task must be a non-empty string.")
         object.__setattr__(self, "task", self.task.strip().lower())
+        object.__setattr__(
+            self,
+            "required_capabilities",
+            _normalized_values(self.required_capabilities),
+        )
         if self.prefer_local is not None and type(self.prefer_local) is not bool:
             raise TypeError("prefer_local must be a bool or None.")
         if type(self.allow_fallback) is not bool:
@@ -324,9 +330,8 @@ class ModelManager:
                     )
                 )
 
-        capability = self._TASK_CAPABILITIES.get(request.task, request.task)
         requirements = ExecutionResourceRequirements(
-            required_capabilities=(capability,),
+            required_capabilities=self._required_capabilities(request),
             maximum_estimated_cost=request.maximum_relative_cost,
             maximum_latency_seconds=request.maximum_relative_latency,
             preferred_model_ids=(preferred.model_name,) if preferred is not None else (),
@@ -401,6 +406,14 @@ class ModelManager:
             is_fallback=is_fallback,
             descriptor=descriptor,
         )
+
+    def _required_capabilities(
+        self,
+        request: ModelSelectionRequest,
+    ) -> tuple[str, ...]:
+        """Combine the task capability with explicit requirements in stable order."""
+        task_capability = self._TASK_CAPABILITIES.get(request.task, request.task)
+        return _normalized_values((task_capability, *request.required_capabilities))
 
     def _fallback_model_names(
         self,
