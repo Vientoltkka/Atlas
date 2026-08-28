@@ -7,7 +7,13 @@ import os
 from time import perf_counter
 from typing import Any
 
-from models.chat_inference import ChatInferenceError, ChatInferenceProvider, default_provider_registry, ollama
+from models.chat_inference import (
+    ChatInferenceError,
+    ChatInferenceProvider,
+    configured_provider_id,
+    default_provider_registry,
+    ollama,
+)
 
 
 class InferenceBackendError(RuntimeError, ValueError):
@@ -24,7 +30,13 @@ class PromptClient:
 
     def __init__(self, provider: ChatInferenceProvider | None = None) -> None:
         timeout = _read_float("ATLAS_OLLAMA_TIMEOUT", 120.0, 1.0, 600.0)
-        self._provider = provider or default_provider_registry(timeout=timeout, keep_alive=os.getenv("ATLAS_OLLAMA_KEEP_ALIVE", "10m").strip() or "10m").get("ollama")
+        keep_alive = os.getenv("ATLAS_OLLAMA_KEEP_ALIVE", "10m").strip() or "10m"
+        provider_id = configured_provider_id()
+        self._provider = provider or default_provider_registry(
+            timeout=timeout,
+            keep_alive=keep_alive,
+            provider_id=provider_id,
+        ).get(provider_id)
         self._keep_alive = os.getenv("ATLAS_OLLAMA_KEEP_ALIVE", "10m").strip() or "10m"
         self._seen_models: set[str] = set()
         self.last_metrics: dict[str, str | float | bool] = {}
