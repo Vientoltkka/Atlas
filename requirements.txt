@@ -1,6 +1,7 @@
 ﻿ollama
 openai
 python-dotenv
+google-genai
 pydantic
 rich
 typer
