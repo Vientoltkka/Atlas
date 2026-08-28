@@ -19,15 +19,20 @@ class Atlas:
     def start_voice(
         self,
         state_listener=None,
+        status_sink=None,
         typed_input=None,
     ) -> None:
         """Start Atlas in manual voice mode."""
 
         self._orchestrator.start_voice(
             state_listener=state_listener,
+            status_sink=status_sink,
             typed_input=typed_input,
         )
 
+    def process_prompt(self, prompt: str) -> str:
+        """Process one textual Orbe request without blocking the UI thread."""
+        return self._orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
     def start_assistant(self) -> None:
         """Start Atlas in permanent assistant mode."""
 

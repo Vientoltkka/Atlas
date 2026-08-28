@@ -371,6 +371,7 @@ class AtlasOrchestrator:
     def start_voice(
         self,
         state_listener=None,
+        status_sink=None,
         typed_input=None,
     ) -> None:
         """Start manual voice conversation mode without wake word."""
@@ -389,7 +390,7 @@ class AtlasOrchestrator:
                 text,
                 confirm=input,
             ),
-            "status_sink": print,
+            "status_sink": status_sink or print,
             "typed_input": self._read_typed_exit_command,
         }
         if state_listener is not None and _accepts_keyword(

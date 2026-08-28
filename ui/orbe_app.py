@@ -137,7 +137,7 @@ def create_orb_window(settings=None):
     ``settings`` is an optional QSettings-like object used to persist
     the window position (keys ``pos_x`` / ``pos_y``).
     """
-    from PySide6.QtCore import Qt, QTimer, Signal
+    from PySide6.QtCore import Qt, Signal, QTimer, Signal
     from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
     from PySide6.QtWidgets import (
         QMenu,
@@ -318,30 +318,78 @@ def create_orb_window(settings=None):
 
 
 def create_transcript_panel():
-    """Minimal always-on-top panel showing session messages (no logic)."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
+    """Small transcript panel with chat and minimal voice controls."""
+    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout, QWidget
 
     class TranscriptPanel(QWidget):
+        send_requested = Signal(str)
+        voice_start_requested = Signal()
+        voice_stop_requested = Signal()
+        voice_retry_requested = Signal()
+        _VOICE_STATUS = {"STARTING": "Iniciando voz", "LISTENING": "Escuchando", "TRANSCRIBING": "STT", "PROCESSING": "Procesando", "SPEAKING": "TTS", "RECOVERING": "Reintentando", "DEGRADED": "Error", "ERROR": "Error", "STOPPING": "Deteniendo", "STOPPED": "Desconectado"}
+
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Atlas - transcripcion")
-            self.setWindowFlags(
-                Qt.WindowType.Tool
-                | Qt.WindowType.WindowStaysOnTopHint
-            )
+            self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
             self.resize(360, 220)
             layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
+            self._voice_status = QLabel("Desconectado", self)
+            layout.addWidget(self._voice_status)
+            voice_layout = QHBoxLayout()
+            self._voice_start_button = QPushButton("Iniciar voz", self)
+            self._voice_stop_button = QPushButton("Detener voz", self)
+            self._voice_retry_button = QPushButton("Reintentar", self)
+            self._voice_start_button.clicked.connect(self.voice_start_requested.emit)
+            self._voice_stop_button.clicked.connect(self.voice_stop_requested.emit)
+            self._voice_retry_button.clicked.connect(self.voice_retry_requested.emit)
+            voice_layout.addWidget(self._voice_start_button)
+            voice_layout.addWidget(self._voice_stop_button)
+            voice_layout.addWidget(self._voice_retry_button)
+            layout.addLayout(voice_layout)
             self._view = QTextBrowser(self)
             self._view.setReadOnly(True)
             layout.addWidget(self._view)
+            input_layout = QHBoxLayout()
+            self._input = QLineEdit(self)
+            self._input.setPlaceholderText("Escribe un mensaje...")
+            self._send_button = QPushButton("Enviar", self)
+            self._input.returnPressed.connect(self._submit_input)
+            self._send_button.clicked.connect(self._submit_input)
+            input_layout.addWidget(self._input)
+            input_layout.addWidget(self._send_button)
+            layout.addLayout(input_layout)
+
+        def _submit_input(self) -> None:
+            text = self._input.text().strip()
+            if text:
+                self._input.clear()
+                self.send_requested.emit(text)
+
+        def set_voice_state(self, state: str) -> None:
+            self._voice_status.setText(self._VOICE_STATUS.get(str(state), str(state)))
+
+        def set_voice_disconnected(self) -> None:
+            self._voice_status.setText("Desconectado")
 
         def append_message(self, message: str) -> None:
             self._view.append(str(message))
 
-    return TranscriptPanel()
+        def append_user(self, message: str) -> None:
+            self.append_message(f"Usuario: {message}")
 
+        def append_transcription(self, transcription: str) -> None:
+            self.append_message(f"Tú: {transcription}")
+
+        def append_response(self, response: str) -> None:
+            self.append_message(f"Atlas: {response}")
+
+        def append_error(self, error: str) -> None:
+            self.append_message(f"Error: {error}")
+
+    return TranscriptPanel()
 
 def run_demo(interval_ms: int = 900) -> int:
     """Cycle every visual state for manual verification (I2 acceptance)."""

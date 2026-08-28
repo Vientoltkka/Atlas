@@ -211,80 +211,20 @@ def _requested_mode(args: argparse.Namespace) -> str:
 
 
 def _run_ui_orb(logger: logging.Logger) -> int:
-    """Run the Atlas orb UI with a real voice session (V4.3-I3).
+    """Run Orbe through its explicit Qt-safe controller."""
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_application, create_orb_window, create_transcript_panel
 
-    Qt lives on the main thread; the voice session runs on its own
-    thread and reaches the UI only through Qt signals. Closing is
-    controlled: stop request -> session end (STOPPING -> STOPPED) ->
-    Qt quit. The process is never killed while audio may be active.
-    """
-    import threading
-
-    from ui.atlas_bridge import AtlasUiBridge
-    from ui.orbe_app import (
-        create_application,
-        create_orb_window,
-        create_transcript_panel,
+    controller = OrbeController(
+        atlas=_atlas_class()(),
+        application=create_application([]),
+        orb=create_orb_window(),
+        transcript_panel=create_transcript_panel(),
+        logger=logger,
     )
-    from use_cases.ui_state_mapper import OrbVisualState
-
-    atlas = _atlas_class()()
-
-    app = create_application([])
-    orb = create_orb_window()
-    panel = create_transcript_panel()
-    bridge = AtlasUiBridge()
-    bridge.state_changed.connect(orb.apply_state)
-    bridge.message_received.connect(panel.append_message)
-
-    stop_event = threading.Event()
-
-    def typed_input():
-        # Polled by the voice loop; returning a close command ends the
-        # session through its normal STOPPING -> STOPPED path.
-        return "salir" if stop_event.is_set() else None
-
-    def run_session() -> None:
-        try:
-            atlas.start_voice(
-                state_listener=bridge.on_state,
-                typed_input=typed_input,
-            )
-        except Exception as exc:
-            logger.error(
-                "Fallo en la sesion de voz del Orbe | tipo=%s | detalle=%s",
-                type(exc).__name__,
-                sanitize_log_message(exc),
-            )
-            panel.append_message("La sesion de voz ha terminado por un error.")
-        finally:
-            bridge.notify_session_finished()
-
-    orb.stop_requested.connect(stop_event.set)
-    orb.quit_requested.connect(stop_event.set)
-
-    def on_session_finished() -> None:
-        if bridge.quit_on_finish:
-            app.quit()
-        else:
-            orb.apply_state(OrbVisualState.IDLE)
-
-    bridge.session_finished.connect(on_session_finished)
-    orb.quit_requested.connect(bridge.request_quit_on_finish)
-
-    session_thread = threading.Thread(target=run_session, daemon=True)
-    session_thread.start()
-
-    orb.show()
-    panel.show()
-    exit_code = app.exec()
-
-    if session_thread.is_alive():
-        stop_event.set()
-        session_thread.join(timeout=8)
+    exit_code = controller.run()
     logger.info("Sesion del Orbe finalizada")
     return exit_code
-
 
 def _run_whatsapp_webhook(logger: logging.Logger) -> int:
     """Start the WhatsApp webhook server (uvicorn, workers=1 for Phase 2)."""

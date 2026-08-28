@@ -192,3 +192,155 @@ def test_transcript_panel_appends_without_session_logic(qapp) -> None:
     panel.append_message("Estado: PROCESSING")
     assert "LISTENING" in panel._view.toPlainText()
     panel.close()
+
+
+def test_controller_delivers_worker_events_only_through_qt_signals(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from use_cases.ui_state_mapper import OrbVisualState
+    from ui.orbe_app import create_transcript_panel
+
+    class FakeAtlas:
+        def start_voice(self, *, state_listener, status_sink, typed_input) -> None:
+            state_listener(VoiceConversationState.LISTENING)
+            status_sink("Tú: prueba desde worker")
+            status_sink("Atlas: respuesta desde worker")
+            assert typed_input() is None
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    controller.start()
+    controller.join(timeout=2)
+    _drain_events(qapp)
+
+    assert orb.state is OrbVisualState.IDLE
+    content = panel._view.toPlainText()
+    assert "prueba desde worker" in content
+    assert "Atlas: respuesta desde worker" in content
+    orb.close()
+    panel.close()
+
+def test_text_chat_submits_without_blocking_and_renders_response(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeAtlas:
+        def start_voice(self, **_kwargs) -> None:
+            return None
+
+        def process_prompt(self, prompt: str) -> str:
+            started.set()
+            assert release.wait(timeout=2)
+            return f"eco: {prompt}"
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    panel._input.setText("hola Orbe")
+    panel._send_button.click()
+    _drain_events(qapp)
+
+    assert started.wait(timeout=1)
+    assert "Usuario: hola Orbe" in panel._view.toPlainText()
+    assert "eco: hola Orbe" not in panel._view.toPlainText()
+
+    release.set()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+    assert "Atlas: eco: hola Orbe" in panel._view.toPlainText()
+    orb.close()
+    panel.close()
+
+
+def test_text_chat_errors_are_rendered_by_bridge_signal(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    class FakeAtlas:
+        def process_prompt(self, _prompt: str) -> str:
+            raise RuntimeError("fallo esperado")
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    controller.submit_text("provoca fallo")
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert "Error: No se pudo procesar el mensaje textual." in panel._view.toPlainText()
+    orb.close()
+    panel.close()
+
+def test_voice_controls_stop_and_retry_without_touching_chat(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    entered = threading.Event()
+    calls: list[int] = []
+
+    class FakeAtlas:
+        def start_voice(self, *, state_listener, status_sink, typed_input) -> None:
+            calls.append(1)
+            state_listener(VoiceConversationState.TRANSCRIBING)
+            state_listener(VoiceConversationState.PROCESSING)
+            state_listener(VoiceConversationState.SPEAKING)
+            entered.set()
+            while typed_input() is None:
+                threading.Event().wait(0.01)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    controller.start()
+    assert entered.wait(timeout=1)
+    _drain_events(qapp)
+    assert panel._voice_status.text() == "TTS"
+
+    panel._voice_stop_button.click()
+    controller.join(timeout=2)
+    _drain_events(qapp)
+    assert panel._voice_status.text() == "Desconectado"
+
+    entered.clear()
+    panel._voice_retry_button.click()
+    assert entered.wait(timeout=1)
+    assert len(calls) == 2
+    controller.stop()
+    controller.join(timeout=2)
+    orb.close()
+    panel.close()
+
+
+def test_voice_statuses_are_distinguishable_through_bridge_signals(qapp) -> None:
+    from ui.orbe_app import create_transcript_panel
+
+    panel = create_transcript_panel()
+    bridge = AtlasUiBridge()
+    bridge.voice_state_changed.connect(panel.set_voice_state)
+    bridge.voice_disconnected.connect(panel.set_voice_disconnected)
+
+    for state, label in (
+        (VoiceConversationState.TRANSCRIBING, "STT"),
+        (VoiceConversationState.PROCESSING, "Procesando"),
+        (VoiceConversationState.SPEAKING, "TTS"),
+        (VoiceConversationState.DEGRADED, "Error"),
+    ):
+        bridge.on_state(state)
+        _drain_events(qapp)
+        assert panel._voice_status.text() == label
+
+    bridge.notify_session_finished()
+    _drain_events(qapp)
+    assert panel._voice_status.text() == "Desconectado"
+    panel.close()
