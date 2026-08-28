@@ -92,6 +92,8 @@ class OllamaModelHealthChecker:
         cause = error.__cause__
         if isinstance(cause, (TimeoutError, httpx.TimeoutException)):
             return ModelHealthErrorCode.TIMEOUT
+        if "not found" in error.reason.lower() or "status code: 404" in error.reason.lower():
+            return ModelHealthErrorCode.MODEL_UNAVAILABLE
         if isinstance(cause, ollama.ResponseError):
             status_code = getattr(cause, "status_code", None)
             if status_code == 404 or "not found" in str(cause).lower():
