@@ -324,6 +324,7 @@ def create_transcript_panel():
 
     class TranscriptPanel(QWidget):
         send_requested = Signal(str)
+        close_requested = Signal()
         voice_start_requested = Signal()
         voice_stop_requested = Signal()
         voice_retry_requested = Signal()
@@ -331,6 +332,7 @@ def create_transcript_panel():
 
         def __init__(self) -> None:
             super().__init__()
+            self._hide_on_close = False
             self.setWindowTitle("Atlas - transcripcion")
             self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
             self.resize(360, 220)
@@ -367,6 +369,17 @@ def create_transcript_panel():
             if text:
                 self._input.clear()
                 self.send_requested.emit(text)
+
+        def set_hide_on_close(self, enabled: bool) -> None:
+            """Configure the chat-only close behavior without changing voice UI."""
+            self._hide_on_close = bool(enabled)
+
+        def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            if self._hide_on_close:
+                self.close_requested.emit()
+                event.ignore()
+                return
+            super().closeEvent(event)
 
         def set_voice_state(self, state: str) -> None:
             self._voice_status.setText(self._VOICE_STATUS.get(str(state), str(state)))

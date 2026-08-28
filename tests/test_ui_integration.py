@@ -344,3 +344,63 @@ def test_voice_statuses_are_distinguishable_through_bridge_signals(qapp) -> None
     _drain_events(qapp)
     assert panel._voice_status.text() == "Desconectado"
     panel.close()
+
+def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    class FakeAtlas:
+        pass
+
+    class FakeHotkey:
+        def __init__(self, callback, logger=None) -> None:
+            self.callback = callback
+            self.started = False
+            self.stopped = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def trigger(self) -> None:
+            self.callback()
+
+    hotkeys: list[FakeHotkey] = []
+
+    def make_hotkey(callback, logger=None) -> FakeHotkey:
+        hotkey = FakeHotkey(callback, logger)
+        hotkeys.append(hotkey)
+        return hotkey
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(),
+        application=qapp,
+        orb=orb,
+        transcript_panel=panel,
+        hotkey_factory=make_hotkey,
+    )
+    controller.start(start_voice=False)
+    assert hotkeys[0].started is True
+    assert qapp.quitOnLastWindowClosed() is False
+    assert orb.isVisible() is True
+    assert panel.isVisible() is True
+
+    panel.close()
+    _drain_events(qapp)
+    assert orb.isVisible() is False
+    assert panel.isVisible() is False
+    assert hotkeys[0].stopped is False
+
+    hotkeys[0].trigger()
+    _drain_events(qapp)
+    assert orb.isVisible() is True
+    assert panel.isVisible() is True
+
+    controller._stop_chat_hotkey()
+    assert hotkeys[0].stopped is True
+    orb.close()
+    panel.close()
