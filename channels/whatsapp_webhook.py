@@ -11,12 +11,13 @@ only real infrastructure failures return 500.
 from __future__ import annotations
 
 import hashlib
+import json
 import hmac
 import logging
 import math
 from typing import Any, Callable, Mapping
 
-from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi import APIRouter, Request, Response
 
 from channels.base_channel import InvalidChannelMessageError
 from channels.whatsapp_channel import WhatsAppChannel
@@ -48,6 +49,7 @@ def build_webhook_router(
     executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult],
     sender: Any,
     verify_token: str,
+    app_secret: str,
     store: Any,
     transcriber: Any = None,
     voice_renderer: Any = None,
@@ -66,107 +68,100 @@ def build_webhook_router(
             return Response(content=hub_challenge, media_type="text/plain", status_code=200)
         return Response(status_code=403)
 
+    def process_pending() -> None:
+        claim = getattr(store, "claim_pending", None)
+        if not callable(claim):
+            return
+        while (job := claim()) is not None:
+            event_id, kind, item = job
+            try:
+                if kind == "message":
+                    normalized = {"id": item["correlation_id"], "from": item["pseudo_sender"], "text": _message_text(item["message"])}
+                    result = executor_fn(channel.parse_inbound(normalized))
+                    body = channel.format_outbound(result).get("body")
+                    if isinstance(body, str) and body.strip():
+                        _deliver_reply(sender, voice_renderer, item["recipient_id"], body, recorder)
+                elif kind == "courtesy":
+                    sender.send_text(item["recipient_id"], item["courtesy"])
+                else:
+                    transcript = transcriber.transcribe_media_id(item["media_id"])
+                    normalized = {"id": item["correlation_id"], "from": item["pseudo_sender"], "text": transcript}
+                    result = executor_fn(channel.parse_inbound(normalized))
+                    body = channel.format_outbound(result).get("body")
+                    if isinstance(body, str) and body.strip():
+                        _deliver_reply(sender, voice_renderer, item["recipient_id"], body, recorder)
+            except Exception:
+                safe_record(recorder, MESSAGES_FAILED)
+                logger.exception("whatsapp durable job failed")
+                store.fail(event_id)
+            else:
+                store.complete(event_id)
+
     @router.post("")
-    async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+    async def receive_webhook(request: Request) -> Response:
+        raw_body = await request.body()
+        received = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        if not received or not hmac.compare_digest(expected, received):
+            logger.warning("whatsapp webhook signature rejected")
+            return Response(status_code=401)
         try:
-            payload = await request.json()
+            payload = json.loads(raw_body)
         except Exception:
             logger.warning("whatsapp webhook received unreadable json body")
             return Response(status_code=400)
-
-        value = _extract_change_value(payload)
-        if value is None:
-            # Uninterpretable payloads must NOT trigger Meta retries.
-            logger.debug("whatsapp webhook payload without interpretable changes")
-            return Response(status_code=200)
-
-        statuses = value.get("statuses")
-        if isinstance(statuses, list) and statuses:
-            _record_status_ack(statuses[0], recorder)
-            return Response(status_code=200)
-
-        messages = value.get("messages")
-        message = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], Mapping) else None
-        if message is None:
-            logger.debug("whatsapp webhook payload without messages")
-            return Response(status_code=200)
-
-        wamid = message.get("id")
-        if not isinstance(wamid, str) or not wamid.strip():
-            logger.debug("whatsapp webhook message without wamid")
-            return Response(status_code=200)
-        wamid = wamid.strip()
-
-        # Rate limit by pseudonymous sender BEFORE reserving idempotency so
-        # that rejected floods do not consume reservations (V4.0-F2).
-        if rate_limiter is not None:
-            raw_sender = message.get("from")
-            if isinstance(raw_sender, str) and raw_sender.strip():
-                sender_key = _pseudonymize(raw_sender.strip())
+        for value in _iter_change_values(payload):
+            statuses = value.get("statuses", [])
+            if isinstance(statuses, list):
+                for status in statuses:
+                    if not isinstance(status, Mapping) or not isinstance(status.get("id"), str):
+                        continue
+                    event_id = f"status:{status['id']}:{status.get('status', '')}"
+                    if store.check_and_reserve(event_id):
+                        _record_status_ack(status, recorder)
+            messages = value.get("messages", [])
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, Mapping) or not isinstance(message.get("id"), str):
+                    continue
+                wamid = message["id"].strip()
+                if not wamid:
+                    continue
+                raw_sender = message.get("from")
+                if rate_limiter is not None and isinstance(raw_sender, str) and raw_sender.strip():
+                    try:
+                        if not rate_limiter.allow(_pseudonymize(raw_sender.strip())):
+                            safe_record(recorder, RATE_LIMITED)
+                            continue
+                    except Exception:
+                        logger.warning("whatsapp webhook rate limiter failed | fail-open")
                 try:
-                    allowed = rate_limiter.allow(sender_key)
-                except Exception:
-                    logger.warning("whatsapp webhook rate limiter failed | fail-open")
-                    allowed = True
-                if not allowed:
-                    safe_record(recorder, RATE_LIMITED)
-                    logger.debug("whatsapp webhook rate limit exceeded")
-                    return Response(status_code=200)
-
-        safe_record(recorder, MESSAGES_RECEIVED)
-
-        # Reserve BEFORE responding so concurrent duplicates cannot both execute.
-        if not store.check_and_reserve(wamid):
-            logger.debug("whatsapp webhook duplicate wamid ignored")
-            safe_record(recorder, MESSAGES_DUPLICATED)
-            return Response(status_code=200)
-
-        recipient_id = _extract_sender_id(message)
-        correlation_id = _correlation_id(wamid)
-        pseudo_sender = _pseudonymize(recipient_id)
-        audio_media_id = _audio_media_id(message) if transcriber is not None else None
-        supported = _is_supported_text_message(message) or audio_media_id is not None
-
-        if audio_media_id is not None:
-            safe_record(recorder, AUDIO_RECEIVED)
-            background_tasks.add_task(
-                _process_audio_message,
-                channel=channel,
-                executor_fn=executor_fn,
-                sender=sender,
-                transcriber=transcriber,
-                voice_renderer=voice_renderer,
-                media_id=audio_media_id,
-                recipient_id=recipient_id,
-                correlation_id=correlation_id,
-                pseudo_sender=pseudo_sender,
-                recorder=recorder,
-            )
-        elif supported:
-            background_tasks.add_task(
-                _process_message,
-                channel=channel,
-                executor_fn=executor_fn,
-                sender=sender,
-                message=message,
-                recipient_id=recipient_id,
-                correlation_id=correlation_id,
-                pseudo_sender=pseudo_sender,
-                voice_renderer=voice_renderer,
-                recorder=recorder,
-            )
-        else:
-            background_tasks.add_task(
-                _send_courtesy_message,
-                channel=channel,
-                executor_fn=None,
-                sender=sender,
-                result=None,
-                recipient_id=recipient_id,
-                courtesy="Solo puedo procesar mensajes de texto por ahora.",
-            )
+                    recipient_id = _extract_sender_id(message)
+                except InvalidChannelMessageError:
+                    continue
+                audio_id = _audio_media_id(message) if transcriber is not None else None
+                kind = "audio" if audio_id is not None else "message" if _is_supported_text_message(message) else "courtesy"
+                item = {"message": dict(message), "recipient_id": recipient_id, "correlation_id": _correlation_id(wamid), "pseudo_sender": _pseudonymize(recipient_id), "media_id": audio_id, "courtesy": "Solo puedo procesar mensajes de texto por ahora."}
+                enqueue = getattr(store, "enqueue", None)
+                accepted = enqueue(wamid, kind, item) if callable(enqueue) else store.check_and_reserve(wamid)
+                if not accepted:
+                    safe_record(recorder, MESSAGES_DUPLICATED)
+                    continue
+                safe_record(recorder, MESSAGES_RECEIVED)
+                if kind == "audio":
+                    safe_record(recorder, AUDIO_RECEIVED)
+                if not callable(enqueue):
+                    if kind == "message":
+                        _process_message(channel=channel, executor_fn=executor_fn, sender=sender, message=message, recipient_id=recipient_id, correlation_id=item["correlation_id"], pseudo_sender=item["pseudo_sender"], voice_renderer=voice_renderer, recorder=recorder)
+                    elif kind == "audio":
+                        _process_audio_message(channel=channel, executor_fn=executor_fn, sender=sender, transcriber=transcriber, media_id=audio_id, recipient_id=recipient_id, correlation_id=item["correlation_id"], pseudo_sender=item["pseudo_sender"], voice_renderer=voice_renderer, recorder=recorder)
+                    else:
+                        _send_courtesy_message(channel=channel, executor_fn=None, sender=sender, result=None, recipient_id=recipient_id, courtesy=item["courtesy"])
+        process_pending()
         return Response(status_code=200)
 
+    router.whatsapp_recover_pending = process_pending  # type: ignore[attr-defined]
     return router
 
 
@@ -322,17 +317,23 @@ def _record_status_ack(status: Any, recorder: Any) -> None:
     logger.debug("whatsapp webhook status acknowledged | state=%s", event)
 
 
-def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
+def _iter_change_values(payload: Any):
     if not isinstance(payload, Mapping):
-        return None
-    entry = payload.get("entry")
-    if not isinstance(entry, list) or not entry or not isinstance(entry[0], Mapping):
-        return None
-    changes = entry[0].get("changes")
-    if not isinstance(changes, list) or not changes or not isinstance(changes[0], Mapping):
-        return None
-    value = changes[0].get("value")
-    return value if isinstance(value, Mapping) else None
+        return
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("changes"), list):
+            continue
+        for change in entry["changes"]:
+            value = change.get("value") if isinstance(change, Mapping) else None
+            if isinstance(value, Mapping):
+                yield value
+
+
+def _extract_change_value(payload: Any) -> Mapping[str, Any] | None:
+    return next(_iter_change_values(payload), None)
 
 
 def _message_text(message: Mapping[str, Any]) -> str:

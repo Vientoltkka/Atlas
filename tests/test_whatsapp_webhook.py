@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import threading
 from typing import Any
 
@@ -14,6 +17,7 @@ from core.agent_executor import AgentExecutionResult, AgentExecutionStatus
 
 
 VERIFY_TOKEN = "atlas-verify-token"
+APP_SECRET = "atlas-app-secret"
 
 
 class FakeStore:
@@ -81,15 +85,38 @@ def text_payload(wamid: str = "wamid.test001", sender: str = "34600111222", body
     }
 
 
-def make_client(executor=None, store=None, sender=None, verify_token: str = VERIFY_TOKEN):
-    return TestClient(
+def _signed_client(client: TestClient) -> TestClient:
+    original_post = client.post
+
+    def post(url: str, **kwargs):
+        body = kwargs.pop("content", None)
+        if body is None and "json" in kwargs:
+            body = json.dumps(kwargs.pop("json"), separators=(",", ":")).encode("utf-8")
+            kwargs.setdefault("headers", {})["Content-Type"] = "application/json"
+        if body is not None:
+            if isinstance(body, str):
+                body = body.encode("utf-8")
+            headers = dict(kwargs.pop("headers", {}))
+            headers["X-Hub-Signature-256"] = "sha256=" + hmac.new(APP_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+            kwargs["headers"] = headers
+            kwargs["content"] = body
+        return original_post(url, **kwargs)
+
+    client.post = post  # type: ignore[method-assign]
+    return client
+
+
+def make_client(executor=None, store=None, sender=None, verify_token: str = VERIFY_TOKEN, **kwargs):
+    return _signed_client(TestClient(
         create_webhook_app(
             executor_fn=executor or make_executor(),
             store=store or FakeStore(),
             sender=sender or FakeSender(),
             verify_token=verify_token,
+            app_secret=APP_SECRET,
+            **kwargs,
         )
-    )
+    ))
 
 
 def test_get_verification_ok() -> None:
@@ -252,14 +279,16 @@ def test_infrastructure_failure_returns_500(monkeypatch: pytest.MonkeyPatch) -> 
     def broken_extract(payload: Any) -> Any:
         raise ConnectionError("storage down")
 
-    monkeypatch.setattr(module, "_extract_change_value", broken_extract)
-    client = TestClient(
+    monkeypatch.setattr(module, "_iter_change_values", broken_extract)
+    client = _signed_client(TestClient(
         create_webhook_app(
             executor_fn=make_executor(),
             store=FakeStore(),
             sender=FakeSender(),
             verify_token=VERIFY_TOKEN,
+            app_secret=APP_SECRET,
         )
+    )
     )
     with pytest.raises(ConnectionError):
         client.post("/webhook/whatsapp", json=text_payload())
@@ -608,15 +637,7 @@ def test_rate_limit_applies_to_new_message_types() -> None:
     executor = make_executor()
     sender = FakeSender()
     limiter = OneShotLimiter()
-    client = TestClient(
-        create_webhook_app(
-            executor_fn=executor,
-            store=FakeStore(),
-            sender=sender,
-            verify_token=VERIFY_TOKEN,
-            rate_limiter=limiter,
-        )
-    )
+    client = make_client(executor=executor, store=FakeStore(), sender=sender, rate_limiter=limiter)
     payloads = [
         _message_payload("wamid.rl-doc", "document", {"id": "rld", "filename": "f.pdf"}),
         _message_payload("wamid.rl-loc", "location", {"latitude": 1, "longitude": 2}),

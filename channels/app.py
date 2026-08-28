@@ -42,9 +42,9 @@ def _build_store() -> IdempotencyStore | SqliteIdempotencyStore:
     failure: silently falling back to the per-process in-memory store
     would weaken the exactly-once guarantee without anyone noticing.
     """
-    db_path = os.environ.get("ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH", "")
+    db_path = os.environ.get("ATLAS_WHATSAPP_IDEMPOTENCY_DB_PATH", "data/whatsapp_webhook.db").strip()
     if not db_path:
-        return IdempotencyStore()
+        raise IdempotencyStoreInitError("persistent whatsapp idempotency store is required.")
     try:
         return SqliteIdempotencyStore(db_path=db_path)
     except Exception as error:
@@ -66,6 +66,7 @@ def build_webhook_app(
     store: IdempotencyStore | SqliteIdempotencyStore | None = None,
     sender: Any = None,
     verify_token: str | None = None,
+    app_secret: str | None = None,
     transcriber: Any = None,
     voice_renderer: Any = None,
     recorder: WhatsAppMetricsRecorder | None = None,
@@ -83,6 +84,10 @@ def build_webhook_app(
         verify_token = os.environ.get("ATLAS_WHATSAPP_VERIFY_TOKEN", "")
     if not verify_token:
         raise ValueError("verify_token is required (set ATLAS_WHATSAPP_VERIFY_TOKEN).")
+    if app_secret is None:
+        app_secret = os.environ.get("ATLAS_WHATSAPP_APP_SECRET", "")
+    if not app_secret:
+        raise ValueError("app_secret is required (set ATLAS_WHATSAPP_APP_SECRET).")
     if sender is None:
         access_token = os.environ.get("ATLAS_WHATSAPP_ACCESS_TOKEN", "")
         phone_number_id = os.environ.get("ATLAS_WHATSAPP_PHONE_NUMBER_ID", "")
@@ -108,6 +113,9 @@ def build_webhook_app(
             transcriber=transcriber,
             voice_renderer=voice_renderer,
         )
+    recover_interrupted = getattr(store, "recover_interrupted", None)
+    if callable(recover_interrupted):
+        recover_interrupted()
     if rate_limiter is None:
         rate_limiter = _build_rate_limiter()
 
@@ -120,6 +128,7 @@ def build_webhook_app(
             executor_fn=executor_fn,
             sender=sender,
             verify_token=verify_token,
+            app_secret=app_secret,
             store=store,
             transcriber=transcriber,
             voice_renderer=voice_renderer,

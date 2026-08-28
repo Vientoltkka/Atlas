@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -24,6 +27,7 @@ from channels.whatsapp_health import (
 
 _TEMP_ROOT = r"C:\Users\victo\AppData\Local\Temp\opencode"
 SECRET_TOKEN = "super-secret-access-token"
+APP_SECRET = "atlas-app-secret"
 
 
 def _tmp_dir() -> Path:
@@ -154,10 +158,13 @@ def test_pipeline_keeps_using_persistent_store() -> None:
             store=SqliteIdempotencyStore(db_path=tmp_dir / "idem.db"),
             sender=FakeSender(),
             verify_token="verify-token",
+            app_secret=APP_SECRET,
         )
         client = TestClient(app)
-        first = client.post("/webhook/whatsapp", json=text_payload())
-        second = client.post("/webhook/whatsapp", json=text_payload())
+        raw = json.dumps(text_payload(), separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + hmac.new(APP_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()}
+        first = client.post("/webhook/whatsapp", content=raw, headers=headers)
+        second = client.post("/webhook/whatsapp", content=raw, headers=headers)
         assert first.status_code == 200
         assert second.status_code == 200
     finally:

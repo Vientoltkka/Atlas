@@ -12,6 +12,7 @@ Two interchangeable implementations share the same minimal contract:
 from __future__ import annotations
 
 from contextlib import closing
+import json
 from pathlib import Path
 from threading import Lock
 import sqlite3
@@ -91,6 +92,18 @@ class SqliteIdempotencyStore:
                     )
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS whatsapp_webhook_jobs (
+                        event_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        updated_at REAL NOT NULL
+                    )
+                    """
+                )
         except Exception as error:
             # Fail loudly without leaking the filesystem location or any
             # other sensitive detail in the exposed message.
@@ -117,5 +130,46 @@ class SqliteIdempotencyStore:
             (now - self._ttl_seconds,),
         )
 
+    def enqueue(self, event_id: str, kind: str, payload: dict) -> bool:
+        """Atomically persist a new webhook job before acknowledging it."""
+        now = time.time()
+        serialized = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        with closing(self._connect()) as connection, connection:
+            self._evict_expired(connection, now)
+            reserved = connection.execute(
+                "INSERT OR IGNORE INTO whatsapp_idempotency (event_id, reserved_at) VALUES (?, ?)",
+                (event_id, now),
+            )
+            if reserved.rowcount != 1:
+                return False
+            connection.execute(
+                "INSERT INTO whatsapp_webhook_jobs (event_id, kind, payload, state, updated_at) VALUES (?, ?, ?, 'pending', ?)",
+                (event_id, kind, serialized, now),
+            )
+            return True
+
+    def recover_interrupted(self) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("UPDATE whatsapp_webhook_jobs SET state = 'pending', updated_at = ? WHERE state IN ('processing', 'failed')", (time.time(),))
+
+    def claim_pending(self) -> tuple[str, str, dict] | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute("SELECT event_id, kind, payload FROM whatsapp_webhook_jobs WHERE state = 'pending' ORDER BY updated_at, event_id LIMIT 1").fetchone()
+            if row is None:
+                return None
+            claimed = connection.execute("UPDATE whatsapp_webhook_jobs SET state = 'processing', attempts = attempts + 1, updated_at = ? WHERE event_id = ? AND state = 'pending'", (time.time(), row[0]))
+            if claimed.rowcount != 1:
+                return None
+            return row[0], row[1], json.loads(row[2])
+
+    def complete(self, event_id: str) -> None:
+        self._set_job_state(event_id, 'processed')
+
+    def fail(self, event_id: str) -> None:
+        self._set_job_state(event_id, 'failed')
+
+    def _set_job_state(self, event_id: str, state: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("UPDATE whatsapp_webhook_jobs SET state = ?, updated_at = ? WHERE event_id = ?", (state, time.time(), event_id))
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path, timeout=30.0)

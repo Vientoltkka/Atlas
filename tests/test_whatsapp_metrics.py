@@ -149,7 +149,7 @@ def test_counts_duplicates() -> None:
     client = make_client(recorder=recorder)
     client.post("/webhook/whatsapp", json=text_payload())
     client.post("/webhook/whatsapp", json=text_payload())
-    assert recorder.value(MESSAGES_RECEIVED) == 2
+    assert recorder.value(MESSAGES_RECEIVED) == 1
     assert recorder.value(MESSAGES_DUPLICATED) == 1
 
 
@@ -190,6 +190,7 @@ def test_counts_voice_replies() -> None:
             executor_fn=make_executor(),
             sender=FakeSender(),
             verify_token=VERIFY_TOKEN,
+            app_secret="atlas-test-whatsapp-app-secret",
             store=FakeStore(),
             voice_renderer=FakeRenderer(),
             recorder=recorder,
@@ -209,7 +210,7 @@ def test_independent_events_do_not_interfere() -> None:
     client.post("/webhook/whatsapp", json=text_payload(wamid="wamid.i1"))
     client.post("/webhook/whatsapp", json=text_payload(wamid="wamid.i1"))
     snapshot = recorder.snapshot()
-    assert snapshot[MESSAGES_RECEIVED] == 2
+    assert snapshot[MESSAGES_RECEIVED] == 1
     assert snapshot[MESSAGES_DUPLICATED] == 1
     assert snapshot[AUDIO_RECEIVED] == 0
     assert snapshot[MESSAGES_FAILED] == 0
