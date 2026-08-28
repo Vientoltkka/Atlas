@@ -65,11 +65,6 @@ class OllamaModelHealthChecker:
         provider_id: str,
     ) -> ModelHealthResult:
         try:
-            if provider_id != "ollama":
-                raise InferenceBackendError(
-                    physical_model_name,
-                    f"Unsupported model provider '{provider_id}'.",
-                )
             self._prompt_client.check_model_health(physical_model_name)
         except InferenceBackendError as error:
             return ModelHealthResult(

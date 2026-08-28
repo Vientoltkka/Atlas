@@ -290,7 +290,11 @@ class ModelManager:
             return None
         return replace(
             descriptor,
-            available=descriptor.available and descriptor.model_name in installed,
+            available=(
+                    descriptor.available
+                    if not descriptor.local
+                    else descriptor.available and descriptor.model_name in installed
+                ),
         )
 
     def select_model(self, request: ModelSelectionRequest) -> ModelSelectionResult:
@@ -517,7 +521,11 @@ class ModelManager:
         descriptors = [
             replace(
                 descriptor,
-                available=descriptor.available and descriptor.model_name in installed,
+                available=(
+                    descriptor.available
+                    if not descriptor.local
+                    else descriptor.available and descriptor.model_name in installed
+                ),
             )
             for descriptor in self._descriptors.values()
         ]
@@ -541,12 +549,7 @@ class ModelManager:
             if current is None or descriptor.priority > current.priority:
                 descriptors_by_name[descriptor.model_name] = descriptor
         candidates: list[ResourceCandidate] = []
-        for model in self.list_models():
-            model_name = _model_resource_id(model)
-            descriptor = descriptors_by_name.get(
-                model_name,
-                self._discovered_descriptor(model_name),
-            )
+        for descriptor in descriptors_by_name.values():
             candidates.append(
                 ResourceCandidate(
                     resource_id=descriptor.model_name,

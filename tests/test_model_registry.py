@@ -87,3 +87,47 @@ def test_invalid_registry_payload_falls_back_to_default_catalog(monkeypatch) -> 
     )
 
     assert manager.choose_model("chat") == "glm4:9b"
+
+
+def test_remote_registered_model_does_not_require_local_install(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ATLAS_MODEL_DESCRIPTORS",
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "logical_id": "chat-gemini",
+                        "provider_id": "gemini",
+                        "model_id": "gemini-3.6-flash",
+                        "capabilities": ["general_chat", "chat", "fast_response"],
+                        "available": True,
+                        "local": False,
+                        "priority": 200,
+                    }
+                ]
+            }
+        ),
+    )
+
+    descriptors = load_model_descriptors_from_environment()
+
+    # El origen local NO contiene Gemini.
+    manager = ModelManager(
+        StaticModelSource(["glm4:9b"]),
+        descriptors,
+    )
+
+    selection = manager.select_model(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_provider_id="gemini",
+        )
+    )
+
+    assert selection.success is True
+    assert selection.logical_model_id == "chat-gemini"
+    assert selection.provider_id == "gemini"
+    assert selection.physical_model_name == "gemini-3.6-flash"
+    assert selection.descriptor is not None
+    assert selection.descriptor.local is False
+    assert selection.descriptor.available is True
