@@ -125,9 +125,9 @@ class WindowsStartupPreflight:
         capabilities = ["texto"]
         if self._modules_available(self._VOICE_REQUIRED_MODULES):
             capabilities.append("voz manual")
-        if (
-            self._modules_available(self._VOICE_REQUIRED_MODULES)
-            and self._modules_available(self._ASSISTANT_MODULES)
+        if self._modules_available(self._VOICE_REQUIRED_MODULES) and (
+            not self._requires_openwakeword()
+            or self._modules_available(self._ASSISTANT_MODULES)
         ):
             capabilities.append("asistente permanente")
         if self._socket_probe("127.0.0.1", 11434, 0.15):
@@ -245,7 +245,9 @@ class WindowsStartupPreflight:
             required.extend(self._VOICE_REQUIRED_MODULES)
             optional = list(self._VOICE_OPTIONAL_MODULES + self._ASSISTANT_MODULES)
         elif mode == "assistant":
-            required.extend(self._VOICE_REQUIRED_MODULES + self._ASSISTANT_MODULES)
+            required.extend(self._VOICE_REQUIRED_MODULES)
+            if self._requires_openwakeword():
+                required.extend(self._ASSISTANT_MODULES)
             optional = list(self._VOICE_OPTIONAL_MODULES)
 
         for module_name in dict.fromkeys(required):
@@ -271,6 +273,15 @@ class WindowsStartupPreflight:
                     "No disponible; se desactiva la capacidad asociada.",
                     "Instala requirements.txt si necesitas voz o wake word.",
                 )
+
+    def _requires_openwakeword(self) -> bool:
+        """Return whether assistant mode is configured for the ONNX provider."""
+        model_path = os.getenv("ATLAS_WAKE_WORD_MODEL_PATH", "").strip()
+        if not model_path:
+            return False
+
+        path = Path(model_path).expanduser()
+        return path.suffix.lower() == ".onnx" and path.is_file()
 
     def _check_whatsapp_credentials(self) -> StartupCheck:
         """Require the WhatsApp credentials without ever showing values."""

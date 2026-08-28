@@ -225,3 +225,40 @@ def test_voice_preflight_still_requires_stt(tmp_path) -> None:
 
     assert not report.ready
     assert any("faster_whisper" in check.name for check in report.errors)
+
+def test_assistant_preflight_uses_stt_fallback_without_openwakeword(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("ATLAS_WAKE_WORD_MODEL_PATH", raising=False)
+
+    def find_module(name: str) -> object | None:
+        return None if name == "openwakeword" else object()
+
+    report = WindowsStartupPreflight(
+        _project(tmp_path),
+        module_finder=find_module,
+        socket_probe=lambda *_args: True,
+    ).run("assistant")
+
+    assert report.ready
+    assert not any("openwakeword" in check.name for check in report.errors)
+
+
+def test_assistant_preflight_requires_openwakeword_for_valid_onnx(
+    tmp_path, monkeypatch
+) -> None:
+    model_path = tmp_path / "Atlas.onnx"
+    model_path.write_bytes(b"fake")
+    monkeypatch.setenv("ATLAS_WAKE_WORD_MODEL_PATH", str(model_path))
+
+    def find_module(name: str) -> object | None:
+        return None if name == "openwakeword" else object()
+
+    report = WindowsStartupPreflight(
+        _project(tmp_path),
+        module_finder=find_module,
+        socket_probe=lambda *_args: True,
+    ).run("assistant")
+
+    assert not report.ready
+    assert any("openwakeword" in check.name for check in report.errors)

@@ -3613,3 +3613,65 @@ def test_phase_17_2_ctrl_c_during_tts_cancels_worker_and_session() -> None:
     assert result.session.ended_reason == "cancelled"
     assert result.session.state is VoiceConversationState.STOPPED
     assert not use_case._tts_workers
+
+
+def test_expired_model_worker_blocks_next_turn_until_it_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MODEL_TIMEOUT", "0.01")
+    use_case = make_use_case(FakeSpeechEngine([]), output=FakeSpeechOutputEngine())
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def process_text(text: str) -> str:
+        if text == "primero":
+            first_started.set()
+            release_first.wait(timeout=2.0)
+            return "respuesta tardia"
+        second_started.set()
+        return "respuesta nueva"
+
+    with pytest.raises(TimeoutError):
+        use_case._process_text_with_timeout("primero", process_text)
+
+    assert first_started.is_set()
+    next_turn = threading.Thread(
+        target=lambda: use_case._process_text_with_timeout("segundo", process_text),
+    )
+    next_turn.start()
+    time.sleep(0.05)
+    assert not second_started.is_set()
+
+    release_first.set()
+    next_turn.join(timeout=1.0)
+
+    assert not next_turn.is_alive()
+    assert second_started.is_set()
+    assert not use_case._expired_model_workers
+
+
+def test_expired_model_worker_requests_optional_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATLAS_VOICE_MODEL_TIMEOUT", "0.01")
+    use_case = make_use_case(FakeSpeechEngine([]), output=FakeSpeechOutputEngine())
+
+    class CancellableProcessor:
+        def __init__(self) -> None:
+            self.cancelled = threading.Event()
+
+        def __call__(self, _text: str) -> str:
+            self.cancelled.wait(timeout=2.0)
+            return "cancelado"
+
+        def cancel(self) -> None:
+            self.cancelled.set()
+
+    processor = CancellableProcessor()
+    with pytest.raises(TimeoutError):
+        use_case._process_text_with_timeout("pregunta", processor)
+
+    assert processor.cancelled.wait(timeout=1.0)
+    use_case._wait_for_expired_model_workers()
+    assert not use_case._expired_model_workers

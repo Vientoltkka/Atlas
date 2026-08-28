@@ -252,6 +252,8 @@ class VoiceConversationUseCase:
         self._tts_warmup_error = ""
         self._model_workers: set[threading.Thread] = set()
         self._tts_workers: set[threading.Thread] = set()
+        self._expired_model_workers: set[threading.Thread] = set()
+        self._model_worker_condition = threading.Condition()
         self._pending_barge_in: SpeechTranscriptionResult | None = None
         self._barge_in_enabled = False
         self._model_timeout_seconds = _read_float(
@@ -1355,6 +1357,7 @@ class VoiceConversationUseCase:
         process_text_stream=None,
         fragment_sink=None,
     ) -> str:
+        self._wait_for_expired_model_workers()
         result_queue: queue.Queue[tuple[bool, str | BaseException]] = queue.Queue(maxsize=1)
 
         def run() -> None:
@@ -1368,15 +1371,23 @@ class VoiceConversationUseCase:
             except BaseException as error:
                 result_queue.put((False, error))
             finally:
-                self._model_workers.discard(threading.current_thread())
+                with self._model_worker_condition:
+                    self._model_workers.discard(threading.current_thread())
+                    self._expired_model_workers.discard(threading.current_thread())
+                    self._model_worker_condition.notify_all()
 
         worker = threading.Thread(target=run, daemon=True, name="atlas-voice-model")
-        self._model_workers.add(worker)
+        with self._model_worker_condition:
+            self._model_workers.add(worker)
         worker.start()
 
         try:
             ok, value = result_queue.get(timeout=self._model_timeout_seconds)
         except queue.Empty:
+            self._request_model_cancellation(process_text, process_text_stream)
+            with self._model_worker_condition:
+                if worker.is_alive():
+                    self._expired_model_workers.add(worker)
             raise VoiceModelTimeoutError(
                 f"supervisor agotado tras {self._model_timeout_seconds:.1f} s"
             )
@@ -1397,6 +1408,24 @@ class VoiceConversationUseCase:
             raise RuntimeError(f"{type(value).__name__}: {value}") from value
 
         raise RuntimeError(str(value))
+
+    def _wait_for_expired_model_workers(self) -> None:
+        """Prevent a new model turn while an expired prior request is still running."""
+        with self._model_worker_condition:
+            while any(worker.is_alive() for worker in self._expired_model_workers):
+                self._model_worker_condition.wait()
+            self._expired_model_workers.clear()
+
+    @staticmethod
+    def _request_model_cancellation(*processors) -> None:
+        """Ask an optionally cancellable model adapter to stop an expired request."""
+        for processor in processors:
+            cancel = getattr(processor, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:
+                    pass
 
     def _voice_flow_route(
         self,
