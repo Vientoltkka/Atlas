@@ -41,10 +41,14 @@ class OrbeController:
     def bridge(self):
         return self._bridge
 
-    def start(self) -> None:
+    def start(self, *, start_voice: bool = True) -> None:
         self._orb.show()
         self._transcript_panel.show()
-        self.start_voice()
+        if not start_voice:
+            self._transcript_panel.raise_()
+            self._transcript_panel.activateWindow()
+        if start_voice:
+            self.start_voice()
 
     def start_voice(self) -> None:
         """Start a new voice session only when no prior session is running."""
@@ -60,8 +64,8 @@ class OrbeController:
         """Retry a completed voice session without affecting text chat."""
         self.start_voice()
 
-    def run(self) -> int:
-        self.start()
+    def run(self, *, start_voice: bool = True) -> int:
+        self.start(start_voice=start_voice)
         exit_code = self._application.exec()
         self.stop()
         self.join()

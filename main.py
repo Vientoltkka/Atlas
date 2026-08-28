@@ -47,6 +47,11 @@ def main() -> int:
         help="Inicia el webhook de WhatsApp (FastAPI + uvicorn, workers=1).",
     )
     parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Inicia el Orbe de Atlas en modo chat textual sin voz.",
+    )
+    parser.add_argument(
         "--ui",
         action="store_true",
         help="Inicia el Orbe de Atlas con una sesion de voz real.",
@@ -95,6 +100,9 @@ def main() -> int:
 
         if args.whatsapp_webhook:
             return _run_whatsapp_webhook(logger)
+
+        if getattr(args, "chat", False):
+            return _run_ui_orb(logger, start_voice=False)
 
         if getattr(args, "ui", False):
             return _run_ui_orb(logger)
@@ -201,6 +209,8 @@ def _requested_mode(args: argparse.Namespace) -> str:
         return "microphone"
     if getattr(args, "whatsapp_webhook", False):
         return "whatsapp"
+    if getattr(args, "chat", False):
+        return "chat"
     if getattr(args, "ui", False):
         return "ui"
     if args.voice:
@@ -210,7 +220,7 @@ def _requested_mode(args: argparse.Namespace) -> str:
     return "text"
 
 
-def _run_ui_orb(logger: logging.Logger) -> int:
+def _run_ui_orb(logger: logging.Logger, *, start_voice: bool = True) -> int:
     """Run Orbe through its explicit Qt-safe controller."""
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_application, create_orb_window, create_transcript_panel
@@ -222,7 +232,7 @@ def _run_ui_orb(logger: logging.Logger) -> int:
         transcript_panel=create_transcript_panel(),
         logger=logger,
     )
-    exit_code = controller.run()
+    exit_code = controller.run(start_voice=start_voice)
     logger.info("Sesion del Orbe finalizada")
     return exit_code
 
