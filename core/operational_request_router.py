@@ -826,7 +826,7 @@ def _normalize_for_matching(text: str) -> str:
         for character in normalized
         if unicodedata.category(character) != "Mn"
     )
-    without_punctuation = re.sub(r"[^\w\s.:_-]", " ", without_accents)
+    without_punctuation = re.sub(r"[^\w\s.:_\\/-]", " ", without_accents)
     return " ".join(without_punctuation.split())
 
 
@@ -975,6 +975,8 @@ def _tool_matches(
         - {"abre", "abrir", "lee", "leer", "el", "la", "los", "las", "de", "un", "una"}
         if not _looks_like_tool_argument(token)
     }
+    if action in {"read", "write"}:
+        meaningful.difference_update({"archivo", "fichero"})
     if "aplicacion" in meaningful and "application" in tool_tokens:
         meaningful = set(meaningful)
         meaningful.remove("aplicacion")

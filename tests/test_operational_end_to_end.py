@@ -144,6 +144,37 @@ def test_bootstrapped_text_flow_is_observable_persistent_and_repeatable(
     assert read_calls == ["README.md", "README.md"]
 
 
+def test_bootstrapped_text_flow_reads_an_absolute_spanish_file_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    real_read = FileService.read
+    read_calls: list[str] = []
+
+    def counted_read(path: str) -> str:
+        read_calls.append(str(path))
+        return real_read(path)
+
+    monkeypatch.setattr(FileService, "read", staticmethod(counted_read))
+    orchestrator = Bootstrap.build()
+    readme_path = str(Path("README.md").resolve())
+
+    prompt = f"Lee el archivo {readme_path}"
+    decision = orchestrator.classify_prompt(prompt)
+    visible = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+    result = orchestrator._execution_conversation.last_result
+
+    assert decision.route is RequestRoute.SINGLE_TOOL
+    assert decision.target_tool_name == "read_file"
+    assert result is not None
+    assert result.execution_result is not None
+    assert result.execution_result.tool_name == "read_file"
+    assert result.execution_result.success is True
+    assert read_calls == [readme_path]
+    assert visible.startswith(f"He leído {readme_path}:")
+    assert "Archivos encontrados:" not in visible
+
 def test_real_tool_error_does_not_break_the_next_text_request(
     monkeypatch,
     tmp_path: Path,
