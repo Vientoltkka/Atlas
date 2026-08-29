@@ -64,9 +64,12 @@ class OrbeController:
     def bridge(self):
         return self._bridge
 
-    def start(self, *, start_voice: bool = True) -> None:
+    def start(self, *, start_voice: bool = True, show_on_start: bool = True) -> None:
         self._transcript_panel.set_hide_on_close(not start_voice)
-        self.show_chat()
+        if show_on_start:
+            self.show_chat()
+        else:
+            self.hide_chat()
         if not start_voice:
             self._application.setQuitOnLastWindowClosed(False)
             self._start_chat_hotkey()
@@ -99,8 +102,8 @@ class OrbeController:
         """Retry a completed voice session without affecting text chat."""
         self.start_voice()
 
-    def run(self, *, start_voice: bool = True) -> int:
-        self.start(start_voice=start_voice)
+    def run(self, *, start_voice: bool = True, show_on_start: bool = True) -> int:
+        self.start(start_voice=start_voice, show_on_start=show_on_start)
         try:
             return self._application.exec()
         finally:

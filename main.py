@@ -52,6 +52,11 @@ def main() -> int:
         help="Inicia el Orbe de Atlas en modo chat textual sin voz.",
     )
     parser.add_argument(
+        "--start-hidden",
+        action="store_true",
+        help="Inicia el chat oculto; reservado para el autoarranque de Windows.",
+    )
+    parser.add_argument(
         "--ui",
         action="store_true",
         help="Inicia el Orbe de Atlas con una sesion de voz real.",
@@ -63,6 +68,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     mode = _requested_mode(args)
+    if args.start_hidden and not args.chat:
+        parser.error("--start-hidden solo se puede usar junto a --chat.")
     project_root = Path(__file__).resolve().parent
     _load_environment_file(project_root)
     preflight_mode = "voice" if mode == "ui" else mode
@@ -102,10 +109,12 @@ def main() -> int:
             return _run_whatsapp_webhook(logger)
 
         if getattr(args, "chat", False):
-            return _run_ui_orb(logger, start_voice=False)
+            return _run_desktop_ui(
+                logger, start_voice=False, show_on_start=not args.start_hidden
+            )
 
         if getattr(args, "ui", False):
-            return _run_ui_orb(logger)
+            return _run_desktop_ui(logger)
 
         print(render_startup_banner(report))
         print()
@@ -220,7 +229,33 @@ def _requested_mode(args: argparse.Namespace) -> str:
     return "text"
 
 
-def _run_ui_orb(logger: logging.Logger, *, start_voice: bool = True) -> int:
+def _run_desktop_ui(
+    logger: logging.Logger,
+    *,
+    start_voice: bool = True,
+    show_on_start: bool = True,
+) -> int:
+    """Run at most one desktop chat/UI process on Windows."""
+    from core.windows_ui_instance import WindowsUiInstance
+
+    instance = WindowsUiInstance()
+    if not instance.acquire():
+        logger.info("Se omitio una segunda instancia de la interfaz de Atlas")
+        return 0
+    try:
+        return _run_ui_orb(
+            logger, start_voice=start_voice, show_on_start=show_on_start
+        )
+    finally:
+        instance.release()
+
+
+def _run_ui_orb(
+    logger: logging.Logger,
+    *,
+    start_voice: bool = True,
+    show_on_start: bool = True,
+) -> int:
     """Run Orbe through its explicit Qt-safe controller."""
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_application, create_orb_window, create_transcript_panel
@@ -232,7 +267,7 @@ def _run_ui_orb(logger: logging.Logger, *, start_voice: bool = True) -> int:
         transcript_panel=create_transcript_panel(),
         logger=logger,
     )
-    exit_code = controller.run(start_voice=start_voice)
+    exit_code = controller.run(start_voice=start_voice, show_on_start=show_on_start)
     logger.info("Sesion del Orbe finalizada")
     return exit_code
 
