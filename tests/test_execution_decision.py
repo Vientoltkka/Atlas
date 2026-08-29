@@ -53,6 +53,12 @@ def test_calendar_list_request_uses_calendar_intent() -> None:
     assert decision.candidate_tools == ("calendar.events.list",)
 
 
+def test_natural_tomorrow_request_uses_only_calendar_intent() -> None:
+    decision = _engine().decide("Qué tengo mañana")
+
+    assert decision.mode == ExecutionMode.SINGLE_TOOL
+    assert decision.candidate_tools == ("calendar.events.list",)
+
 def test_file_write_request_uses_single_tool() -> None:
     decision = _engine().decide("Escribe hola en resumen.txt")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -914,6 +915,47 @@ def test_calendar_clarification_completes_range_and_executes_once() -> None:
     ]
     assert outcome.text == "No hay eventos en el rango solicitado."
 
+
+def test_natural_tomorrow_calendar_request_executes_once_with_normalized_output(
+    monkeypatch,
+) -> None:
+    from tools.calendar import calendar_request_parser
+    from tools import tool_proposal_builder
+
+    fixed_time = datetime(2026, 8, 12, 14, 30, tzinfo=timezone(timedelta(hours=1)))
+    monkeypatch.setattr(
+        tool_proposal_builder,
+        "extract_calendar_arguments",
+        lambda source_text: calendar_request_parser.extract_calendar_arguments(
+            source_text,
+            current_time=fixed_time,
+        ),
+    )
+    controller, tool = _calendar_controller(
+        [
+            {
+                "id": "evt_1",
+                "summary": "Review",
+                "start": "2026-08-13T12:00:00+01:00",
+                "end": "2026-08-13T12:30:00+01:00",
+            }
+        ]
+    )
+
+    outcome = controller.handle("Qué tengo mañana")
+
+    assert tool.calls == 1
+    assert tool.arguments == [
+        {
+            "time_min": "2026-08-13T00:00:00+01:00",
+            "time_max": "2026-08-14T00:00:00+01:00",
+            "max_results": 5,
+        }
+    ]
+    assert outcome.text == (
+        "Eventos encontrados:\n"
+        "- Review: 2026-08-13T12:00:00+01:00 - 2026-08-13T12:30:00+01:00"
+    )
 
 def test_calendar_invalid_range_keeps_clarification_without_execution() -> None:
     controller, tool = _calendar_controller([])

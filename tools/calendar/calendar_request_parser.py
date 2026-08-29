@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 import re
 from typing import Any
+import unicodedata
 
 from tools.calendar.calendar_list_events_tool import MAX_RESULTS_LIMIT
 
@@ -26,7 +27,11 @@ _MAX_RESULTS_PATTERN = re.compile(
 )
 
 
-def extract_calendar_arguments(source_text: str) -> dict[str, Any]:
+def extract_calendar_arguments(
+    source_text: str,
+    *,
+    current_time: datetime | None = None,
+) -> dict[str, Any]:
     """Extract only the supported calendar search arguments from text."""
     arguments: dict[str, Any] = {
         name.casefold(): value
@@ -43,7 +48,59 @@ def extract_calendar_arguments(source_text: str) -> dict[str, Any]:
     if max_results is not None:
         arguments["max_results"] = int(max_results.group(1))
 
+    if "time_min" not in arguments and "time_max" not in arguments:
+        natural_range = _natural_calendar_range(source_text, current_time)
+        if natural_range is not None:
+            arguments.update(natural_range)
+
     return arguments
+
+
+def _natural_calendar_range(
+    source_text: str,
+    current_time: datetime | None,
+) -> dict[str, str] | None:
+    normalized = _normalize(source_text)
+    expression = next(
+        (
+            value
+            for value in ("esta semana", "manana", "hoy")
+            if re.search(rf"\b{value}\b", normalized)
+        ),
+        None,
+    )
+    if expression is None:
+        return None
+
+    now = current_time or datetime.now().astimezone()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("current_time must include timezone information")
+
+    today_start = datetime.combine(now.date(), time.min, tzinfo=now.tzinfo)
+    if expression == "hoy":
+        range_start = today_start
+        range_end = today_start + timedelta(days=1)
+    elif expression == "manana":
+        range_start = today_start + timedelta(days=1)
+        range_end = range_start + timedelta(days=1)
+    else:
+        range_start = today_start - timedelta(days=today_start.weekday())
+        range_end = range_start + timedelta(days=7)
+
+    return {
+        "time_min": range_start.isoformat(timespec="seconds"),
+        "time_max": range_end.isoformat(timespec="seconds"),
+    }
+
+
+def _normalize(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.strip().lower())
+    without_accents = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Mn"
+    )
+    return " ".join(without_accents.split())
 
 
 def require_rfc3339_timestamp(value: Any) -> None:
