@@ -448,7 +448,7 @@ class OperationalRequestRouter:
             if _tool_matches(descriptor, normalized, action, self._config.strict_tool_matching)
         )
         if not matches:
-            if action in {"open", "read", "write", "list", "copy", "status"}:
+            if action in {"open", "read", "write", "list", "copy", "status", "send"}:
                 return (
                     RouteCandidate(
                         RequestRoute.UNSUPPORTED,
@@ -904,6 +904,8 @@ def _single_tool_action(text: str) -> str | None:
         return "read"
     if text.startswith(("escribe ", "guarda ", "write ")):
         return "write"
+    if text.startswith(("envia ", "enviame ", "manda ", "mandame ", "send ")):
+        return "send"
     if text.startswith(("lista ", "listar ", "muestra carpeta")):
         return "list"
     if "portapapeles" in text or "clipboard" in text:
@@ -959,12 +961,15 @@ def _tool_matches(
         "list": ("list", "listar", "folder", "carpeta"),
         "calendar_list": ("calendar", "events", "calendario", "eventos"),
         "copy": ("clipboard", "portapapeles", "copy"),
+        "send": ("send", "enviar", "mensaje", "message", "whatsapp"),
         "status": ("status", "estado", "process", "proceso"),
         "time": ("time", "hora", "date", "fecha"),
     }[action]
     if not any(marker in haystack for marker in action_markers):
         return False
     request_tokens = set(text.split())
+    if action == "send" and "whatsapp" in request_tokens and "whatsapp" not in haystack:
+        return False
     tool_tokens = (
         set(haystack.split())
         | set(haystack.replace(".", " ").replace("_", " ").split())

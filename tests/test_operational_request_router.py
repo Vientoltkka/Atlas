@@ -119,6 +119,21 @@ def test_missing_tool_is_not_single_tool() -> None:
     assert decision.target_tool_name is None
 
 
+def test_unregistered_whatsapp_send_is_unsupported() -> None:
+    decision = _router().classify(_gateway().from_text("Envíame ahora por WhatsApp un mensaje a mí mismo que diga: Prueba operativa de Atlas."))
+    assert decision.route is RequestRoute.UNSUPPORTED
+    assert decision.target_tool_name is None
+
+
+def test_registered_whatsapp_tool_keeps_the_normal_single_tool_route() -> None:
+    tools = ToolRegistry()
+    tool = _Tool("whatsapp.send_message", "Send a WhatsApp message.")
+    tools.register(tool)
+    decision = _router(tools=tools).classify(_gateway().from_text("Envía por WhatsApp un mensaje de prueba"))
+    assert decision.route is RequestRoute.SINGLE_TOOL
+    assert decision.target_tool_name == "whatsapp.send_message"
+    assert tool.calls == 0
+
 def test_ambiguous_tools_require_clarification() -> None:
     tools = ToolRegistry()
     tools.register(_Tool("desktop.open_alpha", "Open application."))
