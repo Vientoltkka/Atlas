@@ -128,6 +128,7 @@ Código:
     def clear_generated(self) -> None:
         self._pending_change = None
 
+    def prepare_capability_plan(self, **details) -> str: return "\n".join(("Preparación supervisada de mejora:", f"- Capacidad ausente: {details['capability_id']}.", f"- Implementación mínima propuesta: {details['implementation']}.", "- Archivos previsiblemente afectados:", *(f"  - {path}" for path in details['planned_files']), "- Tests focalizados necesarios:", *(f"  - {test}" for test in details['focused_tests']), f"- Riesgo/impacto: {details['risk']}", "- Estado: todavía NO se han realizado cambios."))
     def authorize_pending_change(self, token: str) -> PendingCodingChange:
         """Consume a single token bound to the exact pending file change."""
         pending = self._pending_change

@@ -84,7 +84,10 @@ from core.structured_execution import (
 from core.skill_executor import SkillExecutionRequest
 from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
 from core.skill_system import SkillSystem
-from core.supervised_capability_gap import SupervisedCapabilityGapDetector
+from core.supervised_capability_gap import (
+    MissingCapabilityProposal,
+    SupervisedCapabilityGapDetector,
+)
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
@@ -189,6 +192,7 @@ class AtlasOrchestrator:
         self._tool_registry = tool_registry
         self._skill_system = skill_system
         self._capability_gap_detector = capability_gap_detector
+        self._pending_capability_proposal: MissingCapabilityProposal | None = None
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -454,6 +458,10 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        pending_response = self._handle_pending_capability_proposal(prompt)
+        if pending_response is not None:
+            return pending_response
+
         tool_catalog = self._tool_catalog_response(prompt)
         if tool_catalog is not None:
             return tool_catalog
@@ -465,6 +473,7 @@ class AtlasOrchestrator:
         if self._capability_gap_detector is not None:
             proposal = self._capability_gap_detector.proposal_for(prompt)
             if proposal is not None:
+                self._pending_capability_proposal = proposal
                 return proposal.present()
 
         request = self._request_gateway.from_text(prompt)
@@ -553,6 +562,37 @@ class AtlasOrchestrator:
             request.content,
             confirm,
             request=request,
+        )
+
+    def _handle_pending_capability_proposal(self, prompt: str) -> str | None:
+        """Prepare or cancel a pending capability proposal without applying it."""
+        proposal = self._pending_capability_proposal
+        if proposal is None:
+            return None
+
+        normalized = unicodedata.normalize("NFD", prompt)
+        normalized = "".join(
+            character
+            for character in normalized
+            if unicodedata.category(character) != "Mn"
+        ).casefold().strip()
+        if normalized in {"no", "n", "cancelar", "cancela"}:
+            self._pending_capability_proposal = None
+            return "Preparación de mejora cancelada. No se han realizado cambios."
+        if normalized not in {"si", "s", "si, por favor", "si por favor", "vale", "ok", "de acuerdo", "adelante"}:
+            return None
+
+        self._pending_capability_proposal = None
+        coding_agent = self._registry.get("coding")
+        prepare = getattr(coding_agent, "prepare_capability_plan", None)
+        if not callable(prepare):
+            return "No hay un CodingAgent disponible para preparar la mejora. No se han realizado cambios."
+        return prepare(
+            capability_id=proposal.capability_id,
+            implementation=proposal.minimum_scope,
+            planned_files=proposal.planned_files,
+            focused_tests=proposal.focused_tests,
+            risk=proposal.risk,
         )
 
     def execute_capability(

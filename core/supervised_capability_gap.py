@@ -21,6 +21,27 @@ class MissingCapabilityProposal:
     capability_id: str
     minimum_scope: str
 
+    @property
+    def planned_files(self) -> tuple[str, ...]:
+        """Return the smallest expected implementation surface."""
+        return (
+            "tools/temperature_conversion.py",
+            "bootstrap/bootstrap.py",
+            "tests/test_temperature_conversion.py",
+        )
+
+    @property
+    def focused_tests(self) -> tuple[str, ...]:
+        """Return the focused tests needed before applying a future change."""
+        return (
+            "conversión correcta de Celsius a Fahrenheit",
+            "registro de la tool y ruta normal",
+        )
+
+    @property
+    def risk(self) -> str:
+        """Describe the bounded impact of the future implementation."""
+        return "Añade una capacidad nueva; debe registrarse sin alterar rutas existentes."
     def present(self) -> str:
         return ("No dispongo de una capacidad registrada para realizar esa acción. "
                 "He comprobado tools, skills y agentes disponibles y no encuentro una capacidad reutilizable. "
