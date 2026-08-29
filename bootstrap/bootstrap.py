@@ -32,6 +32,7 @@ from bootstrap.capability_resolver import build_core_capability_resolver
 from bootstrap.execution_plan_library import build_core_execution_plan_library
 from bootstrap.workflow_selector import build_core_workflow_selector
 from core.capability_execution_service import CapabilityExecutionService
+from core.supervised_capability_gap import SupervisedCapabilityGapDetector
 from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager
@@ -887,6 +888,12 @@ class Bootstrap:
         agent_system = agent_system_result.system if agent_system_result.system is not None else None
         if agent_system is not None:
             register_builtin_skills(agent_system.skill_system)
+        capability_gap_detector = SupervisedCapabilityGapDetector.from_registries(
+            tool_registry=tool_registry,
+            execution_plan_libraries=execution_plan_libraries,
+            skill_system=(agent_system.skill_system if agent_system is not None else None),
+            agent_registry=(agent_system.agent_registry if agent_system is not None else None),
+        )
         atlas_router = build_core_atlas_router(
             capability_execution_service=capability_execution_service,
             agent_system=agent_system,
@@ -1303,6 +1310,7 @@ class Bootstrap:
                 if agent_system is not None
                 else None
             ),
+            capability_gap_detector=capability_gap_detector,
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,

@@ -84,6 +84,7 @@ from core.structured_execution import (
 from core.skill_executor import SkillExecutionRequest
 from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
 from core.skill_system import SkillSystem
+from core.supervised_capability_gap import SupervisedCapabilityGapDetector
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
@@ -136,6 +137,7 @@ class AtlasOrchestrator:
         execution_dispatcher: ExecutionDispatcher | None = None,
         tool_registry: ToolRegistry | None = None,
         skill_system: SkillSystem | None = None,
+        capability_gap_detector: SupervisedCapabilityGapDetector | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -186,6 +188,7 @@ class AtlasOrchestrator:
         self._execution_dispatcher = execution_dispatcher
         self._tool_registry = tool_registry
         self._skill_system = skill_system
+        self._capability_gap_detector = capability_gap_detector
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -458,6 +461,11 @@ class AtlasOrchestrator:
         capability_status = self._capability_status_response(prompt)
         if capability_status is not None:
             return capability_status
+
+        if self._capability_gap_detector is not None:
+            proposal = self._capability_gap_detector.proposal_for(prompt)
+            if proposal is not None:
+                return proposal.present()
 
         request = self._request_gateway.from_text(prompt)
         skill_response = self._process_skill_request(request)
