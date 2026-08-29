@@ -9,11 +9,13 @@ from core.operational_request_router import OperationalRequestRouter
 from core.operational_route_executor import RouteExecutionStatus
 from core.orchestrator import AtlasOrchestrator
 from core.router import Router
+from tools.desktop.desktop_tools import TypeTextTool
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
     ExecutionCoordinationStatus,
 )
 from tools.execution_decision import ExecutionDecision, ExecutionMode
+from tools.registry import ToolRegistry
 from tools.tool_chain_proposal_builder import StructuredToolChainProposal
 from use_cases.execution_conversation import ExecutionConversationController
 
@@ -104,6 +106,31 @@ def _operational_orchestrator(
         operational_route_executor=executor,
     )
     return orchestrator, executor, agent
+class _DesktopControllerFake:
+    def __init__(self) -> None:
+        self.activated: list[str] = []
+        self.typed: list[str] = []
+
+    def window_exists(self, title: str) -> bool:
+        return title == "WPS"
+
+    def activate_window(self, title: str) -> None:
+        self.activated.append(title)
+
+    def type_text(self, text: str) -> None:
+        self.typed.append(text)
+
+
+def _desktop_type_controller() -> tuple[ExecutionConversationController, _DesktopControllerFake]:
+    desktop_controller = _DesktopControllerFake()
+    registry = ToolRegistry()
+    registry.register(TypeTextTool(desktop_controller))
+    coordinator = Bootstrap.build_execution_coordinator(tool_registry=registry)
+    return ExecutionConversationController(coordinator), desktop_controller
+
+
+def _unused_confirmation(_prompt: str) -> str:
+    raise AssertionError("The inherited confirmation callback must not run.")
 
 
 def test_direct_response_keeps_conversational_fallback() -> None:
@@ -999,6 +1026,42 @@ def test_pending_confirmation_bypasses_direct_response(tmp_path: Path) -> None:
     assert direct_executor.calls == 0
     assert agent.calls == 0
 
+
+def test_process_prompt_desktop_type_cancel_keeps_tool_unexecuted() -> None:
+    controller, desktop = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+
+    pending = orchestrator.process_prompt(
+        "Escribe ORBE E2E en la ventana de WPS",
+        confirm=_unused_confirmation,
+    )
+    cancelled = orchestrator.process_prompt("cancelar", confirm=_unused_confirmation)
+
+    assert "deseas continuar" in pending.lower()
+    assert cancelled.lower() == "operacion cancelada."
+    assert desktop.activated == []
+    assert desktop.typed == []
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_process_prompt_desktop_type_confirm_executes_once_and_returns_result() -> None:
+    controller, desktop = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+
+    pending = orchestrator.process_prompt(
+        "Escribe ORBE E2E en la ventana de WPS",
+        confirm=_unused_confirmation,
+    )
+    confirmed = orchestrator.process_prompt("s", confirm=_unused_confirmation)
+
+    assert "deseas continuar" in pending.lower()
+    assert "Texto escrito en WPS." in confirmed
+    assert "ORBE E2E" in confirmed
+    assert desktop.activated == ["WPS"]
+    assert desktop.typed == ["ORBE E2E"]
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
 
 def test_direct_response_still_executes_without_pending_interaction() -> None:
     orchestrator, direct_executor, agent = _operational_orchestrator(_controller())

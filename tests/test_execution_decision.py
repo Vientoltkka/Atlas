@@ -60,6 +60,15 @@ def test_file_write_request_uses_single_tool() -> None:
     assert decision.candidate_tools == ("file.write",)
 
 
+def test_named_window_text_request_uses_desktop_type_only() -> None:
+    decision = _engine().decide("Escribe ORBE E2E en la ventana de WPS")
+
+    assert decision.mode == ExecutionMode.SINGLE_TOOL
+    assert decision.candidate_tools == ("desktop.text.type",)
+    assert all(not tool.startswith("file.") for tool in decision.candidate_tools)
+    assert "file.write" not in decision.candidate_tools
+
+
 def test_read_then_write_request_uses_tool_chain() -> None:
     decision = _engine().decide("Lee README.md y copia su contenido en resumen.txt")
 

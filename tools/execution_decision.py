@@ -73,6 +73,15 @@ class ExecutionDecisionEngine:
                 required_capabilities=(),
             )
 
+        if self._is_explicit_desktop_type_request(normalized):
+            return ExecutionDecision(
+                mode=ExecutionMode.SINGLE_TOOL,
+                reason="An explicit named-window request maps to desktop text input.",
+                confidence=0.9,
+                candidate_tools=("desktop.text.type",),
+                required_capabilities=("type_text",),
+            )
+
         matches = self._detect_capabilities(normalized)
         candidates = self._registered_tools(matches)
         capabilities = tuple(match.capability for match in matches)
@@ -148,6 +157,14 @@ class ExecutionDecisionEngine:
                 tools.append(match.tool)
 
         return tuple(tools)
+
+    def _is_explicit_desktop_type_request(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\bescribe\s+.+\s+en\s+(?:la\s+)?ventana\s+(?:de\s+)?[\w.-]+(?:\s+[\w.-]+)*$",
+                text,
+            )
+        )
 
     def _is_general_or_conversational(
         self,
@@ -231,6 +248,7 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "desktop.text.type",
         (
             r"\bescribe\b.*\b(?:linea|texto)\b",
+            r"\bescribe\b.*\bventana\b",
             r"\bteclea\b",
         ),
     ),

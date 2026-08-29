@@ -462,6 +462,12 @@ class AtlasOrchestrator:
         if memory_response is not None:
             return memory_response
 
+        if self._execution_conversation is not None:
+            outcome = self._execution_conversation.handle(request.content)
+
+            if not outcome.direct_response_required:
+                return outcome.text
+
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
             return direct_response
@@ -474,12 +480,6 @@ class AtlasOrchestrator:
             visible = self._present_structured_execution(structured_response)
             self._remember_structured_turn(request.content, structured_response)
             return visible
-
-        if self._execution_conversation is not None:
-            outcome = self._execution_conversation.handle(request.content)
-
-            if not outcome.direct_response_required:
-                return outcome.text
 
         return self._process_prompt_without_execution(
             request.content,

@@ -299,7 +299,15 @@ class ToolProposalBuilder:
 
         if intent_action == "desktop.text.type":
             text = _extract_type_text(source_text, normalized)
-            return _ExtractionResult(_filter_fields({"text": text}, field_names))
+            return _ExtractionResult(
+                _filter_fields(
+                    {
+                        "text": text,
+                        "window_title": _extract_type_window_title(source_text),
+                    },
+                    field_names,
+                )
+            )
 
         return _ExtractionResult({})
 
@@ -530,6 +538,14 @@ def _extract_type_text(source_text: str, normalized: str) -> str | None:
     if quoted:
         return quoted
 
+    match = re.search(
+        r"\b(?:escribe|teclea)\s+(?P<text>.+?)\s+\ben\s+(?:la\s+)?ventana\b",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group("text").strip() or None
+
     match = re.search(r"\b(?:escribe|teclea)\s+(?P<text>.+)$", normalized)
     if match:
         text = match.group("text").strip()
@@ -538,6 +554,26 @@ def _extract_type_text(source_text: str, normalized: str) -> str | None:
 
     return None
 
+
+def _extract_type_window_title(source_text: str) -> str | None:
+    match = re.search(
+        r"\ben\s+(?:la\s+)?ventana\s+(?:de\s+)?(?P<title>[\w .-]+)$",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group("title").strip() or None
+
+    match = re.search(
+        r"\b(?:en|ventana)\s+(?P<title>[\w .-]+)$",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    title = match.group("title").strip()
+    return title or None
 
 def _extract_quoted(source_text: str) -> str | None:
     match = re.search(r"[\"'“”‘’](?P<value>.+?)[\"'“”‘’]", source_text)
