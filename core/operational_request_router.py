@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any
 import unicodedata
 
+from core.agent_orchestrator import AgentOrchestrator
 from agents.registry import AgentRegistry
 from core.request_gateway import AtlasRequest, RequestSource
 from tools.registry import ToolDescriptor, ToolRegistry
@@ -497,6 +498,20 @@ class OperationalRequestRouter:
 
     def _agent_candidates(self, normalized: str) -> tuple[RouteCandidate, ...]:
         descriptors = self._agent_descriptors()
+
+        if self._agent_registry is not None:
+            specialist_selection = AgentOrchestrator(self._agent_registry).select(normalized)
+            if specialist_selection.primary_agent is not None:
+                return (
+                    RouteCandidate(
+                        RequestRoute.AGENT_DELEGATION,
+                        0.9,
+                        f"agent.{specialist_selection.primary_agent}",
+                        "A registered specialized agent matches the request.",
+                        target=specialist_selection.primary_agent,
+                        rule_priority=50,
+                    ),
+                )
         matches = tuple(
             (name, description, _agent_match_score(name, description, normalized))
             for name, description in descriptors

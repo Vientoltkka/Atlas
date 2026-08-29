@@ -472,6 +472,56 @@ class AtlasOrchestrator:
         if history_response is not None:
             return history_response
 
+        # Specialized agents bypass the legacy execution-conversation gate
+        # while reusing Atlas' existing model health/fallback pipeline.
+        specialist_decision = self.classify_request(request)
+        if specialist_decision.route is RequestRoute.AGENT_DELEGATION:
+            agent_name = specialist_decision.target_agent_name
+            specialist_agent = (
+                self._registry.get(agent_name)
+                if agent_name is not None
+                else None
+            )
+
+            if specialist_agent is None:
+                raise RuntimeError(
+                    f"Agent '{agent_name}' is not registered."
+                )
+
+            model_task = (
+                "coding"
+                if agent_name in {"code", "coding"}
+                else "chat"
+            )
+
+            self._memory.add_user(request.content)
+            specialist_messages = self._memory.history()
+
+            try:
+                specialist_response = self._model_inference_runner.run(
+                    self._model_selection_policy.create_request(
+                        task=model_task
+                    ),
+                    lambda selected_model: specialist_agent.run(
+                        model=selected_model,
+                        messages=specialist_messages,
+                    ),
+                )
+            except ModelSelectionError as error:
+                if self._model_selection_policy != ModelSelectionPolicy():
+                    raise
+
+                specialist_response = specialist_agent.run(
+                    model=self._model_manager.choose_model(
+                        model_task,
+                        selection_result=error.result,
+                    ),
+                    messages=specialist_messages,
+                )
+
+            self._memory.add_assistant(specialist_response)
+            return specialist_response
+
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
 
