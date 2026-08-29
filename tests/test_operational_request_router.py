@@ -54,6 +54,19 @@ def _classify(text: str, **kwargs):
     return _router(**kwargs.get("router_kwargs", {})).classify(request)
 
 
+def test_strength_estimation_request_routes_to_existing_training_agent() -> None:
+    agents = AgentRegistry()
+    agents.register(SimpleNamespace(name="training"))  # type: ignore[arg-type]
+
+    decision = _router(agents=agents).classify(
+        _gateway().from_text(
+            "Calcula mi 1RM estimado de back squat si he hecho 5 repeticiones con 100 kg."
+        )
+    )
+
+    assert decision.route is RequestRoute.AGENT_DELEGATION
+    assert decision.target_agent_name == "training"
+
 def test_direct_response_for_simple_question() -> None:
     decision = _router().classify(_gateway().from_text("Que es una API?"))
 

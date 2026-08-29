@@ -21,6 +21,7 @@ def test_agent_orchestrator_selects_expected_specialists() -> None:
     orchestrator = _orchestrator()
 
     assert orchestrator.select("Quiero preparar un HYROX").agents == ("training",)
+    assert orchestrator.select("Calcula mi 1RM estimado de back squat con 5 repeticiones").agents == ("training",)
     assert orchestrator.select("Hazme una dieta para perder grasa").agents == ("nutrition",)
     assert orchestrator.select("Tengo dolor lumbar entrenando").agents == ("medical", "training")
     assert orchestrator.select("Quiero crear una app para mis clientes del box").agents == ("code", "training", "nutrition")

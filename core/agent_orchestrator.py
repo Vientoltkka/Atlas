@@ -23,7 +23,7 @@ class AgentOrchestrator:
 
     _DOMAIN_ORDER = ("medical", "legal", "finance", "project", "code", "training", "nutrition")
     _MARKERS = {
-        "training": ("crossfit", "hyrox", "halterofilia", "gimnasia", "entren", "programacion", "fuerza", "movilidad", "tecnica", "box"),
+        "training": ("crossfit", "hyrox", "halterofilia", "gimnasia", "entren", "programacion", "fuerza", "movilidad", "tecnica", "box", "1rm", "back squat", "sentadilla"),
         "nutrition": ("dieta", "nutric", "perder grasa", "menu", "aliment", "box"),
         "medical": ("dolor", "lesion", "sintoma", "rehabilit", "medic"),
         "legal": ("contrato", "laboral", "jurid", "abogado", "legal"),
