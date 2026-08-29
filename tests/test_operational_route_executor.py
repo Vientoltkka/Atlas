@@ -576,11 +576,25 @@ def test_system_commands_are_structured_and_do_not_exit_process() -> None:
     assert result.output["signal"] == "exit_requested"
 
 
-def test_system_status_and_list_use_real_supervisor_api() -> None:
+def test_system_status_uses_supervisor_and_list_uses_execution_history() -> None:
     supervisor = _Supervisor()
+    history = SimpleNamespace(
+        latest_executions=lambda limit: (
+            SimpleNamespace(
+                id="execution.session.000001",
+                final_result=SimpleNamespace(value="COMPLETED"),
+                objective="Lee README.md",
+                date=NOW,
+                duration_seconds=0.25,
+            ),
+        )[:limit]
+    )
     status_request = _gateway("status").from_system("estado", request_id="status")
     list_request = _gateway("list").from_system("lista", request_id="list")
-    executor = _executor(execution_supervisor=supervisor)
+    executor = _executor(
+        execution_supervisor=supervisor,
+        execution_history=history,
+    )
 
     status = executor.execute(
         status_request,
@@ -600,8 +614,9 @@ def test_system_status_and_list_use_real_supervisor_api() -> None:
     )
 
     assert status.output["output"]["active"] == 1
-    assert listed.output["output"] == ("session-1",)
-    assert supervisor.calls == ["overview", "list"]
+    assert "execution.session.000001" in listed.output["output"]
+    assert "Lee README.md" in listed.output["output"]
+    assert supervisor.calls == ["overview"]
 
 
 def test_system_cancel_without_session_requires_clarification() -> None:

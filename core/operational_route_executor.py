@@ -1358,12 +1358,14 @@ class SystemCommandRouteHandler(_BaseRouteHandler):
         self,
         *,
         supervisor: object | None = None,
+        execution_history: object | None = None,
         autonomous_orchestrator: AutonomousExecutionOrchestrator | None = None,
         diagnostics: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(clock=clock)
         self._supervisor = supervisor
+        self._execution_history = execution_history
         self._autonomous = autonomous_orchestrator
         self._diagnostics = diagnostics
 
@@ -1445,10 +1447,44 @@ class SystemCommandRouteHandler(_BaseRouteHandler):
             overview = _call_optional(self._supervisor, "get_overview")
             return SystemCommandResult(command, True, output=overview or {"status": "idle"})
         if command is SystemCommand.LIST_EXECUTIONS:
-            sessions = _call_optional(self._supervisor, "list_sessions")
-            if sessions is None:
+            latest_executions = getattr(self._execution_history, "latest_executions", None)
+            if not callable(latest_executions):
                 raise self._unavailable(request, decision, command)
-            return SystemCommandResult(command, True, output=sessions)
+            records = latest_executions(5)
+            if not records:
+                return SystemCommandResult(
+                    command,
+                    True,
+                    output="No hay ejecuciones terminales registradas.",
+                )
+            lines = ["Últimas ejecuciones:"]
+            for record in records:
+                lines.append(
+                    "- "
+                    f"{record.id} | {record.final_result.value} | "
+                    f"{record.objective[:120]} | "
+                    f"{record.date.isoformat()} | "
+                    f"{record.duration_seconds:.2f} s"
+                )
+            return SystemCommandResult(command, True, output="\n".join(lines))
+        if command is SystemCommand.EXECUTION_DETAIL:
+            execution_by_id = getattr(self._execution_history, "execution_by_id", None)
+            session_id = _history_session_id(request.content)
+            if not callable(execution_by_id) or session_id is None:
+                raise self._unavailable(request, decision, command)
+            record = execution_by_id(session_id)
+            if record is None:
+                return SystemCommandResult(
+                    command,
+                    True,
+                    output="No se encontró una ejecución terminal disponible con ese session_id.",
+                )
+            return SystemCommandResult(
+                command,
+                True,
+                output=record.operational_report.to_text(),
+                session_id=record.id,
+            )
         if command is SystemCommand.CANCEL_EXECUTION:
             session_id = decision.target_session_id or (
                 request.execution_context.session_id
@@ -1910,6 +1946,13 @@ class RouteExecutionPresenter:
 
     def present(self, result: RouteExecutionResult) -> str:
         if result.status is RouteExecutionStatus.COMPLETED:
+            if result.route is RequestRoute.SYSTEM_COMMAND:
+                command = _mapping_value(result.output, "command")
+                if command in {
+                    SystemCommand.LIST_EXECUTIONS.value,
+                    SystemCommand.EXECUTION_DETAIL.value,
+                }:
+                    return _present_output(_mapping_value(result.output, "output"))
             if getattr(result, "target_tool_name", None) == "calendar_list_events":
                 return _present_calendar_output(result.output)
             return _present_output(result.output) or "Operacion completada."
@@ -1942,6 +1985,7 @@ def build_default_route_handlers(
     model_selector: Callable[[str], str] | None = None,
     autonomous_orchestrator: AutonomousExecutionOrchestrator | None = None,
     execution_supervisor: object | None = None,
+    execution_history: object | None = None,
     diagnostics: Callable[[], Any] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> Mapping[RequestRoute, RouteHandler]:
@@ -1976,6 +2020,7 @@ def build_default_route_handlers(
         ),
         RequestRoute.SYSTEM_COMMAND: SystemCommandRouteHandler(
             supervisor=execution_supervisor,
+            execution_history=execution_history,
             autonomous_orchestrator=autonomous_orchestrator,
             diagnostics=diagnostics,
             clock=clock,
@@ -2807,6 +2852,11 @@ def _requires_idempotency(decision: RouteDecision) -> bool:
 def _is_cancel_request(request: AtlasRequest) -> bool:
     normalized = request.content.strip().lower()
     return normalized.startswith(("cancela", "cancelar", "cancel "))
+
+
+def _history_session_id(text: str) -> str | None:
+    match = re.fullmatch(r"\s*detalle de ejecuci[oó]n\s+(\S+)\s*", text, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 def _call_optional(target: object | None, method: str) -> Any:

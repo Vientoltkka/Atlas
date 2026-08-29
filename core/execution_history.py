@@ -297,6 +297,18 @@ class ExecutionSessionHistory:
         _validate_limit(limit)
         return self._records()[:limit]
 
+    def execution_by_id(self, session_id: str) -> ExecutionHistoryRecord | None:
+        """Return one terminal execution by id without changing its state."""
+        if not isinstance(session_id, str):
+            return None
+        normalized_id = session_id.strip()
+        if not normalized_id:
+            return None
+        for session in self._sessions():
+            if session.session_id == normalized_id and session.is_terminal:
+                return self._record(session)
+        return None
+
     def executions_by_objective(
         self,
         objective: str,

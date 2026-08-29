@@ -38,6 +38,7 @@ class SystemCommand(str, Enum):
     STATUS = "status"
     CANCEL_EXECUTION = "cancel_execution"
     LIST_EXECUTIONS = "list_executions"
+    EXECUTION_DETAIL = "execution_detail"
     DIAGNOSTICS = "diagnostics"
     VOICE_MODE = "voice_mode"
     STOP_LISTENING = "stop_listening"
@@ -836,6 +837,7 @@ def _system_command(text: str) -> SystemCommand | None:
         "diagnosticos": SystemCommand.DIAGNOSTICS,
         "listar ejecuciones": SystemCommand.LIST_EXECUTIONS,
         "lista ejecuciones": SystemCommand.LIST_EXECUTIONS,
+        "ultimas ejecuciones": SystemCommand.LIST_EXECUTIONS,
         "modo voz": SystemCommand.VOICE_MODE,
         "detener escucha": SystemCommand.STOP_LISTENING,
     }
@@ -843,6 +845,8 @@ def _system_command(text: str) -> SystemCommand | None:
         return exact[text]
     if text.startswith("cancelar ejecucion") or text.startswith("cancela ejecucion"):
         return SystemCommand.CANCEL_EXECUTION
+    if re.fullmatch(r"detalle de ejecucion\s+\S+", text):
+        return SystemCommand.EXECUTION_DETAIL
     return None
 
 

@@ -433,3 +433,56 @@ def test_text_loop_accepts_english_exit_commands_and_can_restart(
     assert output.count("Hasta pronto.") == 2
     assert "Atlas iniciado correctamente" not in output
     assert "Traceback" not in output
+
+
+def test_execution_history_is_visible_after_restart_without_new_tool_execution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    real_read = FileService.read
+    read_calls: list[str] = []
+
+    def counted_read(path: str) -> str:
+        read_calls.append(str(path))
+        return real_read(path)
+
+    monkeypatch.setattr(FileService, "read", staticmethod(counted_read))
+    first_runtime = Bootstrap.build()
+    first_runtime._execution_conversation = None
+    first_runtime.process_prompt("Lee README.md", confirm=lambda _prompt: "")
+    first_detail = first_runtime.last_structured_execution_response
+
+    assert first_detail is not None
+    assert first_detail.execution_result is not None
+    session_id = first_detail.execution_result.metadata["execution_session_id"]
+    assert read_calls == ["README.md"]
+
+    restarted_runtime = Bootstrap.build()
+    latest = restarted_runtime.process_prompt(
+        "últimas ejecuciones",
+        confirm=lambda _prompt: "",
+    )
+    detail = restarted_runtime.process_prompt(
+        f"detalle de ejecución {session_id}",
+        confirm=lambda _prompt: "",
+    )
+    missing = restarted_runtime.process_prompt(
+        "detalle de ejecución execution.session.999999",
+        confirm=lambda _prompt: "",
+    )
+
+    assert "Últimas ejecuciones:" in latest
+    assert session_id in latest
+    assert "COMPLETED" in latest
+    assert "Lee README.md" in latest
+    assert read_calls == ["README.md"]
+    assert "Objetivo: Lee README.md" in detail
+    assert "Resultado:" in detail
+    assert "Progreso:" in detail
+    assert "Duración:" in detail
+    assert "Ejecución:" in detail
+    assert "step_outputs" not in detail
+    assert "execution_events" not in detail
+    assert "No se encontró una ejecución terminal disponible" in missing
+    assert read_calls == ["README.md"]

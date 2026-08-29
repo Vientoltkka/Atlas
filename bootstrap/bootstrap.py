@@ -1245,6 +1245,7 @@ class Bootstrap:
                 model_selector=model_manager.choose_model,
                 autonomous_orchestrator=autonomous_execution,
                 execution_supervisor=execution_supervisor,
+                execution_history=execution_history,
                 diagnostics=lambda: {
                     "tool_count": len(tool_registry.list()),
                     "agent_count": len(registry.list()),

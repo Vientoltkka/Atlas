@@ -52,6 +52,7 @@ from core import skill_intent
 from core.operational_request_router import (
     MemoryOperation,
     RequestRoute,
+    SystemCommand,
     RouteDecision,
 )
 from core.operational_route_executor import (
@@ -291,6 +292,11 @@ class AtlasOrchestrator:
                 self._print_atlas(memory_response)
                 continue
 
+            history_response = self._process_execution_history_request(request)
+            if history_response is not None:
+                self._print_atlas(history_response)
+                continue
+
             direct_response = self._process_direct_conversation(
                 request,
                 status_sink=self._print_atlas,
@@ -461,6 +467,10 @@ class AtlasOrchestrator:
         memory_response = self._process_memory_request(request)
         if memory_response is not None:
             return memory_response
+
+        history_response = self._process_execution_history_request(request)
+        if history_response is not None:
+            return history_response
 
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
@@ -1325,6 +1335,26 @@ class AtlasOrchestrator:
             executable_request,
             decision,
         )
+        response = self._route_execution_presenter.present(result)
+        self._memory.add_user(request.content)
+        self._memory.add_assistant(response)
+        return response
+
+    def _process_execution_history_request(self, request: AtlasRequest) -> str | None:
+        """Execute only read-only execution-history commands before conversation."""
+        if self._operational_route_executor is None:
+            return None
+        decision = self._structured_route_decision(request)
+        if (
+            decision is None
+            or decision.route is not RequestRoute.SYSTEM_COMMAND
+            or decision.system_command not in {
+                SystemCommand.LIST_EXECUTIONS,
+                SystemCommand.EXECUTION_DETAIL,
+            }
+        ):
+            return None
+        result = self._operational_route_executor.execute(request, decision)
         response = self._route_execution_presenter.present(result)
         self._memory.add_user(request.content)
         self._memory.add_assistant(response)
