@@ -3675,3 +3675,14 @@ def test_expired_model_worker_requests_optional_cancellation(
     assert processor.cancelled.wait(timeout=1.0)
     use_case._wait_for_expired_model_workers()
     assert not use_case._expired_model_workers
+
+def test_barge_in_rejects_isolated_phantom_word_during_tts() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    use_case._tts_speaking = True
+
+    accepted = use_case._accepted_barge_in_text(
+        speech_result("fama"),
+        "Francia es famosa mundialmente por su cultura y gastronom?a.",
+    )
+
+    assert accepted is None

@@ -1794,6 +1794,10 @@ class VoiceConversationUseCase:
         if self._is_tts_echo(clean_text, spoken_response):
             return None
 
+        words = re.findall(r"\w+", clean_text)
+        if len(words) < 2 and not self._is_close_command(clean_text):
+            return None
+
         return self._accepted_transcription_text(
             replace(transcription, text=clean_text),
             trim_edge_punctuation=False,
