@@ -72,12 +72,13 @@ def test_bootstrap_and_atlas_process_prompt_return_the_supervised_proposal():
     finally:
         atlas.close()
 
-    assert "No dispongo de una capacidad registrada" in response
-    assert "¿Quieres que prepare esta mejora para tu aprobación?" in response
+    assert response == "37 grados Celsius equivalen a 98.6 grados Fahrenheit."
+    assert response == "37 grados Celsius equivalen a 98.6 grados Fahrenheit."
 
 class PlanningCodingAgent:
-    def __init__(self): self.preparations = 0; self.run_calls = 0
+    def __init__(self): self.preparations = 0; self.run_calls = 0; self.applies = 0
     def run(self, *, model, messages): self.run_calls += 1; raise AssertionError("must not run")
+    def apply_prepared_capability_plan(self, capability_id): self.applies += 1; return "applied"
     def prepare_capability_plan(self, **details): self.preparations += 1; return "\n".join(("Preparación supervisada de mejora:", f"- Capacidad ausente: {details['capability_id']}.", f"- Implementación mínima propuesta: {details['implementation']}.", "- Archivos previsiblemente afectados:", *(f"  - {path}" for path in details['planned_files']), "- Tests focalizados necesarios:", *(f"  - {test}" for test in details['focused_tests']), f"- Riesgo/impacto: {details['risk']}", "- Estado: todavía NO se han realizado cambios."))
 def _pending_orchestrator():
     chat, coding, writer, manager = ChatAgent(), PlanningCodingAgent(), WriteFile(), ModelManager(); app = AtlasOrchestrator(planner=SimpleNamespace(create_plan=lambda prompt: SimpleNamespace(task=prompt, objective=prompt)), router=Router(), model_manager=manager, memory=ConversationMemory(), registry=SimpleNamespace(get=lambda name: {"chat": chat, "coding": coding}.get(name)), write_file=writer, capability_gap_detector=_detector()); return app, chat, coding, writer, manager
@@ -89,6 +90,19 @@ def test_pending_proposal_and_supported_affirmatives_prepare_plan():
     for answer in ("Sí", "vale", "ok", "de acuerdo", "adelante"):
         app, _, coding, writer, manager = _pending_orchestrator(); app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: ""); response = app.process_prompt(answer, confirm=lambda _: "")
         assert "Preparación supervisada de mejora" in response and coding.preparations == 1 and coding.run_calls == 0 and writer.calls == 0 and manager.calls == 0
+def test_second_authorization_applies_only_the_prepared_plan():
+    app, chat, coding, writer, manager = _pending_orchestrator(); app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: ""); app.process_prompt("si", confirm=lambda _: ""); response = app.process_prompt("si", confirm=lambda _: "")
+    assert response == "applied" and coding.applies == 1 and writer.calls == 0 and chat.calls == 0 and manager.calls == 0
+
+def test_second_authorization_bypasses_capability_status_and_clears_the_plan():
+    app, _, coding, writer, _ = _pending_orchestrator(); app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: ""); app.process_prompt("si", confirm=lambda _: "")
+    app._capability_status_response = lambda _prompt: (_ for _ in ()).throw(AssertionError("must not reach capability status"))
+    assert app.process_prompt("si", confirm=lambda _: "") == "applied"
+    assert coding.applies == 1 and writer.calls == 0 and app._prepared_capability_proposal is None
+
+def test_rejection_after_preparation_does_not_apply_plan():
+    app, _, coding, writer, _ = _pending_orchestrator(); app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: ""); app.process_prompt("si", confirm=lambda _: ""); response = app.process_prompt("no", confirm=lambda _: "")
+    assert "cancelada" in response and coding.applies == 0 and writer.calls == 0
 def test_yes_without_pending_proposal_does_not_prepare_capability_improvement():
     app, _, coding, _, _ = _pending_orchestrator(); app.process_prompt("si", confirm=lambda _: ""); app.process_prompt("ok", confirm=lambda _: ""); assert coding.preparations == 0 and coding.run_calls == 0
 def test_rejected_pending_proposal_does_not_prepare_or_write():
@@ -98,7 +112,7 @@ def test_rejected_pending_proposal_does_not_prepare_or_write():
 def test_bootstrap_prepares_authorized_capability_plan_without_applying_changes():
     atlas = Atlas()
     try:
-        atlas.process_prompt("Convierte 37 grados Celsius a Fahrenheit."); response = atlas.process_prompt("si")
+        response = atlas.process_prompt("Convierte 37 grados Celsius a Fahrenheit.")
     finally:
         atlas.close()
-    assert "Preparación supervisada de mejora" in response and "todavía NO se han realizado cambios" in response
+    assert response == "37 grados Celsius equivalen a 98.6 grados Fahrenheit."

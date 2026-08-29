@@ -102,6 +102,7 @@ from tools.semantic_catalog import SemanticToolCatalog
 from tools.tool_schema import ToolArgumentsSchema, ToolParameterSchema
 
 from tools.filesystem.read_file_tool import ReadFileTool
+from tools.temperature_conversion import TemperatureConversionTool
 from tools.filesystem.write_file_tool import WriteFileTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
@@ -208,6 +209,7 @@ class Bootstrap:
                 ),
             ),
         )
+        tool_registry.register(TemperatureConversionTool())
         tool_registry.register(
             WriteFileTool(),
             arguments_schema=ToolArgumentsSchema(

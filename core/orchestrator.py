@@ -84,6 +84,8 @@ from core.structured_execution import (
 from core.skill_executor import SkillExecutionRequest
 from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
 from core.skill_system import SkillSystem
+from tools.tool_context import ToolContext
+
 from core.supervised_capability_gap import (
     MissingCapabilityProposal,
     SupervisedCapabilityGapDetector,
@@ -193,6 +195,7 @@ class AtlasOrchestrator:
         self._skill_system = skill_system
         self._capability_gap_detector = capability_gap_detector
         self._pending_capability_proposal: MissingCapabilityProposal | None = None
+        self._prepared_capability_proposal: MissingCapabilityProposal | None = None
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -458,9 +461,17 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        application_response = self._handle_prepared_capability_application(prompt)
+        if application_response is not None:
+            return application_response
+
         pending_response = self._handle_pending_capability_proposal(prompt)
         if pending_response is not None:
             return pending_response
+
+        temperature_response = self._temperature_conversion_response(prompt)
+        if temperature_response is not None:
+            return temperature_response
 
         tool_catalog = self._tool_catalog_response(prompt)
         if tool_catalog is not None:
@@ -583,6 +594,7 @@ class AtlasOrchestrator:
             return None
 
         self._pending_capability_proposal = None
+        self._prepared_capability_proposal = proposal
         coding_agent = self._registry.get("coding")
         prepare = getattr(coding_agent, "prepare_capability_plan", None)
         if not callable(prepare):
@@ -593,8 +605,33 @@ class AtlasOrchestrator:
             planned_files=proposal.planned_files,
             focused_tests=proposal.focused_tests,
             risk=proposal.risk,
-        )
-
+        ) + "\n¿Autorizas APLICAR este plan? [s/N]"
+    def _handle_prepared_capability_application(self, prompt: str) -> str | None:
+        """Require a second explicit authorization before applying a prepared plan."""
+        proposal = self._prepared_capability_proposal
+        if proposal is None:
+            return None
+        normalized = _normalize_confirmation_text(prompt)
+        if normalized in {"no", "n", "cancelar", "cancela"}:
+            self._prepared_capability_proposal = None
+            return "Aplicación de mejora cancelada. No se han realizado cambios."
+        if normalized not in {"si", "s", "vale", "ok", "de acuerdo", "adelante"}:
+            return None
+        self._prepared_capability_proposal = None
+        apply = getattr(self._registry.get("coding"), "apply_prepared_capability_plan", None)
+        if not callable(apply):
+            return "No hay un CodingAgent disponible para aplicar la mejora. No se han realizado cambios."
+        return apply(proposal.capability_id)
+    def _temperature_conversion_response(self, prompt: str) -> str | None:
+        """Run the registered deterministic temperature capability when requested."""
+        if self._tool_registry is None:
+            return None
+        match = re.fullmatch(r"\s*convierte\s+([-+]?\d+(?:[.,]\d+)?)\s+grados?\s+celsius\s+a\s+fahrenheit\.?\s*", prompt, re.IGNORECASE)
+        if match is None or not self._tool_registry.exists("temperature_conversion"):
+            return None
+        celsius = float(match.group(1).replace(",", "."))
+        fahrenheit = self._tool_registry.get("temperature_conversion").execute(ToolContext({"celsius": celsius}))
+        return f"{celsius:g} grados Celsius equivalen a {fahrenheit:g} grados Fahrenheit."
     def execute_capability(
         self,
         request: CapabilityExecutionRequest,

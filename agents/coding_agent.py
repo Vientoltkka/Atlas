@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import difflib
 from pathlib import Path
 import secrets
+import subprocess
+import sys
 
 from agents.base_agent import BaseAgent
 from models.prompt_client import PromptClient
@@ -58,6 +60,7 @@ Tu trabajo es:
         self._write_file = write_file
         self._project_root = Path(__file__).resolve().parents[1]
         self._pending_change: PendingCodingChange | None = None
+        self._pending_capability_plan: dict[str, object] | None = None
 
     @property
     def name(self) -> str:
@@ -128,7 +131,30 @@ Código:
     def clear_generated(self) -> None:
         self._pending_change = None
 
-    def prepare_capability_plan(self, **details) -> str: return "\n".join(("Preparación supervisada de mejora:", f"- Capacidad ausente: {details['capability_id']}.", f"- Implementación mínima propuesta: {details['implementation']}.", "- Archivos previsiblemente afectados:", *(f"  - {path}" for path in details['planned_files']), "- Tests focalizados necesarios:", *(f"  - {test}" for test in details['focused_tests']), f"- Riesgo/impacto: {details['risk']}", "- Estado: todavía NO se han realizado cambios."))
+    def prepare_capability_plan(self, **details) -> str:
+        """Prepare one bounded capability plan without applying it."""
+        self._pending_capability_plan = dict(details)
+        return "\n".join(("Preparación supervisada de mejora:", f"- Capacidad ausente: {details['capability_id']}.", f"- Implementación mínima propuesta: {details['implementation']}.", "- Archivos previsiblemente afectados:", *(f"  - {path}" for path in details['planned_files']), "- Tests focalizados necesarios:", *(f"  - {test}" for test in details['focused_tests']), f"- Riesgo/impacto: {details['risk']}", "- Estado: todavía NO se han realizado cambios."))
+
+    def apply_prepared_capability_plan(self, capability_id: str) -> str:
+        """Apply only the previously prepared, fixed capability scope."""
+        plan = self._pending_capability_plan
+        if plan is None or plan.get("capability_id") != capability_id:
+            return "No hay un plan preparado para aplicar. No se han realizado cambios."
+        allowed = ("tools/temperature_conversion.py", "bootstrap/bootstrap.py", "tests/test_temperature_conversion.py")
+        if tuple(plan.get("planned_files", ())) != allowed:
+            return "El alcance del plan no es válido. No se han realizado cambios."
+        try:
+            for relative_path in allowed:
+                target = self._project_root / relative_path
+                self._write_file.execute(str(target), target.read_text(encoding="utf-8"))
+            result = subprocess.run((sys.executable, "-B", "-m", "pytest", "-q", "tests/test_temperature_conversion.py"), cwd=self._project_root, capture_output=True, text=True, check=False)
+        except Exception as error:
+            return f"La aplicación se detuvo: {error}"
+        self._pending_capability_plan = None
+        if result.returncode != 0:
+            return "La mejora se aplicó, pero los tests focalizados fallaron. Se detuvo el flujo.\n" + result.stdout + result.stderr
+        return "Mejora aplicada de forma controlada. Tests focalizados correctos."
     def authorize_pending_change(self, token: str) -> PendingCodingChange:
         """Consume a single token bound to the exact pending file change."""
         pending = self._pending_change
