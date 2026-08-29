@@ -16,6 +16,7 @@ from core.execution_supervisor import ExecutionState, ExecutionSupervisor
 from core.operational_request_router import RequestRoute
 from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult
 from core.structured_execution import StructuredExecutionCoordinator
+from models.prompt_client import PromptClient
 from services.file_service import FileService
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.executor import ToolExecutor
@@ -174,6 +175,32 @@ def test_bootstrapped_text_flow_reads_an_absolute_spanish_file_request(
     assert read_calls == [readme_path]
     assert visible.startswith(f"He leído {readme_path}:")
     assert "Archivos encontrados:" not in visible
+
+def test_bootstrapped_project_agent_answers_agent_selection_analysis_without_model(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    orchestrator = Bootstrap.build()
+
+    def unexpected_model_call(*_args, **_kwargs):
+        raise AssertionError("This project analysis must not invoke the model.")
+
+    monkeypatch.setattr(PromptClient, "ask", unexpected_model_call)
+    prompt = (
+        "Analiza el proyecto Atlas y dime cuáles son los 3 archivos del código "
+        "que consideras más importantes para entender cómo se decide qué agente "
+        "debe atender una petición."
+    )
+
+    decision = orchestrator.classify_prompt(prompt)
+    response = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+
+    assert decision.route is RequestRoute.AGENT_DELEGATION
+    assert decision.target_agent_name == "project"
+    assert "core/operational_request_router.py" in response
+    assert "core/agent_orchestrator.py" in response
+    assert "core/orchestrator.py" in response
 
 def test_real_tool_error_does_not_break_the_next_text_request(
     monkeypatch,

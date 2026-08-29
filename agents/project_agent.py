@@ -80,6 +80,11 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
         messages: list[dict[str, str]],
     ) -> str:
         user_query = self._last_user_query(messages)
+        agent_selection_query = self._answer_agent_selection_files_query(
+            query=user_query,
+        )
+        if agent_selection_query is not None:
+            return agent_selection_query
         architecture_query = self._answer_architecture_query(
             query=user_query,
         )
@@ -137,6 +142,39 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
 
         return ""
 
+    def _answer_agent_selection_files_query(
+        self,
+        query: str,
+    ) -> str | None:
+        """Explain the deterministic files that select a specialist agent."""
+        normalized_query = self._normalize_text(query)
+        if not (
+            "agente debe atender" in normalized_query
+            and "archivos" in normalized_query
+            and ("importantes" in normalized_query or "principales" in normalized_query)
+        ):
+            return None
+
+        indexed_paths = {
+            str(item.get("path")).replace("\\", "/")
+            for item in self._read_project_index.execute(".")
+        }
+        selected_paths = (
+            "core/operational_request_router.py",
+            "core/agent_orchestrator.py",
+            "core/orchestrator.py",
+        )
+        if not all(path in indexed_paths for path in selected_paths):
+            return None
+
+        return "\n".join(
+            (
+                "Los 3 archivos más importantes para seguir la decisión son:",
+                "- core/operational_request_router.py: clasifica la petición y decide entre herramienta, agente u otras rutas.",
+                "- core/agent_orchestrator.py: asigna especialistas registrados según marcadores explícitos del dominio.",
+                "- core/orchestrator.py: aplica la ruta elegida, obtiene el agente del AgentRegistry y usa la selección/fallback de ModelManager cuando procede.",
+            )
+        )
     def _answer_architecture_query(
         self,
         query: str,

@@ -21,13 +21,14 @@ class AgentSelection:
 class AgentOrchestrator:
     """Select registered specialists from explicit, bounded domain markers."""
 
-    _DOMAIN_ORDER = ("medical", "legal", "finance", "code", "training", "nutrition")
+    _DOMAIN_ORDER = ("medical", "legal", "finance", "project", "code", "training", "nutrition")
     _MARKERS = {
         "training": ("crossfit", "hyrox", "halterofilia", "gimnasia", "entren", "programacion", "fuerza", "movilidad", "tecnica", "box"),
         "nutrition": ("dieta", "nutric", "perder grasa", "menu", "aliment", "box"),
         "medical": ("dolor", "lesion", "sintoma", "rehabilit", "medic"),
         "legal": ("contrato", "laboral", "jurid", "abogado", "legal"),
         "finance": ("invert", "acciones", "etf", "bolsa", "cripto", "defi", "ingresos"),
+        "project": ("analiza el proyecto", "analisis del proyecto", "arquitectura del proyecto"),
         "code": ("crear una app", "aplicacion", "app", "react", "next", "vite", "flutter", "api", "software", "codigo"),
     }
 
