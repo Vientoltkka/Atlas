@@ -20,17 +20,17 @@ from typing import Sequence
 from use_cases.ui_state_mapper import OrbVisualState
 
 
-ORB_SIZE = 140
+ORB_SIZE = 280
 
 _STATE_COLORS: dict[OrbVisualState, tuple[int, int, int, int]] = {
-    OrbVisualState.IDLE: (96, 125, 255, 210),
-    OrbVisualState.STARTING: (70, 90, 200, 160),
-    OrbVisualState.LISTENING: (64, 170, 255, 230),
-    OrbVisualState.PROCESSING: (255, 180, 60, 230),
-    OrbVisualState.SPEAKING: (70, 220, 140, 235),
-    OrbVisualState.RECOVERING: (255, 120, 70, 220),
-    OrbVisualState.DEGRADED: (200, 150, 80, 150),
-    OrbVisualState.STOPPING: (120, 120, 130, 140),
+    OrbVisualState.IDLE: (56, 185, 255, 220),
+    OrbVisualState.STARTING: (105, 225, 255, 235),
+    OrbVisualState.LISTENING: (80, 225, 255, 245),
+    OrbVisualState.PROCESSING: (68, 178, 255, 245),
+    OrbVisualState.SPEAKING: (82, 235, 255, 250),
+    OrbVisualState.RECOVERING: (60, 175, 235, 220),
+    OrbVisualState.DEGRADED: (78, 100, 128, 145),
+    OrbVisualState.STOPPING: (80, 145, 180, 160),
 }
 
 DEMO_STATE_CYCLE: Sequence[OrbVisualState] = (
@@ -56,7 +56,7 @@ _ANIMATION_PERIODS: dict[OrbVisualState, float | None] = {
     OrbVisualState.STOPPING: 1.5,    # gentle shrink/fade
 }
 
-ANIMATION_FPS = 30
+ANIMATION_FPS = 24
 
 
 def color_for_state(state: OrbVisualState) -> tuple[int, int, int, int]:
@@ -73,11 +73,7 @@ def animation_frame(
     state: OrbVisualState,
     elapsed_seconds: float,
 ) -> dict[str, float]:
-    """Deterministic animation frame for one state at one instant.
-
-    Returns scale (relative to base), alpha_factor (multiplier of the
-    base alpha) and rotation_deg (inner marker rotation). Pure function.
-    """
+    """Return the lightweight deterministic frame used by the core renderer."""
     period = _ANIMATION_PERIODS[state]
     if period is None or period <= 0:
         return {"scale": 1.0, "alpha_factor": 1.0, "rotation_deg": 0.0}
@@ -88,15 +84,15 @@ def animation_frame(
     if state is OrbVisualState.IDLE:
         scale = 1.0 + 0.03 * wave
         alpha_factor = 1.0
-        rotation_deg = 0.0
+        rotation_deg = 18.0 * phase
     elif state is OrbVisualState.STARTING:
         scale = 1.0
         alpha_factor = 0.75 + 0.25 * (wave * 0.5 + 0.5)
-        rotation_deg = 0.0
+        rotation_deg = 30.0 * phase
     elif state is OrbVisualState.LISTENING:
         scale = 1.0 + 0.05 * wave
         alpha_factor = 1.0
-        rotation_deg = 0.0
+        rotation_deg = 20.0 * phase
     elif state is OrbVisualState.PROCESSING:
         scale = 1.0
         alpha_factor = 1.0
@@ -104,23 +100,21 @@ def animation_frame(
     elif state is OrbVisualState.SPEAKING:
         scale = 1.02 + 0.03 * (wave * 0.5 + 0.5)
         alpha_factor = 0.85 + 0.15 * (wave * 0.5 + 0.5)
-        rotation_deg = 0.0
+        rotation_deg = 42.0 * phase
     elif state is OrbVisualState.RECOVERING:
         scale = 1.0
         alpha_factor = 0.55 + 0.45 * abs(wave)
-        rotation_deg = 0.0
+        rotation_deg = 15.0 * phase
     else:  # STOPPING
         scale = 1.0 - 0.06 * phase
         alpha_factor = 1.0 - 0.35 * phase
-        rotation_deg = 0.0
+        rotation_deg = 12.0 * phase
 
     return {
         "scale": round(scale, 4),
         "alpha_factor": round(alpha_factor, 4),
         "rotation_deg": round(rotation_deg, 2),
     }
-
-
 def create_application(argv: list[str] | None = None):
     """Create (or reuse) the QApplication with HiDPI defaults."""
     from PySide6.QtWidgets import QApplication
@@ -137,8 +131,8 @@ def create_orb_window(settings=None):
     ``settings`` is an optional QSettings-like object used to persist
     the window position (keys ``pos_x`` / ``pos_y``).
     """
-    from PySide6.QtCore import Qt, Signal, QTimer, Signal
-    from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+    from PySide6.QtCore import Qt, Signal, QTimer
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
     from PySide6.QtWidgets import (
         QMenu,
         QSystemTrayIcon,
@@ -165,6 +159,7 @@ def create_orb_window(settings=None):
             self._drag_offset = None
             self._settings = settings
             self._animation_started_at = time.monotonic()
+            self._emblem_path = self._build_atlas_emblem()
 
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._on_animation_tick)
@@ -263,6 +258,38 @@ def create_orb_window(settings=None):
                 target_y = max(bounds.top(), min(target_y, bounds.bottom() - ORB_SIZE))
             self.move(target_x, target_y)
 
+        def reposition_beside(self, panel) -> None:
+            """Move beside a visible transcript panel only when they overlap."""
+            panel_geometry = panel.frameGeometry()
+            if not self.frameGeometry().intersects(panel_geometry):
+                return
+            screen = panel.screen() or self.screen()
+            if screen is None:
+                return
+            bounds = screen.availableGeometry()
+            target_y = max(bounds.top(), min(panel_geometry.center().y() - ORB_SIZE // 2, bounds.bottom() - ORB_SIZE + 1))
+            gap = 16
+            for target_x in (panel_geometry.right() + gap + 1, panel_geometry.left() - gap - ORB_SIZE):
+                if bounds.left() <= target_x and target_x + ORB_SIZE <= bounds.right() + 1:
+                    self.move(target_x, target_y)
+                    return
+            target_x = max(bounds.left(), min(panel_geometry.center().x() - ORB_SIZE // 2, bounds.right() - ORB_SIZE + 1))
+            for target_y in (panel_geometry.top() - gap - ORB_SIZE, panel_geometry.bottom() + gap + 1):
+                if bounds.top() <= target_y and target_y + ORB_SIZE <= bounds.bottom() + 1:
+                    self.move(target_x, target_y)
+                    return
+
+        def _avoid_visible_transcript_overlap(self) -> None:
+            from PySide6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                if widget.objectName() == "atlasTranscriptPanel" and widget.isVisible():
+                    self.reposition_beside(widget)
+                    return
+
+        def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            super().showEvent(event)
+            QTimer.singleShot(0, self._avoid_visible_transcript_overlap)
+
         # -- interaction -----------------------------------------------
 
         def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -290,30 +317,151 @@ def create_orb_window(settings=None):
 
         # -- painting ---------------------------------------------------
 
+        def _build_atlas_emblem(self) -> QPainterPath:
+            """Create the cached, bar-free geometric Atlas emblem silhouette."""
+            size = ORB_SIZE
+            path = QPainterPath()
+            # Two filled, inclined arms leave a triangular inner cut: this is a symbol, not a typographic A.
+            path.moveTo(size * 0.50, size * 0.405)
+            path.lineTo(size * 0.402, size * 0.635)
+            path.lineTo(size * 0.447, size * 0.620)
+            path.lineTo(size * 0.500, size * 0.485)
+            path.closeSubpath()
+            path.moveTo(size * 0.50, size * 0.405)
+            path.lineTo(size * 0.598, size * 0.635)
+            path.lineTo(size * 0.553, size * 0.620)
+            path.lineTo(size * 0.500, size * 0.485)
+            path.closeSubpath()
+            return path
+
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            """Render the layered, fully procedural Atlas energy core."""
             frame = self.current_frame()
-            red, green, blue, alpha = color_for_state(self._state)
-            alpha = max(0, min(255, int(alpha * frame["alpha_factor"])))
-            margin = int((ORB_SIZE // 10) * (2.0 - frame["scale"]))
-            diameter = max(1, ORB_SIZE - 2 * margin)
+            red, green, blue, base_alpha = color_for_state(self._state)
+            alpha = max(0, min(255, int(base_alpha * frame["alpha_factor"])))
             center = ORB_SIZE // 2
+            core_radius = max(18, int(ORB_SIZE * 0.245 * frame["scale"]))
+            orbit_radius = max(28, int(ORB_SIZE * 0.335 * frame["scale"]))
+            halo_radius = max(38, int(ORB_SIZE * 0.435 * frame["scale"]))
+            phase = math.radians(frame["rotation_deg"])
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QColor(red, green, blue, alpha))
-            painter.setPen(QColor(0, 0, 0, 0))
-            painter.drawEllipse(center - diameter // 2, center - diameter // 2, diameter, diameter)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            rotation = frame["rotation_deg"]
-            if rotation > 0.0:
+            # Broad, low-alpha strokes create a soft halo without costly blur.
+            for multiplier, opacity, width in (
+                (1.03, 0.045, 10.0), (0.95, 0.075, 7.0),
+                (0.86, 0.12, 4.0), (0.77, 0.18, 2.0),
+            ):
+                radius = int(halo_radius * multiplier)
+                painter.setPen(QPen(QColor(70, 205, 255, int(alpha * opacity)), width))
+                painter.drawEllipse(center - radius, center - radius, radius * 2, radius * 2)
+
+            ring_specs = (
+                (frame["rotation_deg"], 0.46, 1.00, 18),
+                (frame["rotation_deg"] + 57.0, 0.62, 0.88, 126),
+                (-frame["rotation_deg"] * 0.72 + 119.0, 0.34, 0.76, 247),
+            )
+            # Dim back segments establish that each orbit continues behind the core.
+            for angle, squash, radius_factor, start_angle in ring_specs:
+                radius = int(orbit_radius * radius_factor)
+                painter.save()
                 painter.translate(center, center)
-                painter.rotate(rotation)
-                painter.setBrush(QColor(255, 255, 255, 90))
-                painter.drawPie(
-                    -diameter // 2, -diameter // 2, diameter, diameter, 0, 60 * 16
-                )
-            painter.end()
+                painter.rotate(angle)
+                painter.scale(1.0, squash)
+                painter.setPen(QPen(QColor(42, 142, 255, int(alpha * 0.24)), 3.2))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, start_angle * 16, 112 * 16)
+                painter.setPen(QPen(QColor(120, 225, 255, int(alpha * 0.13)), 1.4))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 158) * 16, 54 * 16)
+                painter.restore()
 
+            # Dark shell, electric crown and cyan energy form a volumetric core.
+            shell_gradient = QRadialGradient(center, center, core_radius)
+            shell_gradient.setColorAt(0.0, QColor(3, 13, 38, min(255, alpha + 18)))
+            shell_gradient.setColorAt(0.48, QColor(5, 31, 78, int(alpha * 0.96)))
+            shell_gradient.setColorAt(0.77, QColor(15, 104, 188, int(alpha * 0.82)))
+            shell_gradient.setColorAt(1.0, QColor(red, green, blue, 0))
+            painter.setBrush(shell_gradient)
+            painter.setPen(QPen(QColor(84, 204, 255, int(alpha * 0.52)), 2.2))
+            painter.drawEllipse(center - core_radius, center - core_radius, core_radius * 2, core_radius * 2)
+
+            for multiplier, opacity, width in ((0.90, 0.22, 4.0), (0.79, 0.34, 2.5), (0.68, 0.48, 1.5)):
+                radius = int(core_radius * multiplier)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(52, 182, 255, int(alpha * opacity)), width))
+                painter.drawEllipse(center - radius, center - radius, radius * 2, radius * 2)
+
+            energy_radius = max(10, int(core_radius * 0.64))
+            energy_gradient = QRadialGradient(center - energy_radius * 0.18, center - energy_radius * 0.20, energy_radius)
+            energy_gradient.setColorAt(0.0, QColor(172, 248, 255, int(alpha * 0.82)))
+            energy_gradient.setColorAt(0.22, QColor(52, 206, 255, int(alpha * 0.68)))
+            energy_gradient.setColorAt(0.58, QColor(12, 79, 173, int(alpha * 0.38)))
+            energy_gradient.setColorAt(1.0, QColor(7, 27, 74, 0))
+            painter.setBrush(energy_gradient)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(center - energy_radius, center - energy_radius, energy_radius * 2, energy_radius * 2)
+
+            # Fine energy points make the interior feel active rather than uniformly filled.
+            for x_factor, y_factor, radius, opacity in (
+                (-0.28, -0.18, 2, 0.72), (0.23, -0.27, 1, 0.58),
+                (0.31, 0.16, 2, 0.48), (-0.17, 0.30, 1, 0.66),
+                (0.04, 0.11, 1, 0.78),
+            ):
+                painter.setBrush(QColor(170, 245, 255, int(alpha * opacity)))
+                painter.drawEllipse(
+                    int(center + energy_radius * x_factor) - radius,
+                    int(center + energy_radius * y_factor) - radius,
+                    radius * 2,
+                    radius * 2,
+                )
+
+            # Bright front segments complete the three-dimensional orbit illusion.
+            for angle, squash, radius_factor, start_angle in ring_specs:
+                radius = int(orbit_radius * radius_factor)
+                painter.save()
+                painter.translate(center, center)
+                painter.rotate(angle)
+                painter.scale(1.0, squash)
+                painter.setPen(QPen(QColor(53, 179, 255, int(alpha * 0.80)), 4.2))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 224) * 16, 82 * 16)
+                painter.setPen(QPen(QColor(216, 252, 255, int(alpha * 0.94)), 2.5))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 246) * 16, 30 * 16)
+                painter.restore()
+
+            # A compact Atlas emblem stays inside the nucleus and gains a cyan-blue glow.
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(37, 152, 255, int(alpha * 0.38)))
+            painter.drawPath(self._emblem_path)
+            painter.setBrush(QColor(218, 252, 255, min(255, alpha + 8)))
+            painter.drawPath(self._emblem_path)
+
+            # Six-to-ten restrained exterior particles use the existing animation phase only.
+            if self._state is not OrbVisualState.DEGRADED:
+                for x, y, offset, radius in (
+                    (0.18, 0.33, 0.0, 2), (0.82, 0.28, 1.0, 1),
+                    (0.76, 0.73, 2.0, 2), (0.24, 0.75, 3.0, 1),
+                    (0.13, 0.53, 4.0, 1), (0.87, 0.52, 5.0, 2),
+                    (0.34, 0.17, 2.6, 1), (0.66, 0.18, 4.6, 1),
+                ):
+                    shimmer = 0.36 + 0.64 * ((math.sin(phase + offset) + 1.0) * 0.5)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(185, 248, 255, int(alpha * 0.42 * shimmer)))
+                    painter.drawEllipse(int(ORB_SIZE * x) - radius, int(ORB_SIZE * y) - radius, radius * 2, radius * 2)
+
+            # A subtle vertical beam and three compact ellipses ground the hologram below the core.
+            base_y = int(ORB_SIZE * 0.79)
+            beam_top = center + int(core_radius * 0.58)
+            painter.setPen(QPen(QColor(47, 183, 255, int(alpha * 0.08)), 18.0))
+            painter.drawLine(center, beam_top, center, base_y)
+            painter.setPen(QPen(QColor(105, 235, 255, int(alpha * 0.20)), 5.0))
+            painter.drawLine(center, beam_top, center, base_y)
+            for half_width, half_height, opacity, width in ((15, 3, 0.62, 2.2), (22, 5, 0.34, 1.6), (30, 7, 0.16, 1.1)):
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(92, 224, 255, int(alpha * opacity)), width))
+                painter.drawEllipse(center - half_width, base_y - half_height, half_width * 2, half_height * 2)
+
+            painter.end()
     return OrbWindow()
 
 
@@ -334,6 +482,7 @@ def create_transcript_panel():
             super().__init__()
             self._hide_on_close = False
             self.setWindowTitle("Atlas - transcripcion")
+            self.setObjectName("atlasTranscriptPanel")
             self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
             self.resize(360, 220)
             layout = QVBoxLayout(self)

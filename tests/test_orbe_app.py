@@ -108,13 +108,32 @@ def test_drag_moves_window(qapp, orb) -> None:
 
 def test_fixed_orb_size(orb) -> None:
     assert orb.width() == orbe_app.ORB_SIZE
+    assert 270 <= orbe_app.ORB_SIZE <= 290
     assert orb.height() == orbe_app.ORB_SIZE
+
+
+def test_orb_repositions_beside_an_overlapping_transcript_panel(qapp, orb) -> None:
+    from PySide6.QtCore import Qt
+
+    panel = orbe_app.create_transcript_panel()
+    panel.move(100, 100)
+    orb.move(120, 100)
+    panel.show()
+
+    orb.reposition_beside(panel)
+
+    assert not orb.frameGeometry().intersects(panel.frameGeometry())
+    assert orb.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    panel.close()
 
 
 # ---------------------------------------------------------------------------
 # V4.3-I4: animations, tray, position preferences
 # ---------------------------------------------------------------------------
 
+
+def test_animation_rate_is_capped_for_the_desktop_widget() -> None:
+    assert orbe_app.ANIMATION_FPS <= 24
 
 def test_animation_frame_is_pure_and_deterministic() -> None:
     first = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
