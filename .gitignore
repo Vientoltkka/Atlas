@@ -29,6 +29,7 @@ __pycache__/
 *.mp3
 *.flac
 artifacts/screenshots/
+artifacts/documents/
 screenshots/
 screenshot_*.png
 

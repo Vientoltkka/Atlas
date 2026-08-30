@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
@@ -116,6 +116,23 @@ class ExecutionConversationController:
             result=result,
         )
 
+    def handle_registered_tool(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        original_text: str,
+        confirmation_text: str,
+    ) -> ExecutionConversationOutcome:
+        """Prepare an exact tool while preserving this controller's confirmation state."""
+        result = self._coordinator.execute_registered_tool(tool_name, arguments)
+        self._remember(result, original_text=original_text)
+        text = (
+            confirmation_text
+            if result.status is ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
+            else self._presenter.present(result)
+        )
+        return ExecutionConversationOutcome(False, text, result)
     def _handle_confirmation_response(
         self,
         prompt: str,

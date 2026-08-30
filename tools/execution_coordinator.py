@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 from tools.execution_decision import (
     ExecutionDecision,
@@ -88,6 +88,30 @@ class ExecutionCoordinator:
         decision = self._decision_engine.decide(prompt)
         return self.execute_with_decision(prompt, decision)
 
+    def execute_registered_tool(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> ExecutionCoordinationResult:
+        """Prepare one exact registered tool through the normal confirmation flow."""
+        decision = ExecutionDecision(
+            mode=ExecutionMode.SINGLE_TOOL,
+            reason=f"Registered tool requested: {tool_name}.",
+            confidence=1.0,
+            candidate_tools=(tool_name,),
+        )
+        outcome = self._single_tool_runner.run_registered_tool(tool_name, arguments)
+        if outcome is None:
+            return ExecutionCoordinationResult(
+                status=ExecutionCoordinationStatus.UNSUPPORTED,
+                mode=decision.mode,
+                decision=decision,
+                proposal=None,
+                execution_result=None,
+                message=f"Registered tool is not selectable: {tool_name}.",
+                executed=False,
+            )
+        return self._single_result(decision, None, outcome, "single")
     def execute_with_decision(
         self,
         prompt: str,

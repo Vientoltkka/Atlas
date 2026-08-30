@@ -51,3 +51,5 @@ Propósito: documentar herramientas registradas, schemas conversacionales, confi
 | `project_tree` | proyecto | Return all Python files inside a project. | opt:path | NO | `Muestra el árbol del proyecto` | Lista de archivos Python | Ignora carpetas técnicas |
 | `read_file` | archivos | Read a UTF-8 text file. | req:path | NO | `Lee README.md` | Contenido del archivo | Requiere texto UTF-8 |
 | `write_file` | archivos | Write a UTF-8 text file. | req:path,content | SI | `Escribe hola en prueba.txt` | Archivo actualizado | Requiere confirmación |
+
+| `training.create_pdf` | documentos | Create and open a PDF from generated training content. | req:content; opt:output_dir | SI | Uso interno tras TrainingAgent | PDF creado y abierto | Requiere confirmación explícita |

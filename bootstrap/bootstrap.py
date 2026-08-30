@@ -104,6 +104,7 @@ from tools.tool_schema import ToolArgumentsSchema, ToolParameterSchema
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.temperature_conversion import TemperatureConversionTool
 from tools.filesystem.write_file_tool import WriteFileTool
+from tools.documents.create_training_pdf_tool import CreateTrainingPdfTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
 from tools.calendar.calendar_list_events_tool import (
@@ -155,6 +156,8 @@ from tools.desktop.desktop_tools import (
 
 from use_cases.read_file import ReadFileUseCase
 from use_cases.write_file import WriteFileUseCase
+from use_cases.create_training_pdf import CreateTrainingPdfUseCase
+from services.pdf_service import PdfService
 from use_cases.list_python_files import ListPythonFilesUseCase
 from use_cases.read_project import ReadProjectUseCase
 from use_cases.read_project_index import ReadProjectIndexUseCase
@@ -246,7 +249,17 @@ class Bootstrap:
         tool_registry.register(CloseApplicationTool())
         tool_registry.register(TerminateProcessTool())
         tool_registry.register(OpenFolderTool())
-        tool_registry.register(OpenFileTool())
+        open_file_tool = OpenFileTool()
+        tool_registry.register(open_file_tool)
+        tool_registry.register(
+            CreateTrainingPdfTool(CreateTrainingPdfUseCase(PdfService(), open_file_tool)),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("content", str, required=True),
+                    ToolParameterSchema("output_dir", str, default="artifacts/documents"),
+                ),
+            ),
+        )
         tool_registry.register(TypeTextTool())
         tool_registry.register(CopyClipboardTextTool())
         tool_registry.register(ReadClipboardTextTool())
@@ -289,6 +302,7 @@ class Bootstrap:
         for action, tool_name in (
             ("file.read", "read_file"),
             ("file.write", "write_file"),
+            ("training.pdf.create", "training.create_pdf"),
             ("directory.list", "list_directory"),
             ("calendar.events.list", "calendar_list_events"),
             ("project.tree", "project_tree"),
@@ -325,6 +339,16 @@ class Bootstrap:
                 ),
             )
         )
+        schema_registry.register(
+            ArgumentSchema(
+                "training.pdf.create",
+                (
+                    ArgumentField("content", str, required=True, description="Training content."),
+                    ArgumentField("output_dir", str, default="artifacts/documents", description="PDF output directory."),
+                ),
+            )
+        )
+
         schema_registry.register(
             ArgumentSchema(
                 "directory.list",

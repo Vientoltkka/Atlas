@@ -148,6 +148,7 @@ class AtlasOrchestrator:
         structured_plan_execution_enabled: bool = False,
         structured_planning_progress_enabled: bool = True,
         project_root: Path | None = None,
+        training_pdf_output_dir: Path | None = None,
         now_provider=None,
     ) -> None:
 
@@ -192,6 +193,9 @@ class AtlasOrchestrator:
         self._execution_authorization_gate = execution_authorization_gate
         self._execution_dispatcher = execution_dispatcher
         self._tool_registry = tool_registry
+        self._training_pdf_output_dir = training_pdf_output_dir or (
+            Path("artifacts") / "documents"
+        )
         self._skill_system = skill_system
         self._capability_gap_detector = capability_gap_detector
         self._pending_capability_proposal: MissingCapabilityProposal | None = None
@@ -467,6 +471,11 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        if (
+            self._execution_conversation is not None
+            and self._execution_conversation.pending_confirmation_id is not None
+        ):
+            return self._execution_conversation.handle(prompt).text
         closure_response = self._handle_validated_capability_closure(prompt)
         if closure_response is not None:
             return closure_response
@@ -558,6 +567,19 @@ class AtlasOrchestrator:
                 )
 
             self._memory.add_assistant(specialist_response)
+            if agent_name == "training" and _requests_pdf_export(request.content):
+                if self._execution_conversation is None:
+                    return specialist_response
+                outcome = self._execution_conversation.handle_registered_tool(
+                    "training.create_pdf",
+                    {
+                        "content": specialist_response,
+                        "output_dir": str(self._training_pdf_output_dir),
+                    },
+                    original_text=request.content,
+                    confirmation_text="Voy a crear y abrir el PDF. ¿Confirmas?",
+                )
+                return f"{specialist_response}\n\n{outcome.text}"
             return specialist_response
 
 
@@ -2180,3 +2202,13 @@ def _with_message_prefix(
     prefix: str,
 ) -> StructuredExecutionResponse:
     return replace(response, message=prefix + response.message)
+
+
+def _requests_pdf_export(text: str) -> bool:
+    normalized = unicodedata.normalize("NFD", text.casefold())
+    normalized = "".join(
+        character for character in normalized if not unicodedata.combining(character)
+    )
+    return "pdf" in normalized and any(
+        marker in normalized for marker in ("guarda", "exporta", "crea")
+    )
