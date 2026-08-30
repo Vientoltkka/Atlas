@@ -107,6 +107,7 @@ def test_drag_moves_window(qapp, orb) -> None:
 
 
 def test_fixed_orb_size(orb) -> None:
+    assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.275)
     assert orb.width() == orbe_app.ORB_SIZE
     assert 270 <= orbe_app.ORB_SIZE <= 290
     assert orb.height() == orbe_app.ORB_SIZE
@@ -148,6 +149,17 @@ def test_listening_keeps_the_core_stable_while_animation_phase_advances() -> Non
 
 def test_animation_rate_is_capped_for_the_desktop_widget() -> None:
     assert orbe_app.ANIMATION_FPS <= 24
+
+
+def test_degraded_stays_compact_and_visually_separate_from_authorization(orb) -> None:
+    orb.apply_state(OrbVisualState.DEGRADED)
+    assert orb.width() == orbe_app.ORB_SIZE
+    assert orbe_app.color_for_state(OrbVisualState.DEGRADED) != orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)
+
+
+def test_orb_owns_only_its_existing_animation_timer() -> None:
+    source = __import__("inspect").getsource(orbe_app.create_orb_window)
+    assert source.count("self._timer = QTimer(self)") == 1
 
 
 def test_idle_is_compact_and_active_states_are_much_larger(qapp, orb) -> None:
