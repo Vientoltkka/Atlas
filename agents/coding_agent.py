@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import difflib
 from pathlib import Path
@@ -27,6 +28,13 @@ class PendingCodingChange:
     original_content: str
     proposed_content: str
     diff: str
+@dataclass(frozen=True)
+class AppliedCapabilityChange:
+    """One bounded applied change that can be validated or restored once."""
+
+    capability_id: str
+    original_contents: tuple[tuple[str, str | None], ...]
+    applied_contents: tuple[tuple[str, str], ...]
 
 
 class CodingAgent(BaseAgent):
@@ -61,6 +69,8 @@ Tu trabajo es:
         self._project_root = Path(__file__).resolve().parents[1]
         self._pending_change: PendingCodingChange | None = None
         self._pending_capability_plan: dict[str, object] | None = None
+        self._applied_capability_change: AppliedCapabilityChange | None = None
+        self._capability_validation_status: str | None = None
 
     @property
     def name(self) -> str:
@@ -131,30 +141,122 @@ Código:
     def clear_generated(self) -> None:
         self._pending_change = None
 
+    @property
+    def capability_validation_status(self) -> str | None:
+        """Return the result of the latest supervised capability validation."""
+        return self._capability_validation_status
+
     def prepare_capability_plan(self, **details) -> str:
         """Prepare one bounded capability plan without applying it."""
         self._pending_capability_plan = dict(details)
         return "\n".join(("Preparación supervisada de mejora:", f"- Capacidad ausente: {details['capability_id']}.", f"- Implementación mínima propuesta: {details['implementation']}.", "- Archivos previsiblemente afectados:", *(f"  - {path}" for path in details['planned_files']), "- Tests focalizados necesarios:", *(f"  - {test}" for test in details['focused_tests']), f"- Riesgo/impacto: {details['risk']}", "- Estado: todavía NO se han realizado cambios."))
 
     def apply_prepared_capability_plan(self, capability_id: str) -> str:
-        """Apply only the previously prepared, fixed capability scope."""
+        """Apply, validate and safely restore only one prepared capability plan."""
         plan = self._pending_capability_plan
+        allowed = (
+            "tools/temperature_conversion.py",
+            "bootstrap/bootstrap.py",
+            "tests/test_temperature_conversion.py",
+        )
         if plan is None or plan.get("capability_id") != capability_id:
             return "No hay un plan preparado para aplicar. No se han realizado cambios."
-        allowed = ("tools/temperature_conversion.py", "bootstrap/bootstrap.py", "tests/test_temperature_conversion.py")
         if tuple(plan.get("planned_files", ())) != allowed:
             return "El alcance del plan no es válido. No se han realizado cambios."
+
+        proposed_contents = plan.get("proposed_contents", {})
+        if not isinstance(proposed_contents, Mapping):
+            return "El contenido del plan no es válido. No se han realizado cambios."
+
+        originals: list[tuple[str, str | None]] = []
+        applied: list[tuple[str, str]] = []
+        for relative_path in allowed:
+            target = self._project_root / relative_path
+            original_content = target.read_text(encoding="utf-8") if target.exists() else None
+            proposed_content = proposed_contents.get(relative_path, original_content)
+            if not isinstance(proposed_content, str):
+                return "El contenido del plan no es válido. No se han realizado cambios."
+            originals.append((relative_path, original_content))
+            applied.append((relative_path, proposed_content))
+
+        change = AppliedCapabilityChange(
+            capability_id=capability_id,
+            original_contents=tuple(originals),
+            applied_contents=tuple(applied),
+        )
+        written_paths: list[str] = []
+        self._capability_validation_status = None
         try:
-            for relative_path in allowed:
-                target = self._project_root / relative_path
-                self._write_file.execute(str(target), target.read_text(encoding="utf-8"))
-            result = subprocess.run((sys.executable, "-B", "-m", "pytest", "-q", "tests/test_temperature_conversion.py"), cwd=self._project_root, capture_output=True, text=True, check=False)
+            for relative_path, proposed_content in change.applied_contents:
+                self._write_file.execute(str(self._project_root / relative_path), proposed_content)
+                written_paths.append(relative_path)
         except Exception as error:
-            return f"La aplicación se detuvo: {error}"
+            return self._rollback_capability_change(change, tuple(written_paths), f"Error de aplicación: {error}")
+
         self._pending_capability_plan = None
+        self._applied_capability_change = change
+        return self.validate_applied_capability_plan(capability_id)
+
+    def validate_applied_capability_plan(self, capability_id: str) -> str:
+        """Validate one applied capability and rollback it when validation fails."""
+        change = self._applied_capability_change
+        if change is None or change.capability_id != capability_id:
+            return "No hay una mejora aplicada pendiente de validación."
+
+        result = self._run_capability_tests()
         if result.returncode != 0:
-            return "La mejora se aplicó, pero los tests focalizados fallaron. Se detuvo el flujo.\n" + result.stdout + result.stderr
-        return "Mejora aplicada de forma controlada. Tests focalizados correctos."
+            return self._rollback_capability_change(change, tuple(path for path, _ in change.applied_contents), "Los tests focalizados fallaron.")
+
+        self._applied_capability_change = None
+        self._capability_validation_status = "VALIDATED"
+        return "\n".join((
+            "Validación completada correctamente.",
+            "La nueva capacidad funciona y los tests focalizados pasan.",
+            "No se ha detectado regresión en el alcance validado.",
+            "¿Apruebas cerrar y versionar esta mejora?",
+        ))
+
+    def _run_capability_tests(self) -> subprocess.CompletedProcess[str]:
+        """Run only the focused tests bound to this approved capability."""
+        return subprocess.run(
+            (sys.executable, "-B", "-m", "pytest", "-q", "tests/test_temperature_conversion.py"),
+            cwd=self._project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _rollback_capability_change(self, change: AppliedCapabilityChange, paths: tuple[str, ...], reason: str) -> str:
+        """Restore only unchanged approved files, never overwriting external edits."""
+        originals = dict(change.original_contents)
+        applied = dict(change.applied_contents)
+        for relative_path in paths:
+            target = self._project_root / relative_path
+            current_content = target.read_text(encoding="utf-8") if target.exists() else None
+            if current_content != applied[relative_path]:
+                self._clear_capability_state()
+                return "La validación falló y el rollback se detuvo para no sobrescribir cambios ajenos en '" + relative_path + "'. Motivo: " + reason
+
+        try:
+            for relative_path in paths:
+                target = self._project_root / relative_path
+                original_content = originals[relative_path]
+                if original_content is None:
+                    target.unlink()
+                else:
+                    self._write_file.execute(str(target), original_content)
+        except Exception as error:
+            self._clear_capability_state()
+            return "ERROR CRÍTICO: falló el rollback controlado. Motivo de validación: " + reason + ". Motivo de rollback: " + str(error)
+
+        self._clear_capability_state()
+        return "La validación falló. Se restauraron únicamente los archivos aprobados. Motivo: " + reason
+
+    def _clear_capability_state(self) -> None:
+        """Forget transient apply state so restarts cannot repeat an action."""
+        self._pending_capability_plan = None
+        self._applied_capability_change = None
+        self._capability_validation_status = None
     def authorize_pending_change(self, token: str) -> PendingCodingChange:
         """Consume a single token bound to the exact pending file change."""
         pending = self._pending_change
