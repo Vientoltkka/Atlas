@@ -188,6 +188,8 @@ def create_orb_window(settings=None):
                 self._build_tray()
 
             self.restore_position()
+            # Start the animation loop for the initial IDLE state.
+            self._update_timer()
 
         @property
         def state(self) -> OrbVisualState:

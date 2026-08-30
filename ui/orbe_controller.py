@@ -83,7 +83,9 @@ class OrbeController:
         if show_on_start:
             self.show_chat()
         else:
-            self.hide_chat()
+            # Windows autostart hides only the chat panel; the Atlas core remains visible.
+            self._transcript_panel.hide()
+            self._orb.show()
         if not start_voice:
             self._application.setQuitOnLastWindowClosed(False)
             self._start_chat_hotkey()
