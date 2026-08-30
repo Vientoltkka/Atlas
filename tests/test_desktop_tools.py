@@ -6,6 +6,7 @@ from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
     CaptureScreenshotTool,
+    DesktopTool,
     ClearClipboardTool,
     ClipboardHasTextTool,
     CloseApplicationTool,
@@ -41,6 +42,9 @@ from tools.desktop.desktop_tools import (
     TypeTextTool,
 )
 from tools.desktop.windows_controller import ProcessInfo, WindowsDesktopController
+from tools.effect_permissions import ToolPermissionDeniedError
+from tools.executor import ToolExecutor
+from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
 
 
@@ -248,6 +252,62 @@ class FakeDesktopController:
         self.existing_pids.discard(pid)
 
 
+class FutureDesktopTool(DesktopTool):
+    @property
+    def name(self) -> str:
+        return "desktop.future_action"
+
+    @property
+    def description(self) -> str:
+        return "Future desktop action."
+
+    def execute(self, context: ToolContext) -> str:
+        return "not executed"
+
+
+def test_only_validated_open_capabilities_are_exempt_from_desktop_authorization(
+    tmp_path: Path,
+) -> None:
+    controller = FakeDesktopController()
+    registry = ToolRegistry()
+    for tool in (
+        OpenApplicationTool(controller),
+        OpenFolderTool(controller),
+        OpenFileTool(controller),
+        PressHotkeyTool(controller),
+        FutureDesktopTool(controller),
+    ):
+        registry.register(tool)
+    executor = ToolExecutor(registry)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    file = tmp_path / "file.txt"
+    file.write_text("Atlas", encoding="utf-8")
+
+    assert executor.execute(
+        "desktop.open_application",
+        ToolContext(parameters={"application": "Visual Studio Code"}),
+    ).startswith("Visual Studio Code abierto.")
+    assert executor.execute(
+        "desktop.open_folder",
+        ToolContext(parameters={"path": str(folder)}),
+    ) == f"Carpeta abierta: {folder}"
+    assert executor.execute(
+        "desktop.open_file",
+        ToolContext(parameters={"path": str(file)}),
+    ) == f"Archivo abierto: {file}"
+
+    assert executor.requires_explicit_authorization("desktop.press_hotkey") is True
+    assert executor.requires_explicit_authorization("desktop.future_action") is True
+    with pytest.raises(ToolPermissionDeniedError):
+        executor.execute(
+            "desktop.press_hotkey",
+            ToolContext(parameters={"window_title": "Visual Studio Code", "keys": ["ctrl", "s"]}),
+        )
+    with pytest.raises(ToolPermissionDeniedError):
+        executor.execute("desktop.future_action")
+
+
 def test_open_application_tool() -> None:
     controller = FakeDesktopController()
     tool = OpenApplicationTool(controller)
@@ -257,10 +317,7 @@ def test_open_application_tool() -> None:
     )
 
     assert result == "Visual Studio Code abierto. PID: 500"
-    assert controller.calls == [
-        ("list_processes", "Visual Studio Code"),
-        ("open_application", "Visual Studio Code")
-    ]
+    assert controller.calls == [("open_application", "Visual Studio Code")]
 
 
 def test_open_application_tool_reports_existing_process() -> None:
@@ -274,8 +331,8 @@ def test_open_application_tool_reports_existing_process() -> None:
         ToolContext(parameters={"application": "Visual Studio Code"})
     )
 
-    assert result == "Visual Studio Code ya estaba abierto. PID: 10"
-    assert controller.calls == [("list_processes", "Visual Studio Code")]
+    assert result == "Visual Studio Code abierto. PID: 500"
+    assert controller.calls == [("open_application", "Visual Studio Code")]
 
 
 def test_list_processes_tool_returns_plain_structures() -> None:
@@ -1240,6 +1297,21 @@ def test_windows_controller_open_application_uses_popen_without_shell(
     assert calls[0]["shell"] is False
 
 
+def test_windows_controller_resolves_powershell_alias_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = WindowsDesktopController()
+    expected = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.shutil.which",
+        lambda candidate: expected if candidate == "powershell" else None,
+    )
+
+    assert controller._resolve_application("PowerShell") == expected
+    assert controller._process_names_for_query("PowerShell") == ("powershell.exe",)
+
+
 def test_windows_controller_rejects_arbitrary_application_command() -> None:
     controller = WindowsDesktopController()
 
@@ -1358,3 +1430,23 @@ def test_windows_controller_terminate_process_uses_taskkill_without_shell(
 
     assert calls[0]["args"] == ["taskkill", "/PID", "1234", "/F"]
     assert calls[0]["shell"] is False
+
+def test_windows_controller_resolves_vs_code_from_standard_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = r"C:\Users\AnyUser\AppData\Local"
+    expected = local_app_data + r"\Programs\Microsoft VS Code\Code.exe"
+    monkeypatch.setenv("LOCALAPPDATA", local_app_data)
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    monkeypatch.setattr("tools.desktop.windows_controller.shutil.which", lambda _candidate: None)
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.Path.exists",
+        lambda path: str(path) == expected,
+    )
+
+    controller = WindowsDesktopController()
+
+
+    assert controller._resolve_application("Visual Studio Code") == expected
+    assert controller._resolve_application("VS Code") == expected

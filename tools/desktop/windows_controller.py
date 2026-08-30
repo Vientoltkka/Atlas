@@ -312,39 +312,19 @@ class WindowsDesktopController:
         ),
         "visual studio code": (
             "code",
-            str(
-                Path.home()
-                / "AppData"
-                / "Local"
-                / "Programs"
-                / "Microsoft VS Code"
-                / "Code.exe"
-            ),
         ),
         "vscode": (
             "code",
-            str(
-                Path.home()
-                / "AppData"
-                / "Local"
-                / "Programs"
-                / "Microsoft VS Code"
-                / "Code.exe"
-            ),
         ),
         "vs code": (
             "code",
-            str(
-                Path.home()
-                / "AppData"
-                / "Local"
-                / "Programs"
-                / "Microsoft VS Code"
-                / "Code.exe"
-            ),
         ),
+        "explorador": ("explorer",),
         "explorador de archivos": ("explorer",),
+        "el explorador de archivos": ("explorer",),
         "explorer": ("explorer",),
+        "powershell": ("powershell",),
+        "windows powershell": ("powershell",),
         "bloc de notas": ("notepad",),
         "notepad": ("notepad",),
         "calculadora": ("calc",),
@@ -357,8 +337,12 @@ class WindowsDesktopController:
         "vscode": ("Code.exe",),
         "vs code": ("Code.exe",),
         "code": ("Code.exe",),
+        "explorador": ("explorer.exe",),
         "explorador de archivos": ("explorer.exe",),
+        "el explorador de archivos": ("explorer.exe",),
         "explorer": ("explorer.exe",),
+        "powershell": ("powershell.exe",),
+        "windows powershell": ("powershell.exe",),
         "bloc de notas": ("notepad.exe",),
         "notepad": ("notepad.exe",),
         "calculadora": ("CalculatorApp.exe", "calc.exe"),
@@ -882,10 +866,7 @@ class WindowsDesktopController:
         """Resolve an application name to an executable path."""
         normalized = application.strip().lower()
         self._reject_unsafe_application(application)
-        candidates = self._KNOWN_APPLICATIONS.get(
-            normalized,
-            (application,),
-        )
+        candidates = self._application_candidates(normalized, application)
 
         for candidate in candidates:
             found = shutil.which(candidate)
@@ -901,6 +882,30 @@ class WindowsDesktopController:
         raise FileNotFoundError(
             f"No se encontro la aplicacion '{application}'."
         )
+
+    def _application_candidates(
+        self,
+        normalized: str,
+        application: str,
+    ) -> tuple[str, ...]:
+        """Return safe deterministic executable candidates for an application."""
+        candidates = self._KNOWN_APPLICATIONS.get(normalized, (application,))
+
+        if normalized not in {"visual studio code", "vs code", "vscode"}:
+            return candidates
+
+        local_app_data = Path(
+            os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        )
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        installation_paths = (
+            local_app_data / "Programs" / "Microsoft VS Code" / "Code.exe",
+            program_files / "Microsoft VS Code" / "Code.exe",
+            program_files_x86 / "Microsoft VS Code" / "Code.exe",
+        )
+        return tuple(str(path) for path in installation_paths) + candidates
+
 
     def _reject_unsafe_application(self, application: str) -> None:
         """Reject command-shaped application input."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import re
 from typing import Callable
@@ -24,7 +25,6 @@ from tools.tool_context import ToolContext
 class DesktopInteractionUseCase:
     """Execute simple desktop commands through Atlas tools."""
 
-    _DEFAULT_EDITOR = "Visual Studio Code"
     _DEFAULT_WINDOW_TITLE = "Visual Studio Code"
     _CONFIRMATION_PREFIX = "\u2713"
 
@@ -798,6 +798,7 @@ class DesktopInteractionUseCase:
         target: str,
     ) -> str:
         """Open an application, folder, or file."""
+        expected_kind = self._open_target_kind(target)
         target = self._clean_open_target(target)
 
         if not target:
@@ -806,30 +807,40 @@ class DesktopInteractionUseCase:
         path = self._resolve_path(target)
 
         if path.exists() and path.is_dir():
+            if expected_kind == "file":
+                return "La ruta es una carpeta, no un archivo."
             return self._run(
                 "desktop.open_folder",
                 {"path": str(path)},
-                f"Carpeta abierta: {path}",
+                f"Abriendo {path}.",
             )
 
         if path.exists() and path.is_file():
+            if expected_kind == "folder":
+                return "La ruta es un archivo, no una carpeta."
             return self._run(
                 "desktop.open_file",
-                {
-                    "path": str(path),
-                    "application": self._DEFAULT_EDITOR,
-                },
-                f"Archivo abierto en {self._DEFAULT_EDITOR}.",
+                {"path": str(path)},
+                f"Abriendo {path}.",
             )
 
         if self._looks_like_path(target):
-            raise FileNotFoundError(str(path))
+            return "La ruta no existe."
 
-        return self._run(
-            "desktop.open_application",
-            {"application": target},
-            f"{target} abierto.",
-        )
+        try:
+            return self._run(
+                "desktop.open_application",
+                {"application": target},
+                f"Abriendo {target}.",
+            )
+        except FileNotFoundError:
+            return "No encuentro esa aplicación."
+        except OSError:
+            logging.getLogger(__name__).exception(
+                "Fallo al lanzar la aplicación desktop: %s",
+                target,
+            )
+            return f"No pude abrir {target}."
 
     def _execute_clipboard_command(
         self,
@@ -1019,6 +1030,16 @@ class DesktopInteractionUseCase:
             "y",
             "yes",
         }
+
+    def _open_target_kind(self, target: str) -> str | None:
+        """Return an explicitly requested filesystem target kind, if any."""
+        normalized = self._normalize(target)
+
+        if normalized.startswith(("la carpeta ", "carpeta ")):
+            return "folder"
+        if normalized.startswith(("el archivo ", "archivo ")):
+            return "file"
+        return None
 
     def _clean_open_target(
         self,

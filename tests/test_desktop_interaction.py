@@ -1,5 +1,9 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+from core.orchestrator import AtlasOrchestrator
+from core.router import Router
+from memory.conversation import ConversationMemory
 from tools.tool_context import ToolContext
 from use_cases.desktop_interaction import DesktopInteractionUseCase
 
@@ -114,7 +118,7 @@ def test_desktop_interaction_opens_application() -> None:
 
     result = use_case.execute("Abre Visual Studio Code")
 
-    assert result == "\u2713 Visual Studio Code abierto."
+    assert result == "\u2713 Abriendo Visual Studio Code."
     assert executor.calls[0][0] == "desktop.open_application"
     assert executor.calls[0][1].parameters == {
         "application": "Visual Studio Code"
@@ -127,9 +131,67 @@ def test_desktop_interaction_opens_application_with_english_alias() -> None:
 
     result = use_case.execute("open Chrome")
 
-    assert result == "\u2713 Chrome abierto."
+    assert result == "\u2713 Abriendo Chrome."
     assert executor.calls[0][0] == "desktop.open_application"
     assert executor.calls[0][1].parameters == {"application": "Chrome"}
+
+
+def test_desktop_interaction_routes_powershell_and_explorer_to_open_application() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    powershell = use_case.execute("Abre PowerShell")
+    explorer = use_case.execute("Abre el explorador de archivos")
+
+    assert powershell == "\u2713 Abriendo PowerShell."
+    assert explorer == "\u2713 Abriendo el explorador de archivos."
+    assert [call[0] for call in executor.calls] == [
+        "desktop.open_application",
+        "desktop.open_application",
+    ]
+    assert [call[1].parameters for call in executor.calls] == [
+        {"application": "PowerShell"},
+        {"application": "el explorador de archivos"},
+    ]
+
+
+class UnknownApplicationExecutor(FakeToolExecutor):
+    def execute(self, tool_name: str, context: ToolContext):
+        self.calls.append((tool_name, context))
+        raise FileNotFoundError("missing")
+
+
+def test_desktop_interaction_reports_unknown_application_specifically() -> None:
+    executor = UnknownApplicationExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("Abre Aplicación inexistente")
+
+    assert result == "No encuentro esa aplicación."
+    assert executor.calls[0][0] == "desktop.open_application"
+
+
+class FailedApplicationExecutor(FakeToolExecutor):
+    def execute(self, tool_name: str, context: ToolContext):
+        self.calls.append((tool_name, context))
+        raise OSError("launch rejected")
+
+
+def test_desktop_interaction_reports_application_launch_failure() -> None:
+    executor = FailedApplicationExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("Abre Visual Studio Code")
+
+    assert result == "No pude abrir Visual Studio Code."
+    assert executor.calls[0][0] == "desktop.open_application"
+def test_desktop_interaction_does_not_treat_read_or_destructive_requests_as_open() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute(r"Lee C:\AI\Atlas\README.md") is None
+    assert use_case.execute(r"Borra C:\AI\Atlas\README.md") is None
+    assert executor.calls == []
 
 
 def test_desktop_interaction_rejects_incomplete_open_command() -> None:
@@ -425,7 +487,7 @@ def test_desktop_interaction_opens_existing_folder(
 
     result = use_case.execute("Abre core")
 
-    assert result == f"\u2713 Carpeta abierta: {folder}"
+    assert result == f"\u2713 Abriendo {folder}."
     assert executor.calls[0][0] == "desktop.open_folder"
     assert executor.calls[0][1].parameters == {"path": str(folder)}
 
@@ -440,7 +502,7 @@ def test_desktop_interaction_opens_folder_with_natural_prefix(
 
     result = use_case.execute(f"Abre la carpeta {folder}")
 
-    assert result == f"\u2713 Carpeta abierta: {folder}"
+    assert result == f"\u2713 Abriendo {folder}."
     assert executor.calls[0][0] == "desktop.open_folder"
 
 
@@ -455,12 +517,9 @@ def test_desktop_interaction_opens_existing_file(
 
     result = use_case.execute("Abre core/router.py")
 
-    assert result == "\u2713 Archivo abierto en Visual Studio Code."
+    assert result == f"\u2713 Abriendo {file}."
     assert executor.calls[0][0] == "desktop.open_file"
-    assert executor.calls[0][1].parameters == {
-        "path": str(file),
-        "application": "Visual Studio Code",
-    }
+    assert executor.calls[0][1].parameters == {"path": str(file)}
 
 
 def test_desktop_interaction_opens_file_with_natural_prefix(
@@ -474,7 +533,7 @@ def test_desktop_interaction_opens_file_with_natural_prefix(
 
     result = use_case.execute("Abre el archivo core/router.py")
 
-    assert result == "\u2713 Archivo abierto en Visual Studio Code."
+    assert result == f"\u2713 Abriendo {file}."
     assert executor.calls[0][0] == "desktop.open_file"
 
 
@@ -486,7 +545,24 @@ def test_desktop_interaction_reports_missing_file(
 
     result = use_case.execute("Abre missing.py")
 
-    assert result == f"Error: {tmp_path / 'missing.py'}"
+    assert result == "La ruta no existe."
+    assert executor.calls == []
+
+
+def test_desktop_interaction_reports_path_kind_mismatches(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    file = tmp_path / "file.txt"
+    file.write_text("Atlas", encoding="utf-8")
+
+    assert use_case.execute(f"Abre la carpeta {file}") == (
+        "La ruta es un archivo, no una carpeta."
+    )
+    assert use_case.execute(f"Abre el archivo {folder}") == (
+        "La ruta es una carpeta, no un archivo."
+    )
     assert executor.calls == []
 
 
@@ -1222,3 +1298,76 @@ def test_desktop_interaction_cancels_close_with_no_response() -> None:
         "desktop.list_processes",
         "desktop.list_windows",
     ]
+
+class _ExistingPath:
+    def __init__(self, value: str, *, is_dir: bool) -> None:
+        self._value = value
+        self._is_dir = is_dir
+
+    def exists(self) -> bool:
+        return True
+
+    def is_dir(self) -> bool:
+        return self._is_dir
+
+    def is_file(self) -> bool:
+        return not self._is_dir
+
+    def __str__(self) -> str:
+        return self._value
+
+
+def test_desktop_e2e_opens_vs_code_alias() -> None:
+    executor = FakeToolExecutor()
+    result = DesktopInteractionUseCase(executor).execute("Abre VS Code")
+
+    assert result == "✓ Abriendo VS Code."
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "VS Code"}
+
+
+def test_desktop_e2e_opens_explicit_existing_folder() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+    use_case._resolve_path = lambda _target: _ExistingPath(r"C:\AI\Atlas", is_dir=True)  # type: ignore[method-assign]
+
+    assert use_case.execute(r"Abre la carpeta C:\AI\Atlas") == r"✓ Abriendo C:\AI\Atlas."
+    assert executor.calls[0][0] == "desktop.open_folder"
+
+
+def test_desktop_e2e_opens_existing_path_as_folder() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+    use_case._resolve_path = lambda _target: _ExistingPath(r"C:\AI\Atlas", is_dir=True)  # type: ignore[method-assign]
+
+    assert use_case.execute(r"Abre C:\AI\Atlas") == r"✓ Abriendo C:\AI\Atlas."
+    assert executor.calls[0][0] == "desktop.open_folder"
+
+
+def test_desktop_e2e_keeps_existing_file_as_open_file() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+    use_case._resolve_path = lambda _target: _ExistingPath(r"C:\AI\Atlas\README.md", is_dir=False)  # type: ignore[method-assign]
+
+    assert use_case.execute(r"Abre C:\AI\Atlas\README.md") == r"✓ Abriendo C:\AI\Atlas\README.md."
+    assert executor.calls[0][0] == "desktop.open_file"
+
+
+def test_orchestrator_prioritizes_registered_desktop_folder() -> None:
+    executor = FakeToolExecutor()
+    desktop = DesktopInteractionUseCase(executor)
+
+    class CapabilityGap:
+        def handle(self, _prompt: str):
+            raise AssertionError("desktop.open_folder must not reach capability gap")
+
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(create_plan=lambda prompt: SimpleNamespace(task="chat", objective=prompt)),
+        router=Router(), model_manager=SimpleNamespace(), memory=ConversationMemory(),
+        registry=SimpleNamespace(get=lambda _name: None),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop, execution_conversation=CapabilityGap(),
+    )
+
+    assert orchestrator.process_prompt(r"Abre la carpeta C:\AI\Atlas", confirm=lambda _: "") == r"✓ Abriendo C:\AI\Atlas."
+    assert executor.calls[0][0] == "desktop.open_folder"

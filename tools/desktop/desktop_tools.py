@@ -173,6 +173,11 @@ class OpenApplicationTool(DesktopTool):
     def description(self) -> str:
         return "Open an installed desktop application."
 
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        """Opening a validated target is a direct low-risk desktop action."""
+        return ()
+
     def execute(
         self,
         context: ToolContext,
@@ -183,12 +188,6 @@ class OpenApplicationTool(DesktopTool):
             raise ValueError("Missing parameter 'application'.")
 
         query = str(application)
-        existing = self._controller.list_processes(query)
-
-        if existing:
-            pids = ", ".join(str(process.pid) for process in existing)
-            return f"{query} ya estaba abierto. PID: {pids}"
-
         pid = self._controller.open_application(query)
 
         if pid is None:
@@ -347,6 +346,11 @@ class OpenFolderTool(DesktopTool):
     def description(self) -> str:
         return "Open an existing folder."
 
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        """Opening a validated target is a direct low-risk desktop action."""
+        return ()
+
     def execute(
         self,
         context: ToolContext,
@@ -379,6 +383,11 @@ class OpenFileTool(DesktopTool):
     @property
     def description(self) -> str:
         return "Open an existing file."
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        """Opening a validated target is a direct low-risk desktop action."""
+        return ()
 
     def execute(
         self,

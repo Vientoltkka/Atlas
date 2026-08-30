@@ -560,6 +560,14 @@ class AtlasOrchestrator:
             self._memory.add_assistant(specialist_response)
             return specialist_response
 
+
+        if self._desktop_interaction is not None:
+            desktop_response = self._desktop_interaction.execute(
+                request.content,
+                confirm=confirm,
+            )
+            if desktop_response is not None:
+                return desktop_response
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
 
@@ -870,14 +878,6 @@ class AtlasOrchestrator:
             except Exception as error:
                 return "La autorización fue consumida, pero no se pudo escribir la propuesta. Motivo: " + str(error)
             return f"Cambio aplicado en '{change.relative_path}'.\n{result}"
-        if self._desktop_interaction is not None:
-            desktop_response = self._desktop_interaction.execute(
-                prompt,
-                confirm=confirm,
-            )
-
-            if desktop_response is not None:
-                return desktop_response
 
         if self._correction_interaction is not None:
             correction_response = self._correction_interaction.execute(

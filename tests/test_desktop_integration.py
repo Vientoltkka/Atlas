@@ -80,7 +80,7 @@ def test_desktop_interaction_runs_before_agent_routing() -> None:
 
     response = use_case.execute("Abre Visual Studio Code")
 
-    assert response == "\u2713 Visual Studio Code abierto."
+    assert response == "\u2713 Abriendo Visual Studio Code."
     assert executor.calls[0][0] == "desktop.open_application"
 
 
