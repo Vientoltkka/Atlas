@@ -70,6 +70,7 @@ Tu trabajo es:
         self._pending_change: PendingCodingChange | None = None
         self._pending_capability_plan: dict[str, object] | None = None
         self._applied_capability_change: AppliedCapabilityChange | None = None
+        self._validated_capability_change: AppliedCapabilityChange | None = None
         self._capability_validation_status: str | None = None
 
     @property
@@ -207,6 +208,7 @@ Código:
         if result.returncode != 0:
             return self._rollback_capability_change(change, tuple(path for path, _ in change.applied_contents), "Los tests focalizados fallaron.")
 
+        self._validated_capability_change = change
         self._applied_capability_change = None
         self._capability_validation_status = "VALIDATED"
         return "\n".join((
@@ -216,6 +218,60 @@ Código:
             "¿Apruebas cerrar y versionar esta mejora?",
         ))
 
+    def close_validated_capability_plan(self, capability_id: str, *, approved: bool) -> str:
+        """Commit exactly one still-intact validated capability after human approval."""
+        change = self._validated_capability_change
+        if (
+            change is None
+            or change.capability_id != capability_id
+            or self._capability_validation_status != "VALIDATED"
+        ):
+            return "No hay una mejora VALIDATED pendiente de cierre."
+        if not approved:
+            self._validated_capability_change = None
+            self._capability_validation_status = "CLOSURE_DECLINED"
+            return "Cierre/versionado no aprobado. La mejora validada se mantiene sin commit."
+
+        paths = tuple(relative_path for relative_path, _ in change.applied_contents)
+        applied = dict(change.applied_contents)
+        for relative_path in paths:
+            target = self._project_root / relative_path
+            current_content = target.read_text(encoding="utf-8") if target.exists() else None
+            if current_content != applied[relative_path]:
+                return "El cierre se detuvo: el archivo aprobado cambió desde la validación: " + relative_path
+
+        scope_status = self._git_command("status", "--porcelain", "--", *paths)
+        names = tuple(line[3:].strip() for line in scope_status.stdout.splitlines() if line.strip())
+        if scope_status.returncode != 0 or set(names) != set(paths):
+            return "El cierre se detuvo: el preflight no coincide exactamente con el alcance validado."
+
+        committed = self._git_command(
+            "commit",
+            "--only",
+            "-m",
+            "feat(supervision): close validated capability " + capability_id,
+            "--",
+            *paths,
+        )
+        if committed.returncode != 0:
+            return "El commit aprobado falló. La mejora permanece VALIDATED. Motivo: " + (committed.stderr or committed.stdout)
+        revision = self._git_command("rev-parse", "HEAD")
+        if revision.returncode != 0:
+            return "El commit fue creado, pero no se pudo confirmar su hash."
+
+        commit_hash = revision.stdout.strip()
+        self._clear_capability_state()
+        return "Mejora cerrada y versionada correctamente. Commit: " + commit_hash + ". Alcance limpio: " + ", ".join(paths)
+
+    def _git_command(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        """Run one explicit Git command in the project without push or reset."""
+        return subprocess.run(
+            ("git", *arguments),
+            cwd=self._project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     def _run_capability_tests(self) -> subprocess.CompletedProcess[str]:
         """Run only the focused tests bound to this approved capability."""
         return subprocess.run(
@@ -256,6 +312,7 @@ Código:
         """Forget transient apply state so restarts cannot repeat an action."""
         self._pending_capability_plan = None
         self._applied_capability_change = None
+        self._validated_capability_change = None
         self._capability_validation_status = None
     def authorize_pending_change(self, token: str) -> PendingCodingChange:
         """Consume a single token bound to the exact pending file change."""

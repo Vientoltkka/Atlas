@@ -196,6 +196,7 @@ class AtlasOrchestrator:
         self._capability_gap_detector = capability_gap_detector
         self._pending_capability_proposal: MissingCapabilityProposal | None = None
         self._prepared_capability_proposal: MissingCapabilityProposal | None = None
+        self._validated_capability_proposal: MissingCapabilityProposal | None = None
         self._last_structured_execution_response: (
             StructuredExecutionResponse | None
         ) = None
@@ -461,6 +462,10 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        closure_response = self._handle_validated_capability_closure(prompt)
+        if closure_response is not None:
+            return closure_response
+
         application_response = self._handle_prepared_capability_application(prompt)
         if application_response is not None:
             return application_response
@@ -606,6 +611,26 @@ class AtlasOrchestrator:
             focused_tests=proposal.focused_tests,
             risk=proposal.risk,
         ) + "\n¿Autorizas APLICAR este plan? [s/N]"
+    def _handle_validated_capability_closure(self, prompt: str) -> str | None:
+        """Require final human approval before closing a validated capability."""
+        proposal = self._validated_capability_proposal
+        if proposal is None:
+            return None
+        normalized = _normalize_confirmation_text(prompt)
+        if normalized not in {"si", "s", "vale", "ok", "de acuerdo", "adelante", "no", "n", "cancelar", "cancela"}:
+            return None
+        coding_agent = self._registry.get("coding")
+        close = getattr(coding_agent, "close_validated_capability_plan", None)
+        if not callable(close):
+            return "No hay un CodingAgent disponible para cerrar la mejora."
+        approved = normalized in {"si", "s", "vale", "ok", "de acuerdo", "adelante"}
+        response = close(proposal.capability_id, approved=approved)
+        if approved and getattr(coding_agent, "capability_validation_status", None) != "VALIDATED":
+            self._validated_capability_proposal = None
+        elif not approved:
+            self._validated_capability_proposal = None
+        return response
+
     def _handle_prepared_capability_application(self, prompt: str) -> str | None:
         """Require a second explicit authorization before applying a prepared plan."""
         proposal = self._prepared_capability_proposal
@@ -618,10 +643,14 @@ class AtlasOrchestrator:
         if normalized not in {"si", "s", "vale", "ok", "de acuerdo", "adelante"}:
             return None
         self._prepared_capability_proposal = None
-        apply = getattr(self._registry.get("coding"), "apply_prepared_capability_plan", None)
+        coding_agent = self._registry.get("coding")
+        apply = getattr(coding_agent, "apply_prepared_capability_plan", None)
         if not callable(apply):
             return "No hay un CodingAgent disponible para aplicar la mejora. No se han realizado cambios."
-        return apply(proposal.capability_id)
+        response = apply(proposal.capability_id)
+        if getattr(coding_agent, "capability_validation_status", None) == "VALIDATED":
+            self._validated_capability_proposal = proposal
+        return response
     def _temperature_conversion_response(self, prompt: str) -> str | None:
         """Run the registered deterministic temperature capability when requested."""
         if self._tool_registry is None:

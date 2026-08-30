@@ -116,3 +116,55 @@ def test_bootstrap_prepares_authorized_capability_plan_without_applying_changes(
     finally:
         atlas.close()
     assert response == "37 grados Celsius equivalen a 98.6 grados Fahrenheit."
+
+class FinalizationCodingAgent(PlanningCodingAgent):
+    def __init__(self):
+        super().__init__()
+        self.capability_validation_status = None
+        self.closures: list[bool] = []
+
+    def apply_prepared_capability_plan(self, capability_id):
+        self.applies += 1
+        self.capability_validation_status = "VALIDATED"
+        return "Validación completada correctamente. ¿Apruebas cerrar y versionar esta mejora?"
+
+    def close_validated_capability_plan(self, capability_id, *, approved):
+        self.closures.append(approved)
+        if not approved:
+            self.capability_validation_status = "CLOSURE_DECLINED"
+            return "Cierre/versionado no aprobado."
+        self.capability_validation_status = None
+        return "Mejora cerrada y versionada correctamente. Commit: abc123."
+
+
+def _finalization_orchestrator():
+    chat, coding, writer, manager = ChatAgent(), FinalizationCodingAgent(), WriteFile(), ModelManager()
+    app = AtlasOrchestrator(planner=SimpleNamespace(create_plan=lambda prompt: SimpleNamespace(task=prompt, objective=prompt)), router=Router(), model_manager=manager, memory=ConversationMemory(), registry=SimpleNamespace(get=lambda name: {"chat": chat, "coding": coding}.get(name)), write_file=writer, capability_gap_detector=_detector())
+    return app, coding, writer
+
+
+def test_final_approval_closes_only_a_validated_capability():
+    app, coding, writer = _finalization_orchestrator()
+    app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: "")
+    app.process_prompt("si", confirm=lambda _: "")
+    validation = app.process_prompt("si", confirm=lambda _: "")
+    response = app.process_prompt("si", confirm=lambda _: "")
+
+    assert "Validación completada correctamente" in validation
+    assert "Commit: abc123" in response
+    assert coding.closures == [True]
+    assert writer.calls == 0
+    assert app._validated_capability_proposal is None
+
+
+def test_final_rejection_never_closes_the_validated_capability():
+    app, coding, writer = _finalization_orchestrator()
+    app.process_prompt("Convierte 37 grados Celsius a Fahrenheit.", confirm=lambda _: "")
+    app.process_prompt("si", confirm=lambda _: "")
+    app.process_prompt("si", confirm=lambda _: "")
+    response = app.process_prompt("no", confirm=lambda _: "")
+
+    assert "no aprobado" in response
+    assert coding.closures == [False]
+    assert writer.calls == 0
+    assert app._validated_capability_proposal is None

@@ -135,3 +135,101 @@ def test_validation_flow_never_creates_a_commit() -> None:
 
     assert "git commit" not in source.lower()
     assert "subprocess.run" in source
+class _Git:
+    def __init__(self, *, commit_returncode: int = 0, staged_names: tuple[str, ...] = _ALLOWED) -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self._commit_returncode = commit_returncode
+        self._staged_names = staged_names
+
+    def run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        self.commands.append(arguments)
+        if arguments[0] == "status":
+            return subprocess.CompletedProcess(arguments, 0, "\n".join(" M " + name for name in self._staged_names), "")
+        if arguments[0] == "commit":
+            return subprocess.CompletedProcess(arguments, self._commit_returncode, "", "commit failed")
+        if arguments[0] == "rev-parse":
+            return subprocess.CompletedProcess(arguments, 0, "abc123\n", "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+
+def _validated_agent(tmp_path: Path, monkeypatch) -> tuple[CodingAgent, _Writer]:
+    writer = _Writer()
+    agent = _agent(tmp_path, writer)
+    monkeypatch.setattr(agent, "_run_capability_tests", lambda: _result(0))
+    agent.apply_prepared_capability_plan("unit.temperature-conversion")
+    assert agent.capability_validation_status == "VALIDATED"
+    return agent, writer
+
+
+def test_final_approval_commits_exactly_the_validated_scope(tmp_path, monkeypatch) -> None:
+    agent, _ = _validated_agent(tmp_path, monkeypatch)
+    git = _Git()
+    monkeypatch.setattr(agent, "_git_command", git.run)
+
+    response = agent.close_validated_capability_plan("unit.temperature-conversion", approved=True)
+
+    assert "Commit: abc123" in response
+    assert agent.capability_validation_status is None
+    assert git.commands[0] == ("status", "--porcelain", "--", *_ALLOWED)
+    assert git.commands[1][0:2] == ("commit", "--only")
+    assert git.commands[1][-4:] == ("--", *_ALLOWED)
+    assert all(command[0] != "push" for command in git.commands)
+
+
+def test_final_rejection_creates_no_commit_or_rollback(tmp_path, monkeypatch) -> None:
+    agent, writer = _validated_agent(tmp_path, monkeypatch)
+    git = _Git()
+    monkeypatch.setattr(agent, "_git_command", git.run)
+
+    response = agent.close_validated_capability_plan("unit.temperature-conversion", approved=False)
+
+    assert "no aprobado" in response
+    assert agent.capability_validation_status == "CLOSURE_DECLINED"
+    assert git.commands == []
+    assert len(writer.calls) == 3
+
+
+def test_final_approval_without_validated_change_runs_no_git(tmp_path, monkeypatch) -> None:
+    agent, _ = _agent(tmp_path, _Writer()), None
+    git = _Git()
+    monkeypatch.setattr(agent, "_git_command", git.run)
+
+    assert "No hay una mejora VALIDATED" in agent.close_validated_capability_plan("unit.temperature-conversion", approved=True)
+    assert git.commands == []
+
+
+def test_final_closure_aborts_when_validated_file_changes(tmp_path, monkeypatch) -> None:
+    agent, _ = _validated_agent(tmp_path, monkeypatch)
+    git = _Git()
+    monkeypatch.setattr(agent, "_git_command", git.run)
+    (tmp_path / _ALLOWED[0]).write_text("changed later", encoding="utf-8")
+
+    response = agent.close_validated_capability_plan("unit.temperature-conversion", approved=True)
+
+    assert "cambió desde la validación" in response
+    assert agent.capability_validation_status == "VALIDATED"
+    assert git.commands == []
+
+
+def test_final_closure_aborts_when_staged_scope_is_not_exact(tmp_path, monkeypatch) -> None:
+    agent, _ = _validated_agent(tmp_path, monkeypatch)
+    git = _Git(staged_names=(_ALLOWED[0], "unrelated.txt"))
+    monkeypatch.setattr(agent, "_git_command", git.run)
+
+    response = agent.close_validated_capability_plan("unit.temperature-conversion", approved=True)
+
+    assert "preflight no coincide exactamente" in response
+    assert agent.capability_validation_status == "VALIDATED"
+    assert [command[0] for command in git.commands] == ["status"]
+
+
+def test_final_commit_failure_keeps_validated_state(tmp_path, monkeypatch) -> None:
+    agent, _ = _validated_agent(tmp_path, monkeypatch)
+    git = _Git(commit_returncode=1)
+    monkeypatch.setattr(agent, "_git_command", git.run)
+
+    response = agent.close_validated_capability_plan("unit.temperature-conversion", approved=True)
+
+    assert "commit aprobado falló" in response
+    assert agent.capability_validation_status == "VALIDATED"
+    assert [command[0] for command in git.commands] == ["status", "commit"]
