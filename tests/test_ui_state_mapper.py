@@ -8,7 +8,12 @@ import sys
 
 import pytest
 
-from use_cases.ui_state_mapper import OrbVisualState, map_to_orb_state
+from core.execution_supervisor import ExecutionState
+from use_cases.ui_state_mapper import (
+    OrbVisualState,
+    map_supervision_state,
+    map_to_orb_state,
+)
 from use_cases.voice_conversation import VoiceConversationState
 
 
@@ -56,10 +61,17 @@ def test_visual_states_do_not_invent_core_states() -> None:
         "LISTENING",
         "PROCESSING",
         "SPEAKING",
+        "AUTHORIZATION",
         "RECOVERING",
         "DEGRADED",
         "STOPPING",
     }
+
+
+def test_real_supervision_wait_maps_to_authorization_and_clears() -> None:
+    assert map_supervision_state(ExecutionState.WAITING_CONFIRMATION) is OrbVisualState.AUTHORIZATION
+    assert map_supervision_state(ExecutionState.RUNNING) is OrbVisualState.PROCESSING
+    assert map_supervision_state(ExecutionState.CANCELLED) is OrbVisualState.IDLE
 
 
 def test_mapper_does_not_import_graphic_frameworks() -> None:

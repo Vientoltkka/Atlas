@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from enum import Enum
 
+from core.execution_supervisor import ExecutionState
 from use_cases.voice_conversation import VoiceConversationState
 
 
@@ -21,6 +22,7 @@ class OrbVisualState(str, Enum):
     LISTENING = "LISTENING"
     PROCESSING = "PROCESSING"
     SPEAKING = "SPEAKING"
+    AUTHORIZATION = "AUTHORIZATION"
     RECOVERING = "RECOVERING"
     DEGRADED = "DEGRADED"
     STOPPING = "STOPPING"
@@ -48,3 +50,18 @@ def map_to_orb_state(state: VoiceConversationState) -> OrbVisualState:
         raise ValueError(
             f"Estado de voz no reconocido para el Orbe: {state!r}"
         ) from error
+
+
+def map_supervision_state(state: ExecutionState) -> OrbVisualState:
+    """Map real supervised-execution lifecycle states to visual state."""
+    try:
+        execution_state = ExecutionState(state)
+    except ValueError as error:
+        raise ValueError(
+            f"Estado de supervision no reconocido para el Orbe: {state!r}"
+        ) from error
+    if execution_state is ExecutionState.WAITING_CONFIRMATION:
+        return OrbVisualState.AUTHORIZATION
+    if execution_state in {ExecutionState.RUNNING, ExecutionState.REPLANNING}:
+        return OrbVisualState.PROCESSING
+    return OrbVisualState.IDLE

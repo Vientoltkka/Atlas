@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
 
-from use_cases.ui_state_mapper import map_to_orb_state
+from use_cases.ui_state_mapper import map_supervision_state, map_to_orb_state
 
 
 class AtlasUiBridge(QObject):
@@ -39,6 +39,14 @@ class AtlasUiBridge(QObject):
         self.state_changed.emit(visual)
         self.voice_state_changed.emit(str(state.value if hasattr(state, "value") else state))
         self.message_received.emit(f"Estado: {visual.value}")
+
+    def on_supervision_state(self, state) -> None:
+        """Reflect only real supervised lifecycle transitions in the Orbe."""
+        try:
+            visual = map_supervision_state(state)
+        except ValueError:
+            return
+        self.state_changed.emit(visual)
 
     def on_message(self, message: str) -> None:
         text = str(message).strip()

@@ -132,8 +132,47 @@ def test_orb_repositions_beside_an_overlapping_transcript_panel(qapp, orb) -> No
 # ---------------------------------------------------------------------------
 
 
+def test_authorization_uses_distinct_amber_animation_without_extra_timer(orb) -> None:
+    assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 178, 58)
+    assert orbe_app.animation_period(OrbVisualState.AUTHORIZATION) == 2.4
+    orb.apply_state(OrbVisualState.AUTHORIZATION)
+    assert orb._timer.isActive()
+
+
+def test_listening_keeps_the_core_stable_while_animation_phase_advances() -> None:
+    first = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.0)
+    second = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.8)
+    assert first["scale"] == second["scale"] == 1.0
+    assert first["rotation_deg"] != second["rotation_deg"]
+
+
 def test_animation_rate_is_capped_for_the_desktop_widget() -> None:
     assert orbe_app.ANIMATION_FPS <= 24
+
+
+def test_idle_is_compact_and_active_states_are_much_larger(qapp, orb) -> None:
+    assert orbe_app.size_for_state(OrbVisualState.IDLE) == 280
+    for state in (OrbVisualState.LISTENING, OrbVisualState.PROCESSING, OrbVisualState.SPEAKING, OrbVisualState.AUTHORIZATION):
+        orb.apply_state(state)
+        assert orb.width() == orb.height() == orbe_app.size_for_state(state)
+        assert orb.width() >= 430
+
+
+def test_active_resize_repositions_beside_visible_transcript(qapp, orb) -> None:
+    from PySide6.QtCore import QRect
+
+    class Panel:
+        def frameGeometry(self):  # noqa: N802 (Qt API shape)
+            return QRect(100, 100, 100, 100)
+
+        def screen(self):
+            return orb.screen()
+
+    panel = Panel()
+    orb.move(100, 100)
+    orb.apply_state(OrbVisualState.PROCESSING)
+    orb.reposition_beside(panel)
+    assert not orb.frameGeometry().intersects(panel.frameGeometry())
 
 def test_animation_frame_is_pure_and_deterministic() -> None:
     first = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
@@ -167,8 +206,8 @@ def test_processing_rotates_and_listening_pulses() -> None:
     assert quarter["rotation_deg"] == pytest.approx(90.0, abs=2.0)
     assert three_quarters["rotation_deg"] == pytest.approx(270.0, abs=2.0)
 
-    peak = orbe_app.animation_frame(OrbVisualState.LISTENING, 0.4)
-    trough = orbe_app.animation_frame(OrbVisualState.LISTENING, 1.2)
+    peak = orbe_app.animation_frame(OrbVisualState.SPEAKING, 0.225)
+    trough = orbe_app.animation_frame(OrbVisualState.SPEAKING, 0.675)
     assert peak["scale"] > trough["scale"]
 
 

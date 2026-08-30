@@ -184,6 +184,10 @@ class _PendingPlan:
 class StructuredExecutionCoordinator:
     """Coordinate Planner, Validator and Executor without duplicating them."""
 
+    def add_supervision_state_listener(self, listener) -> None:
+        """Expose real supervisor transitions to passive UI observers."""
+        self._execution_supervisor.add_state_listener(listener)
+
     def __init__(
         self,
         planner: Planner,

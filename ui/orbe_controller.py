@@ -17,6 +17,13 @@ class _ChatHotkeyBridge(QObject):
     activated = Signal()
 
 
+class _VoiceSessionBridge(QObject):
+    """Tag queued worker callbacks so stale sessions cannot repaint the UI."""
+
+    state_received = Signal(int, object)
+    message_received = Signal(int, object)
+
+
 class OrbeController:
     """Own UI lifecycle; workers emit signals and never touch widgets."""
 
@@ -38,10 +45,14 @@ class OrbeController:
         self._bridge = AtlasUiBridge()
         self._stop_event = threading.Event()
         self._session_thread = None
+        self._session_generation = 0
         self._chat_threads: set[threading.Thread] = set()
         self._hotkey_factory = hotkey_factory
         self._chat_hotkey = None
         self._chat_hotkey_bridge = _ChatHotkeyBridge()
+        self._voice_session_bridge = _VoiceSessionBridge()
+        self._voice_session_bridge.state_received.connect(self._on_voice_state)
+        self._voice_session_bridge.message_received.connect(self._on_voice_message)
         self._bridge.state_changed.connect(self._orb.apply_state)
         self._bridge.voice_state_changed.connect(self._transcript_panel.set_voice_state)
         self._bridge.voice_disconnected.connect(self._transcript_panel.set_voice_disconnected)
@@ -51,6 +62,9 @@ class OrbeController:
         self._bridge.response_received.connect(self._transcript_panel.append_response)
         self._bridge.error_received.connect(self._transcript_panel.append_error)
         self._bridge.session_finished.connect(self._on_session_finished)
+        subscribe_supervision = getattr(self._atlas, "add_supervision_state_listener", None)
+        if callable(subscribe_supervision):
+            subscribe_supervision(self._bridge.on_supervision_state)
         self._orb.stop_requested.connect(self.stop)
         self._orb.quit_requested.connect(self.request_quit)
         self._transcript_panel.send_requested.connect(self.submit_text)
@@ -93,8 +107,15 @@ class OrbeController:
         if self._session_thread is not None and self._session_thread.is_alive():
             return
         self._stop_event = threading.Event()
+        self._session_generation += 1
+        generation = self._session_generation
+        self._orb.apply_state(OrbVisualState.STARTING)
+        self._transcript_panel.set_voice_state("STARTING")
         self._session_thread = threading.Thread(
-            target=self._run_session, daemon=True, name="atlas-orbe-voice"
+            target=self._run_session,
+            args=(generation, self._stop_event),
+            daemon=True,
+            name="atlas-orbe-voice",
         )
         self._session_thread.start()
 
@@ -112,7 +133,11 @@ class OrbeController:
             self.join()
 
     def stop(self) -> None:
+        """Acknowledge cancellation in the UI without waiting for a worker."""
         self._stop_event.set()
+        self._session_generation += 1
+        self._orb.apply_state(OrbVisualState.IDLE)
+        self._transcript_panel.set_voice_disconnected()
 
     def request_quit(self) -> None:
         self.stop()
@@ -138,21 +163,41 @@ class OrbeController:
         for worker in tuple(self._chat_threads):
             worker.join(timeout=timeout)
 
-    def _typed_input(self):
-        return "salir" if self._stop_event.is_set() else None
+    @staticmethod
+    def _typed_input(stop_event):
+        return "salir" if stop_event.is_set() else None
 
-    def _run_session(self) -> None:
+    def _run_session(self, generation: int, stop_event: threading.Event) -> None:
+        def is_current() -> bool:
+            return generation == self._session_generation and not stop_event.is_set()
+
+        def on_state(state) -> None:
+            self._voice_session_bridge.state_received.emit(generation, state)
+
+        def on_message(message) -> None:
+            self._voice_session_bridge.message_received.emit(generation, message)
+
         try:
             self._atlas.start_voice(
-                state_listener=self._bridge.on_state,
-                status_sink=self._bridge.on_message,
-                typed_input=self._typed_input,
+                state_listener=on_state,
+                status_sink=on_message,
+                typed_input=lambda: self._typed_input(stop_event),
             )
         except Exception as error:
             self._logger.error("Fallo en la sesion de voz del Orbe: %s", error)
-            self._bridge.on_voice_error("La sesion de voz ha terminado por un error.")
+            if is_current():
+                self._bridge.on_voice_error("La sesion de voz ha terminado por un error.")
         finally:
-            self._bridge.notify_session_finished()
+            if is_current():
+                self._bridge.notify_session_finished()
+
+    def _on_voice_state(self, generation: int, state) -> None:
+        if generation == self._session_generation:
+            self._bridge.on_state(state)
+
+    def _on_voice_message(self, generation: int, message) -> None:
+        if generation == self._session_generation:
+            self._bridge.on_message(message)
 
     def _run_text_prompt(self, prompt: str) -> None:
         try:

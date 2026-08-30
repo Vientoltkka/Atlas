@@ -19,6 +19,7 @@ from use_cases.voice_conversation import (
     VoiceConversationState,
     VoiceConversationUseCase,
 )
+from core.execution_supervisor import ExecutionState, ExecutionSupervisor
 from ui.atlas_bridge import AtlasUiBridge
 from ui.orbe_app import create_application, create_orb_window
 
@@ -86,6 +87,28 @@ def test_bridge_crosses_threads_via_signals(qapp) -> None:
     qapp.processEvents()
 
     assert orb.state is OrbVisualState.SPEAKING
+    orb.close()
+
+
+def test_real_supervisor_authorization_reaches_orb_and_clears(qapp) -> None:
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    orb = create_orb_window()
+    bridge = AtlasUiBridge()
+    bridge.state_changed.connect(orb.apply_state)
+    supervisor = ExecutionSupervisor()
+    supervisor.add_state_listener(bridge.on_supervision_state)
+    session = supervisor.start(SimpleNamespace(steps=()))
+
+    supervisor.mark_running(session.session_id)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.PROCESSING
+    supervisor.mark_waiting_confirmation(session.session_id)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.AUTHORIZATION
+    supervisor.mark_cancelled(session.session_id, error="denegado")
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.IDLE
     orb.close()
 
 
@@ -191,6 +214,29 @@ def test_transcript_panel_appends_without_session_logic(qapp) -> None:
     panel.append_message("Estado: LISTENING")
     panel.append_message("Estado: PROCESSING")
     assert "LISTENING" in panel._view.toPlainText()
+    panel.close()
+
+
+def test_controller_subscribes_only_when_atlas_exposes_real_supervision(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    class FakeAtlas:
+        def add_supervision_state_listener(self, listener) -> None:
+            self.listener = listener
+
+    atlas = FakeAtlas()
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
+    atlas.listener(ExecutionState.WAITING_CONFIRMATION)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.AUTHORIZATION
+    atlas.listener(ExecutionState.RUNNING)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.PROCESSING
+    orb.close()
     panel.close()
 
 
@@ -318,6 +364,42 @@ def test_voice_controls_stop_and_retry_without_touching_chat(qapp) -> None:
     assert len(calls) == 2
     controller.stop()
     controller.join(timeout=2)
+    orb.close()
+    panel.close()
+
+
+def test_stop_acknowledges_ui_before_a_blocked_voice_worker_returns(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class FakeAtlas:
+        def start_voice(self, *, state_listener, status_sink, typed_input) -> None:
+            state_listener(VoiceConversationState.PROCESSING)
+            entered.set()
+            assert release.wait(timeout=2)
+            state_listener(VoiceConversationState.SPEAKING)  # late worker event
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+    controller.start()
+    assert entered.wait(timeout=1)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.PROCESSING
+
+    panel._voice_stop_button.click()
+    assert orb.state is OrbVisualState.IDLE
+    assert panel._voice_status.text() == "Desconectado"
+    _drain_events(qapp)  # stale queued PROCESSING must not restore the core
+    assert orb.state is OrbVisualState.IDLE
+    release.set()
+    controller.join(timeout=2)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.IDLE
     orb.close()
     panel.close()
 

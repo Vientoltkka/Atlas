@@ -33,6 +33,10 @@ class Atlas:
     def process_prompt(self, prompt: str) -> str:
         """Process one textual Orbe request without blocking the UI thread."""
         return self._orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+    def add_supervision_state_listener(self, listener) -> None:
+        """Expose supervised execution transitions to an optional UI observer."""
+        self._orchestrator.add_supervision_state_listener(listener)
+
     def start_assistant(self) -> None:
         """Start Atlas in permanent assistant mode."""
 

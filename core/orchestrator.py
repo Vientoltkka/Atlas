@@ -221,6 +221,11 @@ class AtlasOrchestrator:
         """Expose the read-only internal execution-history query API."""
         return self._execution_history
 
+    def add_supervision_state_listener(self, listener) -> None:
+        """Attach a passive observer to real supervised execution state."""
+        if self._structured_execution_coordinator is not None:
+            self._structured_execution_coordinator.add_supervision_state_listener(listener)
+
     @property
     def execution_history_advisor(self) -> ExecutionHistoryAdvisor | None:
         """Expose consultation-only recommendations for planning callers."""

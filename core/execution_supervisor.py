@@ -429,7 +429,15 @@ class ExecutionSupervisor:
         )
         self._sessions: dict[str, ExecutionSession] = {}
         self._events: list[ExecutionSupervisorEvent] = []
+        self._state_listeners: set[Callable[[ExecutionState], None]] = set()
         self._lock = RLock()
+
+    def add_state_listener(self, listener: Callable[[ExecutionState], None]) -> None:
+        """Observe real lifecycle transitions without changing execution flow."""
+        if not callable(listener):
+            raise TypeError("listener must be callable.")
+        with self._lock:
+            self._state_listeners.add(listener)
 
     def start(
         self,
@@ -1359,7 +1367,18 @@ class ExecutionSupervisor:
             )
             self._sessions[session_id] = updated
         self._persist_session(updated)
+        self._notify_state_listeners(updated.state)
         return updated
+
+    def _notify_state_listeners(self, state: ExecutionState) -> None:
+        with self._lock:
+            listeners = tuple(self._state_listeners)
+        for listener in listeners:
+            try:
+                listener(state)
+            except Exception:
+                # Passive observers (for example, UI) never alter execution.
+                continue
 
     def _with_event(
         self,
