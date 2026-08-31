@@ -254,6 +254,16 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "copy_text",
+        "desktop.clipboard.copy",
+        (r"^\s*copia(?:\s+este\s+texto)?(?:\s*:\s*|\s+).+",),
+    ),
+    (
+        "paste_text",
+        "desktop.clipboard.paste",
+        (r"^\s*pega(?:\s+el\s+texto)?\s*$",),
+    ),
+    (
         "press_hotkey",
         "desktop.hotkey.press",
         (

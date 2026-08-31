@@ -500,40 +500,13 @@ def test_open_file_tool_requires_existing_file(tmp_path: Path) -> None:
     ]
 
 
-def test_type_text_requires_existing_window() -> None:
+def test_type_text_uses_current_foreground_window_without_selection() -> None:
     controller = FakeDesktopController()
     controller.windows.clear()
     tool = TypeTextTool(controller)
 
-    with pytest.raises(RuntimeError):
-        tool.execute(
-            ToolContext(
-                parameters={
-                    "window_title": "Visual Studio Code",
-                    "text": "print('Hola')",
-                }
-            )
-        )
-
-
-def test_type_text_activates_window_before_writing() -> None:
-    controller = FakeDesktopController()
-    tool = TypeTextTool(controller)
-
-    result = tool.execute(
-        ToolContext(
-            parameters={
-                "window_title": "Visual Studio Code",
-                "text": "print('Hola')",
-            }
-        )
-    )
-
-    assert result == "Texto escrito."
-    assert controller.calls == [
-        ("activate_window", "Visual Studio Code"),
-        ("type_text", "print('Hola')"),
-    ]
+    assert tool.execute(ToolContext(parameters={"text": "print('Hola')"})) == "Texto escrito."
+    assert controller.calls == [("type_text", "print('Hola')")]
 
 
 def test_copy_clipboard_text_tool_writes_unicode_text() -> None:
@@ -587,14 +560,11 @@ def test_paste_clipboard_tool_uses_ctrl_v_not_type_text() -> None:
     controller = FakeDesktopController()
     tool = PasteClipboardTool(controller)
 
-    result = tool.execute(
-        ToolContext(parameters={"window_title": "Visual Studio Code"})
-    )
+    result = tool.execute(ToolContext())
 
     assert result == "Contenido pegado."
     assert controller.calls == [
         ("clipboard_has_text", None),
-        ("activate_window", "Visual Studio Code"),
         ("press_hotkey", ["ctrl", "v"]),
     ]
     assert all(call[0] != "type_text" for call in controller.calls)
@@ -898,6 +868,92 @@ def test_bring_window_to_front_tool() -> None:
     assert result == "Ventana activada."
     assert controller.calls == [("bring_window_to_front", 10)]
 
+
+class _ForegroundUser32:
+    def __init__(self, *, direct: bool, fallback: bool, focus_error: bool = False) -> None:
+        self._direct = direct
+        self._fallback = fallback
+        self._focus_error = focus_error
+        self.foreground = 999
+        self.calls: list[tuple[str, object]] = []
+
+    def IsWindow(self, handle: int) -> bool:
+        self.calls.append(("IsWindow", handle))
+        return True
+
+    def ShowWindow(self, handle: int, _command: int) -> bool:
+        self.calls.append(("ShowWindow", handle))
+        return True
+
+    def SetForegroundWindow(self, handle: int) -> bool:
+        self.calls.append(("SetForegroundWindow", handle))
+        if len([call for call in self.calls if call[0] == "SetForegroundWindow"]) == 1:
+            if self._direct:
+                self.foreground = handle
+        elif self._fallback:
+            self.foreground = handle
+        return True
+
+    def GetForegroundWindow(self) -> int:
+        self.calls.append(("GetForegroundWindow", self.foreground))
+        return self.foreground
+
+    def GetWindowThreadProcessId(self, handle: int, _process_id) -> int:
+        return 10 if handle == 999 else 20
+
+    def AttachThreadInput(self, first: int, second: int, attach: bool) -> bool:
+        self.calls.append(("AttachThreadInput", (first, second, attach)))
+        return True
+
+    def BringWindowToTop(self, handle: int) -> bool:
+        self.calls.append(("BringWindowToTop", handle))
+        return True
+
+    def SetFocus(self, handle: int) -> int:
+        self.calls.append(("SetFocus", handle))
+        if self._focus_error:
+            raise RuntimeError("focus failure")
+        return handle
+
+
+def _foreground_controller(user32: _ForegroundUser32) -> WindowsDesktopController:
+    controller = WindowsDesktopController()
+    controller._USER32 = user32
+    return controller
+
+
+def test_windows_controller_bring_window_to_front_succeeds_directly() -> None:
+    user32 = _ForegroundUser32(direct=True, fallback=False)
+
+    _foreground_controller(user32).bring_window_to_front(123)
+
+    assert ("AttachThreadInput", (10, 20, True)) not in user32.calls
+
+
+def test_windows_controller_bring_window_to_front_uses_foreground_target_fallback() -> None:
+    user32 = _ForegroundUser32(direct=False, fallback=True)
+
+    _foreground_controller(user32).bring_window_to_front(123)
+
+    assert ("AttachThreadInput", (10, 20, True)) in user32.calls
+    assert ("AttachThreadInput", (10, 20, False)) in user32.calls
+    assert ("SetFocus", 123) in user32.calls
+
+
+def test_windows_controller_rejects_unfocused_handle_after_activation() -> None:
+    user32 = _ForegroundUser32(direct=False, fallback=False)
+
+    with pytest.raises(RuntimeError, match="No se pudo activar la ventana"):
+        _foreground_controller(user32).bring_window_to_front(123)
+
+
+def test_windows_controller_detaches_threads_when_focus_fails() -> None:
+    user32 = _ForegroundUser32(direct=False, fallback=True, focus_error=True)
+
+    with pytest.raises(RuntimeError, match="focus failure"):
+        _foreground_controller(user32).bring_window_to_front(123)
+
+    assert ("AttachThreadInput", (10, 20, False)) in user32.calls
 
 def test_maximize_window_tool() -> None:
     controller = FakeDesktopController()

@@ -419,7 +419,7 @@ class OpenFileTool(DesktopTool):
 
 
 class TypeTextTool(DesktopTool):
-    """Type text into an existing target window."""
+    """Type literal text into the current foreground window."""
 
     @property
     def name(self) -> str:
@@ -427,7 +427,7 @@ class TypeTextTool(DesktopTool):
 
     @property
     def description(self) -> str:
-        return "Type text into an existing target window."
+        return "Type literal text into the current foreground window."
 
     @property
     def requires_confirmation(self) -> bool:
@@ -442,8 +442,6 @@ class TypeTextTool(DesktopTool):
         if text is None:
             raise ValueError("Missing parameter 'text'.")
 
-        title = self._window_title(context)
-        self._controller.activate_window(title)
         self._controller.type_text(str(text))
 
         return "Texto escrito."
@@ -529,7 +527,7 @@ class ClipboardHasTextTool(DesktopTool):
 
 
 class PasteClipboardTool(DesktopTool):
-    """Paste clipboard content into an existing target window."""
+    """Paste clipboard content into the current foreground window."""
 
     @property
     def name(self) -> str:
@@ -537,18 +535,19 @@ class PasteClipboardTool(DesktopTool):
 
     @property
     def description(self) -> str:
-        return "Paste clipboard content into an existing target window."
+        return "Paste clipboard content into the current foreground window."
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return True
 
     def execute(
         self,
         context: ToolContext,
     ) -> str:
-        title = self._window_title(context)
-
         if not self._controller.clipboard_has_text():
             raise RuntimeError("El portapapeles no contiene texto.")
 
-        self._controller.activate_window(title)
         self._controller.press_hotkey(["ctrl", "v"])
 
         return "Contenido pegado."
@@ -834,6 +833,9 @@ class ListWindowsTool(DesktopTool):
     """List visible windows matching a title."""
 
     @property
+    def required_permissions(self) -> tuple[str, ...]:
+        return ()
+    @property
     def name(self) -> str:
         return "desktop.list_windows"
 
@@ -845,12 +847,7 @@ class ListWindowsTool(DesktopTool):
         self,
         context: ToolContext,
     ) -> list[dict[str, object]]:
-        title = context.parameters.get("title")
-
-        if not title:
-            raise ValueError("Missing parameter 'title'.")
-
-        return self._controller.list_windows(str(title))
+        return self._controller.list_windows()
 
 
 class GetWindowRectTool(DesktopTool):

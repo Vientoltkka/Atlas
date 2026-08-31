@@ -574,10 +574,7 @@ def test_desktop_interaction_types_text() -> None:
 
     assert result == "\u2713 Texto escrito."
     assert executor.calls[0][0] == "desktop.type_text"
-    assert executor.calls[0][1].parameters == {
-        "window_title": "Visual Studio Code",
-        "text": 'print("Hola")',
-    }
+    assert executor.calls[0][1].parameters == {"text": 'print("Hola")'}
 
 
 def test_desktop_interaction_copies_clipboard_text() -> None:
@@ -601,6 +598,23 @@ def test_desktop_interaction_preserves_clipboard_copy_text_exactly() -> None:
 
     assert result.endswith(f"Caracteres: {len(text)}")
     assert executor.calls[0][1].parameters == {"text": text}
+
+
+def test_desktop_interaction_routes_minimum_active_window_text_commands() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute("Escribe el texto Prueba operativa") == "✓ Texto escrito."
+    assert executor.calls[-1][0] == "desktop.type_text"
+    assert executor.calls[-1][1].parameters == {"text": "Prueba operativa"}
+
+    assert use_case.execute("Copia este texto: Atlas clipboard OK").endswith("Caracteres: 18")
+    assert executor.calls[-1][0] == "desktop.copy_clipboard_text"
+    assert executor.calls[-1][1].parameters == {"text": "Atlas clipboard OK"}
+
+    assert use_case.execute("Pega el texto", confirm=lambda _: "s") == "✓ Contenido pegado."
+    assert executor.calls[-1][0] == "desktop.paste_clipboard"
+    assert executor.calls[-1][1].parameters == {}
 
 
 def test_desktop_interaction_copies_clipboard_text_without_colon() -> None:
@@ -717,10 +731,7 @@ def test_desktop_interaction_paste_requires_confirmation() -> None:
     result = use_case.execute("pega el portapapeles")
 
     assert result == "Pegado cancelado."
-    assert [call[0] for call in executor.calls] == [
-        "desktop.clipboard_has_text",
-        "desktop.get_foreground_window",
-    ]
+    assert [call[0] for call in executor.calls] == ["desktop.clipboard_has_text"]
 
 
 def test_desktop_interaction_paste_cancels_with_empty_or_no() -> None:
@@ -748,15 +759,15 @@ def test_desktop_interaction_does_not_paste_without_text() -> None:
     assert [call[0] for call in executor.calls] == ["desktop.clipboard_has_text"]
 
 
-def test_desktop_interaction_does_not_paste_without_valid_window() -> None:
+def test_desktop_interaction_pastes_without_window_selection() -> None:
     executor = FakeToolExecutor()
     executor.windows = []
     use_case = DesktopInteractionUseCase(executor)
 
-    result = use_case.execute("pega el portapapeles", confirm=lambda _: "s")
+    result = use_case.execute("pega", confirm=lambda _: "s")
 
-    assert result == "Error: missing"
-    assert all(call[0] != "desktop.paste_clipboard" for call in executor.calls)
+    assert result == "✓ Contenido pegado."
+    assert [call[0] for call in executor.calls] == ["desktop.clipboard_has_text", "desktop.paste_clipboard"]
 
 
 def test_desktop_interaction_pastes_with_ctrl_v_tool_after_yes() -> None:
@@ -768,12 +779,9 @@ def test_desktop_interaction_pastes_with_ctrl_v_tool_after_yes() -> None:
     assert result == "\u2713 Contenido pegado."
     assert [call[0] for call in executor.calls] == [
         "desktop.clipboard_has_text",
-        "desktop.get_foreground_window",
         "desktop.paste_clipboard",
     ]
-    assert executor.calls[2][1].parameters == {
-        "window_title": "Visual Studio Code - Atlas"
-    }
+    assert executor.calls[1][1].parameters == {}
 
 
 def test_desktop_interaction_saves_file() -> None:

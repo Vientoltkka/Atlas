@@ -309,8 +309,11 @@ class Bootstrap:
             ("desktop.application.open", "desktop.open_application"),
             ("desktop.file.open", "desktop.open_file"),
             ("desktop.text.type", "desktop.type_text"),
+            ("desktop.clipboard.copy", "desktop.copy_clipboard_text"),
+            ("desktop.clipboard.paste", "desktop.paste_clipboard"),
             ("desktop.hotkey.press", "desktop.press_hotkey"),
             ("desktop.windows.list", "desktop.list_windows"),
+            ("desktop.window.bring_to_front", "desktop.bring_window_to_front"),
         ):
             if registry.exists(tool_name):
                 intent_registry.register(action, tool_name)
@@ -434,15 +437,18 @@ class Bootstrap:
                 "desktop.text.type",
                 (
                     ArgumentField("text", str, required=True, description="Text to type."),
-                    ArgumentField(
-                        "window_title",
-                        str,
-                        required=True,
-                        description="Target window title.",
-                    ),
                 ),
             )
         )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.clipboard.copy",
+                (
+                    ArgumentField("text", str, required=True, description="Text to copy."),
+                ),
+            )
+        )
+        schema_registry.register(ArgumentSchema("desktop.clipboard.paste", ()))
         schema_registry.register(
             ArgumentSchema(
                 "desktop.hotkey.press",
@@ -477,6 +483,19 @@ class Bootstrap:
             )
         )
 
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.window.bring_to_front",
+                (
+                    ArgumentField(
+                        "handle",
+                        int,
+                        required=True,
+                        description="Exact target window handle.",
+                    ),
+                ),
+            )
+        )
         return schema_registry
 
     @staticmethod
@@ -1120,7 +1139,8 @@ class Bootstrap:
                 selector=tool_selector,
                 validator=argument_validator,
                 single_tool_runner=single_tool_runner,
-            )
+            ),
+            restore_pending_target=desktop_interaction.restore_external_foreground_handle,
         )
 
         # -----------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import re
 from typing import Callable
@@ -19,6 +20,7 @@ from use_cases.verified_text_file import (
 )
 from use_cases.wait_engine import WaitEngine, WaitResult
 from tools.executor import ToolExecutor
+from tools.desktop.windows_controller import DesktopController, WindowsDesktopController
 from tools.tool_context import ToolContext
 
 
@@ -37,6 +39,7 @@ class DesktopInteractionUseCase:
         restart_application: RestartApplicationUseCase | None = None,
         create_verified_text_file: CreateVerifiedTextFileUseCase | None = None,
         wait_engine: WaitEngine | None = None,
+        focus_controller: DesktopController | None = None,
     ) -> None:
         self._executor = executor
         self._project_root = project_root or Path(".")
@@ -49,6 +52,22 @@ class DesktopInteractionUseCase:
         self._restart_application = restart_application
         self._create_verified_text_file = create_verified_text_file
         self._wait_engine = wait_engine or WaitEngine(executor)
+        self._focus_controller = focus_controller or WindowsDesktopController()
+
+    def capture_external_foreground_handle(self) -> int:
+        """Capture the exact active external HWND for one pending text action."""
+        window = self._focus_controller.get_foreground_window()
+        handle = window.get("handle")
+        if not isinstance(handle, int) or handle <= 0:
+            raise RuntimeError("No se pudo identificar la ventana destino.")
+        if self._focus_controller.get_window_process_id(handle) == os.getpid():
+            raise RuntimeError("No hay una ventana externa activa para escribir.")
+        return handle
+
+    def restore_external_foreground_handle(self, handle: int) -> None:
+        """Validate and reactivate the exact HWND captured for a pending action."""
+        self._focus_controller.get_window_rect(handle)
+        self._focus_controller.bring_window_to_front(handle)
 
     def execute(
         self,
@@ -215,10 +234,7 @@ class DesktopInteractionUseCase:
                 content = self._extract_text_to_type(text)
                 return self._run(
                     "desktop.type_text",
-                    {
-                        "window_title": self._DEFAULT_WINDOW_TITLE,
-                        "text": content,
-                    },
+                    {"text": content},
                     "Texto escrito.",
                 )
 
@@ -865,6 +881,8 @@ class DesktopInteractionUseCase:
         if normalized in {
             "copia al portapapeles",
             "copia este texto al portapapeles",
+            "copia este texto",
+            "copia",
             "copiar al portapapeles",
             "copiar",
         }:
@@ -925,14 +943,14 @@ class DesktopInteractionUseCase:
             raise ValueError("Orden incompleta: falta el portapapeles.")
 
         if normalized in {
+            "pega",
+            "pega el texto",
             "pega el portapapeles",
             "pega el contenido del portapapeles",
             "paste clipboard",
         }:
             return self._paste_clipboard(confirm)
 
-        if normalized == "pega":
-            raise ValueError("Orden incompleta: falta el portapapeles.")
 
         return None
 
@@ -942,8 +960,10 @@ class DesktopInteractionUseCase:
     ) -> str | None:
         """Extract copy text from supported clipboard commands."""
         patterns = (
+            r"^\s*copia\s+este\s+texto\s*:\s*(.*)$",
             r"^\s*copia\s+al\s+portapapeles\s*:\s*(.*)$",
             r"^\s*copia\s+este\s+texto\s+al\s+portapapeles\s*:\s*(.*)$",
+            r"^\s*copia\s+(?!al\s+portapapeles\s*$)(.+)$",
             r"^\s*copiar\s+al\s+portapapeles\s+(.+)$",
         )
 
@@ -975,22 +995,12 @@ class DesktopInteractionUseCase:
         if has_text is not True:
             raise RuntimeError("El portapapeles no contiene texto.")
 
-        window = self._executor.execute(
-            "desktop.get_foreground_window",
-            ToolContext(),
-        )
-
-        if not isinstance(window, dict) or not window.get("title"):
-            raise RuntimeError("No existe una ventana destino valida.")
-
-        title = str(window["title"])
-
-        if not self._confirmed_paste_clipboard(confirm, title):
+        if not self._confirmed_paste_clipboard(confirm):
             return "Pegado cancelado."
 
         return self._run(
             "desktop.paste_clipboard",
-            {"window_title": title},
+            {},
             "Contenido pegado.",
         )
 
@@ -1014,15 +1024,12 @@ class DesktopInteractionUseCase:
     def _confirmed_paste_clipboard(
         self,
         confirm: Callable[[str], str] | None,
-        title: str,
     ) -> bool:
-        """Return whether the user explicitly confirmed pasting clipboard."""
+        """Return whether the user explicitly confirmed active-window paste."""
         if confirm is None:
             return False
 
-        response = confirm(
-            f"Â¿Confirmas pegar el contenido en \"{title}\"? [s/N]: "
-        )
+        response = confirm("Â¿Confirmas pegar el contenido en la ventana activa? [s/N]: ")
 
         return self._normalize(response) in {
             "s",
@@ -1110,6 +1117,20 @@ class DesktopInteractionUseCase:
         if normalized in {"mueve el raton", "mueve el cursor"}:
             return None
 
+        if normalized in {
+            "que ventanas tengo abiertas",
+            "lista las ventanas abiertas",
+            "muestrame las ventanas abiertas",
+        }:
+            result = self._executor.execute(
+                "desktop.list_windows",
+                ToolContext(parameters={}),
+            )
+            if not isinstance(result, list):
+                raise RuntimeError("Respuesta de ventanas invalida.")
+            lines = ["Ventanas abiertas:"]
+            lines.extend(f"- {window['title']}" for window in result)
+            return "\n".join(lines)
         if normalized.startswith("lista ventanas de "):
             title = text[len("lista ventanas de ") :].strip()
             matches = self._list_windows(title)
@@ -1154,14 +1175,10 @@ class DesktopInteractionUseCase:
             )
 
         if normalized.startswith("activa "):
-            title = text[len("activa ") :].strip()
-            return self._window_state_action(
-                title,
-                "desktop.bring_window_to_front",
-                "Ventana activada",
-                confirm,
-            )
+            return self._activate_window(text[len("activa ") :].strip())
 
+        if normalized.startswith("pon ") and normalized.endswith(" delante"):
+            return self._activate_window(text[len("pon ") : -len(" delante")].strip())
         if normalized.startswith("cierra "):
             title = text[len("cierra ") :].strip()
             return self._close_window(title, confirm)
@@ -1190,6 +1207,46 @@ class DesktopInteractionUseCase:
 
         return None
 
+    def _activate_window(self, title: str) -> str:
+        """Activate one unambiguously matched window by exact HWND."""
+        resolved = self.resolve_window_for_activation(title)
+        if isinstance(resolved, str):
+            return resolved
+
+        handle, resolved_title = resolved
+        self._executor.execute(
+            "desktop.bring_window_to_front",
+            ToolContext(parameters={"handle": handle}),
+        )
+        return f"{self._CONFIRMATION_PREFIX} Ventana activada:\n{resolved_title}"
+
+    def resolve_window_for_activation(self, title: str) -> tuple[int, str] | str:
+        """Resolve one activation target without bringing it to the foreground."""
+        query = self._normalize(title)
+        if not query:
+            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        result = self._executor.execute(
+            "desktop.list_windows",
+            ToolContext(parameters={}),
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de ventanas invalida.")
+
+        matches = [
+            window
+            for window in result
+            if query in self._normalize(str(window.get("title", "")))
+        ]
+        if not matches:
+            return f"No se encontro ninguna ventana para '{title}'."
+        if len(matches) > 1:
+            return "Varias ventanas coinciden:\n" + "\n".join(
+                f"- {window['title']}" for window in matches
+            )
+
+        window = matches[0]
+        return int(window["handle"]), str(window["title"])
     def _window_state_action(
         self,
         title: str,
@@ -1492,6 +1549,9 @@ class DesktopInteractionUseCase:
             return content.lstrip("\r\n ")
 
         content = text[len("Escribe") :].strip()
+
+        if content.lower().startswith("el texto "):
+            content = content[len("el texto ") :]
 
         if not content:
             raise ValueError("Falta el texto a escribir.")

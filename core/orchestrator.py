@@ -521,6 +521,48 @@ class AtlasOrchestrator:
 
         # Specialized agents bypass the legacy execution-conversation gate
         # while reusing Atlas' existing model health/fallback pipeline.
+        if self._desktop_interaction is not None and self._execution_conversation is not None:
+            activation_title = _conversational_activation_window_title(request.content)
+            if activation_title is not None:
+                resolved = self._desktop_interaction.resolve_window_for_activation(
+                    activation_title,
+                )
+                if isinstance(resolved, str):
+                    return resolved
+                target_handle, target_title = resolved
+                outcome = self._execution_conversation.handle_registered_tool(
+                    "desktop.bring_window_to_front",
+                    {"handle": target_handle},
+                    original_text=request.content,
+                    confirmation_text=(
+                        f"Voy a activar '{target_title}'. ¿Confirmas?"
+                    ),
+                    pending_target_handle=target_handle,
+                )
+                return outcome.text
+            if _is_conversational_type_text_request(request.content):
+                content = self._desktop_interaction._extract_text_to_type(  # noqa: SLF001
+                    request.content,
+                )
+                target_handle = self._desktop_interaction.capture_external_foreground_handle()
+                outcome = self._execution_conversation.handle_registered_tool(
+                    "desktop.type_text",
+                    {"text": content},
+                    original_text=request.content,
+                    confirmation_text="Voy a escribir en la ventana activa. ¿Confirmas?",
+                    pending_target_handle=target_handle,
+                )
+                return outcome.text
+            if _is_conversational_paste_request(request.content):
+                target_handle = self._desktop_interaction.capture_external_foreground_handle()
+                outcome = self._execution_conversation.handle_registered_tool(
+                    "desktop.paste_clipboard",
+                    {},
+                    original_text=request.content,
+                    confirmation_text="Voy a pegar el contenido del portapapeles en la ventana activa. ¿Confirmas?",
+                    pending_target_handle=target_handle,
+                )
+                return outcome.text
         specialist_decision = self.classify_request(request)
         if specialist_decision.route is RequestRoute.AGENT_DELEGATION:
             agent_name = specialist_decision.target_agent_name
@@ -595,7 +637,6 @@ class AtlasOrchestrator:
 
             if not outcome.direct_response_required:
                 return outcome.text
-
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
             return direct_response
@@ -2203,6 +2244,35 @@ def _with_message_prefix(
 ) -> StructuredExecutionResponse:
     return replace(response, message=prefix + response.message)
 
+
+def _conversational_activation_window_title(prompt: str) -> str | None:
+    """Return the requested title for the narrowly supported activation command."""
+    normalized = " ".join(prompt.strip().split())
+    if not normalized.casefold().startswith("activa "):
+        return None
+    title = normalized[len("activa ") :].strip()
+    return title or None
+
+def _is_conversational_type_text_request(prompt: str) -> bool:
+    """Recognize active-window typing requests, excluding file writes."""
+    normalized = " ".join(prompt.strip().lower().split())
+    if not normalized.startswith("escribe ") and not normalized.startswith("escribe:"):
+        return False
+    if re.search(r"\ben\s+(?:la\s+)?(?:ventana\s+)?[^ ]+\.[a-z0-9]{1,8}$", normalized):
+        return False
+    return len(normalized) > len("escribe")
+
+
+def _is_conversational_paste_request(prompt: str) -> bool:
+    """Recognize the active-window clipboard paste command."""
+    normalized = " ".join(prompt.strip().lower().split())
+    return normalized in {
+        "pega",
+        "pega el texto",
+        "pega el portapapeles",
+        "pega el contenido del portapapeles",
+        "paste clipboard",
+    }
 
 def _requests_pdf_export(text: str) -> bool:
     normalized = unicodedata.normalize("NFD", text.casefold())

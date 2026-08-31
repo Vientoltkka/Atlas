@@ -588,7 +588,7 @@ def create_transcript_panel():
             self._hide_on_close = False
             self.setWindowTitle("Atlas - transcripcion")
             self.setObjectName("atlasTranscriptPanel")
-            self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+            self.setWindowFlags(Qt.WindowType.Window)
             self.resize(360, 220)
             layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)

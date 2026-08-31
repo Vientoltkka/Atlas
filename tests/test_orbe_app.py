@@ -66,6 +66,16 @@ def test_window_is_frameless_translucent_and_on_top(qapp, orb) -> None:
     assert orb.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
+def test_transcript_panel_is_a_normal_window_and_not_on_top(qapp) -> None:
+    from PySide6.QtCore import Qt
+
+    panel = orbe_app.create_transcript_panel()
+    flags = panel.windowFlags()
+
+    assert flags & Qt.WindowType.WindowType_Mask == Qt.WindowType.Window
+    assert not flags & Qt.WindowType.WindowStaysOnTopHint
+    panel.close()
+
 def test_drag_moves_window(qapp, orb) -> None:
     from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent

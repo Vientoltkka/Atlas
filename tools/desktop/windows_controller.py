@@ -88,14 +88,16 @@ class DesktopController(Protocol):
     def capture_screen(self, path: Path) -> None:
         """Capture the full screen as PNG."""
 
-    def list_windows(self, title: str) -> list[dict[str, object]]:
-        """List visible windows matching title."""
+    def list_windows(self) -> list[dict[str, object]]:
+        """List visible top-level windows with a non-empty title."""
 
     def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
         """Return a window rectangle."""
-
     def get_foreground_window(self) -> dict[str, object]:
         """Return the current foreground window."""
+
+    def get_window_process_id(self, handle: int) -> int:
+        """Return the process that owns an exact window handle."""
 
     def bring_window_to_front(self, handle: int) -> None:
         """Bring a window to the foreground."""
@@ -188,6 +190,8 @@ class WindowsDesktopController:
     _USER32.ShowWindow.restype = wintypes.BOOL
     _USER32.SetForegroundWindow.argtypes = (wintypes.HWND,)
     _USER32.SetForegroundWindow.restype = wintypes.BOOL
+    _USER32.SetFocus.argtypes = (wintypes.HWND,)
+    _USER32.SetFocus.restype = wintypes.HWND
     _USER32.BringWindowToTop.argtypes = (wintypes.HWND,)
     _USER32.BringWindowToTop.restype = wintypes.BOOL
     _USER32.GetForegroundWindow.restype = wintypes.HWND
@@ -644,53 +648,43 @@ class WindowsDesktopController:
 
             self._USER32.ReleaseDC(None, screen_dc)
 
-    def list_windows(self, title: str) -> list[dict[str, object]]:
-        """List visible windows matching title."""
-        target = title.strip().lower()
+    def list_windows(self) -> list[dict[str, object]]:
+        """List visible top-level windows with a non-empty title."""
         windows: list[dict[str, object]] = []
-
-        enum_windows_proc = ctypes.WINFUNCTYPE(
+        callback_type = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
             wintypes.HWND,
             wintypes.LPARAM,
         )
 
-        def callback(
-            handle: int,
-            _: int,
-        ) -> bool:
+        def callback(handle: int, _: int) -> bool:
+            if not self._USER32.IsWindow(handle):
+                return True
             if not self._USER32.IsWindowVisible(handle):
                 return True
-
             length = self._USER32.GetWindowTextLengthW(handle)
-
-            if length == 0:
+            if length <= 0:
                 return True
-
             buffer = ctypes.create_unicode_buffer(length + 1)
             self._USER32.GetWindowTextW(handle, buffer, length + 1)
-            window_title = buffer.value
-
-            if target and target not in window_title.lower():
+            title = buffer.value.strip()
+            if not title:
                 return True
-
+            process_id = wintypes.DWORD()
+            self._USER32.GetWindowThreadProcessId(handle, ctypes.byref(process_id))
+            if process_id.value <= 0:
+                return True
             windows.append(
                 {
                     "handle": int(handle),
-                    "title": window_title,
-                    "rect": self.get_window_rect(int(handle)),
-                    "order": len(windows),
+                    "title": title,
+                    "process_id": int(process_id.value),
                 }
             )
-
             return True
 
-        self._USER32.EnumWindows(enum_windows_proc(callback), 0)
-
-        return sorted(
-            windows,
-            key=lambda item: (str(item["title"]).lower(), int(item["handle"])),
-        )
+        self._USER32.EnumWindows(callback_type(callback), 0)
+        return windows
 
     def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
         """Return a window rectangle."""
@@ -706,7 +700,6 @@ class WindowsDesktopController:
             int(rect.right),
             int(rect.bottom),
         )
-
     def get_foreground_window(self) -> dict[str, object]:
         """Return the current foreground window."""
         handle = int(self._USER32.GetForegroundWindow())
@@ -724,14 +717,26 @@ class WindowsDesktopController:
             "rect": self.get_window_rect(handle),
         }
 
+    def get_window_process_id(self, handle: int) -> int:
+        """Return the process that owns an exact window handle."""
+        self._ensure_window(handle)
+        process_id = wintypes.DWORD()
+        self._USER32.GetWindowThreadProcessId(handle, ctypes.byref(process_id))
+        if process_id.value <= 0:
+            raise RuntimeError("No se pudo obtener el proceso de la ventana.")
+        return int(process_id.value)
+
     def bring_window_to_front(self, handle: int) -> None:
         """Bring a window to the foreground."""
         self._ensure_window(handle)
         self._USER32.ShowWindow(handle, self._SW_RESTORE)
+        self._USER32.SetForegroundWindow(handle)
 
-        if not self._USER32.SetForegroundWindow(handle) and not (
-            self._attach_and_set_foreground(handle)
-        ):
+        if int(self._USER32.GetForegroundWindow()) == handle:
+            return
+
+        self._attach_and_set_foreground(handle)
+        if int(self._USER32.GetForegroundWindow()) != handle:
             raise RuntimeError("No se pudo activar la ventana.")
 
     def maximize_window(self, handle: int) -> None:
@@ -1164,52 +1169,38 @@ class WindowsDesktopController:
     def _attach_and_set_foreground(
         self,
         handle: int,
-    ) -> bool:
-        """Try foreground activation by temporarily joining input queues."""
-        foreground = self._USER32.GetForegroundWindow()
-        current_thread = self._KERNEL32.GetCurrentThreadId()
+    ) -> None:
+        """Try foreground activation by temporarily joining exact input queues."""
+        foreground = int(self._USER32.GetForegroundWindow())
         target_thread = self._USER32.GetWindowThreadProcessId(handle, None)
         foreground_thread = (
             self._USER32.GetWindowThreadProcessId(foreground, None)
             if foreground
             else 0
         )
-
-        attached_target = False
-        attached_foreground = False
+        attached = False
 
         try:
-            if target_thread and target_thread != current_thread:
-                attached_target = bool(
+            if (
+                foreground_thread
+                and target_thread
+                and foreground_thread != target_thread
+            ):
+                attached = bool(
                     self._USER32.AttachThreadInput(
-                        current_thread,
+                        foreground_thread,
                         target_thread,
                         True,
                     )
                 )
 
-            if foreground_thread and foreground_thread != current_thread:
-                attached_foreground = bool(
-                    self._USER32.AttachThreadInput(
-                        current_thread,
-                        foreground_thread,
-                        True,
-                    )
-                )
-
             self._USER32.BringWindowToTop(handle)
-            return bool(self._USER32.SetForegroundWindow(handle))
+            self._USER32.SetForegroundWindow(handle)
+            self._USER32.SetFocus(handle)
         finally:
-            if attached_foreground:
+            if attached:
                 self._USER32.AttachThreadInput(
-                    current_thread,
                     foreground_thread,
-                    False,
-                )
-
-            if attached_target:
-                self._USER32.AttachThreadInput(
-                    current_thread,
                     target_thread,
                     False,
                 )

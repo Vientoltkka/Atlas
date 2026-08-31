@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,7 +11,8 @@ from core.operational_request_router import OperationalRequestRouter
 from core.operational_route_executor import RouteExecutionStatus
 from core.orchestrator import AtlasOrchestrator
 from core.router import Router
-from tools.desktop.desktop_tools import TypeTextTool
+from tools.desktop.desktop_tools import ListWindowsTool, PasteClipboardTool, TypeTextTool
+from tools.executor import ToolExecutor
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
     ExecutionCoordinationStatus,
@@ -18,6 +20,7 @@ from tools.execution_coordinator import (
 from tools.execution_decision import ExecutionDecision, ExecutionMode
 from tools.registry import ToolRegistry
 from tools.tool_chain_proposal_builder import StructuredToolChainProposal
+from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.execution_conversation import ExecutionConversationController
 
 
@@ -93,6 +96,7 @@ def _controller() -> ExecutionConversationController:
 
 def _operational_orchestrator(
     controller: ExecutionConversationController,
+    desktop_interaction: DesktopInteractionUseCase | None = None,
 ) -> tuple[AtlasOrchestrator, _OperationalExecutorFake, _AgentFake]:
     executor = _OperationalExecutorFake()
     agent = _AgentFake()
@@ -103,32 +107,69 @@ def _operational_orchestrator(
         memory=_MemoryFake(),
         registry=_RegistryFake(agent),
         write_file=_WriteFileFake(),
+        desktop_interaction=desktop_interaction,
         execution_conversation=controller,
         operational_route_executor=executor,
     )
     return orchestrator, executor, agent
+
+
 class _DesktopControllerFake:
     def __init__(self) -> None:
-        self.activated: list[str] = []
         self.typed: list[str] = []
-
-    def window_exists(self, title: str) -> bool:
-        return title == "WPS"
-
-    def activate_window(self, title: str) -> None:
-        self.activated.append(title)
+        self.hotkeys: list[list[str]] = []
+        self.activated: list[int] = []
 
     def type_text(self, text: str) -> None:
         self.typed.append(text)
 
+    def clipboard_has_text(self) -> bool:
+        return True
 
-def _desktop_type_controller() -> tuple[ExecutionConversationController, _DesktopControllerFake]:
+    def press_hotkey(self, keys: list[str]) -> None:
+        self.hotkeys.append(keys)
+
+    def get_foreground_window(self) -> dict[str, object]:
+        return {"handle": 123}
+
+    def get_window_process_id(self, handle: int) -> int:
+        assert handle == 123
+        return os.getpid() + 1
+
+    def get_window_rect(self, handle: int) -> tuple[int, int, int, int]:
+        assert handle == 123
+        return (0, 0, 100, 100)
+
+    def bring_window_to_front(self, handle: int) -> None:
+        self.activated.append(handle)
+
+
+def _desktop_type_controller() -> tuple[
+    ExecutionConversationController,
+    _DesktopControllerFake,
+    DesktopInteractionUseCase,
+]:
     desktop_controller = _DesktopControllerFake()
     registry = ToolRegistry()
     registry.register(TypeTextTool(desktop_controller))
-    coordinator = Bootstrap.build_execution_coordinator(tool_registry=registry)
-    return ExecutionConversationController(coordinator), desktop_controller
-
+    registry.register(PasteClipboardTool(desktop_controller))
+    executor = ToolExecutor(registry)
+    coordinator = Bootstrap.build_execution_coordinator(
+        tool_registry=registry,
+        executor=executor,
+    )
+    desktop_interaction = DesktopInteractionUseCase(
+        executor,
+        focus_controller=desktop_controller,
+    )
+    return (
+        ExecutionConversationController(
+            coordinator,
+            restore_pending_target=desktop_interaction.restore_external_foreground_handle,
+        ),
+        desktop_controller,
+        desktop_interaction,
+    )
 
 def _unused_confirmation(_prompt: str) -> str:
     raise AssertionError("The inherited confirmation callback must not run.")
@@ -1070,38 +1111,65 @@ def test_pending_confirmation_bypasses_direct_response(tmp_path: Path) -> None:
 
 
 def test_process_prompt_desktop_type_cancel_keeps_tool_unexecuted() -> None:
-    controller, desktop = _desktop_type_controller()
-    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+    controller, desktop, desktop_interaction = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(
+        controller,
+        desktop_interaction,
+    )
 
     pending = orchestrator.process_prompt(
-        "Escribe ORBE E2E en la ventana de WPS",
+        "Escribe ORBE CONTROL PC V2",
         confirm=_unused_confirmation,
     )
-    cancelled = orchestrator.process_prompt("cancelar", confirm=_unused_confirmation)
+    cancelled = orchestrator.process_prompt("no", confirm=_unused_confirmation)
 
-    assert "deseas continuar" in pending.lower()
+    assert pending == "Voy a escribir en la ventana activa. ¿Confirmas?"
     assert cancelled.lower() == "operacion cancelada."
-    assert desktop.activated == []
     assert desktop.typed == []
+    assert controller.pending_confirmation_id is None
     assert direct_executor.calls == 0
     assert agent.calls == 0
 
 
-def test_process_prompt_desktop_type_confirm_executes_once_and_returns_result() -> None:
-    controller, desktop = _desktop_type_controller()
-    orchestrator, direct_executor, agent = _operational_orchestrator(controller)
+def test_process_prompt_desktop_type_confirm_executes_once_and_preserves_literal_text() -> None:
+    controller, desktop, desktop_interaction = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(
+        controller,
+        desktop_interaction,
+    )
 
     pending = orchestrator.process_prompt(
-        "Escribe ORBE E2E en la ventana de WPS",
+        "Escribe ORBE CONTROL PC V2",
         confirm=_unused_confirmation,
     )
-    confirmed = orchestrator.process_prompt("s", confirm=_unused_confirmation)
+    assert controller.pending_target_handle == 123
+    assert desktop.typed == []
+    confirmed = orchestrator.process_prompt("s\u00ed", confirm=_unused_confirmation)
 
-    assert "deseas continuar" in pending.lower()
-    assert "Texto escrito en WPS." in confirmed
-    assert "ORBE E2E" in confirmed
-    assert desktop.activated == ["WPS"]
-    assert desktop.typed == ["ORBE E2E"]
+    assert pending == "Voy a escribir en la ventana activa. ¿Confirmas?"
+    assert "Texto escrito." in confirmed
+    assert "ORBE CONTROL PC V2" in confirmed
+    assert desktop.typed == ["ORBE CONTROL PC V2"]
+    assert desktop.activated == [123]
+    assert controller.pending_confirmation_id is None
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_process_prompt_desktop_paste_keeps_conversational_confirmation() -> None:
+    controller, desktop, desktop_interaction = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(
+        controller,
+        desktop_interaction,
+    )
+
+    pending = orchestrator.process_prompt("Pega", confirm=_unused_confirmation)
+    confirmed = orchestrator.process_prompt("s\u00ed", confirm=_unused_confirmation)
+
+    assert pending == "Voy a pegar el contenido del portapapeles en la ventana activa. ¿Confirmas?"
+    assert "Contenido pegado." in confirmed
+    assert desktop.hotkeys == [["ctrl", "v"]]
+    assert controller.pending_confirmation_id is None
     assert direct_executor.calls == 0
     assert agent.calls == 0
 
@@ -1112,4 +1180,37 @@ def test_direct_response_still_executes_without_pending_interaction() -> None:
 
     assert response == "respuesta directa operativa"
     assert direct_executor.calls == 1
+    assert agent.calls == 0
+
+class _ListWindowsDesktop:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def list_windows(self) -> list[dict[str, object]]:
+        self.calls.append("list_windows")
+        return [
+            {"handle": 11, "title": "Bloc de notas", "process_id": 101},
+            {"handle": 12, "title": "Visual Studio Code", "process_id": 102},
+        ]
+
+
+def test_process_prompt_lists_open_windows_without_confirmation_or_actions() -> None:
+    desktop = _ListWindowsDesktop()
+    registry = ToolRegistry()
+    registry.register(ListWindowsTool(desktop))
+    desktop_interaction = DesktopInteractionUseCase(ToolExecutor(registry))
+    orchestrator, _direct_executor, agent = _operational_orchestrator(
+        _controller(),
+        desktop_interaction,
+    )
+    orchestrator.classify_request = lambda _request: SimpleNamespace(route=None)
+
+    response = orchestrator.process_prompt(
+        "Qué ventanas tengo abiertas",
+        confirm=_unused_confirmation,
+    )
+
+    assert "Bloc de notas" in response
+    assert "Visual Studio Code" in response
+    assert desktop.calls == ["list_windows"]
     assert agent.calls == 0

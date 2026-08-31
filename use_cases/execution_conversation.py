@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
@@ -47,6 +47,7 @@ class ExecutionConversationController:
         self,
         coordinator: ExecutionCoordinator,
         presenter: "ExecutionResultPresenter | None" = None,
+        restore_pending_target: Callable[[int], None] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._presenter = presenter or ExecutionResultPresenter()
@@ -58,6 +59,8 @@ class ExecutionConversationController:
         self._pending_confirmation_context: PendingConfirmationContext | None = None
         self._pending_clarification: PendingClarification | None = None
         self._last_result: ExecutionCoordinationResult | None = None
+        self._restore_pending_target = restore_pending_target
+        self._pending_target_handles: dict[str, int] = {}
 
     @property
     def pending_confirmation_id(self) -> str | None:
@@ -78,6 +81,13 @@ class ExecutionConversationController:
     def pending_confirmation_context(self) -> PendingConfirmationContext | None:
         """Return the active confirmation context for debugging."""
         return self._pending_confirmation_context
+
+    @property
+    def pending_target_handle(self) -> int | None:
+        """Return the exact desktop target retained for the pending action."""
+        if self._pending_confirmation_id is None:
+            return None
+        return self._pending_target_handles.get(self._pending_confirmation_id)
 
     def handle(
         self,
@@ -123,10 +133,13 @@ class ExecutionConversationController:
         *,
         original_text: str,
         confirmation_text: str,
+        pending_target_handle: int | None = None,
     ) -> ExecutionConversationOutcome:
         """Prepare an exact tool while preserving this controller's confirmation state."""
         result = self._coordinator.execute_registered_tool(tool_name, arguments)
         self._remember(result, original_text=original_text)
+        if result.confirmation_id is not None and pending_target_handle is not None:
+            self._pending_target_handles[result.confirmation_id] = pending_target_handle
         text = (
             confirmation_text
             if result.status is ExecutionCoordinationStatus.CONFIRMATION_REQUIRED
@@ -144,6 +157,36 @@ class ExecutionConversationController:
         resolution = self._pending_confirmation_resolver.resolve(prompt, context)
 
         if resolution.input_type is PendingConfirmationInputType.CONFIRM:
+            target_handle = self._pending_target_handles.pop(
+                context.confirmation_id,
+                None,
+            )
+            if target_handle is not None and self._restore_pending_target is not None:
+                try:
+                    self._restore_pending_target(target_handle)
+                except RuntimeError as error:
+                    self._coordinator.cancel_pending_confirmation(context.confirmation_id)
+                    self._clear_pending_confirmation()
+                    result = ExecutionCoordinationResult(
+                        status=ExecutionCoordinationStatus.FAILED,
+                        mode=context.mode,
+                        decision=ExecutionDecision(
+                            mode=context.mode,
+                            reason="pending desktop target is unavailable",
+                            confidence=1.0,
+                        ),
+                        proposal=context.proposal,
+                        execution_result=context.execution_result,
+                        message=str(error),
+                        confirmation_id=context.confirmation_id,
+                        executed=False,
+                    )
+                    self._last_result = result
+                    return ExecutionConversationOutcome(
+                        False,
+                        "La ventana destino ya no esta disponible. No se ha escrito nada.",
+                        result,
+                    )
             result = self._coordinator.confirm(context.confirmation_id, prompt)
             self._remember(result)
             return ExecutionConversationOutcome(False, self._presenter.present(result), result)
@@ -152,6 +195,7 @@ class ExecutionConversationController:
             PendingConfirmationInputType.REJECT,
             PendingConfirmationInputType.CANCEL,
         }:
+            self._pending_target_handles.pop(context.confirmation_id, None)
             result = self._coordinator.confirm(context.confirmation_id, "no")
             self._remember(result)
             return ExecutionConversationOutcome(False, self._presenter.present(result), result)
@@ -423,6 +467,8 @@ class ExecutionConversationController:
         return context
 
     def _clear_pending_confirmation(self) -> None:
+        if self._pending_confirmation_id is not None:
+            self._pending_target_handles.pop(self._pending_confirmation_id, None)
         self._pending_confirmation_id = None
         self._pending_confirmation_context = None
         self._pending_clarification = None

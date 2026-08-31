@@ -309,6 +309,14 @@ class ToolProposalBuilder:
                 )
             )
 
+        if intent_action == "desktop.clipboard.copy":
+            return _ExtractionResult(
+                _filter_fields({"text": _extract_clipboard_copy_text(source_text)}, field_names)
+            )
+
+        if intent_action == "desktop.clipboard.paste":
+            return _ExtractionResult({})
+
         return _ExtractionResult({})
 
     def _missing_required_arguments(
@@ -553,6 +561,17 @@ def _extract_type_text(source_text: str, normalized: str) -> str | None:
             return text
 
     return None
+
+
+def _extract_clipboard_copy_text(source_text: str) -> str | None:
+    match = re.match(
+        r"^\s*copia(?:\s+este\s+texto)?\s*(?::\s*|\s+)(?P<text>.*)$",
+        source_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return None
+    return match.group("text") or None
 
 
 def _extract_type_window_title(source_text: str) -> str | None:
