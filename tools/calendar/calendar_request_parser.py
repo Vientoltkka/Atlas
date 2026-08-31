@@ -70,7 +70,7 @@ def _natural_calendar_range(
         None,
     )
     if expression is None:
-        return None
+        expression = "hoy"
 
     now = current_time or datetime.now().astimezone()
     if now.tzinfo is None or now.utcoffset() is None:

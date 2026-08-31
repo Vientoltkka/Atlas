@@ -193,6 +193,7 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             r"\b(?:lista|listar|muestra|consulta|consultar|busca|buscar)\b.*\bcalendario\b",
             r"\b(?:lista|listar|muestra|consulta|consultar|busca|buscar)\b.*\beventos?\b.*\bcalendar\b",
+            r"\bque\s+(?:eventos?\s+)?tengo\b.*\bcalendario\b",
             r"\bque\s+tengo\s+(?:hoy|manana|esta\s+semana)\b",
             r"\b(?:list|show|search)\b.*\bcalendar\b.*\bevents?\b",
         ),

@@ -920,24 +920,25 @@ def _calendar_controller(
     return ExecutionConversationController(coordinator), tool
 
 
-def test_calendar_missing_range_asks_for_explicit_clarification() -> None:
+def test_calendar_partial_range_asks_for_explicit_clarification() -> None:
     controller, tool = _calendar_controller([])
 
-    outcome = controller.handle("Lista eventos del calendario")
+    outcome = controller.handle(
+        "Lista eventos del calendario time_min: 2026-08-09T09:00:00+01:00"
+    )
 
     assert outcome.result.status == ExecutionCoordinationStatus.INFORMATION_REQUIRED
-    assert outcome.text == (
-        "Que rango quieres consultar? Indica time_min y time_max "
-        "en formato RFC3339 con zona horaria."
-    )
+    assert outcome.text == "Cual es el final del rango en formato RFC3339 con zona horaria?"
     assert controller.pending_clarification is not None
-    assert controller.pending_clarification.requested_fields == ("time_min", "time_max")
+    assert controller.pending_clarification.requested_fields == ("time_max",)
     assert tool.calls == 0
 
 
 def test_calendar_clarification_completes_range_and_executes_once() -> None:
     controller, tool = _calendar_controller([])
-    controller.handle("Lista eventos del calendario")
+    controller.handle(
+        "Lista eventos del calendario time_min: 2026-08-09T09:00:00+01:00"
+    )
 
     outcome = controller.handle(
         "2026-08-09T09:00:00+01:00 y 2026-08-09T10:00:00+01:00"
@@ -1000,7 +1001,9 @@ def test_natural_tomorrow_calendar_request_executes_once_with_normalized_output(
 
 def test_calendar_invalid_range_keeps_clarification_without_execution() -> None:
     controller, tool = _calendar_controller([])
-    controller.handle("Lista eventos del calendario")
+    controller.handle(
+        "Lista eventos del calendario time_min: 2026-08-09T09:00:00+01:00"
+    )
 
     outcome = controller.handle(
         "2026-08-09T10:00:00+01:00 y 2026-08-09T09:00:00+01:00"
@@ -1033,7 +1036,7 @@ def test_process_prompt_calendar_multiturn_end_to_end() -> None:
     )
 
     first = orchestrator.process_prompt(
-        "Lista eventos del calendario",
+        "Lista eventos del calendario time_min: 2026-08-09T12:00:00+01:00",
         confirm=lambda _prompt: "",
     )
     second = orchestrator.process_prompt(
@@ -1056,7 +1059,7 @@ def test_process_prompt_pending_calendar_clarification_bypasses_direct_response(
     orchestrator, direct_executor, agent = _operational_orchestrator(controller)
 
     first = orchestrator.process_prompt(
-        "Lista eventos del calendario",
+        "Lista eventos del calendario time_min: 2026-08-09T09:00:00+01:00",
         confirm=lambda _prompt: "",
     )
     second = orchestrator.process_prompt(
@@ -1076,7 +1079,7 @@ def test_process_voice_prompt_pending_calendar_clarification_bypasses_direct_res
     orchestrator, direct_executor, agent = _operational_orchestrator(controller)
 
     first = orchestrator.process_voice_prompt(
-        "Lista eventos del calendario",
+        "Lista eventos del calendario time_min: 2026-08-09T09:00:00+01:00",
         confirm=lambda _prompt: "",
     )
     second = orchestrator.process_voice_prompt(

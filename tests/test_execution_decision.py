@@ -59,6 +59,14 @@ def test_natural_tomorrow_request_uses_only_calendar_intent() -> None:
     assert decision.mode == ExecutionMode.SINGLE_TOOL
     assert decision.candidate_tools == ("calendar.events.list",)
 
+    generic = _engine().decide("Qué eventos tengo en el calendario")
+    assert generic.mode == ExecutionMode.SINGLE_TOOL
+    assert generic.candidate_tools == ("calendar.events.list",)
+
+    non_calendar = _engine().decide("Qué eventos tengo hoy")
+    assert non_calendar.mode == ExecutionMode.DIRECT_RESPONSE
+    assert non_calendar.candidate_tools == ()
+
 def test_file_write_request_uses_single_tool() -> None:
     decision = _engine().decide("Escribe hola en resumen.txt")
 
