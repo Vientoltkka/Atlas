@@ -153,7 +153,8 @@ class FakeDesktopController:
 
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    def list_windows(self, title: str) -> list[dict[str, object]]:
+    def list_windows(self) -> list[dict[str, object]]:
+        title = ""
         self.calls.append(("list_windows", title))
         return [
             {

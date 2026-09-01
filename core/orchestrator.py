@@ -319,6 +319,15 @@ class AtlasOrchestrator:
                 self._print_atlas(history_response)
                 continue
 
+            if self._desktop_interaction is not None:
+                desktop_response = self._desktop_interaction.execute(
+                    request.content,
+                    confirm=input,
+                )
+                if desktop_response is not None:
+                    self._print_atlas(desktop_response)
+                    continue
+
             direct_response = self._process_direct_conversation(
                 request,
                 status_sink=self._print_atlas,
@@ -475,7 +484,11 @@ class AtlasOrchestrator:
         """Process text through the normal Atlas flow."""
         if (
             self._execution_conversation is not None
-            and self._execution_conversation.pending_confirmation_id is not None
+            and getattr(
+                self._execution_conversation,
+                "pending_confirmation_id",
+                None,
+            ) is not None
         ):
             return self._execution_conversation.handle(prompt).text
         closure_response = self._handle_validated_capability_closure(prompt)

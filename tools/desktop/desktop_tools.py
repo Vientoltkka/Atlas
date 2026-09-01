@@ -847,7 +847,18 @@ class ListWindowsTool(DesktopTool):
         self,
         context: ToolContext,
     ) -> list[dict[str, object]]:
-        return self._controller.list_windows()
+        windows = self._controller.list_windows()
+        title = context.parameters.get("title")
+
+        if not isinstance(title, str) or not title.strip():
+            return windows
+
+        normalized_title = title.casefold()
+        return [
+            window
+            for window in windows
+            if normalized_title in str(window.get("title", "")).casefold()
+        ]
 
 
 class GetWindowRectTool(DesktopTool):

@@ -93,7 +93,7 @@ class FakeToolExecutor:
             return f"Proceso terminado: example.exe - PID {context.parameters['pid']}"
 
         if tool_name == "desktop.list_windows":
-            title = str(context.parameters["title"]).lower()
+            title = str(context.parameters.get("title", "")).lower()
             return [
                 window
                 for window in self.windows
@@ -134,6 +134,16 @@ def test_desktop_interaction_opens_application_with_english_alias() -> None:
     assert result == "\u2713 Abriendo Chrome."
     assert executor.calls[0][0] == "desktop.open_application"
     assert executor.calls[0][1].parameters == {"application": "Chrome"}
+
+
+def test_desktop_interaction_opens_vscode_from_conversational_name() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    use_case.execute("abre VS Code")
+
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "VS Code"}
 
 
 def test_desktop_interaction_routes_powershell_and_explorer_to_open_application() -> None:
@@ -506,6 +516,18 @@ def test_desktop_interaction_opens_folder_with_natural_prefix(
     assert executor.calls[0][0] == "desktop.open_folder"
 
 
+def test_desktop_interaction_preserves_folder_path_with_spaces(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    folder = tmp_path / "Atlas Workspace"
+    folder.mkdir()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    use_case.execute(f"abre la carpeta {folder}")
+
+    assert executor.calls[0][0] == "desktop.open_folder"
+    assert executor.calls[0][1].parameters == {"path": str(folder)}
+
+
 def test_desktop_interaction_opens_existing_file(
     tmp_path: Path,
 ) -> None:
@@ -518,6 +540,18 @@ def test_desktop_interaction_opens_existing_file(
     result = use_case.execute("Abre core/router.py")
 
     assert result == f"\u2713 Abriendo {file}."
+    assert executor.calls[0][0] == "desktop.open_file"
+    assert executor.calls[0][1].parameters == {"path": str(file)}
+
+
+def test_desktop_interaction_distinguishes_file_path_from_folder(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    file = tmp_path / "main.py"
+    file.write_text("print('Atlas')", encoding="utf-8")
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    use_case.execute(f"abre {file}")
+
     assert executor.calls[0][0] == "desktop.open_file"
     assert executor.calls[0][1].parameters == {"path": str(file)}
 
@@ -600,6 +634,16 @@ def test_desktop_interaction_preserves_clipboard_copy_text_exactly() -> None:
     assert executor.calls[0][1].parameters == {"text": text}
 
 
+def test_desktop_interaction_copies_text_before_clipboard_suffix() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    use_case.execute("copia hola mundo al portapapeles")
+
+    assert executor.calls[0][0] == "desktop.copy_clipboard_text"
+    assert executor.calls[0][1].parameters == {"text": "hola mundo"}
+
+
 def test_desktop_interaction_routes_minimum_active_window_text_commands() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)
@@ -654,6 +698,15 @@ def test_desktop_interaction_reads_clipboard_text() -> None:
     result = use_case.execute("que hay en el portapapeles")
 
     assert result == "Contenido del portapapeles:\n\nHola Atlas"
+    assert executor.calls[0][0] == "desktop.read_clipboard_text"
+
+
+def test_desktop_interaction_reads_clipboard_from_conversational_question() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    use_case.execute("qué tengo en el portapapeles")
+
     assert executor.calls[0][0] == "desktop.read_clipboard_text"
 
 
@@ -804,6 +857,14 @@ def test_desktop_interaction_ignores_unknown_command() -> None:
     result = use_case.execute("Analiza router.py")
 
     assert result is None
+    assert executor.calls == []
+
+
+def test_desktop_interaction_does_not_handle_normal_conversation() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute("qué es una sentadilla frontal") is None
     assert executor.calls == []
 
 
@@ -1366,6 +1427,8 @@ def test_orchestrator_prioritizes_registered_desktop_folder() -> None:
     desktop = DesktopInteractionUseCase(executor)
 
     class CapabilityGap:
+        pending_confirmation_id = None
+
         def handle(self, _prompt: str):
             raise AssertionError("desktop.open_folder must not reach capability gap")
 

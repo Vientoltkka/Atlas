@@ -898,6 +898,7 @@ class DesktopInteractionUseCase:
             "lee el portapapeles",
             "leer portapapeles",
             "que hay en el portapapeles",
+            "que tengo en el portapapeles",
             "read clipboard",
         }:
             content = self._executor.execute(
@@ -963,6 +964,7 @@ class DesktopInteractionUseCase:
             r"^\s*copia\s+este\s+texto\s*:\s*(.*)$",
             r"^\s*copia\s+al\s+portapapeles\s*:\s*(.*)$",
             r"^\s*copia\s+este\s+texto\s+al\s+portapapeles\s*:\s*(.*)$",
+            r"^\s*copia\s+(.+?)\s+al\s+portapapeles\s*$",
             r"^\s*copia\s+(?!al\s+portapapeles\s*$)(.+)$",
             r"^\s*copiar\s+al\s+portapapeles\s+(.+)$",
         )
