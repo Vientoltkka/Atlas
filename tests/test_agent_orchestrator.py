@@ -55,6 +55,29 @@ def test_agent_orchestrator_selects_training_for_coach_requests_only() -> None:
     )
 
 
+def test_agent_orchestrator_routes_clear_medical_requests_without_capturing_coach_or_nutrition() -> None:
+    orchestrator = _orchestrator()
+
+    for prompt in (
+        "Tengo dolor e inflamacion en la rodilla.",
+        "Tengo fiebre y tos desde anoche.",
+        "Me he desmayado y tengo dolor de pecho.",
+    ):
+        assert orchestrator.select(prompt).primary_agent == "medical"
+
+    for prompt in (
+        "Hazme un WOD de CrossFit de 60 minutos.",
+        "Prepara una sesion de HYROX.",
+        "Calcula mis macros para perder grasa.",
+        "Hazme una dieta con suplementacion basica.",
+        "Quiero invertir en ETFs.",
+        "Necesito revisar un contrato legal.",
+        "Abre VS Code.",
+        "Que eventos tengo hoy en el calendario?",
+    ):
+        assert orchestrator.select(prompt).primary_agent != "medical"
+
+
 def test_agent_orchestrator_routes_nutrition_without_capturing_other_domains() -> None:
     orchestrator = _orchestrator()
 
