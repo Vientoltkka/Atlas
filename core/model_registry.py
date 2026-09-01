@@ -79,9 +79,12 @@ def _descriptor_from_entry(entry: object) -> ModelDescriptor | None:
     fallback_ids = _tuple_value(entry.get("fallback_logical_ids", ()))
     if capabilities is None or fallback_ids is None:
         return None
+    logical_id = entry.get("logical_id", f"{provider_id}:{model_id}")
+    if logical_id == "chat-gemini" and "chat-local" not in fallback_ids:
+        fallback_ids = (*fallback_ids, "chat-local")
     try:
         return ModelDescriptor(
-            logical_id=entry.get("logical_id", f"{provider_id}:{model_id}"),
+            logical_id=logical_id,
             provider_id=provider_id,
             model_name=model_id,
             capabilities=capabilities,

@@ -1235,6 +1235,12 @@ class Bootstrap:
         )
         direct_selection_request = model_selection_policy.create_request(task="chat")
 
+        def direct_provider_id(selected_model: str) -> str:
+            descriptor = model_manager.resolve_model(selected_model)
+            if descriptor is None:
+                raise RuntimeError(f"Selected chat model '{selected_model}' is not registered.")
+            return descriptor.provider_id
+
         def direct_responder(request, context):
             chat_agent = registry.get("chat")
             if chat_agent is None:
@@ -1246,17 +1252,20 @@ class Bootstrap:
                     lambda selected_model: chat_agent.run(
                         model=selected_model,
                         messages=messages,
+                        provider_id=direct_provider_id(selected_model),
                     ),
                 )
             except ModelSelectionError as error:
                 if model_selection_policy != ModelSelectionPolicy():
                     raise
+                selected_model = model_manager.choose_model(
+                    "chat",
+                    selection_result=error.result,
+                )
                 return chat_agent.run(
-                    model=model_manager.choose_model(
-                        "chat",
-                        selection_result=error.result,
-                    ),
+                    model=selected_model,
                     messages=messages,
+                    provider_id=direct_provider_id(selected_model),
                 )
 
         def direct_streaming_responder(request, context):
@@ -1273,17 +1282,20 @@ class Bootstrap:
                     lambda selected_model: stream(
                         model=selected_model,
                         messages=messages,
+                        provider_id=direct_provider_id(selected_model),
                     ),
                 )
             except ModelSelectionError as error:
                 if model_selection_policy != ModelSelectionPolicy():
                     raise
+                selected_model = model_manager.choose_model(
+                    "chat",
+                    selection_result=error.result,
+                )
                 yield from stream(
-                    model=model_manager.choose_model(
-                        "chat",
-                        selection_result=error.result,
-                    ),
+                    model=selected_model,
                     messages=messages,
+                    provider_id=direct_provider_id(selected_model),
                 )
 
         operational_route_executor = OperationalRouteExecutor(

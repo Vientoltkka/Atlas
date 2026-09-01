@@ -26,20 +26,30 @@ class ChatAgent(BaseAgent):
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str:
 
+        if provider_id is None:
+            return self._client.ask(model=model, messages=messages)
         return self._client.ask(
             model=model,
             messages=messages,
+            provider_id=provider_id,
         )
 
     def stream(
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> Iterator[str]:
         """Yield one conversational response through PromptClient streaming."""
+        if provider_id is None:
+            return self._client.stream_messages(model=model, messages=messages)
         return self._client.stream_messages(
             model=model,
             messages=messages,
+            provider_id=provider_id,
         )

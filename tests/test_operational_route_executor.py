@@ -184,6 +184,7 @@ def test_direct_response_invokes_only_conversational_handler() -> None:
 
     assert result.status is RouteExecutionStatus.COMPLETED
     assert result.output == "ok"
+    assert RouteExecutionPresenter().present(result) == "ok"
     assert calls == [request]
 
 

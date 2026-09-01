@@ -8,6 +8,7 @@ from typing import TypeVar
 
 from core.model_health import ModelHealthChecker, ModelHealthResult
 from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
+from models.chat_inference import ChatInferenceError
 from models.prompt_client import InferenceBackendError
 
 
@@ -137,6 +138,11 @@ class ModelInferenceRunner:
             try:
                 value = infer(physical_name)
             except InferenceBackendError as error:
+                if (
+                    current.provider_id == "gemini"
+                    and not isinstance(error.__cause__, ChatInferenceError)
+                ):
+                    raise
                 fallback_reason = error.reason
                 next_selection = self._model_manager.select_fallback(
                     request,
@@ -199,6 +205,11 @@ class ModelInferenceRunner:
             except InferenceBackendError as error:
                 if emitted:
                     raise InferenceStreamInterruptedError(physical_name, error) from error
+                if (
+                    current.provider_id == "gemini"
+                    and not isinstance(error.__cause__, ChatInferenceError)
+                ):
+                    raise
                 fallback_reason = error.reason
                 next_selection = self._model_manager.select_fallback(
                     request,

@@ -8,6 +8,7 @@ from core.model_inference import (
     ModelInferenceRunner,
 )
 from core.model_manager import ModelDescriptor, ModelManager, ModelSelectionRequest
+from models.chat_inference import ChatInferenceError
 from models.prompt_client import InferenceBackendError
 
 
@@ -243,6 +244,74 @@ def test_programming_errors_are_not_classified_as_inference_failures() -> None:
             ModelSelectionRequest(task="chat", preferred_model_id="primary"),
             lambda _model: (_ for _ in ()).throw(ValueError("programming error")),
         )
+
+
+def test_gemini_content_error_does_not_use_local_fallback() -> None:
+    manager = ModelManager(
+        StaticModelSource(["glm4:9b"]),
+        (
+            ModelDescriptor(
+                logical_id="chat-gemini",
+                provider_id="gemini",
+                model_name="gemini-3.6-flash",
+                capabilities=("chat",),
+                local=False,
+                priority=200,
+                fallback_logical_ids=("chat-local",),
+            ),
+        ),
+    )
+    attempts: list[str] = []
+
+    with pytest.raises(InferenceBackendError, match="empty response"):
+        ModelInferenceRunner(manager).run(
+            ModelSelectionRequest(
+                task="chat",
+                preferred_model_id="chat-gemini",
+                allow_fallback=True,
+            ),
+            lambda model: attempts.append(model)
+            or (_ for _ in ()).throw(
+                InferenceBackendError(model, "empty response")
+            ),
+        )
+
+    assert attempts == ["gemini-3.6-flash"]
+
+
+def test_gemini_provider_error_uses_local_fallback() -> None:
+    manager = ModelManager(
+        StaticModelSource(["glm4:9b"]),
+        (
+            ModelDescriptor(
+                logical_id="chat-gemini",
+                provider_id="gemini",
+                model_name="gemini-3.6-flash",
+                capabilities=("chat",),
+                local=False,
+                priority=200,
+                fallback_logical_ids=("chat-local",),
+            ),
+        ),
+    )
+    attempts: list[str] = []
+
+    def infer(model: str) -> str:
+        attempts.append(model)
+        if model == "gemini-3.6-flash":
+            error = ChatInferenceError("gemini", model, "quota exhausted")
+            raise InferenceBackendError(model, error.reason) from error
+        return "respuesta local"
+
+    assert ModelInferenceRunner(manager).run(
+        ModelSelectionRequest(
+            task="chat",
+            preferred_model_id="chat-gemini",
+            allow_fallback=True,
+        ),
+        infer,
+    ) == "respuesta local"
+    assert attempts == ["gemini-3.6-flash", "glm4:9b"]
 
 
 def test_same_physical_model_is_not_retried_through_an_alias() -> None:

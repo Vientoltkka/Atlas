@@ -131,3 +131,4 @@ def test_remote_registered_model_does_not_require_local_install(monkeypatch) -> 
     assert selection.descriptor is not None
     assert selection.descriptor.local is False
     assert selection.descriptor.available is True
+    assert selection.descriptor.fallback_logical_ids == ("chat-local",)

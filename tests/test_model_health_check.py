@@ -76,6 +76,31 @@ def _request(*, allow_fallback: bool = True) -> ModelSelectionRequest:
     )
 
 
+def _gemini_chat_manager() -> ModelManager:
+    return ModelManager(
+        StaticModelSource(["glm4:9b"]),
+        (
+            ModelDescriptor(
+                logical_id="chat-gemini",
+                provider_id="gemini",
+                model_name="gemini-3.6-flash",
+                capabilities=("chat",),
+                local=False,
+                priority=200,
+                fallback_logical_ids=("chat-local",),
+            ),
+        ),
+    )
+
+
+def _gemini_chat_request() -> ModelSelectionRequest:
+    return ModelSelectionRequest(
+        task="chat",
+        preferred_model_id="chat-gemini",
+        allow_fallback=True,
+    )
+
+
 def test_healthy_inventory_model_is_used() -> None:
     manager = _manager(_descriptor("primary"))
     health = RecordingHealthChecker({"primary": _health("primary", True)})
@@ -88,6 +113,64 @@ def test_healthy_inventory_model_is_used() -> None:
     assert result == "ok"
     assert health.checked == ["primary"]
     assert inferred == ["primary:latest"]
+
+
+def test_unhealthy_gemini_uses_local_chat_fallback() -> None:
+    health = RecordingHealthChecker(
+        {
+            "chat-gemini": _health(
+                "chat-gemini",
+                False,
+                ModelHealthErrorCode.UNKNOWN_BACKEND_ERROR,
+            ),
+            "chat-local": _health("chat-local", True),
+        }
+    )
+    inferred: list[str] = []
+
+    result = ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
+        _gemini_chat_request(),
+        lambda model: inferred.append(model) or "respuesta local",
+    )
+
+    assert result == "respuesta local"
+    assert health.checked == ["chat-gemini", "chat-local"]
+    assert inferred == ["glm4:9b"]
+
+
+def test_healthy_gemini_does_not_use_local_chat_fallback() -> None:
+    health = RecordingHealthChecker({"chat-gemini": _health("chat-gemini", True)})
+    inferred: list[str] = []
+
+    result = ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
+        _gemini_chat_request(),
+        lambda model: inferred.append(model) or "respuesta Gemini",
+    )
+
+    assert result == "respuesta Gemini"
+    assert health.checked == ["chat-gemini"]
+    assert inferred == ["gemini-3.6-flash"]
+
+
+def test_unhealthy_gemini_and_local_chat_preserve_final_health_error() -> None:
+    health = RecordingHealthChecker(
+        {
+            "chat-gemini": _health("chat-gemini", False),
+            "chat-local": _health("chat-local", False),
+        }
+    )
+    inferred: list[str] = []
+
+    with pytest.raises(ModelHealthCheckError) as captured:
+        ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
+            _gemini_chat_request(),
+            lambda model: inferred.append(model) or "unused",
+        )
+
+    assert health.checked == ["chat-gemini", "chat-local"]
+    assert inferred == []
+    assert captured.value.attempted_logical_model_ids == ("chat-gemini", "chat-local")
+    assert captured.value.last_result.logical_model_id == "chat-local"
 
 
 def test_unhealthy_inventory_model_is_not_used_without_fallback() -> None:
@@ -179,7 +262,12 @@ def test_runtime_fallback_remains_active_after_healthy_probe() -> None:
 )
 def test_ollama_health_checker_classifies_backend_failures(error: Exception, expected: ModelHealthErrorCode) -> None:
     class FailingPromptClient:
-        def check_model_health(self, _model: str) -> None:
+        def check_model_health(
+            self,
+            _model: str,
+            *,
+            provider_id: str | None = None,
+        ) -> None:
             raise InferenceBackendError("primary:latest", str(error)) from error
 
     result = OllamaModelHealthChecker(FailingPromptClient()).check(

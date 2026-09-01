@@ -11,6 +11,7 @@ from core.model_health import (
     OllamaModelHealthChecker,
 )
 from core.model_manager import ModelDescriptor, ModelManager
+from models.chat_inference import ChatInferenceProviderRegistry
 from models import prompt_client as prompt_client_module
 from models.prompt_client import PromptClient
 
@@ -55,6 +56,52 @@ def test_prompt_client_health_check_accepts_valid_whitespace_content(monkeypatch
     )
 
     PromptClient().check_model_health("glm4:9b")
+
+
+def test_prompt_client_uses_the_selected_provider_for_health_and_inference(
+    monkeypatch,
+) -> None:
+    class Provider:
+        def __init__(self, provider_id: str) -> None:
+            self.provider_id = provider_id
+            self.health_models: list[str] = []
+            self.chat_models: list[str] = []
+
+        def health(self, *, model: str) -> dict[str, object]:
+            self.health_models.append(model)
+            return {"message": {"content": "pong"}}
+
+        def chat(self, *, model: str, messages, stream: bool):
+            self.chat_models.append(model)
+            return iter([{"message": {"content": "respuesta local"}}])
+
+        def capabilities(self) -> frozenset[str]:
+            return frozenset({"chat", "health"})
+
+    gemini = Provider("gemini")
+    ollama = Provider("ollama")
+    monkeypatch.setattr(
+        prompt_client_module,
+        "default_provider_registry",
+        lambda **_kwargs: ChatInferenceProviderRegistry(
+            {"gemini": gemini, "ollama": ollama}
+        ),
+    )
+    monkeypatch.setattr(prompt_client_module, "configured_provider_id", lambda: "gemini")
+
+    client = PromptClient()
+    client.check_model_health("glm4:9b", provider_id="ollama")
+    response = client.ask_messages(
+        model="glm4:9b",
+        messages=[{"role": "user", "content": "hola"}],
+        provider_id="ollama",
+    )
+
+    assert response == "respuesta local"
+    assert ollama.health_models == ["glm4:9b"]
+    assert ollama.chat_models == ["glm4:9b"]
+    assert gemini.health_models == []
+    assert gemini.chat_models == []
 
 
 def test_real_prompt_client_health_checker_rejects_unavailable_model(monkeypatch) -> None:

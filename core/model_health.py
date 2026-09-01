@@ -47,7 +47,7 @@ class ModelHealthChecker(Protocol):
 
 
 class _PromptHealthClient(Protocol):
-    def check_model_health(self, model: str) -> None:
+    def check_model_health(self, model: str, *, provider_id: str | None = None) -> None:
         ...
 
 
@@ -65,7 +65,10 @@ class OllamaModelHealthChecker:
         provider_id: str,
     ) -> ModelHealthResult:
         try:
-            self._prompt_client.check_model_health(physical_model_name)
+            self._prompt_client.check_model_health(
+                physical_model_name,
+                provider_id=provider_id,
+            )
         except InferenceBackendError as error:
             return ModelHealthResult(
                 logical_model_id=logical_model_id,

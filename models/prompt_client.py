@@ -32,11 +32,12 @@ class PromptClient:
         timeout = _read_float("ATLAS_OLLAMA_TIMEOUT", 120.0, 1.0, 600.0)
         keep_alive = os.getenv("ATLAS_OLLAMA_KEEP_ALIVE", "10m").strip() or "10m"
         provider_id = configured_provider_id()
-        self._provider = provider or default_provider_registry(
+        self._providers = default_provider_registry(
             timeout=timeout,
             keep_alive=keep_alive,
             provider_id=provider_id,
-        ).get(provider_id)
+        )
+        self._provider = provider or self._providers.get(provider_id)
         self._keep_alive = os.getenv("ATLAS_OLLAMA_KEEP_ALIVE", "10m").strip() or "10m"
         self._seen_models: set[str] = set()
         self.last_metrics: dict[str, str | float | bool] = {}
@@ -45,14 +46,20 @@ class PromptClient:
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str:
         """Send a conversation to the selected model."""
-        return self.ask_messages(model=model, messages=messages)
+        return self.ask_messages(
+            model=model,
+            messages=messages,
+            provider_id=provider_id,
+        )
 
-    def check_model_health(self, model: str) -> None:
+    def check_model_health(self, model: str, *, provider_id: str | None = None) -> None:
         """Verify one model with a minimal non-streaming provider request."""
         try:
-            response = self._provider.health(model=model)
+            response = self._provider_for(provider_id).health(model=model)
         except ChatInferenceError as error:
             raise InferenceBackendError(model, error.reason) from error
         try:
@@ -65,6 +72,8 @@ class PromptClient:
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str:
         """Send exactly the provided messages to the selected model."""
         started = perf_counter()
@@ -72,7 +81,7 @@ class PromptClient:
         fragments: list[str] = []
         final_chunk: Any = None
         try:
-            stream = self._provider.chat(
+            stream = self._provider_for(provider_id).chat(
                 model=model,
                 messages=messages,
                 stream=True,
@@ -105,6 +114,8 @@ class PromptClient:
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> Iterator[str]:
         """Stream exactly the provided messages and yield content fragments."""
         started = perf_counter()
@@ -113,7 +124,7 @@ class PromptClient:
         yielded_content = False
         try:
             try:
-                stream = self._provider.chat(
+                stream = self._provider_for(provider_id).chat(
                     model=model,
                     messages=messages,
                     stream=True,
@@ -141,6 +152,11 @@ class PromptClient:
                 model,
                 "Ollama returned no observable stream content.",
             )
+
+    def _provider_for(self, provider_id: str | None) -> ChatInferenceProvider:
+        if provider_id is None or provider_id == self._provider.provider_id:
+            return self._provider
+        return self._providers.get(provider_id)
 
     def _record_metrics(
         self,
