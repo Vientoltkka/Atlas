@@ -206,6 +206,14 @@ class SkillRegistry:
             if normalized in definition.allowed_agent_types and (definition.enabled or not enabled_only)
         )
 
+    def unregister(self, skill_id: str) -> SkillDefinition:
+        """Remove exactly one registered Skill and return its immutable definition."""
+        normalized = validate_skill_id(skill_id)
+        try:
+            return self._definitions.pop(normalized)
+        except KeyError as error:
+            raise SkillNotFoundError(f"skill id not found: {normalized}") from error
+
     def clear(self) -> None:
         self._definitions.clear()
 

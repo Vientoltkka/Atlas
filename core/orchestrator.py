@@ -88,6 +88,7 @@ from tools.tool_context import ToolContext
 
 from core.supervised_capability_gap import (
     MissingCapabilityProposal,
+    SkillCreationResponse,
     SupervisedCapabilityGapDetector,
 )
 
@@ -199,6 +200,7 @@ class AtlasOrchestrator:
         self._skill_system = skill_system
         self._capability_gap_detector = capability_gap_detector
         self._pending_capability_proposal: MissingCapabilityProposal | None = None
+        self._pending_skill_creation_proposal: SkillCreationResponse | None = None
         self._prepared_capability_proposal: MissingCapabilityProposal | None = None
         self._validated_capability_proposal: MissingCapabilityProposal | None = None
         self._last_structured_execution_response: (
@@ -484,9 +486,21 @@ class AtlasOrchestrator:
         if application_response is not None:
             return application_response
 
+        pending_skill_response = self._handle_pending_skill_creation(prompt)
+        if pending_skill_response is not None:
+            return pending_skill_response
+
         pending_response = self._handle_pending_capability_proposal(prompt)
         if pending_response is not None:
             return pending_response
+
+        if self._capability_gap_detector is not None:
+            skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
+            if skill_creation is not None:
+                if skill_creation.status == "CREATE_PROPOSAL":
+                    self._pending_skill_creation_proposal = skill_creation
+                    return skill_creation.present()
+                return skill_creation.present()
 
         temperature_response = self._temperature_conversion_response(prompt)
         if temperature_response is not None:
@@ -654,6 +668,31 @@ class AtlasOrchestrator:
             request.content,
             confirm,
             request=request,
+        )
+
+    def _handle_pending_skill_creation(self, prompt: str) -> str | None:
+        proposal = self._pending_skill_creation_proposal
+        if proposal is None:
+            return None
+        normalized = _normalize_confirmation_text(prompt)
+        if normalized in {"no", "n", "cancelar", "cancela"}:
+            self._pending_skill_creation_proposal = None
+            return "Creación de Skill cancelada. No se han realizado cambios."
+        expected = _normalize_confirmation_text(
+            f"AUTORIZAR {proposal.skill_id} {proposal.authorization_token}"
+        )
+        if normalized != expected:
+            if normalized.startswith("autorizar "):
+                return "UNSUPPORTED_FOR_SAFE_CREATION: autorización no corresponde a la propuesta activa."
+            return None
+        self._pending_skill_creation_proposal = None
+        if self._capability_gap_detector is None:
+            return "UNSUPPORTED_FOR_SAFE_CREATION: detector no disponible."
+        authorization = f"AUTORIZAR {proposal.skill_id} {proposal.authorization_token}"
+        return self._capability_gap_detector.apply_declarative_skill(
+            proposal,
+            authorization,
+            self._project_root,
         )
 
     def _handle_pending_capability_proposal(self, prompt: str) -> str | None:
