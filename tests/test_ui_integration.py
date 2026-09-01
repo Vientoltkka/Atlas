@@ -875,3 +875,32 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     assert hotkeys[0].stopped is True
     orb.close()
     panel.close()
+
+
+def test_orb_context_actions_reuse_chat_and_voice_controller_paths(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    voice_started = threading.Event()
+
+    class FakeAtlas:
+        def start_voice(self, *, typed_input, **_kwargs) -> None:
+            voice_started.set()
+            while typed_input() is None:
+                threading.Event().wait(0.01)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+    panel.hide()
+
+    orb.chat_requested.emit()
+    assert panel.isVisible()
+    orb.voice_requested.emit()
+    assert voice_started.wait(timeout=1)
+    assert orb.context_menu._voice_button.text() == "Detener voz"
+    orb.voice_requested.emit()
+    controller.join(timeout=2)
+    assert orb.context_menu._voice_button.text() == "Modo Voz"
+    orb.close()
+    panel.close()

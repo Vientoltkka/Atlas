@@ -221,9 +221,73 @@ def test_drag_moves_window(qapp, orb) -> None:
     )
 
     assert orb.frameGeometry().topLeft() == target
+    assert not orb.context_menu.isVisible()
     centre = orb.frameGeometry().center()
     orb.apply_state(OrbVisualState.PROCESSING)
     assert orb.frameGeometry().center() == centre
+
+
+def test_orb_click_toggles_the_custom_context_menu(qapp, orb) -> None:
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    point = orb.frameGeometry().topLeft() + type(orb.pos())(20, 20)
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(20, 20), QPointF(point),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, QPointF(20, 20), QPointF(point),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+    )
+    orb.mousePressEvent(press)
+    orb.mouseReleaseEvent(release)
+    assert orb.context_menu.isVisible()
+    orb.mousePressEvent(press)
+    orb.mouseReleaseEvent(release)
+    assert not orb.context_menu.isVisible()
+
+
+def test_context_menu_stays_on_screen_and_moves_left_at_right_edge(qapp, orb) -> None:
+    bounds = orb.screen().availableGeometry()
+    orb.move(bounds.right() - orb.width() + 1, bounds.center().y() - orb.height() // 2)
+
+    orb.toggle_context_menu()
+
+    menu = orb.context_menu
+    geometry = menu.frameGeometry()
+    assert geometry.left() >= bounds.left()
+    assert geometry.right() <= bounds.right()
+    assert geometry.top() >= bounds.top()
+    assert geometry.bottom() <= bounds.bottom()
+    assert geometry.right() < orb.frameGeometry().left()
+    menu.hide()
+
+
+def test_context_menu_actions_emit_existing_orb_signals_and_close(qapp, orb) -> None:
+    calls: list[str] = []
+    orb.chat_requested.connect(lambda: calls.append("chat"))
+    orb.voice_requested.connect(lambda: calls.append("voice"))
+    orb.quit_requested.connect(lambda: calls.append("quit"))
+    menu = orb.context_menu
+
+    for button, expected in (
+        (menu._chat_button, "chat"),
+        (menu._voice_button, "voice"),
+        (menu._quit_button, "quit"),
+    ):
+        orb.toggle_context_menu()
+        assert menu.isVisible()
+        button.click()
+        assert calls[-1] == expected
+        assert not menu.isVisible()
+
+
+def test_context_menu_voice_label_reflects_real_controller_state(orb) -> None:
+    orb.set_voice_active(True)
+    assert orb.context_menu._voice_button.text() == "Detener voz"
+    orb.set_voice_active(False)
+    assert orb.context_menu._voice_button.text() == "Modo Voz"
 
 
 def test_fixed_orb_size(orb) -> None:

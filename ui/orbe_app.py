@@ -164,16 +164,104 @@ def create_orb_window(settings=None):
     from PySide6.QtCore import Qt, Signal, QTimer
     from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
     from PySide6.QtWidgets import (
+        QFrame,
+        QLabel,
         QMenu,
+        QPushButton,
         QSystemTrayIcon,
+        QVBoxLayout,
         QWidget,
     )
+
+    class OrbContextMenu(QWidget):
+        """Small translucent popup for actions already owned by the controller."""
+
+        chat_requested = Signal()
+        voice_requested = Signal()
+        quit_requested = Signal()
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setFixedWidth(212)
+            self._voice_active = False
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 12, 14, 12)
+            layout.setSpacing(5)
+            self._title = QLabel("MENU ATLAS", self)
+            self._title.setStyleSheet("color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            layout.addWidget(self._title)
+            self._add_separator(layout)
+            self._chat_button = self._add_action(layout, "Abrir Chat", self.chat_requested)
+            self._voice_button = self._add_action(layout, "Modo Voz", self.voice_requested)
+            self._add_separator(layout)
+            self._quit_button = self._add_action(layout, "Salir", self.quit_requested, danger=True)
+
+        def _add_separator(self, layout) -> None:
+            separator = QFrame(self)
+            separator.setFrameShape(QFrame.Shape.HLine)
+            separator.setStyleSheet("color: rgba(85, 185, 255, 105);")
+            layout.addWidget(separator)
+
+        def _add_action(self, layout, text: str, signal, *, danger: bool = False):
+            button = QPushButton(text, self)
+            color = "#ffb6b6" if danger else "#e7f8ff"
+            hover = "rgba(255, 78, 78, 50)" if danger else "rgba(52, 173, 255, 52)"
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                "QPushButton {"
+                f"color: {color}; background: transparent; border: 1px solid transparent;"
+                "border-radius: 7px; padding: 8px 10px; text-align: left; font-size: 12px;"
+                "}"
+                f"QPushButton:hover {{ background: {hover}; border-color: rgba(96, 202, 255, 130); }}"
+            )
+            button.clicked.connect(signal.emit)
+            button.clicked.connect(self.hide)
+            layout.addWidget(button)
+            return button
+
+        def set_voice_active(self, active: bool) -> None:
+            self._voice_active = active
+            self._voice_button.setText("Detener voz" if active else "Modo Voz")
+
+        def show_beside(self, orb) -> None:
+            self.adjustSize()
+            screen = orb.screen()
+            if screen is None:
+                return
+            bounds = screen.availableGeometry()
+            gap = 12
+            right_x = orb.frameGeometry().right() + gap + 1
+            left_x = orb.frameGeometry().left() - gap - self.width()
+            x = right_x if right_x + self.width() <= bounds.right() + 1 else left_x
+            x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
+            y = orb.frameGeometry().center().y() - self.height() // 2
+            y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
+            self.move(x, y)
+            self.show()
+            self.raise_()
+
+        def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 11, 11)
+            painter.setPen(QPen(QColor(75, 192, 255, 180), 1.0))
+            painter.setBrush(QColor(4, 18, 42, 238))
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(80, 195, 255, 36), 5.0))
+            painter.drawPath(path)
+            painter.end()
 
     class OrbWindow(QWidget):
         """Frameless translucent always-on-top circular state indicator."""
 
         stop_requested = Signal()
         quit_requested = Signal()
+        chat_requested = Signal()
+        voice_requested = Signal()
 
         def __init__(self) -> None:
             super().__init__()
@@ -188,9 +276,16 @@ def create_orb_window(settings=None):
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self._state = OrbVisualState.IDLE
             self._drag_offset = None
+            self._press_global = None
+            self._dragging = False
+            self._voice_active = False
             self._settings = settings
             self._animation_started_at = time.monotonic()
             self._emblem_path = self._build_atlas_emblem()
+            self._context_menu = OrbContextMenu(self)
+            self._context_menu.chat_requested.connect(self.chat_requested.emit)
+            self._context_menu.voice_requested.connect(self.voice_requested.emit)
+            self._context_menu.quit_requested.connect(self.quit_requested.emit)
 
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._on_animation_tick)
@@ -218,6 +313,21 @@ def create_orb_window(settings=None):
             self._update_tray_icon()
             self._update_timer()
             self.update()
+
+        @property
+        def context_menu(self):
+            return self._context_menu
+
+        def set_voice_active(self, active: bool) -> None:
+            self._voice_active = active
+            self._context_menu.set_voice_active(active)
+
+        def toggle_context_menu(self) -> None:
+            if self._context_menu.isVisible():
+                self._context_menu.hide()
+            else:
+                self._context_menu.set_voice_active(self._voice_active)
+                self._context_menu.show_beside(self)
 
         def _resize_for_state(self) -> None:
             """Resize around the current centre while keeping it on screen."""
@@ -367,19 +477,29 @@ def create_orb_window(settings=None):
                 self._drag_offset = (
                     event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                 )
+                self._press_global = event.globalPosition().toPoint()
+                self._dragging = False
 
         def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
             if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                if not self._dragging:
+                    distance = (event.globalPosition().toPoint() - self._press_global).manhattanLength()
+                    if distance < 10:
+                        return
+                    self._dragging = True
+                    self._context_menu.hide()
                 self.move(event.globalPosition().toPoint() - self._drag_offset)
 
         def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            if event.button() == Qt.MouseButton.LeftButton and not self._dragging:
+                self.toggle_context_menu()
             self._drag_offset = None
+            self._press_global = None
+            self._dragging = False
 
         def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt API)
-            menu = QMenu(self)
-            menu.addAction("Detener", self.stop_requested.emit)
-            menu.addAction("Salir", self.quit_requested.emit)
-            menu.exec(event.globalPos())
+            self.toggle_context_menu()
+            event.accept()
 
         def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
             self.save_position()

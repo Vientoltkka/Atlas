@@ -70,6 +70,8 @@ class OrbeController:
             subscribe_supervision(self._bridge.on_supervision_state)
         self._orb.stop_requested.connect(self.stop)
         self._orb.quit_requested.connect(self.request_quit)
+        self._orb.chat_requested.connect(self.show_chat)
+        self._orb.voice_requested.connect(self.toggle_voice)
         self._transcript_panel.send_requested.connect(self.submit_text)
         self._transcript_panel.attachment_send_requested.connect(self.submit_attachment_notice)
         self._transcript_panel.close_requested.connect(self.hide_chat)
@@ -112,6 +114,7 @@ class OrbeController:
         """Start a new voice session only when no prior session is running."""
         if self._session_thread is not None and self._session_thread.is_alive():
             return
+        self._orb.set_voice_active(True)
         self._stop_event = threading.Event()
         self._session_generation += 1
         generation = self._session_generation
@@ -129,6 +132,13 @@ class OrbeController:
         """Retry a completed voice session without affecting text chat."""
         self.start_voice()
 
+    def toggle_voice(self) -> None:
+        """Reuse the existing start/stop flow selected from the orb popup."""
+        if self._session_thread is not None and self._session_thread.is_alive():
+            self.stop()
+        else:
+            self.start_voice()
+
     def run(self, *, start_voice: bool = True, show_on_start: bool = True) -> int:
         self.start(start_voice=start_voice, show_on_start=show_on_start)
         try:
@@ -142,6 +152,7 @@ class OrbeController:
         """Acknowledge cancellation in the UI without waiting for a worker."""
         self._stop_event.set()
         self._session_generation += 1
+        self._orb.set_voice_active(False)
         self._apply_voice_visual_state(OrbVisualState.IDLE)
         self._transcript_panel.set_voice_disconnected()
 
@@ -226,6 +237,7 @@ class OrbeController:
             self._chat_threads.discard(threading.current_thread())
 
     def _on_session_finished(self) -> None:
+        self._orb.set_voice_active(False)
         if self._bridge.quit_on_finish:
             self._application.quit()
         else:
