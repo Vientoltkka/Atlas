@@ -14,6 +14,14 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import main as atlas_main
+from bootstrap.bootstrap import Bootstrap
+from core.atlas import Atlas
+from core.orchestrator import AtlasOrchestrator
+from tools.desktop.desktop_tools import CopyClipboardTextTool
+from tools.executor import ToolExecutor
+from tools.registry import ToolRegistry
+from use_cases.desktop_interaction import DesktopInteractionUseCase
+from use_cases.execution_conversation import ExecutionConversationController
 from use_cases.voice_conversation import (
     VoiceConversationSession,
     VoiceConversationState,
@@ -301,6 +309,75 @@ def test_text_chat_submits_without_blocking_and_renders_response(qapp) -> None:
     controller.join_chat(timeout=2)
     _drain_events(qapp)
     assert "Atlas: eco: hola Orbe" in panel._view.toPlainText()
+    orb.close()
+    panel.close()
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_copies"),
+    [("si", ["hola Atlas"]), ("no", [])],
+)
+def test_text_chat_routes_clipboard_copy_through_conversational_confirmation(
+    qapp, response: str, expected_copies: list[str]
+) -> None:
+    """Exercise the actual Orbe text controller and Atlas multi-turn flow."""
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    class Desktop:
+        def __init__(self) -> None:
+            self.copied: list[str] = []
+
+        def copy_clipboard_text(self, text: str) -> int:
+            self.copied.append(text)
+            return len(text)
+
+    desktop = Desktop()
+    registry = ToolRegistry()
+    registry.register(CopyClipboardTextTool(desktop))
+    executor = ToolExecutor(registry)
+    coordinator = Bootstrap.build_execution_coordinator(
+        tool_registry=registry,
+        executor=executor,
+    )
+    desktop_interaction = DesktopInteractionUseCase(executor)
+    orchestrator = AtlasOrchestrator(
+        planner=None,
+        router=None,
+        model_manager=None,
+        memory=None,
+        registry=None,
+        write_file=None,
+        desktop_interaction=desktop_interaction,
+        execution_conversation=ExecutionConversationController(coordinator),
+    )
+    atlas = Atlas.__new__(Atlas)
+    atlas._orchestrator = orchestrator
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=atlas, application=qapp, orb=orb, transcript_panel=panel
+    )
+
+    panel._input.setText("Copia hola Atlas al portapapeles")
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert desktop.copied == []
+    assert "Voy a copiar ese texto al portapapeles." in panel._view.toPlainText()
+
+    panel._input.setText(response)
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert desktop.copied == expected_copies
+    content = panel._view.toPlainText()
+    if response == "si":
+        assert "Texto copiado al portapapeles." in content
+    else:
+        assert "Operacion cancelada." in content
     orb.close()
     panel.close()
 
