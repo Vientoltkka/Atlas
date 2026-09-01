@@ -76,6 +76,81 @@ def test_transcript_panel_is_a_normal_window_and_not_on_top(qapp) -> None:
     assert not flags & Qt.WindowType.WindowStaysOnTopHint
     panel.close()
 
+
+def test_chat_input_is_multiline_and_enter_submits_but_shift_enter_inserts_newline(qapp) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    panel = orbe_app.create_transcript_panel()
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+    panel._input.setText("primera linea")
+    QTest.keyClick(panel._input, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    assert panel._input.text() == "primera linea\n"
+    QTest.keyClick(panel._input, Qt.Key.Key_Return)
+    assert sent == ["primera linea"]
+    assert panel._input.text() == ""
+    QTest.keyClick(panel._input, Qt.Key.Key_Backspace)
+    assert panel._input.text() == ""
+    panel.close()
+
+
+def test_empty_chat_input_does_not_send(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+    panel._submit_input()
+    assert sent == []
+    panel.close()
+
+
+def test_transcript_uses_distinct_escaped_user_and_atlas_turns(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    panel.append_user("<b>sin formato</b>\nsegunda linea")
+    panel.append_response("respuesta")
+    rendered = panel._view.toHtml()
+    text = panel._view.toPlainText()
+    assert "Usuario:" in text
+    assert "Atlas:" in text
+    assert "&lt;b&gt;sin formato&lt;/b&gt;" in rendered
+    assert "segunda linea" in text
+    panel.close()
+
+
+def test_transcript_autoscrolls_only_when_reader_is_at_the_end(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    panel.show()
+    for index in range(40):
+        panel.append_response(f"mensaje {index}")
+    scrollbar = panel._view.verticalScrollBar()
+    assert scrollbar.value() == scrollbar.maximum()
+    scrollbar.setValue(0)
+    panel.append_response("mensaje mientras leo arriba")
+    assert scrollbar.value() == 0
+    scrollbar.setValue(scrollbar.maximum())
+    panel.append_response("mensaje al final")
+    assert scrollbar.value() == scrollbar.maximum()
+    panel.close()
+
+
+def test_attachment_selection_shows_preview_and_remove_clears_it(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    attachment = tmp_path / "nota.txt"
+    attachment.write_text("contenido", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(attachment), ""))
+    panel = orbe_app.create_transcript_panel()
+    panel._choose_attachment()
+    assert panel._pending_attachment.name == "nota.txt"
+    assert panel._pending_attachment.media_type == "text/plain"
+    assert panel._pending_attachment.size_bytes == len("contenido")
+    assert "nota.txt" in panel._attachment_details.text()
+    assert "text/plain" in panel._attachment_details.text()
+    panel._clear_attachment()
+    assert panel._pending_attachment is None
+    assert panel._attachment_preview.isHidden()
+    panel.close()
+
 def test_drag_moves_window(qapp, orb) -> None:
     from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QMouseEvent

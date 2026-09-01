@@ -68,6 +68,7 @@ class OrbeController:
         self._orb.stop_requested.connect(self.stop)
         self._orb.quit_requested.connect(self.request_quit)
         self._transcript_panel.send_requested.connect(self.submit_text)
+        self._transcript_panel.attachment_send_requested.connect(self.submit_attachment_notice)
         self._transcript_panel.close_requested.connect(self.hide_chat)
         self._transcript_panel.voice_start_requested.connect(self.start_voice)
         self._transcript_panel.voice_stop_requested.connect(self.stop)
@@ -155,6 +156,17 @@ class OrbeController:
         )
         self._chat_threads.add(worker)
         worker.start()
+
+    def submit_attachment_notice(self, prompt: str, attachment) -> None:
+        """Keep attachment handling local until chat attachment analysis is wired."""
+        text = str(prompt).strip()
+        if not text:
+            return
+        self._bridge.on_user_message(text)
+        self._bridge.on_response(
+            f"Archivo adjunto: {attachment.name}. "
+            "El análisis de archivos desde el chat todavía no está habilitado."
+        )
 
     def join(self, timeout: float = 8.0) -> None:
         if self._session_thread is not None and self._session_thread.is_alive():

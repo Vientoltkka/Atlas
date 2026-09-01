@@ -317,6 +317,43 @@ def test_text_chat_submits_without_blocking_and_renders_response(qapp) -> None:
     panel.close()
 
 
+def test_text_chat_with_attachment_renders_notice_without_calling_backend(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    attachment = tmp_path / "datos.csv"
+    attachment.write_text("valor\n1\n", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(attachment), ""))
+
+    class FakeAtlas:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def process_prompt(self, prompt: str) -> str:
+            self.calls.append(prompt)
+            return "no debe llegar"
+
+    atlas = FakeAtlas()
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
+    panel._choose_attachment()
+    panel._input.setText("revisa esto")
+    panel._send_button.click()
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    assert atlas.calls == []
+    assert "Usuario: revisa esto" in content
+    assert "Archivo adjunto: datos.csv." in content
+    assert "análisis de archivos" in content
+    assert "No se pudo procesar el mensaje textual." not in content
+    assert panel._pending_attachment is None
+    orb.close()
+    panel.close()
+
+
 def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_followup(
     qapp, monkeypatch
 ) -> None:

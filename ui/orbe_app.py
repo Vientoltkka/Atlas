@@ -12,9 +12,12 @@ signals are unchanged.
 
 from __future__ import annotations
 
+import html
 import math
+import mimetypes
 import sys
 import time
+import uuid
 from typing import Sequence
 
 from use_cases.ui_state_mapper import OrbVisualState
@@ -573,10 +576,42 @@ def create_orb_window(settings=None):
 def create_transcript_panel():
     """Small transcript panel with chat and minimal voice controls."""
     from PySide6.QtCore import Qt, Signal
-    from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout, QWidget
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import (
+        QFileDialog,
+        QFrame,
+        QHBoxLayout,
+        QLabel,
+        QPlainTextEdit,
+        QPushButton,
+        QTextBrowser,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    class ChatInput(QPlainTextEdit):
+        """Multiline input that keeps Enter as the chat submission shortcut."""
+
+        submit_requested = Signal()
+
+        def setText(self, text: str) -> None:  # noqa: N802 (QLineEdit compatibility)
+            self.setPlainText(text)
+            self.moveCursor(QTextCursor.MoveOperation.End)
+
+        def text(self) -> str:
+            return self.toPlainText()
+
+        def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if event.modifiers() == Qt.KeyboardModifier.NoModifier:
+                    self.submit_requested.emit()
+                    event.accept()
+                    return
+            super().keyPressEvent(event)
 
     class TranscriptPanel(QWidget):
         send_requested = Signal(str)
+        attachment_send_requested = Signal(str, object)
         close_requested = Signal()
         voice_start_requested = Signal()
         voice_stop_requested = Signal()
@@ -589,9 +624,11 @@ def create_transcript_panel():
             self.setWindowTitle("Atlas - transcripcion")
             self.setObjectName("atlasTranscriptPanel")
             self.setWindowFlags(Qt.WindowType.Window)
-            self.resize(360, 220)
+            self.resize(380, 440)
+            self.setMinimumSize(360, 400)
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(8)
             self._voice_status = QLabel("Desconectado", self)
             layout.addWidget(self._voice_status)
             voice_layout = QHBoxLayout()
@@ -607,22 +644,97 @@ def create_transcript_panel():
             layout.addLayout(voice_layout)
             self._view = QTextBrowser(self)
             self._view.setReadOnly(True)
+            self._view.setStyleSheet(
+                "QTextBrowser { background: #0b1220; color: #e6edf7; border: 1px solid #24344a; "
+                "border-radius: 8px; font-size: 15px; padding: 8px; }"
+            )
             layout.addWidget(self._view)
+            self._pending_attachment = None
+            self._attachment_preview = QFrame(self)
+            self._attachment_preview.setFrameShape(QFrame.Shape.StyledPanel)
+            self._attachment_preview.setStyleSheet(
+                "QFrame { background: #132238; border: 1px solid #2f5b82; border-radius: 6px; }"
+            )
+            attachment_layout = QHBoxLayout(self._attachment_preview)
+            self._attachment_icon = QLabel("[archivo]", self._attachment_preview)
+            self._attachment_details = QLabel(self._attachment_preview)
+            self._attachment_remove_button = QPushButton("X", self._attachment_preview)
+            self._attachment_remove_button.setToolTip("Quitar adjunto")
+            self._attachment_remove_button.setFixedWidth(30)
+            self._attachment_remove_button.clicked.connect(self._clear_attachment)
+            attachment_layout.addWidget(self._attachment_icon)
+            attachment_layout.addWidget(self._attachment_details, 1)
+            attachment_layout.addWidget(self._attachment_remove_button)
+            self._attachment_preview.hide()
+            layout.addWidget(self._attachment_preview)
             input_layout = QHBoxLayout()
-            self._input = QLineEdit(self)
+            self._attachment_button = QPushButton("+", self)
+            self._attachment_button.setToolTip("Adjuntar archivo")
+            self._attachment_button.clicked.connect(self._choose_attachment)
+            self._input = ChatInput(self)
             self._input.setPlaceholderText("Escribe un mensaje...")
+            self._input.setFixedHeight(96)
+            self._input.setStyleSheet(
+                "QPlainTextEdit { background: #101a2a; color: #edf5ff; border: 1px solid #2d4b69; "
+                "border-radius: 7px; font-size: 15px; padding: 8px; }"
+            )
             self._send_button = QPushButton("Enviar", self)
-            self._input.returnPressed.connect(self._submit_input)
+            self._input.submit_requested.connect(self._submit_input)
             self._send_button.clicked.connect(self._submit_input)
+            input_layout.addWidget(self._attachment_button)
             input_layout.addWidget(self._input)
             input_layout.addWidget(self._send_button)
             layout.addLayout(input_layout)
 
         def _submit_input(self) -> None:
             text = self._input.text().strip()
-            if text:
-                self._input.clear()
-                self.send_requested.emit(text)
+            if not text:
+                return
+            self._input.clear()
+            if self._pending_attachment is not None:
+                attachment = self._pending_attachment
+                self._clear_attachment()
+                self.attachment_send_requested.emit(text, attachment)
+                return
+            self.send_requested.emit(text)
+
+        def _choose_attachment(self) -> None:
+            path, _selected_filter = QFileDialog.getOpenFileName(self, "Seleccionar archivo")
+            if not path:
+                return
+            from pathlib import Path
+            from core.request_gateway import RequestAttachment
+
+            file_path = Path(path)
+            try:
+                size_bytes = file_path.stat().st_size
+            except OSError:
+                return
+            media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+            self._pending_attachment = RequestAttachment(
+                attachment_id=uuid.uuid4().hex,
+                name=file_path.name,
+                media_type=media_type,
+                size_bytes=size_bytes,
+                local_reference=str(file_path),
+            )
+            self._attachment_details.setText(
+                f"{file_path.name}\n{media_type} · {self._format_size(size_bytes)}"
+            )
+            self._attachment_preview.show()
+
+        @staticmethod
+        def _format_size(size_bytes: int) -> str:
+            if size_bytes < 1024:
+                return f"{size_bytes} B"
+            if size_bytes < 1024 * 1024:
+                return f"{size_bytes / 1024:.1f} KB"
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+        def _clear_attachment(self) -> None:
+            self._pending_attachment = None
+            self._attachment_details.clear()
+            self._attachment_preview.hide()
 
         def set_hide_on_close(self, enabled: bool) -> None:
             """Configure the chat-only close behavior without changing voice UI."""
@@ -642,19 +754,38 @@ def create_transcript_panel():
             self._voice_status.setText("Desconectado")
 
         def append_message(self, message: str) -> None:
-            self._view.append(str(message))
+            self._append_turn("Sistema", message, "#1a2b40")
 
         def append_user(self, message: str) -> None:
-            self.append_message(f"Usuario: {message}")
+            self._append_turn("Usuario", message, "#17395a")
 
         def append_transcription(self, transcription: str) -> None:
-            self.append_message(f"Tú: {transcription}")
+            self._append_turn("Tú", transcription, "#17395a")
 
         def append_response(self, response: str) -> None:
-            self.append_message(f"Atlas: {response}")
+            self._append_turn("Atlas", response, "#172c46")
 
         def append_error(self, error: str) -> None:
-            self.append_message(f"Error: {error}")
+            self._append_turn("Error", error, "#48202a")
+
+        def _append_turn(self, sender: str, message: str, background: str) -> None:
+            scrollbar = self._view.verticalScrollBar()
+            follow_tail = scrollbar.value() >= scrollbar.maximum() - 24
+            previous_scroll_value = scrollbar.value()
+            safe_sender = html.escape(str(sender))
+            safe_message = html.escape(str(message)).replace("\n", "<br>")
+            self._view.moveCursor(QTextCursor.MoveOperation.End)
+            self._view.insertHtml(
+                f'<div style="margin: 8px 2px 14px 2px; padding: 9px 11px; '
+                f'background: {background}; border-radius: 7px;">'
+                f'<span style="color: #8fd3ff; font-weight: 700;">{safe_sender}:</span> '
+                f'<span style="color: #eef5ff;">{safe_message}</span></div>'
+            )
+            self._view.insertHtml("<br>")
+            if follow_tail:
+                scrollbar.setValue(scrollbar.maximum())
+            else:
+                scrollbar.setValue(previous_scroll_value)
 
     return TranscriptPanel()
 
