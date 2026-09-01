@@ -53,7 +53,10 @@ class OrbeController:
         self._voice_session_bridge = _VoiceSessionBridge()
         self._voice_session_bridge.state_received.connect(self._on_voice_state)
         self._voice_session_bridge.message_received.connect(self._on_voice_message)
-        self._bridge.state_changed.connect(self._orb.apply_state)
+        self._last_voice_visual_state = OrbVisualState.IDLE
+        self._supervision_visual_override = None
+        self._bridge.voice_visual_state_changed.connect(self._apply_voice_visual_state)
+        self._bridge.supervision_visual_state_changed.connect(self._apply_supervision_visual_state)
         self._bridge.voice_state_changed.connect(self._transcript_panel.set_voice_state)
         self._bridge.voice_disconnected.connect(self._transcript_panel.set_voice_disconnected)
         self._bridge.message_received.connect(self._transcript_panel.append_message)
@@ -112,7 +115,7 @@ class OrbeController:
         self._stop_event = threading.Event()
         self._session_generation += 1
         generation = self._session_generation
-        self._orb.apply_state(OrbVisualState.STARTING)
+        self._apply_voice_visual_state(OrbVisualState.STARTING)
         self._transcript_panel.set_voice_state("STARTING")
         self._session_thread = threading.Thread(
             target=self._run_session,
@@ -139,7 +142,7 @@ class OrbeController:
         """Acknowledge cancellation in the UI without waiting for a worker."""
         self._stop_event.set()
         self._session_generation += 1
-        self._orb.apply_state(OrbVisualState.IDLE)
+        self._apply_voice_visual_state(OrbVisualState.IDLE)
         self._transcript_panel.set_voice_disconnected()
 
     def request_quit(self) -> None:
@@ -226,7 +229,23 @@ class OrbeController:
         if self._bridge.quit_on_finish:
             self._application.quit()
         else:
-            self._orb.apply_state(OrbVisualState.IDLE)
+            self._apply_voice_visual_state(OrbVisualState.IDLE)
+
+    def _apply_voice_visual_state(self, state) -> None:
+        """Remember voice state without displacing an active supervision cue."""
+        self._last_voice_visual_state = OrbVisualState(state)
+        if self._supervision_visual_override is None:
+            self._orb.apply_state(self._last_voice_visual_state)
+
+    def _apply_supervision_visual_state(self, state) -> None:
+        """Give approval and execution their required visual precedence."""
+        visual_state = OrbVisualState(state)
+        if visual_state in {OrbVisualState.AUTHORIZATION, OrbVisualState.AUTOMATION}:
+            self._supervision_visual_override = visual_state
+            self._orb.apply_state(visual_state)
+            return
+        self._supervision_visual_override = None
+        self._orb.apply_state(self._last_voice_visual_state)
 
     def _start_chat_hotkey(self) -> None:
         if self._chat_hotkey is None:

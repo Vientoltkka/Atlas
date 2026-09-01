@@ -23,22 +23,24 @@ from typing import Sequence
 from use_cases.ui_state_mapper import OrbVisualState
 
 
-ORB_SIZE = 280
+ORB_SIZE = 360
 CORE_RADIUS_FACTOR = 0.275
 _ACTIVE_ORB_SIZES: dict[OrbVisualState, int] = {
     OrbVisualState.LISTENING: 460,
-    OrbVisualState.PROCESSING: 500,
-    OrbVisualState.SPEAKING: 460,
-    OrbVisualState.AUTHORIZATION: 500,
+    OrbVisualState.PROCESSING: 480,
+    OrbVisualState.SPEAKING: 490,
+    OrbVisualState.AUTHORIZATION: 490,
+    OrbVisualState.AUTOMATION: 490,
 }
 
 _STATE_COLORS: dict[OrbVisualState, tuple[int, int, int, int]] = {
-    OrbVisualState.IDLE: (56, 185, 255, 220),
+    OrbVisualState.IDLE: (56, 185, 255, 230),
     OrbVisualState.STARTING: (105, 225, 255, 235),
     OrbVisualState.LISTENING: (80, 225, 255, 245),
-    OrbVisualState.PROCESSING: (68, 178, 255, 245),
-    OrbVisualState.SPEAKING: (82, 235, 255, 250),
-    OrbVisualState.AUTHORIZATION: (255, 178, 58, 245),
+    OrbVisualState.PROCESSING: (168, 102, 255, 245),
+    OrbVisualState.SPEAKING: (72, 238, 148, 250),
+    OrbVisualState.AUTHORIZATION: (255, 174, 52, 250),
+    OrbVisualState.AUTOMATION: (255, 72, 72, 250),
     OrbVisualState.RECOVERING: (60, 175, 235, 220),
     OrbVisualState.DEGRADED: (78, 100, 128, 145),
     OrbVisualState.STOPPING: (80, 145, 180, 160),
@@ -51,6 +53,7 @@ DEMO_STATE_CYCLE: Sequence[OrbVisualState] = (
     OrbVisualState.PROCESSING,
     OrbVisualState.SPEAKING,
     OrbVisualState.AUTHORIZATION,
+    OrbVisualState.AUTOMATION,
     OrbVisualState.RECOVERING,
     OrbVisualState.DEGRADED,
     OrbVisualState.STOPPING,
@@ -64,6 +67,7 @@ _ANIMATION_PERIODS: dict[OrbVisualState, float | None] = {
     OrbVisualState.PROCESSING: 2.0,  # inner arc rotation
     OrbVisualState.SPEAKING: 0.9,    # quick luminous halo pulse
     OrbVisualState.AUTHORIZATION: 2.4,  # slow human-approval pulse
+    OrbVisualState.AUTOMATION: 1.35,  # active supervised execution
     OrbVisualState.RECOVERING: 0.6,  # quick blink
     OrbVisualState.DEGRADED: None,   # static dim
     OrbVisualState.STOPPING: 1.5,    # gentle shrink/fade
@@ -123,6 +127,10 @@ def animation_frame(
         scale = 1.0 + 0.015 * wave
         alpha_factor = 0.78 + 0.20 * (wave * 0.5 + 0.5)
         rotation_deg = 360.0 * phase
+    elif state is OrbVisualState.AUTOMATION:
+        scale = 1.0 + 0.022 * wave
+        alpha_factor = 0.88 + 0.12 * (wave * 0.5 + 0.5)
+        rotation_deg = 360.0 * phase
     elif state is OrbVisualState.RECOVERING:
         scale = 1.0
         alpha_factor = 0.55 + 0.45 * abs(wave)
@@ -170,7 +178,8 @@ def create_orb_window(settings=None):
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Atlas")
-            self.setFixedSize(ORB_SIZE, ORB_SIZE)
+            initial_size = self._bounded_size(ORB_SIZE)
+            self.setFixedSize(initial_size, initial_size)
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint
                 | Qt.WindowType.WindowStaysOnTopHint
@@ -212,14 +221,31 @@ def create_orb_window(settings=None):
 
         def _resize_for_state(self) -> None:
             """Resize around the current centre, then keep clear of the chat."""
-            target_size = size_for_state(self._state)
+            target_size = self._bounded_size(size_for_state(self._state))
             if self.width() == target_size:
                 return
             centre = self.frameGeometry().center()
             self.setFixedSize(target_size, target_size)
             self._emblem_path = self._build_atlas_emblem()
             self.move(centre.x() - target_size // 2, centre.y() - target_size // 2)
+            self._clamp_to_available_geometry()
             self._avoid_visible_transcript_overlap()
+
+        def _bounded_size(self, requested_size: int) -> int:
+            screen = self.screen()
+            if screen is None:
+                return requested_size
+            bounds = screen.availableGeometry()
+            return max(1, min(requested_size, bounds.width(), bounds.height()))
+
+        def _clamp_to_available_geometry(self) -> None:
+            screen = self.screen()
+            if screen is None:
+                return
+            bounds = screen.availableGeometry()
+            x = max(bounds.left(), min(self.x(), bounds.right() - self.width() + 1))
+            y = max(bounds.top(), min(self.y(), bounds.bottom() - self.height() + 1))
+            self.move(x, y)
 
         def _update_timer(self) -> None:
             if animation_period(self._state) is None:
@@ -278,21 +304,30 @@ def create_orb_window(settings=None):
         def restore_position(self) -> None:
             """Restore a previously saved position within screen bounds."""
             if self._settings is None:
+                self._center_on_available_geometry()
                 return
             x = self._settings.value("pos_x")
             y = self._settings.value("pos_y")
             if x is None or y is None:
+                self._center_on_available_geometry()
                 return
             try:
                 target_x, target_y = int(x), int(y)
             except (TypeError, ValueError):
                 return
-            screen = self.screen()
-            bounds = screen.availableGeometry() if screen is not None else None
-            if bounds is not None:
-                target_x = max(bounds.left(), min(target_x, bounds.right() - self.width() + 1))
-                target_y = max(bounds.top(), min(target_y, bounds.bottom() - self.height() + 1))
             self.move(target_x, target_y)
+            self._clamp_to_available_geometry()
+
+        def _center_on_available_geometry(self) -> None:
+            screen = self.screen()
+            if screen is None:
+                return
+            bounds = screen.availableGeometry()
+            self.move(
+                bounds.center().x() - (self.width() - 1) // 2,
+                bounds.center().y() - (self.height() - 1) // 2,
+            )
+            self._clamp_to_available_geometry()
 
         def reposition_beside(self, panel) -> None:
             """Move beside a visible transcript panel only when they overlap."""
@@ -358,17 +393,18 @@ def create_orb_window(settings=None):
             """Create the cached, bar-free geometric Atlas emblem silhouette."""
             size = self.width()
             path = QPainterPath()
-            # Two filled, inclined arms leave a triangular inner cut: this is a symbol, not a typographic A.
-            path.moveTo(size * 0.50, size * 0.405)
-            path.lineTo(size * 0.402, size * 0.635)
-            path.lineTo(size * 0.447, size * 0.620)
-            path.lineTo(size * 0.500, size * 0.485)
+            # Interlocked twin A peaks remain clear at small sizes without becoming text.
+            path.moveTo(size * 0.475, size * 0.375)
+            path.lineTo(size * 0.340, size * 0.650)
+            path.lineTo(size * 0.405, size * 0.628)
+            path.lineTo(size * 0.490, size * 0.445)
             path.closeSubpath()
-            path.moveTo(size * 0.50, size * 0.405)
-            path.lineTo(size * 0.598, size * 0.635)
-            path.lineTo(size * 0.553, size * 0.620)
-            path.lineTo(size * 0.500, size * 0.485)
+            path.moveTo(size * 0.525, size * 0.375)
+            path.lineTo(size * 0.660, size * 0.650)
+            path.lineTo(size * 0.595, size * 0.628)
+            path.lineTo(size * 0.510, size * 0.445)
             path.closeSubpath()
+            path.addRect(size * 0.405, size * 0.548, size * 0.190, size * 0.030)
             return path
 
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -382,15 +418,20 @@ def create_orb_window(settings=None):
             orbit_radius = max(28, int(size * 0.335 * frame["scale"]))
             halo_radius = max(38, int(size * 0.435 * frame["scale"]))
             phase = math.radians(frame["rotation_deg"])
+            palette = {
+                OrbVisualState.PROCESSING: ((187, 116, 255), (75, 38, 132), (215, 175, 255), (165, 94, 255), (245, 232, 255)),
+                OrbVisualState.SPEAKING: ((80, 235, 157), (20, 111, 69), (152, 255, 205), (57, 220, 128), (222, 255, 237)),
+                OrbVisualState.AUTHORIZATION: ((255, 181, 60), (166, 95, 15), (255, 224, 142), (255, 194, 70), (255, 245, 204)),
+                OrbVisualState.AUTOMATION: ((255, 78, 78), (145, 26, 35), (255, 163, 163), (242, 62, 69), (255, 232, 232)),
+            }
+            halo_rgb, ring_dim_rgb, ring_light_rgb, ring_bright_rgb, ring_peak_rgb = palette.get(
+                self._state, ((70, 205, 255), (42, 142, 255), (120, 225, 255), (53, 179, 255), (216, 252, 255))
+            )
             is_authorization = self._state is OrbVisualState.AUTHORIZATION
-            halo_rgb = (255, 181, 60) if is_authorization else (70, 205, 255)
-            ring_dim_rgb = (166, 95, 15) if is_authorization else (42, 142, 255)
-            ring_light_rgb = (255, 224, 142) if is_authorization else (120, 225, 255)
-            ring_bright_rgb = (255, 194, 70) if is_authorization else (53, 179, 255)
-            ring_peak_rgb = (255, 245, 204) if is_authorization else (216, 252, 255)
             active_glow = 1.22 if self._state is OrbVisualState.SPEAKING else 1.0
             active_glow = 1.12 if self._state is OrbVisualState.PROCESSING else active_glow
-            projection_rgb = (255, 192, 72) if is_authorization else (92, 224, 255)
+            active_glow = 1.16 if self._state is OrbVisualState.AUTOMATION else active_glow
+            projection_rgb = ring_bright_rgb
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -425,7 +466,7 @@ def create_orb_window(settings=None):
 
             orbit_speed = (
                 (1.0, 1.58, -0.82)
-                if self._state is OrbVisualState.PROCESSING
+                if self._state in {OrbVisualState.PROCESSING, OrbVisualState.AUTOMATION}
                 else (0.24, 0.16, -0.11)
                 if self._state is OrbVisualState.SPEAKING
                 else (0.18, -0.12, 0.08)
@@ -456,10 +497,22 @@ def create_orb_window(settings=None):
                 center - core_radius * 0.30,
                 core_radius * 1.28,
             )
-            if is_authorization:
+            if self._state is OrbVisualState.AUTHORIZATION:
                 shell_gradient.setColorAt(0.0, QColor(38, 20, 3, min(255, alpha + 18)))
                 shell_gradient.setColorAt(0.48, QColor(83, 43, 4, int(alpha * 0.96)))
                 shell_gradient.setColorAt(0.77, QColor(184, 103, 15, int(alpha * 0.82)))
+            elif self._state is OrbVisualState.AUTOMATION:
+                shell_gradient.setColorAt(0.0, QColor(46, 4, 12, min(255, alpha + 18)))
+                shell_gradient.setColorAt(0.48, QColor(104, 10, 24, int(alpha * 0.96)))
+                shell_gradient.setColorAt(0.77, QColor(212, 42, 50, int(alpha * 0.86)))
+            elif self._state is OrbVisualState.PROCESSING:
+                shell_gradient.setColorAt(0.0, QColor(23, 5, 52, min(255, alpha + 18)))
+                shell_gradient.setColorAt(0.48, QColor(57, 16, 112, int(alpha * 0.96)))
+                shell_gradient.setColorAt(0.77, QColor(145, 63, 228, int(alpha * 0.84)))
+            elif self._state is OrbVisualState.SPEAKING:
+                shell_gradient.setColorAt(0.0, QColor(3, 39, 29, min(255, alpha + 18)))
+                shell_gradient.setColorAt(0.48, QColor(5, 93, 58, int(alpha * 0.96)))
+                shell_gradient.setColorAt(0.77, QColor(23, 177, 103, int(alpha * 0.84)))
             else:
                 shell_gradient.setColorAt(0.0, QColor(3, 13, 38, min(255, alpha + 18)))
                 shell_gradient.setColorAt(0.48, QColor(5, 31, 78, int(alpha * 0.96)))
@@ -489,10 +542,10 @@ def create_orb_window(settings=None):
 
             energy_radius = max(10, int(core_radius * 0.64))
             energy_gradient = QRadialGradient(center - energy_radius * 0.18, center - energy_radius * 0.20, energy_radius)
-            energy_gradient.setColorAt(0.0, QColor(142, 226, 255, int(alpha * 0.60)))
-            energy_gradient.setColorAt(0.22, QColor(39, 176, 242, int(alpha * 0.50)))
-            energy_gradient.setColorAt(0.58, QColor(8, 58, 142, int(alpha * 0.28)))
-            energy_gradient.setColorAt(1.0, QColor(7, 27, 74, 0))
+            energy_gradient.setColorAt(0.0, QColor(*ring_peak_rgb, int(alpha * 0.60)))
+            energy_gradient.setColorAt(0.22, QColor(*ring_light_rgb, int(alpha * 0.50)))
+            energy_gradient.setColorAt(0.58, QColor(*ring_dim_rgb, int(alpha * 0.28)))
+            energy_gradient.setColorAt(1.0, QColor(*ring_dim_rgb, 0))
             painter.setBrush(energy_gradient)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(center - energy_radius, center - energy_radius, energy_radius * 2, energy_radius * 2)

@@ -62,6 +62,7 @@ def test_visual_states_do_not_invent_core_states() -> None:
         "PROCESSING",
         "SPEAKING",
         "AUTHORIZATION",
+        "AUTOMATION",
         "RECOVERING",
         "DEGRADED",
         "STOPPING",
@@ -70,7 +71,8 @@ def test_visual_states_do_not_invent_core_states() -> None:
 
 def test_real_supervision_wait_maps_to_authorization_and_clears() -> None:
     assert map_supervision_state(ExecutionState.WAITING_CONFIRMATION) is OrbVisualState.AUTHORIZATION
-    assert map_supervision_state(ExecutionState.RUNNING) is OrbVisualState.PROCESSING
+    assert map_supervision_state(ExecutionState.RUNNING) is OrbVisualState.AUTOMATION
+    assert map_supervision_state(ExecutionState.REPLANNING) is OrbVisualState.AUTOMATION
     assert map_supervision_state(ExecutionState.CANCELLED) is OrbVisualState.IDLE
 
 

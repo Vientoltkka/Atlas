@@ -10,6 +10,8 @@ class AtlasUiBridge(QObject):
     """Thread-safe signal source for Orbe's voice and chat callbacks."""
 
     state_changed = Signal(object)
+    voice_visual_state_changed = Signal(object)
+    supervision_visual_state_changed = Signal(object)
     voice_state_changed = Signal(str)
     voice_disconnected = Signal()
     message_received = Signal(str)
@@ -37,6 +39,7 @@ class AtlasUiBridge(QObject):
         except ValueError:
             return
         self.state_changed.emit(visual)
+        self.voice_visual_state_changed.emit(visual)
         self.voice_state_changed.emit(str(state.value if hasattr(state, "value") else state))
         self.message_received.emit(f"Estado: {visual.value}")
 
@@ -47,6 +50,7 @@ class AtlasUiBridge(QObject):
         except ValueError:
             return
         self.state_changed.emit(visual)
+        self.supervision_visual_state_changed.emit(visual)
 
     def on_message(self, message: str) -> None:
         text = str(message).strip()

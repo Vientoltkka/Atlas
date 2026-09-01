@@ -114,7 +114,7 @@ def test_real_supervisor_authorization_reaches_orb_and_clears(qapp) -> None:
 
     supervisor.mark_running(session.session_id)
     _drain_events(qapp)
-    assert orb.state is OrbVisualState.PROCESSING
+    assert orb.state is OrbVisualState.AUTOMATION
     supervisor.mark_waiting_confirmation(session.session_id)
     _drain_events(qapp)
     assert orb.state is OrbVisualState.AUTHORIZATION
@@ -243,13 +243,69 @@ def test_controller_subscribes_only_when_atlas_exposes_real_supervision(qapp) ->
     atlas = FakeAtlas()
     orb = create_orb_window()
     panel = create_transcript_panel()
-    OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
+    controller = OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
     atlas.listener(ExecutionState.WAITING_CONFIRMATION)
     _drain_events(qapp)
     assert orb.state is OrbVisualState.AUTHORIZATION
     atlas.listener(ExecutionState.RUNNING)
     _drain_events(qapp)
-    assert orb.state is OrbVisualState.PROCESSING
+    assert orb.state is OrbVisualState.AUTOMATION
+    orb.close()
+    panel.close()
+
+
+@pytest.mark.parametrize(
+    ("supervision_state", "voice_state", "expected"),
+    (
+        (ExecutionState.RUNNING, VoiceConversationState.PROCESSING, "AUTOMATION"),
+        (ExecutionState.WAITING_CONFIRMATION, VoiceConversationState.SPEAKING, "AUTHORIZATION"),
+    ),
+)
+def test_supervision_visual_override_takes_priority_over_voice(
+    qapp, supervision_state, voice_state, expected
+) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    class FakeAtlas:
+        def add_supervision_state_listener(self, listener) -> None:
+            self.listener = listener
+
+    atlas = FakeAtlas()
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
+    atlas.listener(supervision_state)
+    controller.bridge.on_state(voice_state)
+    _drain_events(qapp)
+
+    assert orb.state is OrbVisualState(expected)
+    orb.close()
+    panel.close()
+
+
+def test_terminal_supervision_releases_override_to_last_voice_state(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    class FakeAtlas:
+        def add_supervision_state_listener(self, listener) -> None:
+            self.listener = listener
+
+    atlas = FakeAtlas()
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=atlas, application=qapp, orb=orb, transcript_panel=panel)
+    controller.bridge.on_state(VoiceConversationState.SPEAKING)
+    atlas.listener(ExecutionState.RUNNING)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.AUTOMATION
+
+    atlas.listener(ExecutionState.CANCELLED)
+    _drain_events(qapp)
+    assert orb.state is OrbVisualState.SPEAKING
     orb.close()
     panel.close()
 

@@ -23,6 +23,7 @@ class OrbVisualState(str, Enum):
     PROCESSING = "PROCESSING"
     SPEAKING = "SPEAKING"
     AUTHORIZATION = "AUTHORIZATION"
+    AUTOMATION = "AUTOMATION"
     RECOVERING = "RECOVERING"
     DEGRADED = "DEGRADED"
     STOPPING = "STOPPING"
@@ -63,5 +64,5 @@ def map_supervision_state(state: ExecutionState) -> OrbVisualState:
     if execution_state is ExecutionState.WAITING_CONFIRMATION:
         return OrbVisualState.AUTHORIZATION
     if execution_state in {ExecutionState.RUNNING, ExecutionState.REPLANNING}:
-        return OrbVisualState.PROCESSING
+        return OrbVisualState.AUTOMATION
     return OrbVisualState.IDLE

@@ -35,6 +35,14 @@ def test_color_mapping_is_deterministic_and_complete() -> None:
         assert len(first) == 4  # RGBA
 
 
+def test_primary_visual_states_use_the_fixed_semantic_palette() -> None:
+    assert orbe_app.color_for_state(OrbVisualState.IDLE)[:3] == (56, 185, 255)
+    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (168, 102, 255)
+    assert orbe_app.color_for_state(OrbVisualState.SPEAKING)[:3] == (72, 238, 148)
+    assert orbe_app.color_for_state(OrbVisualState.AUTOMATION)[:3] == (255, 72, 72)
+    assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 174, 52)
+
+
 def test_demo_cycle_covers_every_visual_state() -> None:
     assert set(orbe_app.DEMO_STATE_CYCLE) == set(OrbVisualState)
 
@@ -218,7 +226,7 @@ def test_drag_moves_window(qapp, orb) -> None:
 def test_fixed_orb_size(orb) -> None:
     assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.275)
     assert orb.width() == orbe_app.ORB_SIZE
-    assert 270 <= orbe_app.ORB_SIZE <= 290
+    assert 350 <= orbe_app.ORB_SIZE <= 370
     assert orb.height() == orbe_app.ORB_SIZE
 
 
@@ -226,8 +234,8 @@ def test_orb_repositions_beside_an_overlapping_transcript_panel(qapp, orb) -> No
     from PySide6.QtCore import Qt
 
     panel = orbe_app.create_transcript_panel()
-    panel.move(100, 100)
-    orb.move(120, 100)
+    panel.move(400, 100)
+    orb.move(420, 100)
     panel.show()
 
     orb.reposition_beside(panel)
@@ -243,7 +251,7 @@ def test_orb_repositions_beside_an_overlapping_transcript_panel(qapp, orb) -> No
 
 
 def test_authorization_uses_distinct_amber_animation_without_extra_timer(orb) -> None:
-    assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 178, 58)
+    assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 174, 52)
     assert orbe_app.animation_period(OrbVisualState.AUTHORIZATION) == 2.4
     orb.apply_state(OrbVisualState.AUTHORIZATION)
     assert orb._timer.isActive()
@@ -272,11 +280,27 @@ def test_orb_owns_only_its_existing_animation_timer() -> None:
 
 
 def test_idle_is_compact_and_active_states_are_much_larger(qapp, orb) -> None:
-    assert orbe_app.size_for_state(OrbVisualState.IDLE) == 280
-    for state in (OrbVisualState.LISTENING, OrbVisualState.PROCESSING, OrbVisualState.SPEAKING, OrbVisualState.AUTHORIZATION):
+    assert orbe_app.size_for_state(OrbVisualState.IDLE) == 360
+    for state in (OrbVisualState.LISTENING, OrbVisualState.PROCESSING, OrbVisualState.SPEAKING, OrbVisualState.AUTHORIZATION, OrbVisualState.AUTOMATION):
         orb.apply_state(state)
         assert orb.width() == orb.height() == orbe_app.size_for_state(state)
         assert orb.width() >= 430
+
+
+def test_initial_position_centers_orb_on_available_screen(orb) -> None:
+    bounds = orb.screen().availableGeometry()
+    assert orb.frameGeometry().center() == bounds.center()
+
+
+def test_resize_keeps_centre_and_clamps_to_available_screen(orb) -> None:
+    bounds = orb.screen().availableGeometry()
+    orb.move(bounds.left(), bounds.top())
+    orb.apply_state(OrbVisualState.AUTOMATION)
+    geometry = orb.frameGeometry()
+    assert geometry.left() >= bounds.left()
+    assert geometry.top() >= bounds.top()
+    assert geometry.right() <= bounds.right()
+    assert geometry.bottom() <= bounds.bottom()
 
 
 def test_active_resize_repositions_beside_visible_transcript(qapp, orb) -> None:
