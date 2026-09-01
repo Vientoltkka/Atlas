@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 import inspect
 from pathlib import Path
@@ -12,6 +12,7 @@ import time
 import unicodedata
 
 from agents.registry import AgentRegistry
+from agents.base_agent import AgentResponse
 from agents.coding_agent import PendingCodingChangeError
 
 from core.atlas_router import (
@@ -103,6 +104,15 @@ from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 from tools.registry import ToolRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAgentFollowUp:
+    """One active specialist continuation in the current Atlas runtime."""
+
+    agent_name: str
+    original_prompt: str
+    active: bool = True
 
 
 class AtlasOrchestrator:
@@ -200,6 +210,7 @@ class AtlasOrchestrator:
         self._skill_system = skill_system
         self._capability_gap_detector = capability_gap_detector
         self._pending_capability_proposal: MissingCapabilityProposal | None = None
+        self._pending_agent_followup: PendingAgentFollowUp | None = None
         self._pending_skill_creation_proposal: SkillCreationResponse | None = None
         self._prepared_capability_proposal: MissingCapabilityProposal | None = None
         self._validated_capability_proposal: MissingCapabilityProposal | None = None
@@ -226,6 +237,11 @@ class AtlasOrchestrator:
     def execution_history(self) -> ExecutionSessionHistory | None:
         """Expose the read-only internal execution-history query API."""
         return self._execution_history
+
+    @property
+    def pending_agent_followup(self) -> "PendingAgentFollowUp | None":
+        """Return the active agent continuation, when one was requested."""
+        return self._pending_agent_followup
 
     def add_supervision_state_listener(self, listener) -> None:
         """Attach a passive observer to real supervised execution state."""
@@ -534,6 +550,9 @@ class AtlasOrchestrator:
                 return proposal.present()
 
         request = self._request_gateway.from_text(prompt)
+        followup_response = self._process_pending_agent_followup(request)
+        if followup_response is not None:
+            return followup_response
         skill_response = self._process_skill_request(request)
         if skill_response is not None:
             return skill_response
@@ -604,63 +623,26 @@ class AtlasOrchestrator:
         specialist_decision = self.classify_request(request)
         if specialist_decision.route is RequestRoute.AGENT_DELEGATION:
             agent_name = specialist_decision.target_agent_name
-            specialist_agent = (
-                self._registry.get(agent_name)
-                if agent_name is not None
-                else None
+            if agent_name is None:
+                raise RuntimeError("Specialist route did not select an agent.")
+            specialist_response = self._run_specialist_agent(
+                agent_name,
+                request.content,
             )
-
-            if specialist_agent is None:
-                raise RuntimeError(
-                    f"Agent '{agent_name}' is not registered."
-                )
-
-            model_task = (
-                "coding"
-                if agent_name in {"code", "coding"}
-                else "chat"
-            )
-
-            self._memory.add_user(request.content)
-            specialist_messages = self._memory.history()
-
-            try:
-                specialist_response = self._model_inference_runner.run(
-                    self._model_selection_policy.create_request(
-                        task=model_task
-                    ),
-                    lambda selected_model: specialist_agent.run(
-                        model=selected_model,
-                        messages=specialist_messages,
-                    ),
-                )
-            except ModelSelectionError as error:
-                if self._model_selection_policy != ModelSelectionPolicy():
-                    raise
-
-                specialist_response = specialist_agent.run(
-                    model=self._model_manager.choose_model(
-                        model_task,
-                        selection_result=error.result,
-                    ),
-                    messages=specialist_messages,
-                )
-
-            self._memory.add_assistant(specialist_response)
             if agent_name == "training" and _requests_pdf_export(request.content):
                 if self._execution_conversation is None:
-                    return specialist_response
+                    return specialist_response.text
                 outcome = self._execution_conversation.handle_registered_tool(
                     "training.create_pdf",
                     {
-                        "content": specialist_response,
+                        "content": specialist_response.text,
                         "output_dir": str(self._training_pdf_output_dir),
                     },
                     original_text=request.content,
                     confirmation_text="Voy a crear y abrir el PDF. ¿Confirmas?",
                 )
-                return f"{specialist_response}\n\n{outcome.text}"
-            return specialist_response
+                return f"{specialist_response.text}\n\n{outcome.text}"
+            return specialist_response.text
 
 
         if self._desktop_interaction is not None:
@@ -693,6 +675,80 @@ class AtlasOrchestrator:
             confirm,
             request=request,
         )
+
+    def _process_pending_agent_followup(self, request: AtlasRequest) -> str | None:
+        """Continue one explicitly requested agent follow-up before normal routing."""
+        pending = self._pending_agent_followup
+        if pending is None:
+            return None
+        if _normalize_confirmation_text(request.content) in {
+            "cancelar",
+            "cancela",
+            "cancelalo",
+            "cancelala",
+            "olvidalo",
+        }:
+            self._pending_agent_followup = None
+            return "Seguimiento del agente cancelado."
+
+        decision = self.classify_request(request)
+        if _replaces_pending_agent_followup(decision, pending.agent_name):
+            self._pending_agent_followup = None
+            return None
+
+        return self._run_specialist_agent(pending.agent_name, request.content).text
+
+    def _run_specialist_agent(
+        self,
+        agent_name: str,
+        prompt: str,
+    ) -> AgentResponse:
+        """Run one specialist and update the bounded continuation state."""
+        specialist_agent = self._registry.get(agent_name)
+        if specialist_agent is None:
+            self._pending_agent_followup = None
+            raise RuntimeError(f"Agent '{agent_name}' is not registered.")
+        model_task = "coding" if agent_name in {"code", "coding"} else "chat"
+        self._memory.add_user(prompt)
+        messages = self._memory.history()
+        try:
+            raw_response = self._model_inference_runner.run(
+                self._model_selection_policy.create_request(task=model_task),
+                lambda selected_model: specialist_agent.run(
+                    model=selected_model,
+                    messages=messages,
+                ),
+            )
+        except ModelSelectionError as error:
+            if self._model_selection_policy != ModelSelectionPolicy():
+                raise
+            raw_response = specialist_agent.run(
+                model=self._model_manager.choose_model(
+                    model_task,
+                    selection_result=error.result,
+                ),
+                messages=messages,
+            )
+        response = (
+            raw_response
+            if isinstance(raw_response, AgentResponse)
+            else AgentResponse(text=raw_response)
+        )
+        self._memory.add_assistant(response.text)
+        self._pending_agent_followup = (
+            PendingAgentFollowUp(
+                agent_name=agent_name,
+                original_prompt=(
+                    self._pending_agent_followup.original_prompt
+                    if self._pending_agent_followup is not None
+                    and self._pending_agent_followup.agent_name == agent_name
+                    else prompt
+                ),
+            )
+            if response.requires_follow_up
+            else None
+        )
+        return response
 
     def _handle_pending_skill_creation(self, prompt: str) -> str | None:
         proposal = self._pending_skill_creation_proposal
@@ -2285,6 +2341,25 @@ def _is_tool_catalog_query(prompt: str) -> bool:
         "lista tus herramientas",
         "que puedes ejecutar",
         "muestrame tus capacidades disponibles",
+    }
+
+
+def _replaces_pending_agent_followup(
+    decision: RouteDecision,
+    pending_agent_name: str,
+) -> bool:
+    """Allow an explicit operational request to supersede an agent follow-up."""
+    if (
+        decision.route is RequestRoute.AGENT_DELEGATION
+        and decision.target_agent_name != pending_agent_name
+    ):
+        return True
+    return decision.route in {
+        RequestRoute.MEMORY_QUERY,
+        RequestRoute.SINGLE_TOOL,
+        RequestRoute.AUTONOMOUS_EXECUTION,
+        RequestRoute.RESUME_EXECUTION,
+        RequestRoute.SYSTEM_COMMAND,
     }
 
 

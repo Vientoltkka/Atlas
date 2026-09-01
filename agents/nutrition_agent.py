@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from agents.base_agent import BaseAgent
+import json
+
+from agents.base_agent import AgentResponse, BaseAgent
 from models.prompt_client import PromptClient
 
 
@@ -48,6 +50,11 @@ class NutritionAgent(BaseAgent):
     prescribas: indica que requiere valoración por un profesional sanitario o
     dietista-nutricionista. Distingue recomendaciones de un registro real: no
     afirmes resultados, no escribas recuerdos ni persistas datos automáticamente.
+
+    Devuelve exclusivamente un objeto JSON con las claves "text" y
+    "requires_follow_up". "text" contiene la respuesta visible en español y
+    "requires_follow_up" es true únicamente si necesitas que el usuario aporte
+    otro dato para continuar; en caso contrario es false.
     """.strip()
 
     def __init__(self, prompt_client: PromptClient) -> None:
@@ -61,8 +68,23 @@ class NutritionAgent(BaseAgent):
     def description(self) -> str:
         return "Evidence-informed sports nutrition and dietary guidance."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(self, model: str, messages: list[dict[str, str]]) -> str | AgentResponse:
         """Generate nutrition guidance without mutating memory or runtime state."""
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
-        return self._client.ask(model=model, messages=conversation)
+        response = self._client.ask(model=model, messages=conversation)
+        try:
+            payload = json.loads(response)
+        except (TypeError, json.JSONDecodeError):
+            return response
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"text", "requires_follow_up"}
+            or not isinstance(payload["text"], str)
+            or not isinstance(payload["requires_follow_up"], bool)
+        ):
+            return response
+        return AgentResponse(
+            text=payload["text"],
+            requires_follow_up=payload["requires_follow_up"],
+        )
