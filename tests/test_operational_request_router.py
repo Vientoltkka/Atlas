@@ -97,6 +97,21 @@ def test_clinical_pain_request_prioritizes_medical_agent_over_training() -> None
     assert decision.target_agent_name == "medical"
 
 
+def test_personal_finance_requests_route_to_existing_finance_agent() -> None:
+    agents = AgentRegistry()
+    agents.register(SimpleNamespace(name="finance"))  # type: ignore[arg-type]
+    router = _router(agents=agents)
+
+    for prompt in (
+        "Crea un presupuesto mensual con mis gastos.",
+        "Calcula mi ahorro con 1000 euros al 5% de interes anual.",
+        "Explica que es un fondo indexado.",
+    ):
+        decision = router.classify(_gateway().from_text(prompt))
+        assert decision.route is RequestRoute.AGENT_DELEGATION
+        assert decision.target_agent_name == "finance"
+
+
 def test_direct_response_for_simple_question() -> None:
     decision = _router().classify(_gateway().from_text("Que es una API?"))
 

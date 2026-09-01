@@ -78,6 +78,27 @@ def test_agent_orchestrator_routes_clear_medical_requests_without_capturing_coac
         assert orchestrator.select(prompt).primary_agent != "medical"
 
 
+def test_agent_orchestrator_routes_finance_without_capturing_other_domains() -> None:
+    orchestrator = _orchestrator()
+
+    for prompt in (
+        "Crea un presupuesto mensual con mis gastos.",
+        "Calcula mi ahorro con 1000 euros al 5% de interes anual.",
+        "Explica que es un fondo indexado.",
+    ):
+        assert orchestrator.select(prompt).primary_agent == "finance"
+
+    for prompt in (
+        "Necesito revisar un contrato legal.",
+        "Tengo fiebre y dolor de garganta.",
+        "Calcula mis macros para perder grasa.",
+        "Hazme un WOD de CrossFit de 60 minutos.",
+        "Abre VS Code.",
+        "Que eventos tengo hoy en el calendario?",
+    ):
+        assert orchestrator.select(prompt).primary_agent != "finance"
+
+
 def test_agent_orchestrator_routes_nutrition_without_capturing_other_domains() -> None:
     orchestrator = _orchestrator()
 
