@@ -221,6 +221,9 @@ def test_drag_moves_window(qapp, orb) -> None:
     )
 
     assert orb.frameGeometry().topLeft() == target
+    centre = orb.frameGeometry().center()
+    orb.apply_state(OrbVisualState.PROCESSING)
+    assert orb.frameGeometry().center() == centre
 
 
 def test_fixed_orb_size(orb) -> None:
@@ -292,8 +295,24 @@ def test_initial_position_centers_orb_on_available_screen(orb) -> None:
     assert orb.frameGeometry().center() == bounds.center()
 
 
+def test_visible_chat_does_not_displace_initial_orb_centre(qapp, orb) -> None:
+    panel = orbe_app.create_transcript_panel()
+    panel.show()
+    orb.show()
+    qapp.processEvents()
+
+    assert orb.frameGeometry().center() == orb.screen().availableGeometry().center()
+    panel.close()
+
+
 def test_resize_keeps_centre_and_clamps_to_available_screen(orb) -> None:
     bounds = orb.screen().availableGeometry()
+    centre = orb.frameGeometry().center()
+    orb.apply_state(OrbVisualState.PROCESSING)
+    assert orb.frameGeometry().center() == centre
+    orb.apply_state(OrbVisualState.SPEAKING)
+    assert orb.frameGeometry().center() == centre
+
     orb.move(bounds.left(), bounds.top())
     orb.apply_state(OrbVisualState.AUTOMATION)
     geometry = orb.frameGeometry()

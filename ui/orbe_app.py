@@ -220,16 +220,18 @@ def create_orb_window(settings=None):
             self.update()
 
         def _resize_for_state(self) -> None:
-            """Resize around the current centre, then keep clear of the chat."""
+            """Resize around the current centre while keeping it on screen."""
             target_size = self._bounded_size(size_for_state(self._state))
             if self.width() == target_size:
                 return
             centre = self.frameGeometry().center()
             self.setFixedSize(target_size, target_size)
             self._emblem_path = self._build_atlas_emblem()
-            self.move(centre.x() - target_size // 2, centre.y() - target_size // 2)
+            self.move(
+                centre.x() - (target_size - 1) // 2,
+                centre.y() - (target_size - 1) // 2,
+            )
             self._clamp_to_available_geometry()
-            self._avoid_visible_transcript_overlap()
 
         def _bounded_size(self, requested_size: int) -> int:
             screen = self.screen()
@@ -357,10 +359,6 @@ def create_orb_window(settings=None):
                 if widget.objectName() == "atlasTranscriptPanel" and widget.isVisible():
                     self.reposition_beside(widget)
                     return
-
-        def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
-            super().showEvent(event)
-            QTimer.singleShot(0, self._avoid_visible_transcript_overlap)
 
         # -- interaction -----------------------------------------------
 

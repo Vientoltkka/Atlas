@@ -855,6 +855,9 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     assert qapp.quitOnLastWindowClosed() is False
     assert orb.isVisible() is True
     assert panel.isVisible() is True
+    assert orb.frameGeometry().center() == orb.screen().availableGeometry().center()
+    orb.move(40, 40)
+    position_before_hotkey = orb.frameGeometry().topLeft()
 
     panel.close()
     _drain_events(qapp)
@@ -866,6 +869,7 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     _drain_events(qapp)
     assert orb.isVisible() is True
     assert panel.isVisible() is True
+    assert orb.frameGeometry().topLeft() == position_before_hotkey
 
     controller._stop_chat_hotkey()
     assert hotkeys[0].stopped is True
