@@ -153,7 +153,7 @@ class DesktopInteractionUseCase:
                 raise ValueError("Solo se admite captura de pantalla completa.")
 
             if self._is_screenshot_command(normalized):
-                path = self._executor.execute(
+                path = self._execute(
                     "desktop.capture_screenshot",
                     ToolContext(
                         parameters={
@@ -634,7 +634,7 @@ class DesktopInteractionUseCase:
         if not query:
             raise ValueError("Orden incompleta: falta la aplicacion.")
 
-        result = self._executor.execute(
+        result = self._execute(
             "desktop.list_processes",
             ToolContext(parameters={"query": query}),
         )
@@ -709,7 +709,7 @@ class DesktopInteractionUseCase:
         if not self._confirmed_close_application(confirm, query, pid):
             return "Cierre cancelado."
 
-        self._executor.execute(
+        self._execute(
             "desktop.close_application",
             ToolContext(parameters={"pid": pid}),
         )
@@ -755,7 +755,7 @@ class DesktopInteractionUseCase:
         if pid == 4:
             raise ValueError("Proceso protegido.")
 
-        process = self._executor.execute(
+        process = self._execute(
             "desktop.get_process",
             ToolContext(parameters={"pid": pid}),
         )
@@ -771,7 +771,7 @@ class DesktopInteractionUseCase:
         if not self._confirmed_terminate_process(confirm, name, pid):
             return "Terminacion cancelada."
 
-        result = self._executor.execute(
+        result = self._execute(
             "desktop.terminate_process",
             ToolContext(parameters={"pid": pid}),
         )
@@ -868,7 +868,7 @@ class DesktopInteractionUseCase:
         copy_text = self._extract_clipboard_copy_text(text)
 
         if copy_text is not None:
-            length = self._executor.execute(
+            length = self._execute(
                 "desktop.copy_clipboard_text",
                 ToolContext(parameters={"text": copy_text}),
             )
@@ -901,7 +901,7 @@ class DesktopInteractionUseCase:
             "que tengo en el portapapeles",
             "read clipboard",
         }:
-            content = self._executor.execute(
+            content = self._execute(
                 "desktop.read_clipboard_text",
                 ToolContext(),
             )
@@ -916,7 +916,7 @@ class DesktopInteractionUseCase:
             "el portapapeles contiene texto",
             "clipboard has text",
         }:
-            has_text = self._executor.execute(
+            has_text = self._execute(
                 "desktop.clipboard_has_text",
                 ToolContext(),
             )
@@ -989,7 +989,7 @@ class DesktopInteractionUseCase:
         confirm: Callable[[str], str] | None,
     ) -> str:
         """Paste clipboard text into the active window after confirmation."""
-        has_text = self._executor.execute(
+        has_text = self._execute(
             "desktop.clipboard_has_text",
             ToolContext(),
         )
@@ -1081,7 +1081,7 @@ class DesktopInteractionUseCase:
         confirmation: str,
     ) -> str:
         """Run a tool and return a user-facing confirmation."""
-        self._executor.execute(
+        self._execute(
             tool_name,
             ToolContext(parameters=parameters),
         )
@@ -1094,7 +1094,7 @@ class DesktopInteractionUseCase:
         parameters: dict[str, object],
     ) -> tuple[int, int]:
         """Run a tuple-returning tool."""
-        result = self._executor.execute(
+        result = self._execute(
             tool_name,
             ToolContext(parameters=parameters),
         )
@@ -1108,6 +1108,25 @@ class DesktopInteractionUseCase:
             raise RuntimeError("Respuesta de herramienta invalida.")
 
         return result
+
+    def _execute(
+        self,
+        tool_name: str,
+        context: ToolContext,
+    ):
+        """Execute one desktop tool with its existing one-use authorization."""
+        requires_authorization = getattr(
+            self._executor,
+            "requires_explicit_authorization",
+            lambda _tool_name: False,
+        )
+        if requires_authorization(tool_name):
+            return self._executor.execute(
+                tool_name,
+                context,
+                authorization=self._executor.authorize(tool_name),
+            )
+        return self._executor.execute(tool_name, context)
 
     def _execute_window_command(
         self,
@@ -1124,7 +1143,7 @@ class DesktopInteractionUseCase:
             "lista las ventanas abiertas",
             "muestrame las ventanas abiertas",
         }:
-            result = self._executor.execute(
+            result = self._execute(
                 "desktop.list_windows",
                 ToolContext(parameters={}),
             )
@@ -1216,7 +1235,7 @@ class DesktopInteractionUseCase:
             return resolved
 
         handle, resolved_title = resolved
-        self._executor.execute(
+        self._execute(
             "desktop.bring_window_to_front",
             ToolContext(parameters={"handle": handle}),
         )
@@ -1228,7 +1247,7 @@ class DesktopInteractionUseCase:
         if not query:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
-        result = self._executor.execute(
+        result = self._execute(
             "desktop.list_windows",
             ToolContext(parameters={}),
         )
@@ -1258,7 +1277,7 @@ class DesktopInteractionUseCase:
     ) -> str:
         """Execute a state action against one resolved window."""
         window = self._resolve_window(title, confirm)
-        self._executor.execute(
+        self._execute(
             tool_name,
             ToolContext(parameters={"handle": int(window["handle"])}),
         )
@@ -1274,7 +1293,7 @@ class DesktopInteractionUseCase:
         title, numbers = self._split_window_command(text, "mueve ", 2)
         window = self._resolve_window(title, confirm)
         x, y = numbers
-        self._executor.execute(
+        self._execute(
             "desktop.move_window",
             ToolContext(
                 parameters={
@@ -1302,7 +1321,7 @@ class DesktopInteractionUseCase:
         title, numbers = self._split_window_command(text, prefix, 2)
         window = self._resolve_window(title, confirm)
         width, height = numbers
-        self._executor.execute(
+        self._execute(
             "desktop.resize_window",
             ToolContext(
                 parameters={
@@ -1331,7 +1350,7 @@ class DesktopInteractionUseCase:
         )
         window = self._resolve_window(title, confirm)
         x, y, width, height = numbers
-        self._executor.execute(
+        self._execute(
             "desktop.move_resize_window",
             ToolContext(
                 parameters={
@@ -1360,7 +1379,7 @@ class DesktopInteractionUseCase:
         if not self._confirmed_close(confirm, str(window["title"])):
             return "Acción cancelada."
 
-        self._executor.execute(
+        self._execute(
             "desktop.close_window",
             ToolContext(parameters={"handle": int(window["handle"])}),
         )
@@ -1412,7 +1431,7 @@ class DesktopInteractionUseCase:
         if not title:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
-        result = self._executor.execute(
+        result = self._execute(
             "desktop.list_windows",
             ToolContext(parameters={"title": title}),
         )

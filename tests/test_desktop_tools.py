@@ -46,6 +46,7 @@ from tools.effect_permissions import ToolPermissionDeniedError
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from tools.tool_context import ToolContext
+from use_cases.desktop_interaction import DesktopInteractionUseCase
 
 
 class FakeDesktopController:
@@ -307,6 +308,50 @@ def test_only_validated_open_capabilities_are_exempt_from_desktop_authorization(
         )
     with pytest.raises(ToolPermissionDeniedError):
         executor.execute("desktop.future_action")
+
+
+def test_control_pc_propagates_one_use_authorization_to_effectful_tools() -> None:
+    controller = FakeDesktopController()
+    registry = ToolRegistry()
+    registry.register(PressHotkeyTool(controller))
+    registry.register(FutureDesktopTool(controller))
+    executor = ToolExecutor(registry)
+
+    with pytest.raises(ToolPermissionDeniedError):
+        executor.execute(
+            "desktop.press_hotkey",
+            ToolContext(
+                parameters={"window_title": "Visual Studio Code", "keys": ["ctrl", "s"]}
+            ),
+        )
+    assert controller.calls == []
+
+    authorization = executor.authorize("desktop.press_hotkey")
+    assert executor.execute(
+        "desktop.press_hotkey",
+        ToolContext(
+            parameters={"window_title": "Visual Studio Code", "keys": ["ctrl", "s"]}
+        ),
+        authorization=authorization,
+    ) == "Atajo enviado."
+    assert controller.calls == [
+        ("activate_window", "Visual Studio Code"),
+        ("press_hotkey", ["ctrl", "s"]),
+    ]
+
+    with pytest.raises(ToolPermissionDeniedError):
+        executor.execute(
+            "desktop.future_action",
+            authorization=executor.authorize("desktop.press_hotkey"),
+        )
+
+    assert DesktopInteractionUseCase(executor).execute("pulsa ctrl+s") == "✓ Atajo enviado."
+    assert controller.calls == [
+        ("activate_window", "Visual Studio Code"),
+        ("press_hotkey", ["ctrl", "s"]),
+        ("activate_window", "Visual Studio Code"),
+        ("press_hotkey", ["ctrl", "s"]),
+    ]
 
 
 def test_open_application_tool() -> None:
