@@ -55,6 +55,28 @@ def test_agent_orchestrator_selects_training_for_coach_requests_only() -> None:
     )
 
 
+def test_agent_orchestrator_routes_nutrition_without_capturing_other_domains() -> None:
+    orchestrator = _orchestrator()
+
+    for prompt in (
+        "Calcula mis calorias y macros con mis datos.",
+        "Que suplementacion basica tiene evidencia para ganar masa?",
+        "Necesito nutricion para CrossFit.",
+    ):
+        assert orchestrator.select(prompt).primary_agent == "nutrition"
+
+    for prompt in (
+        "Hazme un WOD de CrossFit de 60 minutos.",
+        "Tengo nauseas y dolor abdominal despues de comer.",
+        "Tengo una enfermedad digestiva y necesito una dieta.",
+        "Necesito revisar un contrato legal.",
+        "Quiero invertir en ETFs.",
+        "Abre VS Code.",
+        "Que eventos tengo hoy en el calendario?",
+    ):
+        assert orchestrator.select(prompt).primary_agent != "nutrition"
+
+
 def test_agent_orchestrator_prioritizes_available_domains_and_bootstrap_exposes_it() -> None:
     orchestrator = _orchestrator()
 
