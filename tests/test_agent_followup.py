@@ -37,16 +37,12 @@ def test_nutrition_followup_continues_with_prior_context_and_is_consumed(monkeyp
     orchestrator, calls = _nutrition_orchestrator(
         monkeypatch,
         [
-            _structured_response(
-                "Solo me falta saber tu edad y sexo biológico.",
-                follow_up=True,
-            ),
             _structured_response("Objetivo y macros estimados.", follow_up=False),
         ],
     )
 
     assert orchestrator.process_prompt(NUTRITION_PROMPT, confirm=lambda _prompt: "") == (
-        "Solo me falta saber tu edad y sexo biológico."
+        "Para calcularlo necesito tu edad y tu sexo."
     )
     assert orchestrator.pending_agent_followup is not None
     assert orchestrator.pending_agent_followup.agent_name == "nutrition"
@@ -55,19 +51,18 @@ def test_nutrition_followup_continues_with_prior_context_and_is_consumed(monkeyp
         "Objetivo y macros estimados."
     )
     assert orchestrator.pending_agent_followup is None
-    assert calls[1][-1] == {"role": "user", "content": "48 años, hombre."}
-    assert {"role": "user", "content": NUTRITION_PROMPT} in calls[1]
+    assert calls[0][-1] == {"role": "user", "content": "48 años, hombre."}
+    assert {"role": "user", "content": NUTRITION_PROMPT} in calls[0]
     assert orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "") == (
         "Atlas todavia no dispone de la capacidad necesaria para esa accion."
     )
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_agent_followup_remains_active_when_the_agent_requests_another_turn(monkeypatch) -> None:
     orchestrator, _calls = _nutrition_orchestrator(
         monkeypatch,
         [
-            _structured_response("Necesito un dato más.", follow_up=True),
             _structured_response("Necesito otro dato.", follow_up=True),
             _structured_response("Cálculo completado.", follow_up=False),
         ],
@@ -96,7 +91,7 @@ def test_agent_followup_cancellation_clears_state(monkeypatch) -> None:
         "Seguimiento del agente cancelado."
     )
     assert orchestrator.pending_agent_followup is None
-    assert len(calls) == 1
+    assert len(calls) == 0
 
 
 def test_short_answer_without_followup_does_not_select_nutrition(monkeypatch) -> None:

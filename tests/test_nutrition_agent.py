@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agents.base_agent import AgentResponse
 from agents.nutrition_agent import NutritionAgent
 from bootstrap.bootstrap import Bootstrap
 
@@ -51,7 +52,6 @@ def test_nutrition_agent_covers_scope_safety_and_bootstrap_registration() -> Non
         "Calcula mis macros para perder grasa: mujer, 30 anos, 65 kg, 165 cm y entreno 4 dias.",
         "Que como antes y despues de entrenar CrossFit?",
         "Que suplementacion basica tiene evidencia para fuerza?",
-        "Calcula mis macros personalizados.",
     ),
 )
 def test_nutrition_agent_v1_requests_use_the_operational_contract(user_prompt: str) -> None:
@@ -68,6 +68,25 @@ def test_nutrition_agent_v1_requests_use_the_operational_contract(user_prompt: s
             ],
         )
     ]
+
+
+def test_nutrition_agent_requests_all_required_data_for_an_empty_calculation() -> None:
+    client = RecordingPromptClient()
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [{"role": "user", "content": "Calcula mis macros personalizados."}],
+    )
+
+    assert response == AgentResponse(
+        text=(
+            "Para calcularlo necesito tu objetivo, tu peso, tu altura, tu edad, "
+            "tu sexo y tu actividad o carga de entrenamiento."
+        ),
+        requires_follow_up=True,
+    )
+    assert client.calls == []
 
 
 def test_nutrition_agent_prompt_defines_v1_calculation_and_safety_contract() -> None:
@@ -92,6 +111,32 @@ def test_nutrition_agent_prompt_defines_v1_calculation_and_safety_contract() -> 
         assert requirement in prompt
 
 
+def test_nutrition_agent_requests_missing_data_before_a_personalized_calculation() -> None:
+    client = RecordingPromptClient()
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "Calcula aproximadamente mis calorías y macronutrientes diarios "
+                    "para ganar masa muscular. Peso 74 kg, mido 1,80 m, entreno "
+                    "CrossFit 5 días por semana y quiero subir de peso minimizando "
+                    "la ganancia de grasa."
+                ),
+            },
+        ],
+    )
+
+    assert response == AgentResponse(
+        text="Para calcularlo necesito tu edad y tu sexo.",
+        requires_follow_up=True,
+    )
+    assert client.calls == []
+
+
 def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkeypatch) -> None:
     orchestrator = Bootstrap.build()
     nutrition = orchestrator._registry.get("nutrition")
@@ -107,7 +152,7 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
     monkeypatch.setattr(nutrition._client, "ask", respond)
 
     response = orchestrator.process_prompt(
-        "Calcula mis macros: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
+        "Calcula mis macros para ganar masa: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
         confirm=lambda _prompt: "",
     )
 
@@ -115,5 +160,5 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
     assert len(calls) == 1
     assert calls[0][1][-1] == {
         "role": "user",
-        "content": "Calcula mis macros: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
+        "content": "Calcula mis macros para ganar masa: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
     }
