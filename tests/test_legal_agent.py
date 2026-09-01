@@ -55,3 +55,30 @@ def test_legal_agent_covers_v1_scope_safety_and_bootstrap_registration() -> None
     assert isinstance(orchestrator._registry.get("legal"), LegalAgent)
     for name in ("training", "nutrition", "code", "coding", "medical"):
         assert orchestrator._registry.get(name) is not None
+
+
+def test_legal_agent_has_a_local_fallback_only_for_contract_clauses() -> None:
+    agent = LegalAgent(RecordingPromptClient())  # type: ignore[arg-type]
+
+    response = agent.local_calculation_fallback(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "He firmado un contrato de alquiler y hay una cláusula que no "
+                    "entiendo. ¿Qué información debería revisar?"
+                ),
+            }
+        ]
+    )
+
+    assert response is not None
+    assert response.requires_follow_up is False
+    assert "no se puede determinar" in response.text
+    assert "texto literal" in response.text
+    assert "jurisdicción aplicable" in response.text
+    assert "normas imperativas" in response.text
+    assert "profesional jurídico cualificado" in response.text
+    assert agent.local_calculation_fallback(
+        [{"role": "user", "content": "¿Cómo funciona una reclamación de consumo?"}]
+    ) is None

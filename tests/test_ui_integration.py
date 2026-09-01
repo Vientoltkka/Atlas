@@ -373,6 +373,54 @@ def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_follo
     panel.close()
 
 
+def test_text_chat_legal_contract_clause_falls_back_when_provider_is_unavailable(
+    qapp, monkeypatch
+) -> None:
+    """Exercise Orbe -> Atlas -> LegalAgent with the authorized fallback exhausted."""
+    from agents.legal_agent import LegalAgent
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    prompt = (
+        "He firmado un contrato de alquiler y hay una cláusula que no entiendo. "
+        "¿Qué información debería revisar para saber si esa cláusula puede ser "
+        "abusiva o ilegal?"
+    )
+    orchestrator = Bootstrap.build()
+    legal = orchestrator._registry.get("legal")
+    assert isinstance(legal, LegalAgent)
+    assert orchestrator.classify_prompt(prompt).target_agent_name == "legal"
+    monkeypatch.setattr(
+        legal._client,
+        "check_model_health",
+        lambda model: (_ for _ in ()).throw(
+            InferenceBackendError(model, "backend unavailable")
+        ),
+    )
+    atlas = Atlas.__new__(Atlas)
+    atlas._orchestrator = orchestrator
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=atlas, application=qapp, orb=orb, transcript_panel=panel
+    )
+
+    panel._input.setText(prompt)
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    assert "orientación jurídica general" in content
+    assert "no se puede determinar si una cláusula es abusiva o ilegal" in content
+    assert "jurisdicción aplicable" in content
+    assert "No se pudo procesar el mensaje textual." not in content
+    assert '"requires_follow_up"' not in content
+    assert orchestrator.pending_agent_followup is None
+    orb.close()
+    panel.close()
+
+
 @pytest.mark.parametrize(
     ("response", "expected_copies"),
     [("si", ["hola Atlas"]), ("no", [])],
