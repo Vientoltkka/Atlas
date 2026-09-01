@@ -71,15 +71,9 @@ class NutritionAgent(BaseAgent):
 
     def run(self, model: str, messages: list[dict[str, str]]) -> str | AgentResponse:
         """Generate nutrition guidance without mutating memory or runtime state."""
-        missing_data = _missing_calculation_data(messages)
-        if missing_data:
-            return AgentResponse(
-                text=(
-                    "Para calcularlo necesito "
-                    f"{_format_missing_data(missing_data)}."
-                ),
-                requires_follow_up=True,
-            )
+        preflight_response = self.preflight(messages)
+        if preflight_response is not None:
+            return preflight_response
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
         response = self._client.ask(model=model, messages=conversation)
@@ -97,6 +91,19 @@ class NutritionAgent(BaseAgent):
         return AgentResponse(
             text=payload["text"],
             requires_follow_up=payload["requires_follow_up"],
+        )
+
+    def preflight(self, messages: list[dict[str, str]]) -> AgentResponse | None:
+        """Return a local clarification before the model health check when needed."""
+        missing_data = _missing_calculation_data(messages)
+        if not missing_data:
+            return None
+        return AgentResponse(
+            text=(
+                "Para calcularlo necesito "
+                f"{_format_missing_data(missing_data)}."
+            ),
+            requires_follow_up=True,
         )
 
 

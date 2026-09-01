@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import json
 import os
 import threading
-from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -309,6 +310,63 @@ def test_text_chat_submits_without_blocking_and_renders_response(qapp) -> None:
     controller.join_chat(timeout=2)
     _drain_events(qapp)
     assert "Atlas: eco: hola Orbe" in panel._view.toPlainText()
+    orb.close()
+    panel.close()
+
+
+def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_followup(
+    qapp, monkeypatch
+) -> None:
+    """Exercise the real Orbe text path without requiring a model for missing data."""
+    from agents.nutrition_agent import NutritionAgent
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    prompt = (
+        "Calcula aproximadamente mis calorías y macronutrientes diarios para ganar "
+        "masa muscular. Peso 74 kg, mido 1,80 m, entreno CrossFit 5 días por "
+        "semana y quiero subir de peso minimizando la ganancia de grasa."
+    )
+    orchestrator = Bootstrap.build()
+    nutrition = orchestrator._registry.get("nutrition")
+    assert isinstance(nutrition, NutritionAgent)
+
+    def health_check_must_not_run(_model: str) -> None:
+        raise AssertionError("El preflight no debe ejecutar el health-check del modelo.")
+
+    monkeypatch.setattr(nutrition._client, "check_model_health", health_check_must_not_run)
+    atlas = Atlas.__new__(Atlas)
+    atlas._orchestrator = orchestrator
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=atlas, application=qapp, orb=orb, transcript_panel=panel
+    )
+
+    panel._input.setText(prompt)
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+    assert "Para calcularlo necesito tu edad y tu sexo." in panel._view.toPlainText()
+    assert orchestrator.pending_agent_followup is not None
+
+    monkeypatch.setattr(nutrition._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(
+        nutrition._client,
+        "ask",
+        lambda **_kwargs: json.dumps(
+            {"text": "Objetivo y macros estimados.", "requires_follow_up": False}
+        ),
+    )
+    panel._input.setText("48 años, hombre.")
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    assert "Objetivo y macros estimados." in content
+    assert '"requires_follow_up"' not in content
+    assert orchestrator.pending_agent_followup is None
     orb.close()
     panel.close()
 

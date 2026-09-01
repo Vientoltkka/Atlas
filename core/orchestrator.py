@@ -711,24 +711,27 @@ class AtlasOrchestrator:
         model_task = "coding" if agent_name in {"code", "coding"} else "chat"
         self._memory.add_user(prompt)
         messages = self._memory.history()
-        try:
-            raw_response = self._model_inference_runner.run(
-                self._model_selection_policy.create_request(task=model_task),
-                lambda selected_model: specialist_agent.run(
-                    model=selected_model,
+        preflight = getattr(specialist_agent, "preflight", None)
+        raw_response = preflight(messages) if callable(preflight) else None
+        if raw_response is None:
+            try:
+                raw_response = self._model_inference_runner.run(
+                    self._model_selection_policy.create_request(task=model_task),
+                    lambda selected_model: specialist_agent.run(
+                        model=selected_model,
+                        messages=messages,
+                    ),
+                )
+            except ModelSelectionError as error:
+                if self._model_selection_policy != ModelSelectionPolicy():
+                    raise
+                raw_response = specialist_agent.run(
+                    model=self._model_manager.choose_model(
+                        model_task,
+                        selection_result=error.result,
+                    ),
                     messages=messages,
-                ),
-            )
-        except ModelSelectionError as error:
-            if self._model_selection_policy != ModelSelectionPolicy():
-                raise
-            raw_response = specialist_agent.run(
-                model=self._model_manager.choose_model(
-                    model_task,
-                    selection_result=error.result,
-                ),
-                messages=messages,
-            )
+                )
         response = (
             raw_response
             if isinstance(raw_response, AgentResponse)
