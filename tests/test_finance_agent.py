@@ -89,3 +89,47 @@ def test_conversation_executes_finance_agent_with_mocked_model(monkeypatch) -> N
         "role": "user",
         "content": "Calcula el interes simple de 1000 euros al 5% anual durante 2 anos.",
     }
+
+
+def test_finance_agent_provides_basic_budget_fallback_without_provider() -> None:
+    agent = FinanceAgent(RecordingPromptClient())  # type: ignore[arg-type]
+
+    response = agent.local_calculation_fallback(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "Quiero organizar mejor mis finanzas personales. Cobro 1.500 € al "
+                    "mes y quiero ahorrar 300 €. ¿Cómo repartirías el resto entre "
+                    "gastos fijos, ocio y un fondo de emergencia?"
+                ),
+            }
+        ]
+    )
+
+    assert response is not None
+    assert response.requires_follow_up is False
+    for detail in (
+        "Ingreso mensual: 1.500 €",
+        "Ahorro objetivo: 300 €",
+        "Gastos fijos: 800 €",
+        "Ocio y gastos variables: 250 €",
+        "Fondo de emergencia: 150 €",
+        "La suma total es 1.500 €",
+    ):
+        assert detail in response.text
+
+
+def test_finance_agent_budget_fallback_requires_income_and_savings_goal() -> None:
+    agent = FinanceAgent(RecordingPromptClient())  # type: ignore[arg-type]
+
+    response = agent.local_calculation_fallback(
+        [
+            {
+                "role": "user",
+                "content": "Reparte gastos fijos, ocio y un fondo de emergencia.",
+            }
+        ]
+    )
+
+    assert response is None

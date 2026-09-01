@@ -514,6 +514,60 @@ def test_orbe_text_chat_uses_medical_fallback_when_provider_is_unavailable(
     orb.close()
     panel.close()
 
+
+def test_orbe_text_chat_uses_finance_budget_fallback_when_provider_is_unavailable(
+    qapp, monkeypatch
+) -> None:
+    from ui.orbe_app import create_transcript_panel
+    from ui.orbe_controller import OrbeController
+
+    orchestrator = Bootstrap.build()
+    health_result = ModelHealthResult(
+        logical_model_id="chat-local",
+        physical_model_name="chat-local",
+        provider_id="ollama",
+        healthy=False,
+        reason="provider unavailable",
+    )
+    unavailable_error = ModelHealthCheckError(
+        initial_logical_model_id="chat-local",
+        attempted_logical_model_ids=("chat-local",),
+        allow_fallback=True,
+        last_result=health_result,
+    )
+    monkeypatch.setattr(
+        orchestrator._model_inference_runner,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(unavailable_error),
+    )
+    atlas = Atlas.__new__(Atlas)
+    atlas._orchestrator = orchestrator
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=atlas, application=qapp, orb=orb, transcript_panel=panel
+    )
+    prompt = (
+        "Quiero organizar mejor mis finanzas personales. Cobro 1.500 € al mes y "
+        "quiero ahorrar 300 €. ¿Cómo repartirías el resto entre gastos fijos, ocio "
+        "y un fondo de emergencia?"
+    )
+
+    controller.submit_text(prompt)
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    assert "Ahorro objetivo: 300 €" in content
+    assert "Gastos fijos: 800 €" in content
+    assert "Ocio y gastos variables: 250 €" in content
+    assert "Fondo de emergencia: 150 €" in content
+    assert "Error: No se pudo procesar el mensaje textual." not in content
+    assert '"requires_follow_up"' not in content
+    assert not orchestrator._pending_agent_followup
+    orb.close()
+    panel.close()
+
 def test_voice_controls_stop_and_retry_without_touching_chat(qapp) -> None:
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel
