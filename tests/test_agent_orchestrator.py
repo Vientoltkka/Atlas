@@ -99,6 +99,27 @@ def test_agent_orchestrator_routes_finance_without_capturing_other_domains() -> 
         assert orchestrator.select(prompt).primary_agent != "finance"
 
 
+def test_agent_orchestrator_routes_legal_without_capturing_other_domains() -> None:
+    orchestrator = _orchestrator()
+
+    for prompt in (
+        "Puedes revisar esta clausula contractual?",
+        "Cuales son mis derechos laborales basicos?",
+        "Como presento una reclamacion de consumo por un producto defectuoso?",
+    ):
+        assert orchestrator.select(prompt).primary_agent == "legal"
+
+    for prompt in (
+        "Crea un presupuesto mensual con mis gastos.",
+        "Tengo fiebre y dolor de garganta.",
+        "Calcula mis macros para perder grasa.",
+        "Hazme un WOD de CrossFit de 60 minutos.",
+        "Abre VS Code.",
+        "Que eventos tengo hoy en el calendario?",
+    ):
+        assert orchestrator.select(prompt).primary_agent != "legal"
+
+
 def test_agent_orchestrator_routes_nutrition_without_capturing_other_domains() -> None:
     orchestrator = _orchestrator()
 

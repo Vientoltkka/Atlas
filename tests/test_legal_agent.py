@@ -28,15 +28,25 @@ def test_legal_agent_preserves_v22_context_without_persisting_data() -> None:
     assert client.calls == [("local-model", [{"role": "system", "content": agent.SYSTEM_PROMPT}, *messages])]
 
 
-def test_legal_agent_covers_scope_safety_and_bootstrap_registration() -> None:
+def test_legal_agent_covers_v1_scope_safety_and_bootstrap_registration() -> None:
     agent = LegalAgent(RecordingPromptClient())  # type: ignore[arg-type]
-    prompt = agent.SYSTEM_PROMPT.casefold().replace("\n", " ")
+    prompt = " ".join(agent.SYSTEM_PROMPT.casefold().split())
 
-    for capability in ("derecho civil", "derecho laboral", "derecho mercantil", "derecho administrativo", "contratos", "proteccion de datos", "consumo", "documentos juridicos", "riesgos legales", "procedimientos y recursos", "jurisdiccion"):
+    for capability in (
+        "conceptos legales",
+        "contratos y clausulas",
+        "derechos y obligaciones generales",
+        "relaciones laborales basicas",
+        "consumo o reclamaciones basicas",
+        "pais o jurisdiccion",
+    ):
         assert capability in prompt
+    assert "pide una sola aclaracion breve solo si falta un dato imprescindible" in prompt
+    assert "no inventes ni cites leyes, articulos, sentencias, plazos o jurisdicciones" in prompt
+    assert "no asegures resultados legales" in prompt
     assert "no ofrezcas representacion legal" in prompt
-    assert "ni afirmes conclusiones juridicas definitivas" in prompt
     assert "no sustituyas el asesoramiento" in prompt
+    assert "no ejecutes tramites, reclamaciones, notificaciones ni otras acciones legales" in prompt
     assert "no escribas recuerdos" in prompt
     assert "ni persistas datos automaticamente" in prompt
 
