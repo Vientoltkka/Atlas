@@ -11,7 +11,12 @@ from core.operational_request_router import OperationalRequestRouter
 from core.operational_route_executor import RouteExecutionStatus
 from core.orchestrator import AtlasOrchestrator
 from core.router import Router
-from tools.desktop.desktop_tools import ListWindowsTool, PasteClipboardTool, TypeTextTool
+from tools.desktop.desktop_tools import (
+    CopyClipboardTextTool,
+    ListWindowsTool,
+    PasteClipboardTool,
+    TypeTextTool,
+)
 from tools.executor import ToolExecutor
 from tools.execution_coordinator import (
     ExecutionCoordinationResult,
@@ -117,11 +122,16 @@ def _operational_orchestrator(
 class _DesktopControllerFake:
     def __init__(self) -> None:
         self.typed: list[str] = []
+        self.copied: list[str] = []
         self.hotkeys: list[list[str]] = []
         self.activated: list[int] = []
 
     def type_text(self, text: str) -> None:
         self.typed.append(text)
+
+    def copy_clipboard_text(self, text: str) -> int:
+        self.copied.append(text)
+        return len(text)
 
     def clipboard_has_text(self) -> bool:
         return True
@@ -152,6 +162,7 @@ def _desktop_type_controller() -> tuple[
     desktop_controller = _DesktopControllerFake()
     registry = ToolRegistry()
     registry.register(TypeTextTool(desktop_controller))
+    registry.register(CopyClipboardTextTool(desktop_controller))
     registry.register(PasteClipboardTool(desktop_controller))
     executor = ToolExecutor(registry)
     coordinator = Bootstrap.build_execution_coordinator(
@@ -1142,7 +1153,7 @@ def test_process_prompt_desktop_type_confirm_executes_once_and_preserves_literal
     )
 
     pending = orchestrator.process_prompt(
-        "Escribe ORBE CONTROL PC V2",
+        "Escribe hola Atlas",
         confirm=_unused_confirmation,
     )
     assert controller.pending_target_handle == 123
@@ -1151,8 +1162,8 @@ def test_process_prompt_desktop_type_confirm_executes_once_and_preserves_literal
 
     assert pending == "Voy a escribir en la ventana activa. ¿Confirmas?"
     assert "Texto escrito." in confirmed
-    assert "ORBE CONTROL PC V2" in confirmed
-    assert desktop.typed == ["ORBE CONTROL PC V2"]
+    assert "hola Atlas" in confirmed
+    assert desktop.typed == ["hola Atlas"]
     assert desktop.activated == [123]
     assert controller.pending_confirmation_id is None
     assert direct_executor.calls == 0
@@ -1216,4 +1227,49 @@ def test_process_prompt_lists_open_windows_without_confirmation_or_actions() -> 
     assert "Bloc de notas" in response
     assert "Visual Studio Code" in response
     assert desktop.calls == ["list_windows"]
+    assert agent.calls == 0
+
+
+def test_process_prompt_desktop_copy_confirms_and_executes_once() -> None:
+    controller, desktop, desktop_interaction = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(
+        controller,
+        desktop_interaction,
+    )
+
+    pending = orchestrator.process_prompt(
+        "Copia hola Atlas al portapapeles",
+        confirm=_unused_confirmation,
+    )
+    confirmed = orchestrator.process_prompt("sí", confirm=_unused_confirmation)
+    repeated = orchestrator.process_prompt("sí", confirm=_unused_confirmation)
+
+    assert pending == "Voy a copiar ese texto al portapapeles. ¿Confirmas?"
+    assert desktop.copied == ["hola Atlas"]
+    assert "Texto copiado al portapapeles." in confirmed
+    assert repeated != confirmed
+    assert desktop.copied == ["hola Atlas"]
+    assert controller.pending_confirmation_id is None
+    assert direct_executor.calls == 0
+    assert agent.calls == 0
+
+
+def test_process_prompt_desktop_copy_cancellation_does_not_execute() -> None:
+    controller, desktop, desktop_interaction = _desktop_type_controller()
+    orchestrator, direct_executor, agent = _operational_orchestrator(
+        controller,
+        desktop_interaction,
+    )
+
+    pending = orchestrator.process_prompt(
+        "Copia hola Atlas al portapapeles",
+        confirm=_unused_confirmation,
+    )
+    cancelled = orchestrator.process_prompt("no", confirm=_unused_confirmation)
+
+    assert pending == "Voy a copiar ese texto al portapapeles. ¿Confirmas?"
+    assert cancelled.lower() == "operacion cancelada."
+    assert desktop.copied == []
+    assert controller.pending_confirmation_id is None
+    assert direct_executor.calls == 0
     assert agent.calls == 0

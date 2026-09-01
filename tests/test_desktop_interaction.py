@@ -146,6 +146,24 @@ def test_desktop_interaction_opens_vscode_from_conversational_name() -> None:
     assert executor.calls[0][1].parameters == {"application": "VS Code"}
 
 
+def test_desktop_interaction_resolves_bloc_de_notas_alias() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute("Abre notepad") == "✓ Abriendo notepad."
+    result = use_case.execute("Abre el Bloc de notas")
+
+    assert result == "✓ Abriendo notepad."
+    assert [call[0] for call in executor.calls] == [
+        "desktop.open_application",
+        "desktop.open_application",
+    ]
+    assert [call[1].parameters for call in executor.calls] == [
+        {"application": "notepad"},
+        {"application": "notepad"},
+    ]
+
+
 def test_desktop_interaction_routes_powershell_and_explorer_to_open_application() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)

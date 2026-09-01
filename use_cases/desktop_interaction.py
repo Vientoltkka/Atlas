@@ -816,6 +816,7 @@ class DesktopInteractionUseCase:
         """Open an application, folder, or file."""
         expected_kind = self._open_target_kind(target)
         target = self._clean_open_target(target)
+        target = self._resolve_application_alias(target)
 
         if not target:
             raise ValueError("Falta el objetivo a abrir.")
@@ -1073,6 +1074,17 @@ class DesktopInteractionUseCase:
                 return cleaned[len(prefix) :].strip()
 
         return cleaned
+
+    def _resolve_application_alias(
+        self,
+        target: str,
+    ) -> str:
+        """Resolve the few application aliases supported by desktop opening."""
+        aliases = {
+            "bloc de notas": "notepad",
+            "el bloc de notas": "notepad",
+        }
+        return aliases.get(self._normalize(target), target)
 
     def _run(
         self,

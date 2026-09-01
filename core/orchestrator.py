@@ -567,6 +567,17 @@ class AtlasOrchestrator:
                     pending_target_handle=target_handle,
                 )
                 return outcome.text
+            copy_text = self._desktop_interaction._extract_clipboard_copy_text(  # noqa: SLF001
+                request.content,
+            )
+            if copy_text is not None:
+                outcome = self._execution_conversation.handle_registered_tool(
+                    "desktop.copy_clipboard_text",
+                    {"text": copy_text},
+                    original_text=request.content,
+                    confirmation_text="Voy a copiar ese texto al portapapeles. ¿Confirmas?",
+                )
+                return outcome.text
             if _is_conversational_type_text_request(request.content):
                 content = self._desktop_interaction._extract_text_to_type(  # noqa: SLF001
                     request.content,

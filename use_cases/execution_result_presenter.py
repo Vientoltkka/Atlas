@@ -221,6 +221,12 @@ class ExecutionResultPresenter:
         if result.tool_name == "desktop.type_text":
             return self._present_type_text(result)
 
+        if result.tool_name == "desktop.copy_clipboard_text":
+            return PresentationResult(
+                text="Texto copiado al portapapeles.",
+                summary="clipboard copied",
+            )
+
         if result.tool_name == "desktop.press_hotkey":
             return self._present_hotkey(result)
 
