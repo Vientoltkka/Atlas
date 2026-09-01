@@ -84,7 +84,7 @@ class NutritionAgent(BaseAgent):
         conversation.extend(messages)
         response = self._client.ask(model=model, messages=conversation)
         try:
-            payload = json.loads(response)
+            payload = json.loads(_structured_response_content(response))
         except (TypeError, json.JSONDecodeError):
             return response
         if (
@@ -98,6 +98,14 @@ class NutritionAgent(BaseAgent):
             text=payload["text"],
             requires_follow_up=payload["requires_follow_up"],
         )
+
+
+def _structured_response_content(response: str) -> str:
+    """Return the full JSON payload when the model encloses it in a JSON fence."""
+    content = response.strip()
+    if content.startswith("```json") and content.endswith("```"):
+        return content[7:-3].strip()
+    return content
 
 
 def _missing_calculation_data(messages: list[dict[str, str]]) -> tuple[str, ...]:

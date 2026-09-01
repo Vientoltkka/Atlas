@@ -14,7 +14,7 @@ NUTRITION_PROMPT = (
 
 
 def _structured_response(text: str, *, follow_up: bool) -> str:
-    return json.dumps({"text": text, "requires_follow_up": follow_up})
+    return "```json\n" + json.dumps({"text": text, "requires_follow_up": follow_up}) + "\n```"
 
 
 def _nutrition_orchestrator(monkeypatch, responses: list[str]):
@@ -47,9 +47,11 @@ def test_nutrition_followup_continues_with_prior_context_and_is_consumed(monkeyp
     assert orchestrator.pending_agent_followup is not None
     assert orchestrator.pending_agent_followup.agent_name == "nutrition"
 
-    assert orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "") == (
-        "Objetivo y macros estimados."
-    )
+    response = orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "")
+    assert response == "Objetivo y macros estimados."
+    assert "requires_follow_up" not in response
+    assert '{"text"' not in response
+    assert "```json" not in response
     assert orchestrator.pending_agent_followup is None
     assert calls[0][-1] == {"role": "user", "content": "48 años, hombre."}
     assert {"role": "user", "content": NUTRITION_PROMPT} in calls[0]
