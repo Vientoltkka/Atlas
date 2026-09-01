@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from bootstrap.bootstrap import Bootstrap
 from agents.training_agent import TrainingAgent
 
 
@@ -92,3 +93,32 @@ def test_training_agent_crossfit_pdf_request_uses_reinforced_prompt_and_preserve
             ],
         )
     ]
+
+
+def test_conversation_executes_existing_training_agent_with_mocked_model(
+    monkeypatch,
+) -> None:
+    orchestrator = Bootstrap.build()
+    training = orchestrator._registry.get("training")
+    assert training is not None
+    calls: list[tuple[str, list[dict[str, str]]]] = []
+
+    monkeypatch.setattr(training._client, "check_model_health", lambda _model: None)
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append((model, messages))
+        return "Plan de entrenamiento generado."
+
+    monkeypatch.setattr(training._client, "ask", respond)
+
+    response = orchestrator.process_prompt(
+        "hazme un entrenamiento de CrossFit de 60 minutos",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "Plan de entrenamiento generado."
+    assert len(calls) == 1
+    assert calls[0][1][-1] == {
+        "role": "user",
+        "content": "hazme un entrenamiento de CrossFit de 60 minutos",
+    }

@@ -67,6 +67,23 @@ def test_strength_estimation_request_routes_to_existing_training_agent() -> None
     assert decision.route is RequestRoute.AGENT_DELEGATION
     assert decision.target_agent_name == "training"
 
+
+def test_coach_requests_route_to_existing_training_agent() -> None:
+    agents = AgentRegistry()
+    agents.register(SimpleNamespace(name="training"))  # type: ignore[arg-type]
+    router = _router(agents=agents)
+
+    for prompt in (
+        "hazme un entrenamiento de CrossFit de 60 minutos",
+        "créame un WOD de HYROX para 20 personas",
+        "quiero mejorar mi clean",
+        "programa una sesión de hipertrofia de tren superior",
+    ):
+        decision = router.classify(_gateway().from_text(prompt))
+        assert decision.route is RequestRoute.AGENT_DELEGATION
+        assert decision.target_agent_name == "training"
+
+
 def test_direct_response_for_simple_question() -> None:
     decision = _router().classify(_gateway().from_text("Que es una API?"))
 

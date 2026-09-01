@@ -29,6 +29,32 @@ def test_agent_orchestrator_selects_expected_specialists() -> None:
     assert orchestrator.select("Necesito revisar un contrato laboral").agents == ("legal",)
 
 
+def test_agent_orchestrator_selects_training_for_coach_requests_only() -> None:
+    orchestrator = _orchestrator()
+
+    for prompt in (
+        "hazme un entrenamiento de CrossFit de 60 minutos",
+        "créame un WOD de HYROX para 20 personas",
+        "quiero mejorar mi clean",
+        "programa una sesión de hipertrofia de tren superior",
+        "haz una sesión de fuerza de sentadilla",
+        "qué ejercicio me recomiendas para mejorar los glúteos",
+    ):
+        assert orchestrator.select(prompt).primary_agent == "training"
+
+    for prompt in (
+        "abre VS Code",
+        "qué eventos tengo hoy",
+        "qué es la fotosíntesis",
+    ):
+        assert orchestrator.select(prompt).primary_agent != "training"
+
+    assert (
+        orchestrator.select("me duele mucho la rodilla y está hinchada").primary_agent
+        == "medical"
+    )
+
+
 def test_agent_orchestrator_prioritizes_available_domains_and_bootstrap_exposes_it() -> None:
     orchestrator = _orchestrator()
 
