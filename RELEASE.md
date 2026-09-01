@@ -2,7 +2,7 @@
 
 Fecha de congelacion: 2026-07-30
 
-Estado: CONGELADA
+Estado: LISTA PARA USO (congelada)
 
 Fase final: FASE 15.8
 
@@ -57,7 +57,7 @@ Dependencias declaradas: `ollama`, `openai`, `python-dotenv`, `pydantic`,
 El modo texto requiere principalmente `ollama` y `numpy`. Las dependencias de
 audio y wake word son opcionales para el uso diario por texto.
 
-## Limitaciones conocidas
+## Deuda POST-V1 no bloqueante
 
 - La latencia de conversacion depende del modelo y del equipo local.
 - Un plan sin evidencia determinista suficiente termina como `INCONCLUSIVE`.
@@ -71,7 +71,7 @@ audio y wake word son opcionales para el uso diario por texto.
 
 ```powershell
 Set-Location C:\AI\Atlas
-python -B main.py
+C:\AI\Atlas\.venv\Scripts\python.exe main.py
 ```
 
 ## Validacion
