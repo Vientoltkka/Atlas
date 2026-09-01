@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from ui.atlas_bridge import AtlasUiBridge
 from ui.windows_hotkey import WindowsGlobalHotkey
@@ -15,6 +15,15 @@ class _ChatHotkeyBridge(QObject):
     """Marshal native hotkey callbacks back onto the Qt UI thread."""
 
     activated = Signal()
+
+    def __init__(self, show_chat) -> None:
+        super().__init__()
+        self._show_chat = show_chat
+        self.activated.connect(self._show_chat_on_ui_thread)
+
+    @Slot()
+    def _show_chat_on_ui_thread(self) -> None:
+        self._show_chat()
 
 
 class _VoiceSessionBridge(QObject):
@@ -49,7 +58,7 @@ class OrbeController:
         self._chat_threads: set[threading.Thread] = set()
         self._hotkey_factory = hotkey_factory
         self._chat_hotkey = None
-        self._chat_hotkey_bridge = _ChatHotkeyBridge()
+        self._chat_hotkey_bridge = _ChatHotkeyBridge(self.show_chat)
         self._voice_session_bridge = _VoiceSessionBridge()
         self._voice_session_bridge.state_received.connect(self._on_voice_state)
         self._voice_session_bridge.message_received.connect(self._on_voice_message)
@@ -78,13 +87,12 @@ class OrbeController:
         self._transcript_panel.voice_start_requested.connect(self.start_voice)
         self._transcript_panel.voice_stop_requested.connect(self.stop)
         self._transcript_panel.voice_retry_requested.connect(self.retry_voice)
-        self._chat_hotkey_bridge.activated.connect(self.show_chat)
 
     @property
     def bridge(self):
         return self._bridge
 
-    def start(self, *, start_voice: bool = True, show_on_start: bool = True) -> None:
+    def start(self, *, start_voice: bool = True, show_on_start: bool = False) -> None:
         self._transcript_panel.set_hide_on_close(not start_voice)
         if show_on_start:
             self.show_chat()
@@ -100,10 +108,52 @@ class OrbeController:
 
     def show_chat(self) -> None:
         """Show and focus the existing chat windows without starting voice."""
+        self._show_chat_without_overlap()
+
+    def _show_chat_without_overlap(self) -> None:
+        """Show the existing chat once and resolve only an initial overlap."""
         self._orb.show()
         self._transcript_panel.show()
+        self._position_chat_without_overlap()
         self._transcript_panel.raise_()
         self._transcript_panel.activateWindow()
+
+    def _position_chat_without_overlap(self) -> None:
+        """Keep the initial orb position unless the newly shown panel covers it."""
+        if not self._orb.frameGeometry().intersects(self._transcript_panel.frameGeometry()):
+            return
+        screen = self._orb.screen() or self._transcript_panel.screen()
+        if screen is None:
+            return
+        bounds = screen.availableGeometry()
+        panel = self._transcript_panel
+        orb_geometry = self._orb.frameGeometry()
+        gap = 16
+        y = max(
+            bounds.top(),
+            min(orb_geometry.center().y() - panel.height() // 2, bounds.bottom() - panel.height() + 1),
+        )
+        for x in (orb_geometry.right() + gap + 1, orb_geometry.left() - gap - panel.width()):
+            if bounds.left() <= x and x + panel.width() <= bounds.right() + 1:
+                panel.move(x, y)
+                return
+        # On narrow displays preserve the readable chat position and move the orb once.
+        self._orb.reposition_beside(panel)
+        if not self._orb.frameGeometry().intersects(panel.frameGeometry()):
+            return
+
+        # If neither window fits beside its current position, anchor the chat
+        # and shift the orb to its side while keeping both windows on screen.
+        panel_x = bounds.left()
+        orb_x = panel_x + panel.width() + gap
+        if orb_x + self._orb.width() <= bounds.right() + 1:
+            panel_y = max(bounds.top(), min(panel.y(), bounds.bottom() - panel.height() + 1))
+            orb_y = max(
+                bounds.top(),
+                min(panel_y + (panel.height() - self._orb.height()) // 2, bounds.bottom() - self._orb.height() + 1),
+            )
+            panel.move(panel_x, panel_y)
+            self._orb.move(orb_x, orb_y)
 
     def hide_chat(self) -> None:
         """Hide the chat pair while preserving the running controller."""

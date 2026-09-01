@@ -161,10 +161,11 @@ def create_orb_window(settings=None):
     ``settings`` is an optional QSettings-like object used to persist
     the window position (keys ``pos_x`` / ``pos_y``).
     """
-    from PySide6.QtCore import Qt, Signal, QTimer
+    from PySide6.QtCore import QSize, Qt, Signal, QTimer
     from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
     from PySide6.QtWidgets import (
         QFrame,
+        QHBoxLayout,
         QLabel,
         QMenu,
         QPushButton,
@@ -184,20 +185,20 @@ def create_orb_window(settings=None):
             super().__init__(parent)
             self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setFixedWidth(212)
+            self.setFixedWidth(224)
             self._voice_active = False
 
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(5)
+            layout.setContentsMargins(12, 11, 12, 11)
+            layout.setSpacing(4)
             self._title = QLabel("MENU ATLAS", self)
-            self._title.setStyleSheet("color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            self._title.setStyleSheet("color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;")
             layout.addWidget(self._title)
             self._add_separator(layout)
-            self._chat_button = self._add_action(layout, "Abrir Chat", self.chat_requested)
-            self._voice_button = self._add_action(layout, "Modo Voz", self.voice_requested)
+            self._chat_button = self._add_action(layout, "Abrir Chat", self.chat_requested, "chat")
+            self._voice_button = self._add_action(layout, "Modo Voz", self.voice_requested, "voice", voice_status=True)
             self._add_separator(layout)
-            self._quit_button = self._add_action(layout, "Salir", self.quit_requested, danger=True)
+            self._quit_button = self._add_action(layout, "Salir", self.quit_requested, "quit", danger=True)
 
         def _add_separator(self, layout) -> None:
             separator = QFrame(self)
@@ -205,26 +206,70 @@ def create_orb_window(settings=None):
             separator.setStyleSheet("color: rgba(85, 185, 255, 105);")
             layout.addWidget(separator)
 
-        def _add_action(self, layout, text: str, signal, *, danger: bool = False):
+        def _add_action(self, layout, text: str, signal, icon_name: str, *, danger: bool = False, voice_status: bool = False):
             button = QPushButton(text, self)
             color = "#ffb6b6" if danger else "#e7f8ff"
             hover = "rgba(255, 78, 78, 50)" if danger else "rgba(52, 173, 255, 52)"
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setIcon(QIcon(self._action_icon(icon_name, "#ff9c9c" if danger else "#84d8ff")))
+            button.setIconSize(QSize(18, 18))
             button.setStyleSheet(
                 "QPushButton {"
                 f"color: {color}; background: transparent; border: 1px solid transparent;"
-                "border-radius: 7px; padding: 8px 10px; text-align: left; font-size: 12px;"
+                "border-radius: 7px; padding: 8px 9px; text-align: left; font-size: 12px;"
                 "}"
                 f"QPushButton:hover {{ background: {hover}; border-color: rgba(96, 202, 255, 130); }}"
             )
             button.clicked.connect(signal.emit)
             button.clicked.connect(self.hide)
-            layout.addWidget(button)
+            if voice_status:
+                row = QFrame(self)
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                row_layout.addWidget(button, 1)
+                self._voice_indicator = QLabel(row)
+                self._voice_indicator.setFixedSize(8, 8)
+                self._voice_indicator.setToolTip("Voz inactiva")
+                row_layout.addWidget(self._voice_indicator)
+                layout.addWidget(row)
+                self._set_voice_indicator(False)
+            else:
+                layout.addWidget(button)
             return button
+
+        def _action_icon(self, icon_name: str, color: str) -> QPixmap:
+            pixmap = QPixmap(18, 18)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor(color), 1.7)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if icon_name == "chat":
+                painter.drawRoundedRect(2, 3, 14, 10, 3, 3)
+                painter.drawLine(6, 13, 5, 16)
+                painter.drawLine(5, 16, 9, 13)
+            elif icon_name == "voice":
+                painter.drawRoundedRect(6, 2, 6, 10, 3, 3)
+                painter.drawArc(3, 7, 12, 8, 0, -180 * 16)
+                painter.drawLine(9, 15, 9, 17)
+                painter.drawLine(6, 17, 12, 17)
+            else:
+                painter.drawArc(3, 3, 12, 12, 45 * 16, 270 * 16)
+                painter.drawLine(9, 1, 9, 9)
+            painter.end()
+            return pixmap
+
+        def _set_voice_indicator(self, active: bool) -> None:
+            color = "#45ee94" if active else "#758496"
+            self._voice_indicator.setStyleSheet(f"background: {color}; border-radius: 4px;")
+            self._voice_indicator.setToolTip("Voz activa" if active else "Voz inactiva")
 
         def set_voice_active(self, active: bool) -> None:
             self._voice_active = active
             self._voice_button.setText("Detener voz" if active else "Modo Voz")
+            self._set_voice_indicator(active)
 
         def show_beside(self, orb) -> None:
             self.adjustSize()
@@ -247,11 +292,11 @@ def create_orb_window(settings=None):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             path = QPainterPath()
-            path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 11, 11)
-            painter.setPen(QPen(QColor(75, 192, 255, 180), 1.0))
-            painter.setBrush(QColor(4, 18, 42, 238))
+            path.addRoundedRect(self.rect().adjusted(2, 2, -2, -2), 10, 10)
+            painter.setPen(QPen(QColor(87, 204, 255, 205), 1.0))
+            painter.setBrush(QColor(3, 15, 36, 242))
             painter.drawPath(path)
-            painter.setPen(QPen(QColor(80, 195, 255, 36), 5.0))
+            painter.setPen(QPen(QColor(80, 195, 255, 46), 5.0))
             painter.drawPath(path)
             painter.end()
 

@@ -110,7 +110,7 @@ def main() -> int:
 
         if getattr(args, "chat", False):
             return _run_desktop_ui(
-                logger, start_voice=False, show_on_start=not args.start_hidden
+                logger, start_voice=False, show_on_start=False
             )
 
         if getattr(args, "ui", False):

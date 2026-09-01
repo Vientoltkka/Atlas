@@ -854,10 +854,20 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     assert hotkeys[0].started is True
     assert qapp.quitOnLastWindowClosed() is False
     assert orb.isVisible() is True
-    assert panel.isVisible() is True
+    assert panel.isVisible() is False
     assert orb.frameGeometry().center() == orb.screen().availableGeometry().center()
     orb.move(40, 40)
+    panel.move(40, 40)
     position_before_hotkey = orb.frameGeometry().topLeft()
+
+    hotkey_thread = threading.Thread(target=hotkeys[0].trigger)
+    hotkey_thread.start()
+    hotkey_thread.join(timeout=1)
+    _drain_events(qapp)
+    assert orb.isVisible() is True
+    assert panel.isVisible() is True
+    assert orb.frameGeometry().topLeft() == position_before_hotkey
+    assert not orb.frameGeometry().intersects(panel.frameGeometry())
 
     panel.close()
     _drain_events(qapp)
@@ -865,11 +875,14 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     assert panel.isVisible() is False
     assert hotkeys[0].stopped is False
 
-    hotkeys[0].trigger()
+    hotkey_thread = threading.Thread(target=hotkeys[0].trigger)
+    hotkey_thread.start()
+    hotkey_thread.join(timeout=1)
     _drain_events(qapp)
     assert orb.isVisible() is True
     assert panel.isVisible() is True
     assert orb.frameGeometry().topLeft() == position_before_hotkey
+    assert not orb.frameGeometry().intersects(panel.frameGeometry())
 
     controller._stop_chat_hotkey()
     assert hotkeys[0].stopped is True
@@ -894,13 +907,46 @@ def test_orb_context_actions_reuse_chat_and_voice_controller_paths(qapp) -> None
     controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
     panel.hide()
 
+    orb.move(200, 160)
+    panel.move(200, 160)
     orb.chat_requested.emit()
+    _drain_events(qapp)
     assert panel.isVisible()
+    assert not orb.frameGeometry().intersects(panel.frameGeometry())
     orb.voice_requested.emit()
     assert voice_started.wait(timeout=1)
     assert orb.context_menu._voice_button.text() == "Detener voz"
     orb.voice_requested.emit()
     controller.join(timeout=2)
     assert orb.context_menu._voice_button.text() == "Modo Voz"
+    orb.close()
+    panel.close()
+
+
+def test_show_chat_repositions_an_overlapping_panel_once(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    class FakeAtlas:
+        pass
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    orb.move(200, 160)
+    panel.move(200, 160)
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+
+    controller.start(start_voice=False)
+    assert not panel.isVisible()
+    controller.show_chat()
+    first_panel_geometry = panel.frameGeometry()
+
+    assert panel.isVisible()
+    assert not orb.frameGeometry().intersects(first_panel_geometry)
+    assert orb.screen().availableGeometry().contains(orb.frameGeometry())
+    assert panel.screen().availableGeometry().contains(first_panel_geometry)
+
+    controller.show_chat()
+    assert panel.frameGeometry() == first_panel_geometry
     orb.close()
     panel.close()

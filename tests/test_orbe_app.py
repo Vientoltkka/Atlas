@@ -286,8 +286,10 @@ def test_context_menu_actions_emit_existing_orb_signals_and_close(qapp, orb) -> 
 def test_context_menu_voice_label_reflects_real_controller_state(orb) -> None:
     orb.set_voice_active(True)
     assert orb.context_menu._voice_button.text() == "Detener voz"
+    assert "#45ee94" in orb.context_menu._voice_indicator.styleSheet()
     orb.set_voice_active(False)
     assert orb.context_menu._voice_button.text() == "Modo Voz"
+    assert "#758496" in orb.context_menu._voice_indicator.styleSheet()
 
 
 def test_fixed_orb_size(orb) -> None:

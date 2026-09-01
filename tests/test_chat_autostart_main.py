@@ -26,7 +26,7 @@ def successful_preflight(monkeypatch):
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        (["main.py", "--chat"], (False, True)),
+        (["main.py", "--chat"], (False, False)),
         (["main.py", "--chat", "--start-hidden"], (False, False)),
         (["main.py", "--ui"], (True, True)),
     ],
