@@ -40,7 +40,12 @@ from core.atlas_request_normalizer import (
     unavailable_atlas_request_normalizer_result,
 )
 from core.model_health import ModelHealthChecker
-from core.model_inference import ModelInferenceRunner, ModelSelectionError
+from core.model_inference import (
+    InferenceFallbackExhaustedError,
+    ModelHealthCheckError,
+    ModelInferenceRunner,
+    ModelSelectionError,
+)
 from core.model_manager import ModelManager
 from core.model_selection_policy import ModelSelectionPolicy
 from core.planner import Planner
@@ -722,6 +727,13 @@ class AtlasOrchestrator:
                         messages=messages,
                     ),
                 )
+            except (ModelHealthCheckError, InferenceFallbackExhaustedError) as error:
+                local_fallback = getattr(
+                    specialist_agent, "local_calculation_fallback", None
+                )
+                raw_response = local_fallback(messages) if callable(local_fallback) else None
+                if raw_response is None:
+                    raise error
             except ModelSelectionError as error:
                 if self._model_selection_policy != ModelSelectionPolicy():
                     raise

@@ -137,6 +137,31 @@ def test_nutrition_agent_requests_missing_data_before_a_personalized_calculation
     assert client.calls == []
 
 
+def test_nutrition_agent_calculates_locally_when_all_data_is_available() -> None:
+    agent = NutritionAgent(RecordingPromptClient())  # type: ignore[arg-type]
+
+    response = agent.local_calculation_fallback(
+        [
+            {"role": "user", "content": "Calcula mis calorías y macros para ganar masa: peso 74 kg, mido 1,80 m y entreno CrossFit 5 días por semana."},
+            {"role": "user", "content": "48 años, hombre."},
+        ]
+    )
+
+    assert response == AgentResponse(
+        text=(
+            "### Estimación inicial para ganar masa muscular\n\n"
+            "- **Calorías:** 3,050 kcal/día\n"
+            "- **Proteínas:** 148 g/día\n"
+            "- **Grasas:** 67 g/día\n"
+            "- **Carbohidratos:** 464 g/día\n\n"
+            "Es una estimación basada en Mifflin-St Jeor, actividad alta por "
+            "CrossFit 5 días/semana y un superávit moderado. Mantén estas cifras "
+            "2-3 semanas y ajusta 100-150 kcal según peso, rendimiento y perímetros."
+        ),
+        requires_follow_up=False,
+    )
+
+
 def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkeypatch) -> None:
     orchestrator = Bootstrap.build()
     nutrition = orchestrator._registry.get("nutrition")

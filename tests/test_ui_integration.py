@@ -18,6 +18,7 @@ import main as atlas_main
 from bootstrap.bootstrap import Bootstrap
 from core.atlas import Atlas
 from core.orchestrator import AtlasOrchestrator
+from models.prompt_client import InferenceBackendError
 from tools.desktop.desktop_tools import CopyClipboardTextTool
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
@@ -350,12 +351,11 @@ def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_follo
     assert "Para calcularlo necesito tu edad y tu sexo." in panel._view.toPlainText()
     assert orchestrator.pending_agent_followup is not None
 
-    monkeypatch.setattr(nutrition._client, "check_model_health", lambda _model: None)
     monkeypatch.setattr(
         nutrition._client,
-        "ask",
-        lambda **_kwargs: json.dumps(
-            {"text": "Objetivo y macros estimados.", "requires_follow_up": False}
+        "check_model_health",
+        lambda model: (_ for _ in ()).throw(
+            InferenceBackendError(model, "backend unavailable")
         ),
     )
     panel._input.setText("48 años, hombre.")
@@ -364,7 +364,7 @@ def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_follo
     _drain_events(qapp)
 
     content = panel._view.toPlainText()
-    assert "Objetivo y macros estimados." in content
+    assert "**Calorías:** 3,050 kcal/día" in content
     assert '"requires_follow_up"' not in content
     assert orchestrator.pending_agent_followup is None
     orb.close()

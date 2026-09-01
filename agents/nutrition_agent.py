@@ -106,13 +106,72 @@ class NutritionAgent(BaseAgent):
             requires_follow_up=True,
         )
 
+    def local_calculation_fallback(
+        self, messages: list[dict[str, str]]
+    ) -> AgentResponse | None:
+        """Return a bounded calorie/macronutrient estimate without a provider."""
+        data = _calculation_data(messages)
+        if data is None:
+            return None
+        weight, height_cm, age, sex, crossfit_days = data
+        bmr = 10 * weight + 6.25 * height_cm - 5 * age + (5 if sex == "hombre" else -161)
+        activity_factor = 1.725 if crossfit_days >= 5 else 1.55
+        calories = round((bmr * activity_factor + 250) / 50) * 50
+        protein = round(weight * 2)
+        fat = round(weight * 0.9)
+        carbohydrates = round((calories - protein * 4 - fat * 9) / 4)
+        return AgentResponse(
+            text=(
+                "### Estimación inicial para ganar masa muscular\n\n"
+                f"- **Calorías:** {calories:,} kcal/día\n"
+                f"- **Proteínas:** {protein} g/día\n"
+                f"- **Grasas:** {fat} g/día\n"
+                f"- **Carbohidratos:** {carbohydrates} g/día\n\n"
+                "Es una estimación basada en Mifflin-St Jeor, actividad alta por "
+                f"CrossFit {crossfit_days} días/semana y un superávit moderado. "
+                "Mantén estas cifras 2-3 semanas y ajusta 100-150 kcal según peso, "
+                "rendimiento y perímetros."
+            ),
+            requires_follow_up=False,
+        )
+
 
 def _structured_response_content(response: str) -> str:
     """Return the full JSON payload when the model encloses it in a JSON fence."""
     content = response.strip()
     if content.startswith("```json") and content.endswith("```"):
         return content[7:-3].strip()
+    fenced_payloads = re.findall(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+    if fenced_payloads:
+        return fenced_payloads[-1]
     return content
+
+
+def _calculation_data(
+    messages: list[dict[str, str]],
+) -> tuple[float, float, int, str, int] | None:
+    """Extract only the values needed for a completed basic calculation."""
+    user_content = "\n".join(
+        message["content"] for message in messages if message.get("role") == "user"
+    ).casefold()
+    if not re.search(r"\bcalcul\w*\b", user_content) or not re.search(
+        r"\b(calor[ií]as?|macros?|macronutrientes?)\b", user_content
+    ):
+        return None
+    if _missing_calculation_data(messages):
+        return None
+    weight_match = re.search(r"\b(\d{2,3}(?:[.,]\d+)?)\s*(?:kg|kilos?)\b", user_content)
+    height_match = re.search(r"\b(\d[.,]\d{1,2})\s*m\b|\b(\d{3})\s*(?:cm|cent[ií]metros?)\b", user_content)
+    age_match = re.search(r"\b(\d{1,3})\s*a[nñ]os?\b", user_content)
+    crossfit_match = re.search(r"crossfit\s*(\d+)\s*d[ií]as?", user_content)
+    if not weight_match or not height_match or not age_match:
+        return None
+    weight = float(weight_match.group(1).replace(",", "."))
+    height_cm = float((height_match.group(1) or height_match.group(2)).replace(",", "."))
+    if height_cm < 10:
+        height_cm *= 100
+    sex = "hombre" if re.search(r"\b(hombre|masculino|var[oó]n)\b", user_content) else "mujer"
+    return weight, height_cm, int(age_match.group(1)), sex, int(crossfit_match.group(1)) if crossfit_match else 4
 
 
 def _missing_calculation_data(messages: list[dict[str, str]]) -> tuple[str, ...]:

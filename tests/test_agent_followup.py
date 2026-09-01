@@ -4,6 +4,7 @@ import json
 
 from agents.nutrition_agent import NutritionAgent
 from bootstrap.bootstrap import Bootstrap
+from models.prompt_client import InferenceBackendError
 
 
 NUTRITION_PROMPT = (
@@ -80,6 +81,28 @@ def test_agent_followup_remains_active_when_the_agent_requests_another_turn(monk
         "Cálculo completado."
     )
     assert orchestrator.pending_agent_followup is None
+
+
+def test_nutrition_followup_uses_local_calculation_when_provider_is_unavailable(monkeypatch) -> None:
+    orchestrator = Bootstrap.build()
+    nutrition = orchestrator._registry.get("nutrition")
+    assert isinstance(nutrition, NutritionAgent)
+
+    orchestrator.process_prompt(NUTRITION_PROMPT, confirm=lambda _prompt: "")
+    monkeypatch.setattr(
+        nutrition._client,
+        "check_model_health",
+        lambda model: (_ for _ in ()).throw(InferenceBackendError(model, "backend unavailable")),
+    )
+
+    response = orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "")
+
+    assert "**Calorías:** 3,050 kcal/día" in response
+    assert "requires_follow_up" not in response
+    assert orchestrator.pending_agent_followup is None
+    assert orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "") == (
+        "Atlas todavia no dispone de la capacidad necesaria para esa accion."
+    )
 
 
 def test_agent_followup_cancellation_clears_state(monkeypatch) -> None:
