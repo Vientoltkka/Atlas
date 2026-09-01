@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import pytest
+
 from bootstrap.bootstrap import Bootstrap
 from agents.training_agent import TrainingAgent
 
@@ -68,6 +70,59 @@ def test_training_agent_prompt_defines_crossfit_session_quality_contract() -> No
         "crossfit habitual",
         "solo el contenido del entrenamiento",
         "markdown limpio",
+    ):
+        assert requirement in prompt
+
+
+@pytest.mark.parametrize(
+    "user_prompt",
+    (
+        "Hazme una sesión de CrossFit de 60 minutos.",
+        "Programa un HYROX para 20 personas con 4 ergómetros.",
+        "Quiero una sesión de fuerza de powerlifting.",
+        "Prepara hipertrofia de tren superior para nivel intermedio.",
+        "Quiero mejorar mi clean con una progresión simple.",
+        "Hazme un entrenamiento personalizado.",
+        "Me duele la rodilla desde ayer: dime qué lesión tengo y cómo tratarla.",
+        "Programa mi back squat al 85% de mi 1RM.",
+    ),
+)
+def test_training_agent_v1_requests_use_the_practical_coach_contract(user_prompt: str) -> None:
+    client = RecordingPromptClient()
+    agent = TrainingAgent(client)  # type: ignore[arg-type]
+
+    assert agent.run("simulated-model", [{"role": "user", "content": user_prompt}]) == "plan"
+    assert client.calls == [
+        (
+            "simulated-model",
+            [
+                {"role": "system", "content": agent.SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+    ]
+
+
+def test_training_agent_prompt_defines_v1_adaptation_and_safety_contract() -> None:
+    prompt = TrainingAgent(RecordingPromptClient()).SYSTEM_PROMPT.casefold()  # type: ignore[arg-type]
+
+    for requirement in (
+        "powerlifting",
+        "halterofilia",
+        "levantamientos",
+        "una sola aclaraci",
+        "atletas",
+        "material",
+        "rir",
+        "descanso",
+        "time cap",
+        "rotaci",
+        "progresiones simples",
+        "no inventes lesiones",
+        "ni 1rm",
+        "no diagnostiques",
+        "no des diagn",
+        "nutricional",
     ):
         assert requirement in prompt
 

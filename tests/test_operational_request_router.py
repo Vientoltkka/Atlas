@@ -84,6 +84,19 @@ def test_coach_requests_route_to_existing_training_agent() -> None:
         assert decision.target_agent_name == "training"
 
 
+def test_clinical_pain_request_prioritizes_medical_agent_over_training() -> None:
+    agents = AgentRegistry()
+    agents.register(SimpleNamespace(name="training"))  # type: ignore[arg-type]
+    agents.register(SimpleNamespace(name="medical"))  # type: ignore[arg-type]
+
+    decision = _router(agents=agents).classify(
+        _gateway().from_text("Me duele la rodilla al hacer sentadillas: diagnostícame la lesión.")
+    )
+
+    assert decision.route is RequestRoute.AGENT_DELEGATION
+    assert decision.target_agent_name == "medical"
+
+
 def test_direct_response_for_simple_question() -> None:
     decision = _router().classify(_gateway().from_text("Que es una API?"))
 
