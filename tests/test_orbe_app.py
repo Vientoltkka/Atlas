@@ -114,6 +114,30 @@ def test_transcript_uses_distinct_escaped_user_and_atlas_turns(qapp) -> None:
     assert "Atlas:" in text
     assert "&lt;b&gt;sin formato&lt;/b&gt;" in rendered
     assert "segunda linea" in text
+    assert "#123b5c" in rendered
+    assert "#162235" in rendered
+    assert rendered.count("<table") == 2
+    panel.close()
+
+
+def test_transcript_hides_repetitive_voice_states_but_keeps_errors_and_transcription(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    for message in (
+        "Estado: STARTING",
+        "Estado: IDLE",
+        "Estado: LISTENING",
+        "Estado: PROCESSING",
+        "Estado: RECOVERING",
+        "Esperando voz...",
+    ):
+        panel.append_message(message)
+    panel.append_transcription("Qué tal está el día hoy")
+    panel.append_error("Error real de voz")
+    text = panel._view.toPlainText()
+    assert "Estado:" not in text
+    assert "Esperando voz" not in text
+    assert "Tú: Qué tal está el día hoy" in text
+    assert "Error: Error real de voz" in text
     panel.close()
 
 

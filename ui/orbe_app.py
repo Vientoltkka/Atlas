@@ -617,6 +617,16 @@ def create_transcript_panel():
         voice_stop_requested = Signal()
         voice_retry_requested = Signal()
         _VOICE_STATUS = {"STARTING": "Iniciando voz", "LISTENING": "Escuchando", "TRANSCRIBING": "STT", "PROCESSING": "Procesando", "SPEAKING": "TTS", "RECOVERING": "Reintentando", "DEGRADED": "Error", "ERROR": "Error", "STOPPING": "Deteniendo", "STOPPED": "Desconectado"}
+        _HIDDEN_SYSTEM_MESSAGES = frozenset(
+            {
+                "Estado: STARTING",
+                "Estado: IDLE",
+                "Estado: LISTENING",
+                "Estado: PROCESSING",
+                "Estado: RECOVERING",
+                "Esperando voz...",
+            }
+        )
 
         def __init__(self) -> None:
             super().__init__()
@@ -754,21 +764,24 @@ def create_transcript_panel():
             self._voice_status.setText("Desconectado")
 
         def append_message(self, message: str) -> None:
-            self._append_turn("Sistema", message, "#1a2b40")
+            text = str(message).strip()
+            if text in self._HIDDEN_SYSTEM_MESSAGES:
+                return
+            self._append_turn("Sistema", text, "#162235", "#334761")
 
         def append_user(self, message: str) -> None:
-            self._append_turn("Usuario", message, "#17395a")
+            self._append_turn("Usuario", message, "#123b5c", "#2b6d9a")
 
         def append_transcription(self, transcription: str) -> None:
-            self._append_turn("Tú", transcription, "#17395a")
+            self._append_turn("Tú", transcription, "#123b5c", "#2b6d9a")
 
         def append_response(self, response: str) -> None:
-            self._append_turn("Atlas", response, "#172c46")
+            self._append_turn("Atlas", response, "#162235", "#38526f")
 
         def append_error(self, error: str) -> None:
-            self._append_turn("Error", error, "#48202a")
+            self._append_turn("Error", error, "#48202a", "#9b4759")
 
-        def _append_turn(self, sender: str, message: str, background: str) -> None:
+        def _append_turn(self, sender: str, message: str, background: str, border: str) -> None:
             scrollbar = self._view.verticalScrollBar()
             follow_tail = scrollbar.value() >= scrollbar.maximum() - 24
             previous_scroll_value = scrollbar.value()
@@ -776,10 +789,13 @@ def create_transcript_panel():
             safe_message = html.escape(str(message)).replace("\n", "<br>")
             self._view.moveCursor(QTextCursor.MoveOperation.End)
             self._view.insertHtml(
-                f'<div style="margin: 8px 2px 14px 2px; padding: 9px 11px; '
-                f'background: {background}; border-radius: 7px;">'
+                f'<table width="100%" cellspacing="0" cellpadding="0" '
+                f'style="margin-top: 6px; margin-bottom: 14px;">'
+                f'<tr><td bgcolor="{background}" style="border: 1px solid {border}; '
+                f'padding: 10px 12px;">'
                 f'<span style="color: #8fd3ff; font-weight: 700;">{safe_sender}:</span> '
-                f'<span style="color: #eef5ff;">{safe_message}</span></div>'
+                f'<span style="color: #eef5ff;">{safe_message}</span>'
+                f'</td></tr></table>'
             )
             self._view.insertHtml("<br>")
             if follow_tail:

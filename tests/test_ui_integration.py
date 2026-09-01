@@ -219,13 +219,15 @@ def test_detener_stops_session_without_closing_app(qapp) -> None:
     orb.close()
 
 
-def test_transcript_panel_appends_without_session_logic(qapp) -> None:
+def test_transcript_panel_hides_repetitive_voice_states_without_session_logic(qapp) -> None:
     from ui.orbe_app import create_transcript_panel
 
     panel = create_transcript_panel()
     panel.append_message("Estado: LISTENING")
     panel.append_message("Estado: PROCESSING")
-    assert "LISTENING" in panel._view.toPlainText()
+    panel.append_message("Aviso de sistema visible")
+    assert "LISTENING" not in panel._view.toPlainText()
+    assert "Aviso de sistema visible" in panel._view.toPlainText()
     panel.close()
 
 
