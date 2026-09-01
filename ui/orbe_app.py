@@ -162,7 +162,7 @@ def create_orb_window(settings=None):
     the window position (keys ``pos_x`` / ``pos_y``).
     """
     from PySide6.QtCore import QSize, Qt, Signal, QTimer
-    from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
+    from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
     from PySide6.QtWidgets import (
         QFrame,
         QHBoxLayout,
@@ -553,21 +553,21 @@ def create_orb_window(settings=None):
         # -- painting ---------------------------------------------------
 
         def _build_atlas_emblem(self) -> QPainterPath:
-            """Create the cached, bar-free geometric Atlas emblem silhouette."""
+            """Create the cached, single-apex geometric Atlas A silhouette."""
             size = self.width()
             path = QPainterPath()
-            # Interlocked twin A peaks remain clear at small sizes without becoming text.
-            path.moveTo(size * 0.475, size * 0.375)
-            path.lineTo(size * 0.340, size * 0.650)
-            path.lineTo(size * 0.405, size * 0.628)
-            path.lineTo(size * 0.490, size * 0.445)
+            # One shared apex and one crossbar keep this readable as a single A at small sizes.
+            path.moveTo(size * 0.500, size * 0.335)
+            path.lineTo(size * 0.318, size * 0.672)
+            path.lineTo(size * 0.402, size * 0.650)
+            path.lineTo(size * 0.500, size * 0.438)
             path.closeSubpath()
-            path.moveTo(size * 0.525, size * 0.375)
-            path.lineTo(size * 0.660, size * 0.650)
-            path.lineTo(size * 0.595, size * 0.628)
-            path.lineTo(size * 0.510, size * 0.445)
+            path.moveTo(size * 0.500, size * 0.335)
+            path.lineTo(size * 0.682, size * 0.672)
+            path.lineTo(size * 0.598, size * 0.650)
+            path.lineTo(size * 0.500, size * 0.438)
             path.closeSubpath()
-            path.addRect(size * 0.405, size * 0.548, size * 0.190, size * 0.030)
+            path.addRect(size * 0.402, size * 0.548, size * 0.196, size * 0.036)
             return path
 
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -600,12 +600,12 @@ def create_orb_window(settings=None):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            # Four halo shells read as a soft volumetric glow rather than one flat outline.
+            # Narrow halo shells frame the structure without flattening the orbital silhouette.
             for multiplier, opacity, width in (
-                (1.12, 0.020 * active_glow, 14.0),
-                (1.04, 0.040 * active_glow, 9.0),
-                (0.96, 0.075 * active_glow, 5.0),
-                (0.88, 0.13 * active_glow, 2.5),
+                (1.10, 0.018 * active_glow, 11.0),
+                (1.03, 0.038 * active_glow, 7.0),
+                (0.96, 0.070 * active_glow, 4.0),
+                (0.89, 0.15 * active_glow, 1.8),
             ):
                 radius = int(halo_radius * multiplier)
                 painter.setPen(QPen(QColor(*halo_rgb, int(alpha * opacity)), width))
@@ -614,6 +614,20 @@ def create_orb_window(settings=None):
             # Projection stays behind the sphere, so the core looks suspended rather than painted on.
             base_y = int(size * 0.79)
             beam_top = center + int(core_radius * 0.54)
+            projection = QLinearGradient(center, beam_top, center, base_y)
+            projection.setColorAt(0.0, QColor(*projection_rgb, int(alpha * 0.26)))
+            projection.setColorAt(0.62, QColor(*projection_rgb, int(alpha * 0.08)))
+            projection.setColorAt(1.0, QColor(*projection_rgb, 0))
+            beam_width = max(16, int(size * 0.105))
+            beam = QPainterPath()
+            beam.moveTo(center - beam_width * 0.28, beam_top)
+            beam.lineTo(center + beam_width * 0.28, beam_top)
+            beam.lineTo(center + beam_width, base_y)
+            beam.lineTo(center - beam_width, base_y)
+            beam.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(projection)
+            painter.drawPath(beam)
             painter.setPen(QPen(QColor(*projection_rgb, int(alpha * 0.060)), max(10.0, size * 0.046)))
             painter.drawLine(center, beam_top, center, base_y)
             painter.setPen(QPen(QColor(*projection_rgb, int(alpha * 0.23)), max(3.0, size * 0.011)))
@@ -748,6 +762,9 @@ def create_orb_window(settings=None):
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 278) * 16, 30 * 16)
                 painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * 0.96)), 2.1))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 240) * 16, 22 * 16)
+                painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * 0.82)), 1.1))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 222) * 16, 9 * 16)
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 269) * 16, 7 * 16)
                 node_angle = math.radians(start_angle + 252 + index * 17)
                 node_x, node_y = int(math.cos(node_angle) * radius), int(math.sin(node_angle) * radius)
                 painter.setPen(Qt.PenStyle.NoPen)

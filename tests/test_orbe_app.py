@@ -65,6 +65,17 @@ def test_all_states_are_renderable_without_errors(orb, qtbot=None) -> None:
         assert orb.state is state
 
 
+def test_atlas_emblem_has_one_shared_apex_and_a_clear_central_cut(orb) -> None:
+    from PySide6.QtCore import QPointF
+
+    emblem = orb._emblem_path
+    size = orb.width()
+
+    assert emblem.contains(QPointF(size * 0.5, size * 0.35))
+    assert not emblem.contains(QPointF(size * 0.5, size * 0.49))
+    assert emblem.contains(QPointF(size * 0.5, size * 0.565))
+
+
 def test_window_is_frameless_translucent_and_on_top(qapp, orb) -> None:
     from PySide6.QtCore import Qt
 
