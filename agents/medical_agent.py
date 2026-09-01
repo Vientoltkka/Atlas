@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import AgentResponse, BaseAgent
 from models.prompt_client import PromptClient
 
 
@@ -55,3 +55,34 @@ class MedicalAgent(BaseAgent):
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
         return self._client.ask(model=model, messages=conversation)
+
+    def local_calculation_fallback(
+        self, messages: list[dict[str, str]]
+    ) -> AgentResponse | None:
+        """Provide bounded triage guidance when no authorized provider is available."""
+        latest_user_message = next(
+            (
+                message.get("content", "").casefold()
+                for message in reversed(messages)
+                if message.get("role") == "user"
+            ),
+            "",
+        )
+        if "dolor muscular" not in latest_user_message or "entren" not in latest_user_message:
+            return None
+        return AgentResponse(
+            text=(
+                "Esto es orientación general y no un diagnóstico.\n\n"
+                "Las agujetas habituales suelen ser dolor muscular difuso que aparece "
+                "horas después del entrenamiento, con rigidez o sensibilidad, y mejora "
+                "progresivamente en pocos días.\n\n"
+                "Conviene pedir valoración médica si el dolor es intenso o empeora "
+                "claramente, hay hinchazón importante, pérdida marcada de fuerza o "
+                "función, o no puedes apoyar o mover una articulación. Busca atención "
+                "urgente si aparece fiebre u otros síntomas sistémicos, orina muy oscura "
+                "tras ejercicio intenso, dolor torácico, dificultad respiratoria u otra "
+                "señal de urgencia.\n\n"
+                "Mientras observas la evolución, evita actividades que aumenten el dolor "
+                "y considera reposo relativo e hidratación."
+            )
+        )

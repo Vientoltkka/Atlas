@@ -17,6 +17,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import main as atlas_main
 from bootstrap.bootstrap import Bootstrap
 from core.atlas import Atlas
+from core.model_health import ModelHealthResult
+from core.model_inference import ModelHealthCheckError
 from core.orchestrator import AtlasOrchestrator
 from models.prompt_client import InferenceBackendError
 from tools.desktop.desktop_tools import CopyClipboardTextTool
@@ -458,6 +460,57 @@ def test_text_chat_errors_are_rendered_by_bridge_signal(qapp) -> None:
     _drain_events(qapp)
 
     assert "Error: No se pudo procesar el mensaje textual." in panel._view.toPlainText()
+    orb.close()
+    panel.close()
+
+
+def test_orbe_text_chat_uses_medical_fallback_when_provider_is_unavailable(
+    qapp, monkeypatch
+) -> None:
+    from ui.orbe_app import create_transcript_panel
+    from ui.orbe_controller import OrbeController
+
+    orchestrator = Bootstrap.build()
+    health_result = ModelHealthResult(
+        logical_model_id="chat-local",
+        physical_model_name="chat-local",
+        provider_id="ollama",
+        healthy=False,
+        reason="provider unavailable",
+    )
+    unavailable_error = ModelHealthCheckError(
+        initial_logical_model_id="chat-local",
+        attempted_logical_model_ids=("chat-local",),
+        allow_fallback=True,
+        last_result=health_result,
+    )
+
+    def unavailable_provider(*_args, **_kwargs):
+        raise unavailable_error
+
+    monkeypatch.setattr(orchestrator._model_inference_runner, "run", unavailable_provider)
+    atlas = Atlas.__new__(Atlas)
+    atlas._orchestrator = orchestrator
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=atlas, application=qapp, orb=orb, transcript_panel=panel
+    )
+    prompt = (
+        "Tengo dolor muscular después de entrenar. ¿Cómo distingo unas agujetas "
+        "normales de algo que debería revisar con un médico?"
+    )
+
+    controller.submit_text(prompt)
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    assert "agujetas habituales" in content
+    assert "atención urgente" in content
+    assert "Error: No se pudo procesar el mensaje textual." not in content
+    assert '"requires_follow_up"' not in content
+    assert not orchestrator._pending_agent_followup
     orb.close()
     panel.close()
 

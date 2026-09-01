@@ -89,3 +89,35 @@ def test_conversation_executes_medical_agent_with_mocked_model(monkeypatch) -> N
         "role": "user",
         "content": "Tengo fiebre y dolor de garganta desde ayer.",
     }
+
+
+def test_medical_agent_provides_local_post_exercise_triage_without_provider() -> None:
+    agent = MedicalAgent(RecordingPromptClient())  # type: ignore[arg-type]
+
+    response = agent.local_calculation_fallback(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "Tengo dolor muscular después de entrenar. ¿Cómo distingo unas "
+                    "agujetas normales de algo que debería revisar con un médico?"
+                ),
+            }
+        ]
+    )
+
+    assert response is not None
+    assert response.requires_follow_up is False
+    assert "orientación general y no un diagnóstico" in response.text
+    for detail in (
+        "dolor muscular difuso",
+        "horas después del entrenamiento",
+        "mejora progresivamente en pocos días",
+        "hinchazón importante",
+        "pérdida marcada de fuerza o función",
+        "orina muy oscura",
+        "dolor torácico",
+        "dificultad respiratoria",
+        "atención urgente",
+    ):
+        assert detail in response.text
