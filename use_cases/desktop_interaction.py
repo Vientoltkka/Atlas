@@ -1188,6 +1188,9 @@ class DesktopInteractionUseCase:
         aliases = {
             "bloc de notas": "notepad",
             "el bloc de notas": "notepad",
+            "la calculadora": "calculadora",
+            "el chrome": "chrome",
+            "el vs code": "vs code",
         }
         return aliases.get(self._normalize(target), target)
 

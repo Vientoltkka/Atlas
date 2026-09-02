@@ -1561,3 +1561,24 @@ def test_desktop_interaction_without_application_keeps_previous_behavior(tmp_pat
 
     assert executor.calls[0][0] == "desktop.open_file"
     assert executor.calls[0][1].parameters == {"path": str(file)}
+
+
+
+def test_desktop_interaction_opens_known_application_by_name_with_article(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    use_case.execute("abre la calculadora")
+
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "calculadora"}
+
+
+def test_desktop_interaction_opens_vs_code_by_name_with_article(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    use_case.execute("abre el vs code")
+
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "vs code"}
