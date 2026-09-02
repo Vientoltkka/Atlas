@@ -1161,7 +1161,7 @@ class DesktopInteractionUseCase:
         target: str,
     ) -> str:
         """Remove natural-language prefixes from an open command."""
-        cleaned = target.strip()
+        cleaned = target.strip().rstrip(" .,;:!?")
         normalized = self._normalize(cleaned)
         prefixes = (
             "la carpeta ",

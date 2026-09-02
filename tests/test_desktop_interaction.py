@@ -1582,3 +1582,13 @@ def test_desktop_interaction_opens_vs_code_by_name_with_article(tmp_path: Path) 
 
     assert executor.calls[0][0] == "desktop.open_application"
     assert executor.calls[0][1].parameters == {"application": "vs code"}
+
+
+def test_desktop_interaction_opens_known_application_with_trailing_punctuation(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    use_case.execute("abre la Calculadora.")
+
+    assert executor.calls[0][0] == "desktop.open_application"
+    assert executor.calls[0][1].parameters == {"application": "calculadora"}
