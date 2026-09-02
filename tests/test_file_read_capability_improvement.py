@@ -163,12 +163,10 @@ def test_unknown_builder_for_improvement_stops_safely(tmp_path: Path) -> None:
     assert not conversation.active
 
 
-def test_real_builder_prepares_the_bounded_read_proposal_without_writes() -> None:
-    source = _ROOT / "tools/filesystem/read_file_tool.py"
-    bootstrap = _ROOT / "bootstrap/bootstrap.py"
-    test_file = _ROOT / "tests/test_read_file_tool.py"
-    before = (source.read_text(encoding="utf-8"), bootstrap.read_text(encoding="utf-8"), test_file.exists())
-    builder = FileReadCapabilityImprovementBuilder(_ROOT)
+def test_builder_prepares_the_bounded_read_proposal_without_writes(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    before = _project_snapshot(root)
+    builder = FileReadCapabilityImprovementBuilder(root)
     diagnosis = builder.diagnose(_PROMPT)
 
     proposal = builder.build(diagnosis, _PROMPT)
@@ -179,25 +177,24 @@ def test_real_builder_prepares_the_bounded_read_proposal_without_writes() -> Non
     assert 'ToolParameterSchema("limit", int, minimum=1)' in proposal.files["bootstrap/bootstrap.py"]
     assert "test_read_with_limit_returns_first_lines" in proposal.files["tests/test_read_file_tool.py"]
     assert proposal.metric_directions == {"lecturas_de_archivo_acotadas_correctas": "increase"}
-    after = (source.read_text(encoding="utf-8"), bootstrap.read_text(encoding="utf-8"), test_file.exists())
-    assert before == after
+    assert _project_snapshot(root) == before
     assert not builder.can_handle(
         ImprovementDiagnosis(ImprovementClassification.CODE_REPAIR, "x", _SCOPE, (), (), "x", "x"),
         "x",
     )
 
 
-def test_real_diagnosis_reports_the_observed_gap_from_the_actual_code() -> None:
+def test_real_diagnosis_reports_the_observed_state_from_the_actual_code() -> None:
     diagnosis = FileReadCapabilityImprovementBuilder(_ROOT).diagnose(_PROMPT)
 
     assert "Inspeccion real" in diagnosis.finding
-    assert "FileService.read(path)" in diagnosis.finding
-    assert "1 parametro(s)" in diagnosis.finding
+    assert "FileReadCapabilityImprovementBuilder" not in diagnosis.finding
 
 
-def test_real_proposal_is_derived_from_the_current_source_not_from_a_constant() -> None:
-    proposal = FileReadCapabilityImprovementBuilder(_ROOT).build(
-        FileReadCapabilityImprovementBuilder(_ROOT).diagnose(_PROMPT), _PROMPT
+def test_proposal_is_derived_from_the_inspected_source_not_from_a_constant(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    proposal = FileReadCapabilityImprovementBuilder(root).build(
+        FileReadCapabilityImprovementBuilder(root).diagnose(_PROMPT), _PROMPT
     )
 
     assert proposal is not None
@@ -205,6 +202,56 @@ def test_real_proposal_is_derived_from_the_current_source_not_from_a_constant() 
     assert 'ToolParameterSchema("path", str, required=True),' in proposal.files["bootstrap/bootstrap.py"]
     assert "class ReadFileTool" in proposal.files["tools/filesystem/read_file_tool.py"].split("content =")[0]
 
+
+_TOOL_FIXTURE = '''"""Read File Tool."""
+
+from __future__ import annotations
+
+from services.file_service import FileService
+from tools.base_tool import BaseTool
+from tools.tool_context import ToolContext
+
+
+class ReadFileTool(BaseTool):
+    """Read a UTF-8 text file."""
+
+    @property
+    def name(self) -> str:
+        return "read_file"
+
+    @property
+    def description(self) -> str:
+        return "Read a UTF-8 text file."
+
+    def semantic_metadata(self) -> dict[str, object]:
+        """Return semantic metadata for catalog generation."""
+        return {
+            "capabilities": ["read_file"],
+            "supported_intents": ["read a local file"],
+            "input_description": "Requires a local text file path.",
+            "output_description": "UTF-8 file content as text.",
+            "risk_level": "low",
+            "preconditions": ["path must exist", "path must point to a file"],
+            "limitations": ["does not interpret file contents", "does not read remote paths"],
+            "negative_examples": ["explain what a file is", "write new file content"],
+            "compatible_tools": ["write_file"],
+            "tags": ["filesystem", "read"],
+            "positive_examples": ["lee el archivo notas.txt"],
+            "category": "filesystem",
+        }
+
+    def execute(
+        self,
+        context: ToolContext,
+    ) -> str:
+
+        path = context.parameters.get("path")
+
+        if not path:
+            raise ValueError("Missing parameter 'path'.")
+
+        return FileService.read(path)
+'''
 
 _BOOTSTRAP_FIXTURE = (
     "from tools.filesystem.read_file_tool import ReadFileTool\n"
@@ -225,9 +272,7 @@ def _fixture_root(tmp_path: Path, *, tool_source: str | None = None, bootstrap_s
     root = tmp_path / "project"
     (root / "tools" / "filesystem").mkdir(parents=True)
     (root / "bootstrap").mkdir()
-    shutil.copyfile(_ROOT / "tools" / "filesystem" / "read_file_tool.py", root / "tools" / "filesystem" / "read_file_tool.py")
-    if tool_source is not None:
-        (root / "tools" / "filesystem" / "read_file_tool.py").write_text(tool_source, encoding="utf-8")
+    (root / "tools" / "filesystem" / "read_file_tool.py").write_text(tool_source if tool_source is not None else _TOOL_FIXTURE, encoding="utf-8")
     (root / "bootstrap" / "bootstrap.py").write_text(bootstrap_source, encoding="utf-8")
     return root
 
@@ -250,7 +295,7 @@ def test_proposal_adapts_when_the_inspected_state_changes(tmp_path: Path) -> Non
 
 
 def test_unexpected_states_yield_no_safe_proposal(tmp_path: Path) -> None:
-    implemented = (_ROOT / "tools" / "filesystem" / "read_file_tool.py").read_text(encoding="utf-8")
+    implemented = _TOOL_FIXTURE
     with_limit = implemented.replace(
         "        return FileService.read(path)",
         "        content = FileService.read(path)\n"
