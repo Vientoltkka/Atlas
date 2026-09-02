@@ -45,6 +45,35 @@ def _fixture_desktop_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+_PRE_OPEN_APPS_ALIAS_POST_BLOCK = (
+    '            "bloc de notas": "notepad",\n'
+    '            "el bloc de notas": "notepad",\n'
+    '            "la calculadora": "calculadora",\n'
+    '            "el chrome": "chrome",\n'
+    '            "el vs code": "vs code",\n'
+)
+_PRE_OPEN_APPS_ALIAS_PRE_BLOCK = (
+    '            "bloc de notas": "notepad",\n'
+    '            "el bloc de notas": "notepad",\n'
+)
+_PRE_OPEN_APPS_DERIVED_TESTS_MARKER = "\n\n\ndef test_desktop_interaction_opens_known_application_by_name_with_article"
+
+
+def _pre_open_apps_fixture_project(tmp_path: Path) -> Path:
+    """Isolated project reproducing the PRE-improvement desktop state deterministically."""
+    project = _fixture_desktop_project(tmp_path)
+    use_case = project / _USE_CASE
+    source = use_case.read_text(encoding="utf-8")
+    assert _PRE_OPEN_APPS_ALIAS_POST_BLOCK in source
+    use_case.write_text(source.replace(_PRE_OPEN_APPS_ALIAS_POST_BLOCK, _PRE_OPEN_APPS_ALIAS_PRE_BLOCK, 1), encoding="utf-8")
+    tests = project / _TEST
+    tests_source = tests.read_text(encoding="utf-8")
+    head, separator, _derived = tests_source.partition(_PRE_OPEN_APPS_DERIVED_TESTS_MARKER)
+    assert separator
+    tests.write_text(head, encoding="utf-8")
+    return project
+
+
 class _FixtureControlPcBuilder:
     """Second compatible builder proving ambiguity never resolves silently."""
 
@@ -88,8 +117,9 @@ def test_control_pc_request_resolves_exactly_one_builder_in_the_default_registry
     assert isinstance(matches[0].builder, DesktopCapabilityImprovementBuilder)
 
 
-def test_open_applications_by_name_gap_produces_one_concrete_proposal() -> None:
-    builder = DesktopCapabilityImprovementBuilder(_ROOT)
+def test_open_applications_by_name_gap_produces_one_concrete_proposal(tmp_path: Path) -> None:
+    project = _pre_open_apps_fixture_project(tmp_path)
+    builder = DesktopCapabilityImprovementBuilder(project)
 
     proposal = builder.build(builder.diagnose(_REAL_OPEN_APPS_PROMPT), _REAL_OPEN_APPS_PROMPT)
 
@@ -211,10 +241,11 @@ def test_open_with_notepad_prompt_stops_without_proposal_when_solved() -> None:
     assert not conversation.active
 
 
-def test_real_open_applications_by_name_prompt_reaches_authorization_with_zero_writes() -> None:
-    targets = [_ROOT / _USE_CASE, _ROOT / _TEST]
+def test_real_open_applications_by_name_prompt_reaches_authorization_with_zero_writes(tmp_path: Path) -> None:
+    project = _pre_open_apps_fixture_project(tmp_path)
+    targets = [project / _USE_CASE, project / _TEST]
     before = [target.read_text(encoding="utf-8") for target in targets]
-    conversation = SelfImprovementConversation(_ROOT)
+    conversation = SelfImprovementConversation(project)
 
     response = conversation.handle(_REAL_OPEN_APPS_PROMPT)
 
