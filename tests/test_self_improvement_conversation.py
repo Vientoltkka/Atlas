@@ -9,6 +9,7 @@ from core.orchestrator import AtlasOrchestrator
 from core.router import Router
 from core.self_improvement_conversation import ImprovementDiagnosis, SelfImprovementConversation
 from core.supervised_repair import ImprovementClassification, RepairProposal, RepairValidation
+from core.voice_repair_builder import VoiceCodeRepairBuilder
 from memory.conversation import ConversationMemory
 
 
@@ -93,7 +94,54 @@ def test_classifies_self_improvement_requests(prompt: str, expected: Improvement
 
 def test_voice_diagnosis_is_limited_to_voice_scope() -> None:
     diagnosis = SelfImprovementConversation.diagnose("Atlas, corrige los fallos de la voz")
-    assert diagnosis.scope == ("use_cases/voice_conversation.py", "use_cases/speech_engine.py", "tests/test_voice_conversation.py")
+    assert diagnosis.scope == ("use_cases/voice_conversation.py", "tests/test_voice_conversation.py")
+
+
+def test_real_voice_builder_prepares_only_the_reviewed_voice_repair() -> None:
+    root = Path(__file__).resolve().parents[1]
+    diagnosis = SelfImprovementConversation.diagnose("Atlas, corrige los fallos de la voz sin romper las funciones actuales")
+    proposal = VoiceCodeRepairBuilder(root).build(diagnosis, "Atlas, corrige los fallos de la voz sin romper las funciones actuales")
+
+    assert proposal is not None
+    assert proposal.proposal_id == "repair.voice.expired-model-worker-wait"
+    assert set(proposal.files) == {"use_cases/voice_conversation.py", "tests/test_voice_conversation.py"}
+    assert "_EXPIRED_MODEL_WORKER_WAIT_TIMEOUT_SECONDS" in proposal.files["use_cases/voice_conversation.py"]
+    assert "test_expired_model_worker_wait_is_bounded" in proposal.files["tests/test_voice_conversation.py"]
+    assert "expired_model_worker_wait_ms" in proposal.metric_directions
+
+
+def test_real_voice_builder_rejects_an_expanded_scope() -> None:
+    diagnosis = ImprovementDiagnosis(
+        ImprovementClassification.CODE_REPAIR,
+        "x",
+        ("use_cases/voice_conversation.py", "outside.py"),
+        (), (), "x", "x",
+    )
+    assert VoiceCodeRepairBuilder(Path(__file__).resolve().parents[1]).build(diagnosis, "x") is None
+
+
+def test_real_voice_order_creates_a_concrete_proposal_without_writing() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = root / "use_cases/voice_conversation.py"
+    tests = root / "tests/test_voice_conversation.py"
+    before = (source.read_text(encoding="utf-8"), tests.read_text(encoding="utf-8"))
+    chat = _Chat()
+    app = AtlasOrchestrator(
+        planner=SimpleNamespace(create_plan=lambda prompt: SimpleNamespace(task=prompt, objective=prompt)),
+        router=Router(),
+        model_manager=_Models(),
+        memory=ConversationMemory(),
+        registry=SimpleNamespace(get=lambda name: chat if name == "chat" else None),
+        write_file=SimpleNamespace(execute=lambda *_: None),
+        project_root=root,
+    )
+
+    response = app.process_prompt("Atlas, corrige los fallos de la voz sin romper las funciones actuales.", confirm=lambda _: "")
+
+    assert "repair.voice.expired-model-worker-wait" in response
+    assert "No he modificado nada." in response
+    assert before == (source.read_text(encoding="utf-8"), tests.read_text(encoding="utf-8"))
+    assert chat.calls == 0
 
 
 def test_e2e_propose_authorize_validate_and_accept(tmp_path: Path) -> None:
@@ -101,7 +149,7 @@ def test_e2e_propose_authorize_validate_and_accept(tmp_path: Path) -> None:
     target.write_text("original\n", encoding="utf-8")
     app, _ = _orchestrator(tmp_path)
 
-    proposal = app.process_prompt("Atlas, corrige los fallos de la voz", confirm=lambda _: "")
+    proposal = app.process_prompt("Atlas, corrige los fallos de la voz sin romper las funciones actuales.", confirm=lambda _: "")
     assert "proposal_id: repair.dialogue-fixture" in proposal
     assert target.read_text(encoding="utf-8") == "original\n"
     validated = app.process_prompt("sí", confirm=lambda _: "")
@@ -117,7 +165,7 @@ def test_rejection_rolls_back_exact_fixture_scope(tmp_path: Path) -> None:
     target.write_text("original\n", encoding="utf-8")
     unrelated.write_text("keep\n", encoding="utf-8")
     app, _ = _orchestrator(tmp_path)
-    app.process_prompt("Atlas, corrige los fallos de la voz", confirm=lambda _: "")
+    app.process_prompt("Atlas, corrige los fallos de la voz sin romper las funciones actuales.", confirm=lambda _: "")
     app.process_prompt("sí", confirm=lambda _: "")
 
     assert "restauró exactamente" in app.process_prompt("no", confirm=lambda _: "")
@@ -129,7 +177,7 @@ def test_validation_failure_rolls_back(tmp_path: Path) -> None:
     target = tmp_path / "fixture.txt"
     target.write_text("original\n", encoding="utf-8")
     app, _ = _orchestrator(tmp_path, passed=False)
-    app.process_prompt("Atlas, corrige los fallos de la voz", confirm=lambda _: "")
+    app.process_prompt("Atlas, corrige los fallos de la voz sin romper las funciones actuales.", confirm=lambda _: "")
 
     assert "se restauró exactamente" in app.process_prompt("sí", confirm=lambda _: "")
     assert target.read_text(encoding="utf-8") == "original\n"

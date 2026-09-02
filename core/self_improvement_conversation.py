@@ -53,6 +53,13 @@ class SelfImprovementConversation:
         validator_factory: ValidatorFactory | None = None,
     ) -> None:
         self._root = project_root
+        if proposal_builder is None:
+            # The only built-in repair is a deterministic voice patch, not model output.
+            from core.voice_repair_builder import VoiceCodeRepairBuilder
+
+            voice_repair = VoiceCodeRepairBuilder(project_root)
+            proposal_builder = voice_repair.build
+            validator_factory = lambda _proposal: voice_repair.validator
         self._proposal_builder = proposal_builder
         self._validator_factory = validator_factory or (lambda _proposal: _unavailable_validator)
         self._workflow: SupervisedRepairWorkflow | None = None
@@ -117,12 +124,12 @@ class SelfImprovementConversation:
         if any(term in text for term in ("voz", "voice")):
             return ImprovementDiagnosis(
                 ImprovementClassification.CODE_REPAIR,
-                "Corregir la capacidad de voz sin regresiones.",
-                ("use_cases/voice_conversation.py", "use_cases/speech_engine.py", "tests/test_voice_conversation.py"),
+                "Evitar que un timeout de modelo bloquee indefinidamente el siguiente turno de voz.",
+                ("use_cases/voice_conversation.py", "tests/test_voice_conversation.py"),
                 ("tests/test_voice_conversation.py",),
-                ("latencia de voz", "fallos de conversación de voz"),
+                ("latencia de espera post-timeout del modelo",),
                 "Puede afectar la interacción de voz; no se tocarán proveedores, secretos ni dependencias.",
-                "El alcance se limita a los adaptadores y pruebas de voz.",
+                "Un worker de modelo expirado puede dejar la siguiente interacción esperando sin límite si ignora la cancelación.",
             )
         if any(term in text for term in ("control pc", "desktop")):
             return ImprovementDiagnosis(
