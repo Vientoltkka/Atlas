@@ -132,9 +132,15 @@ class SelfImprovementConversation:
             from core.voice_repair_builder import VoiceCodeRepairBuilder
             from core.routing_repair_builder import RoutingRepairBuilder
             from core.file_read_capability_builder import FileReadCapabilityImprovementBuilder
+            from core.desktop_capability_builder import DesktopCapabilityImprovementBuilder
 
             registry = SupervisedRepairBuilderRegistry(
-                (VoiceCodeRepairBuilder(project_root), RoutingRepairBuilder(project_root), FileReadCapabilityImprovementBuilder(project_root))
+                (
+                    VoiceCodeRepairBuilder(project_root),
+                    RoutingRepairBuilder(project_root),
+                    FileReadCapabilityImprovementBuilder(project_root),
+                    DesktopCapabilityImprovementBuilder(project_root),
+                )
             )
         self._builders = registry
         self._workflow: SupervisedRepairWorkflow | None = None
