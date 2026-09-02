@@ -812,7 +812,7 @@ def test_voice_statuses_are_distinguishable_through_bridge_signals(qapp) -> None
     assert panel._voice_status.text() == "Desconectado"
     panel.close()
 
-def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
+def test_chat_close_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> None:
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel
 
@@ -865,9 +865,8 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     hotkey_thread.join(timeout=1)
     _drain_events(qapp)
     assert orb.isVisible() is True
-    assert panel.isVisible() is True
+    assert panel.isVisible() is False
     assert orb.frameGeometry().topLeft() == position_before_hotkey
-    assert not orb.frameGeometry().intersects(panel.frameGeometry())
 
     panel.close()
     _drain_events(qapp)
@@ -880,9 +879,8 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_them(qapp) -> None:
     hotkey_thread.join(timeout=1)
     _drain_events(qapp)
     assert orb.isVisible() is True
-    assert panel.isVisible() is True
+    assert panel.isVisible() is False
     assert orb.frameGeometry().topLeft() == position_before_hotkey
-    assert not orb.frameGeometry().intersects(panel.frameGeometry())
 
     controller._stop_chat_hotkey()
     assert hotkeys[0].stopped is True

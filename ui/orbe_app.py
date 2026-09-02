@@ -75,6 +75,29 @@ _ANIMATION_PERIODS: dict[OrbVisualState, float | None] = {
 
 ANIMATION_FPS = 24
 
+_VISUAL_PROFILES: dict[OrbVisualState, dict[str, float]] = {
+    OrbVisualState.IDLE: {
+        "ring_activity": 0.16, "halo_intensity": 0.72, "core_intensity": 0.85,
+        "particle_intensity": 0.48, "segment_activity": 0.45,
+    },
+    OrbVisualState.PROCESSING: {
+        "ring_activity": 1.00, "halo_intensity": 1.12, "core_intensity": 1.18,
+        "particle_intensity": 0.82, "segment_activity": 1.00,
+    },
+    OrbVisualState.SPEAKING: {
+        "ring_activity": 0.30, "halo_intensity": 1.28, "core_intensity": 1.12,
+        "particle_intensity": 0.86, "segment_activity": 0.72,
+    },
+    OrbVisualState.AUTOMATION: {
+        "ring_activity": 1.34, "halo_intensity": 1.22, "core_intensity": 1.22,
+        "particle_intensity": 0.96, "segment_activity": 1.25,
+    },
+    OrbVisualState.AUTHORIZATION: {
+        "ring_activity": 0.25, "halo_intensity": 0.92, "core_intensity": 1.04,
+        "particle_intensity": 0.58, "segment_activity": 0.56,
+    },
+}
+
 
 def color_for_state(state: OrbVisualState) -> tuple[int, int, int, int]:
     """Deterministic RGBA for one visual state."""
@@ -84,6 +107,11 @@ def color_for_state(state: OrbVisualState) -> tuple[int, int, int, int]:
 def animation_period(state: OrbVisualState) -> float | None:
     """Animation period in seconds, or None when the state is static."""
     return _ANIMATION_PERIODS[state]
+
+
+def visual_profile(state: OrbVisualState) -> dict[str, float]:
+    """Return lightweight per-state render controls for the shared orb."""
+    return dict(_VISUAL_PROFILES.get(OrbVisualState(state), _VISUAL_PROFILES[OrbVisualState.IDLE]))
 
 
 def size_for_state(state: OrbVisualState) -> int:
@@ -553,21 +581,25 @@ def create_orb_window(settings=None):
         # -- painting ---------------------------------------------------
 
         def _build_atlas_emblem(self) -> QPainterPath:
-            """Create the cached, single-apex geometric Atlas A silhouette."""
+            """Create the Atlas chevron and its detached lower triangle."""
             size = self.width()
             path = QPainterPath()
-            # One shared apex and one crossbar keep this readable as a single A at small sizes.
-            path.moveTo(size * 0.500, size * 0.335)
-            path.lineTo(size * 0.318, size * 0.672)
-            path.lineTo(size * 0.402, size * 0.650)
-            path.lineTo(size * 0.500, size * 0.438)
+            # Two diagonal arms form an open chevron; no horizontal A crossbar is used.
+            path.moveTo(size * 0.500, size * 0.355)
+            path.lineTo(size * 0.335, size * 0.595)
+            path.lineTo(size * 0.398, size * 0.615)
+            path.lineTo(size * 0.500, size * 0.445)
             path.closeSubpath()
-            path.moveTo(size * 0.500, size * 0.335)
-            path.lineTo(size * 0.682, size * 0.672)
-            path.lineTo(size * 0.598, size * 0.650)
-            path.lineTo(size * 0.500, size * 0.438)
+            path.moveTo(size * 0.500, size * 0.355)
+            path.lineTo(size * 0.665, size * 0.595)
+            path.lineTo(size * 0.602, size * 0.615)
+            path.lineTo(size * 0.500, size * 0.445)
             path.closeSubpath()
-            path.addRect(size * 0.402, size * 0.548, size * 0.196, size * 0.036)
+            # The isolated lower triangle is the reference mark's second component.
+            path.moveTo(size * 0.500, size * 0.602)
+            path.lineTo(size * 0.448, size * 0.680)
+            path.lineTo(size * 0.552, size * 0.680)
+            path.closeSubpath()
             return path
 
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -590,10 +622,8 @@ def create_orb_window(settings=None):
             halo_rgb, ring_dim_rgb, ring_light_rgb, ring_bright_rgb, ring_peak_rgb = palette.get(
                 self._state, ((70, 205, 255), (42, 142, 255), (120, 225, 255), (53, 179, 255), (216, 252, 255))
             )
-            is_authorization = self._state is OrbVisualState.AUTHORIZATION
-            active_glow = 1.22 if self._state is OrbVisualState.SPEAKING else 1.0
-            active_glow = 1.12 if self._state is OrbVisualState.PROCESSING else active_glow
-            active_glow = 1.16 if self._state is OrbVisualState.AUTOMATION else active_glow
+            profile = visual_profile(self._state)
+            active_glow = profile["halo_intensity"]
             projection_rgb = ring_bright_rgb
 
             painter = QPainter(self)
@@ -642,14 +672,19 @@ def create_orb_window(settings=None):
                     painter.drawArc(center - half_width, base_y - half_height, half_width * 2, half_height * 2, (28 + index * 82) * 16, 46 * 16)
 
             orbit_speed = (
-                (1.0, 1.58, -0.82)
-                if self._state in {OrbVisualState.PROCESSING, OrbVisualState.AUTOMATION}
-                else (0.24, 0.16, -0.11)
+                (1.34, 2.10, -1.15)
+                if self._state is OrbVisualState.AUTOMATION
+                else (1.00, 1.58, -0.82)
+                if self._state is OrbVisualState.PROCESSING
+                else (0.30, 0.20, -0.14)
                 if self._state is OrbVisualState.SPEAKING
+                else (0.25, -0.15, 0.10)
+                if self._state is OrbVisualState.AUTHORIZATION
                 else (0.18, -0.12, 0.08)
                 if self._state is OrbVisualState.LISTENING
-                else (0.34, -0.21, 0.15)
+                else (0.16, -0.10, 0.07)
             )
+            orbit_speed = tuple(speed * profile["ring_activity"] for speed in orbit_speed)
             ring_specs = (
                 (frame["rotation_deg"] * orbit_speed[0], 0.46, 1.10, 18),
                 (frame["rotation_deg"] * orbit_speed[1] + 57.0, 0.62, 1.00, 126),
@@ -719,8 +754,8 @@ def create_orb_window(settings=None):
 
             energy_radius = max(10, int(core_radius * 0.64))
             energy_gradient = QRadialGradient(center - energy_radius * 0.18, center - energy_radius * 0.20, energy_radius)
-            energy_gradient.setColorAt(0.0, QColor(*ring_peak_rgb, int(alpha * 0.60)))
-            energy_gradient.setColorAt(0.22, QColor(*ring_light_rgb, int(alpha * 0.50)))
+            energy_gradient.setColorAt(0.0, QColor(*ring_peak_rgb, int(alpha * 0.60 * profile["core_intensity"])))
+            energy_gradient.setColorAt(0.22, QColor(*ring_light_rgb, int(alpha * 0.50 * profile["core_intensity"])))
             energy_gradient.setColorAt(0.58, QColor(*ring_dim_rgb, int(alpha * 0.28)))
             energy_gradient.setColorAt(1.0, QColor(*ring_dim_rgb, 0))
             painter.setBrush(energy_gradient)
@@ -742,7 +777,7 @@ def create_orb_window(settings=None):
                 (0.31, 0.16, 2, 0.48), (-0.17, 0.30, 1, 0.66),
                 (0.04, 0.11, 1, 0.78),
             ):
-                painter.setBrush(QColor(170, 245, 255, int(alpha * opacity)))
+                painter.setBrush(QColor(*ring_peak_rgb, int(alpha * opacity * profile["particle_intensity"])))
                 painter.drawEllipse(
                     int(center + energy_radius * x_factor) - radius,
                     int(center + energy_radius * y_factor) - radius,
@@ -757,7 +792,7 @@ def create_orb_window(settings=None):
                 painter.translate(center, center)
                 painter.rotate(angle)
                 painter.scale(1.0, squash)
-                painter.setPen(QPen(QColor(*ring_bright_rgb, int(alpha * 0.86)), 5.5))
+                painter.setPen(QPen(QColor(*ring_bright_rgb, int(alpha * 0.86)), 5.5 * profile["segment_activity"]))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 218) * 16, 48 * 16)
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 278) * 16, 30 * 16)
                 painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * 0.96)), 2.1))
@@ -799,7 +834,7 @@ def create_orb_window(settings=None):
                 ):
                     shimmer = 0.36 + 0.64 * ((math.sin(phase + offset) + 1.0) * 0.5)
                     painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QColor(185, 248, 255, int(alpha * 0.54 * shimmer)))
+                    painter.setBrush(QColor(*ring_peak_rgb, int(alpha * 0.54 * shimmer * profile["particle_intensity"])))
                     painter.drawEllipse(int(size * x) - radius, int(size * y) - radius, radius * 2, radius * 2)
 
             painter.end()

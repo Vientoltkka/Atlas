@@ -11,19 +11,19 @@ from ui.windows_hotkey import WindowsGlobalHotkey
 from use_cases.ui_state_mapper import OrbVisualState
 
 
-class _ChatHotkeyBridge(QObject):
+class _OrbHotkeyBridge(QObject):
     """Marshal native hotkey callbacks back onto the Qt UI thread."""
 
     activated = Signal()
 
-    def __init__(self, show_chat) -> None:
+    def __init__(self, show_orb) -> None:
         super().__init__()
-        self._show_chat = show_chat
-        self.activated.connect(self._show_chat_on_ui_thread)
+        self._show_orb = show_orb
+        self.activated.connect(self._show_orb_on_ui_thread)
 
     @Slot()
-    def _show_chat_on_ui_thread(self) -> None:
-        self._show_chat()
+    def _show_orb_on_ui_thread(self) -> None:
+        self._show_orb()
 
 
 class _VoiceSessionBridge(QObject):
@@ -58,7 +58,7 @@ class OrbeController:
         self._chat_threads: set[threading.Thread] = set()
         self._hotkey_factory = hotkey_factory
         self._chat_hotkey = None
-        self._chat_hotkey_bridge = _ChatHotkeyBridge(self.show_chat)
+        self._chat_hotkey_bridge = _OrbHotkeyBridge(self.show_orb)
         self._voice_session_bridge = _VoiceSessionBridge()
         self._voice_session_bridge.state_received.connect(self._on_voice_state)
         self._voice_session_bridge.message_received.connect(self._on_voice_message)
@@ -109,6 +109,12 @@ class OrbeController:
     def show_chat(self) -> None:
         """Show and focus the existing chat windows without starting voice."""
         self._show_chat_without_overlap()
+
+    def show_orb(self) -> None:
+        """Restore only the orb; the global hotkey must never reveal chat."""
+        self._orb.show()
+        self._orb.raise_()
+        self._orb.activateWindow()
 
     def _show_chat_without_overlap(self) -> None:
         """Show the existing chat once and resolve only an initial overlap."""
@@ -312,12 +318,12 @@ class OrbeController:
     def _start_chat_hotkey(self) -> None:
         if self._chat_hotkey is None:
             factory = self._hotkey_factory or WindowsGlobalHotkey
-            self._chat_hotkey = factory(self._request_chat_visible, logger=self._logger)
+            self._chat_hotkey = factory(self._request_orb_visible, logger=self._logger)
         self._chat_hotkey.start()
 
     def _stop_chat_hotkey(self) -> None:
         if self._chat_hotkey is not None:
             self._chat_hotkey.stop()
 
-    def _request_chat_visible(self) -> None:
+    def _request_orb_visible(self) -> None:
         self._chat_hotkey_bridge.activated.emit()

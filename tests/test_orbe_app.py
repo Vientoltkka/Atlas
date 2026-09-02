@@ -65,15 +65,41 @@ def test_all_states_are_renderable_without_errors(orb, qtbot=None) -> None:
         assert orb.state is state
 
 
-def test_atlas_emblem_has_one_shared_apex_and_a_clear_central_cut(orb) -> None:
+def test_atlas_emblem_is_a_centered_open_chevron_with_detached_lower_triangle(orb) -> None:
     from PySide6.QtCore import QPointF
 
     emblem = orb._emblem_path
     size = orb.width()
 
-    assert emblem.contains(QPointF(size * 0.5, size * 0.35))
-    assert not emblem.contains(QPointF(size * 0.5, size * 0.49))
-    assert emblem.contains(QPointF(size * 0.5, size * 0.565))
+    components = emblem.toSubpathPolygons()
+    assert len(components) == 3  # left arm, right arm, independent lower triangle
+    assert emblem.contains(QPointF(size * 0.39, size * 0.58))
+    assert emblem.contains(QPointF(size * 0.61, size * 0.58))
+    assert emblem.contains(QPointF(size * 0.50, size * 0.65))
+    # The open interior and the separation rule out a conventional A crossbar.
+    assert not emblem.contains(QPointF(size * 0.50, size * 0.53))
+    assert not emblem.contains(QPointF(size * 0.50, size * 0.60))
+
+
+def test_five_primary_visual_profiles_have_distinct_activity_controls() -> None:
+    states = (
+        OrbVisualState.IDLE,
+        OrbVisualState.PROCESSING,
+        OrbVisualState.SPEAKING,
+        OrbVisualState.AUTOMATION,
+        OrbVisualState.AUTHORIZATION,
+    )
+    profiles = {state: orbe_app.visual_profile(state) for state in states}
+
+    assert orbe_app.color_for_state(OrbVisualState.IDLE)[:3] == (56, 185, 255)
+    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (168, 102, 255)
+    assert orbe_app.color_for_state(OrbVisualState.SPEAKING)[:3] == (72, 238, 148)
+    assert orbe_app.color_for_state(OrbVisualState.AUTOMATION)[:3] == (255, 72, 72)
+    assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 174, 52)
+    assert profiles[OrbVisualState.PROCESSING]["ring_activity"] > profiles[OrbVisualState.IDLE]["ring_activity"]
+    assert profiles[OrbVisualState.AUTOMATION]["ring_activity"] > profiles[OrbVisualState.PROCESSING]["ring_activity"]
+    assert profiles[OrbVisualState.SPEAKING]["halo_intensity"] > profiles[OrbVisualState.PROCESSING]["halo_intensity"]
+    assert profiles[OrbVisualState.AUTHORIZATION]["ring_activity"] < profiles[OrbVisualState.AUTOMATION]["ring_activity"]
 
 
 def test_window_is_frameless_translucent_and_on_top(qapp, orb) -> None:
