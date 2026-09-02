@@ -650,6 +650,14 @@ class AtlasOrchestrator:
                     pending_target_handle=target_handle,
                 )
                 return outcome.text
+        if self._desktop_interaction is not None:
+            desktop_response = self._desktop_interaction.execute(
+                request.content,
+                confirm=confirm,
+            )
+            if desktop_response is not None:
+                return desktop_response
+
         specialist_decision = self.classify_request(request)
         if specialist_decision.route is RequestRoute.AGENT_DELEGATION:
             agent_name = specialist_decision.target_agent_name
@@ -675,13 +683,6 @@ class AtlasOrchestrator:
             return specialist_response.text
 
 
-        if self._desktop_interaction is not None:
-            desktop_response = self._desktop_interaction.execute(
-                request.content,
-                confirm=confirm,
-            )
-            if desktop_response is not None:
-                return desktop_response
         if self._execution_conversation is not None:
             outcome = self._execution_conversation.handle(request.content)
 
