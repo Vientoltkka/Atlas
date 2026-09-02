@@ -260,6 +260,7 @@ class DesktopCapabilityImprovementBuilder:
         script = (
             "import os\n"
             "import tempfile\n"
+            "from pathlib import Path\n"
             "from use_cases.desktop_interaction import DesktopInteractionUseCase\n"
             "from tools.tool_context import ToolContext\n"
             "\n"
@@ -278,7 +279,7 @@ class DesktopCapabilityImprovementBuilder:
             "os.close(descriptor)\n"
             "try:\n"
             "    executor = _Executor()\n"
-            f"    use_case = DesktopInteractionUseCase(executor, project_root={str(self._root)!r})\n"
+            f"    use_case = DesktopInteractionUseCase(executor, project_root=Path({str(self._root)!r}))\n"
             "    use_case.execute('abre ' + path + ' con el bloc de notas')\n"
             "    ok = bool(executor.calls)\n"
             "    ok = ok and executor.calls[0][0] == 'desktop.open_file'\n"
