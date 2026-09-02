@@ -329,6 +329,7 @@ class Bootstrap:
             ("project.tree", "project_tree"),
             ("web.search", "web_search"),
             ("desktop.application.open", "desktop.open_application"),
+            ("desktop.application.close", "desktop.close_application"),
             ("desktop.filesystem.create_folder", "desktop.create_folder"),
             ("desktop.filesystem.copy", "desktop.copy_path"),
             ("desktop.filesystem.move", "desktop.move_path"),
@@ -474,6 +475,19 @@ class Bootstrap:
         )))
         schema_registry.register(ArgumentSchema("desktop.filesystem.delete", (ArgumentField("path", str, required=True, description="Absolute path to delete."),)))
 
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.application.close",
+                (
+                    ArgumentField(
+                        "pid",
+                        int,
+                        required=True,
+                        description="Target process id.",
+                    ),
+                ),
+            )
+        )
         schema_registry.register(
             ArgumentSchema(
                 "desktop.text.type",

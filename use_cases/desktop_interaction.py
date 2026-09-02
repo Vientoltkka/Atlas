@@ -301,6 +301,40 @@ class DesktopInteractionUseCase:
             return "desktop.rename_path", {"source_path": source, "new_name": new_name}, f"Voy a renombrar:\n{source}\n→\n{new_name}\n¿Confirmas?"
         return None
 
+    def close_application_tool_request(
+        self,
+        text: str,
+    ) -> tuple[str, dict[str, object], str] | None:
+        """Resolve one explicit application-close request for supervised execution."""
+        stripped = text.strip().rstrip("¿?").strip()
+        normalized = self._normalize(stripped)
+
+        if normalized.startswith("cierra "):
+            query = stripped[len("cierra ") :].strip()
+        elif normalized.startswith("close "):
+            query = stripped[len("close ") :].strip()
+        else:
+            return None
+
+        query = query.rstrip(" .,;:!?").strip()
+
+        if not query or self._normalize(query) in {"todo", "everything", "all"}:
+            return None
+
+        processes = self._list_processes(query)
+
+        if len(processes) != 1:
+            return None
+
+        process = processes[0]
+        name = str(process["name"])
+        pid = int(process["pid"])
+        return (
+            "desktop.close_application",
+            {"pid": pid},
+            f"Voy a cerrar {name} - PID {pid}. ¿Confirmas?",
+        )
+
     def _execute_filesystem_command(
         self,
         text: str,

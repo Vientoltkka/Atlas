@@ -650,6 +650,18 @@ class AtlasOrchestrator:
                     pending_target_handle=target_handle,
                 )
                 return outcome.text
+            close_request = self._desktop_interaction.close_application_tool_request(
+                request.content,
+            )
+            if close_request is not None:
+                tool_name, arguments, confirmation_text = close_request
+                outcome = self._execution_conversation.handle_registered_tool(
+                    tool_name,
+                    arguments,
+                    original_text=request.content,
+                    confirmation_text=confirmation_text,
+                )
+                return outcome.text
         if self._desktop_interaction is not None:
             desktop_response = self._desktop_interaction.execute(
                 request.content,
