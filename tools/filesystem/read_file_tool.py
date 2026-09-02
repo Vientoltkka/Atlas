@@ -45,4 +45,14 @@ class ReadFileTool(BaseTool):
         if not path:
             raise ValueError("Missing parameter 'path'.")
 
-        return FileService.read(path)
+        content = FileService.read(path)
+
+        limit = context.parameters.get("limit")
+
+        if limit is None:
+            return content
+
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("Parameter 'limit' must be a positive integer.")
+
+        return "\n".join(content.splitlines()[:limit])

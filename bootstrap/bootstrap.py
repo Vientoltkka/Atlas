@@ -215,6 +215,7 @@ class Bootstrap:
             arguments_schema=ToolArgumentsSchema(
                 parameters=(
                     ToolParameterSchema("path", str, required=True),
+                    ToolParameterSchema("limit", int, minimum=1),
                 ),
             ),
         )
