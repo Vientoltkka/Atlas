@@ -172,15 +172,15 @@ class FileReadCapabilityImprovementBuilder:
         indent, call = match.group("indent"), match.group("call")
         block = (
             f"{indent}content = {call}\n"
-            f"{indent}\n"
+            "\n"
             f"{indent}limit = context.parameters.get(\"limit\")\n"
-            f"{indent}\n"
+            "\n"
             f"{indent}if limit is None:\n"
             f"{indent}    return content\n"
-            f"{indent}\n"
+            "\n"
             f"{indent}if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:\n"
             f"{indent}    raise ValueError(\"Parameter 'limit' must be a positive integer.\")\n"
-            f"{indent}\n"
+            "\n"
             f"{indent}return \"\\n\".join(content.splitlines()[:limit])"
         )
         start, end = match.span()
