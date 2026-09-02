@@ -107,6 +107,7 @@ from tools.filesystem.write_file_tool import WriteFileTool
 from tools.documents.create_training_pdf_tool import CreateTrainingPdfTool
 from tools.filesystem.list_directory_tool import ListDirectoryTool
 from tools.project.tree_tool import TreeTool
+from tools.web_search import WebSearchTool
 from tools.calendar.calendar_list_events_tool import (
     CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
     CalendarListEventsTool,
@@ -219,6 +220,15 @@ class Bootstrap:
         )
         tool_registry.register(TemperatureConversionTool())
         tool_registry.register(
+            WebSearchTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("query", str, required=True),
+                    ToolParameterSchema("max_results", int, default=5),
+                ),
+            ),
+        )
+        tool_registry.register(
             WriteFileTool(),
             arguments_schema=ToolArgumentsSchema(
                 parameters=(
@@ -316,6 +326,7 @@ class Bootstrap:
             ("directory.list", "list_directory"),
             ("calendar.events.list", "calendar_list_events"),
             ("project.tree", "project_tree"),
+            ("web.search", "web_search"),
             ("desktop.application.open", "desktop.open_application"),
             ("desktop.filesystem.create_folder", "desktop.create_folder"),
             ("desktop.filesystem.copy", "desktop.copy_path"),
@@ -835,6 +846,7 @@ class Bootstrap:
         # -----------------------
 
         tool_registry = Bootstrap.build_tool_registry()
+        web_search_tool = tool_registry.get("web_search")
         tool_executor = ToolExecutor(tool_registry)
         tool_selector = Bootstrap.build_tool_selector(tool_registry)
         schema_registry = Bootstrap.build_argument_schema_registry()
@@ -1393,6 +1405,7 @@ class Bootstrap:
             execution_authorization_gate=execution_authorization_gate,
             execution_dispatcher=execution_dispatcher,
             tool_registry=tool_registry,
+            web_search_tool=web_search_tool,
             skill_system=(
                 agent_system.skill_system
                 if agent_system is not None

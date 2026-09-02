@@ -109,6 +109,7 @@ from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 from tools.registry import ToolRegistry
+from tools.web_search import WebSearchError, WebSearchTimeoutError, WebSearchTool
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +158,7 @@ class AtlasOrchestrator:
         execution_authorization_gate: ExecutionAuthorizationGate | None = None,
         execution_dispatcher: ExecutionDispatcher | None = None,
         tool_registry: ToolRegistry | None = None,
+        web_search_tool: WebSearchTool | None = None,
         skill_system: SkillSystem | None = None,
         capability_gap_detector: SupervisedCapabilityGapDetector | None = None,
         structured_execution_enabled: bool = False,
@@ -169,6 +171,7 @@ class AtlasOrchestrator:
     ) -> None:
 
         self._planner = planner
+        self._web_search_tool = web_search_tool
         self._router = router
         self._model_manager = model_manager
         self._model_selection_policy = (
@@ -544,6 +547,10 @@ class AtlasOrchestrator:
         if tool_catalog is not None:
             return tool_catalog
 
+        web_research = self._web_research_response(prompt)
+        if web_research is not None:
+            return web_research
+
         capability_status = self._capability_status_response(prompt)
         if capability_status is not None:
             return capability_status
@@ -883,6 +890,43 @@ class AtlasOrchestrator:
         celsius = float(match.group(1).replace(",", "."))
         fahrenheit = self._tool_registry.get("temperature_conversion").execute(ToolContext({"celsius": celsius}))
         return f"{celsius:g} grados Celsius equivalen a {fahrenheit:g} grados Fahrenheit."
+
+    def _web_research_response(self, prompt: str) -> str | None:
+        """Run one bounded web search only for explicit web or research requests."""
+        request = _web_research_request(prompt)
+        if request is None:
+            return None
+        query, limit = request
+        tool = self._web_search_tool
+        if tool is None and self._tool_registry is not None and self._tool_registry.exists("web_search"):
+            candidate = self._tool_registry.get("web_search")
+            tool = candidate if isinstance(candidate, WebSearchTool) else None
+        if tool is None:
+            return "La búsqueda web no está disponible en esta instalación."
+        try:
+            results = tool.search(query, max_results=limit)
+        except WebSearchTimeoutError:
+            return "La búsqueda web agotó el tiempo de espera. Inténtalo de nuevo más tarde."
+        except WebSearchError:
+            return "No se pudo completar la búsqueda web. Inténtalo de nuevo más tarde."
+        except ValueError:
+            return "Necesito un tema concreto para buscar en internet."
+        if not results:
+            return f"No encontré resultados web para: {query}."
+        evidence = [
+            f"- {result.title}: {result.snippet or 'Sin resumen disponible.'}"
+            for result in results
+        ]
+        sources = [
+            f"{index}. {result.title} ({result.source})\n   {result.url}"
+            for index, result in enumerate(results, start=1)
+        ]
+        return (
+            f"Resumen de la búsqueda sobre \"{query}\":\n"
+            + "\n".join(evidence)
+            + "\n\nFuentes:\n"
+            + "\n".join(sources)
+        )
     def execute_capability(
         self,
         request: CapabilityExecutionRequest,
@@ -2025,6 +2069,35 @@ class AtlasOrchestrator:
             return tens[ten]
 
         return f"{tens[ten]} y {units[unit]}"
+
+
+def _web_research_request(prompt: str) -> tuple[str, int] | None:
+    """Recognize explicit web/research prompts without capturing local searches."""
+    normalized = unicodedata.normalize("NFD", prompt)
+    normalized = "".join(
+        character for character in normalized if unicodedata.category(character) != "Mn"
+    ).casefold().strip()
+    if normalized.startswith("investiga ") or normalized.startswith("research "):
+        query = re.sub(r"^(?:investiga|research)\s+(?:sobre\s+)?", "", prompt, flags=re.IGNORECASE).strip()
+        return (query, 5) if query else None
+    if not normalized.startswith("busca "):
+        return None
+    web_markers = ("en internet", "en la web", "online", "informacion actual", "noticias", "actual")
+    if not any(marker in normalized for marker in web_markers):
+        return None
+    query = re.sub(
+        r"^\s*busca\s+(?:(?:en\s+)?internet|en\s+la\s+web|online)\s+",
+        "",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    query = re.sub(
+        r"^\s*(?:informaci[oó]n\s+actual|noticias)\s+(?:sobre\s+)?",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    ).strip()
+    return (query, 3) if query else None
 
 
 class _PlanningProgressPresenter:
