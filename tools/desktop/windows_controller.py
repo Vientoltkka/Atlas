@@ -37,6 +37,21 @@ class DesktopController(Protocol):
     def open_file(self, path: Path, application: str | None = None) -> None:
         """Open an existing file."""
 
+
+    def create_folder(self, path: Path) -> bool:
+        """Create a folder and return whether it was newly created."""
+
+    def copy_path(self, source: Path, destination: Path) -> None:
+        """Copy a file or folder without replacing an existing destination."""
+
+    def move_path(self, source: Path, destination: Path) -> None:
+        """Move a file or folder without replacing an existing destination."""
+
+    def rename_path(self, source: Path, destination: Path) -> None:
+        """Rename a file or folder without replacing an existing destination."""
+
+    def delete_path(self, path: Path) -> None:
+        """Delete a file or folder."""
     def window_exists(self, title: str) -> bool:
         """Return whether a window matching title exists."""
 
@@ -436,6 +451,37 @@ class WindowsDesktopController:
 
         os.startfile(str(path))
 
+
+    def create_folder(self, path: Path) -> bool:
+        """Create a folder idempotently."""
+        if path.exists():
+            if not path.is_dir():
+                raise FileExistsError(str(path))
+            return False
+        path.mkdir()
+        return True
+
+    def copy_path(self, source: Path, destination: Path) -> None:
+        """Copy a file or folder to a new destination."""
+        if source.is_dir():
+            shutil.copytree(source, destination)
+            return
+        shutil.copy2(source, destination)
+
+    def move_path(self, source: Path, destination: Path) -> None:
+        """Move a file or folder to a new destination."""
+        shutil.move(str(source), str(destination))
+
+    def rename_path(self, source: Path, destination: Path) -> None:
+        """Rename a file or folder to a new destination."""
+        source.rename(destination)
+
+    def delete_path(self, path: Path) -> None:
+        """Delete a file or folder without following directory symlinks."""
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+            return
+        path.unlink()
     def window_exists(self, title: str) -> bool:
         """Return whether a window matching title exists."""
         return bool(self.list_windows(title))

@@ -152,8 +152,13 @@ from tools.desktop.desktop_tools import (
     ScrollVerticalTool,
     TerminateProcessTool,
     TypeTextTool,
-)
+    CreateFolderTool,
+    CopyPathTool,
+    MovePathTool,
+    RenamePathTool,
+    DeletePathTool,
 
+)
 from use_cases.read_file import ReadFileUseCase
 from use_cases.write_file import WriteFileUseCase
 from use_cases.create_training_pdf import CreateTrainingPdfUseCase
@@ -250,6 +255,11 @@ class Bootstrap:
         tool_registry.register(TerminateProcessTool())
         tool_registry.register(OpenFolderTool())
         open_file_tool = OpenFileTool()
+        tool_registry.register(CreateFolderTool())
+        tool_registry.register(CopyPathTool())
+        tool_registry.register(MovePathTool())
+        tool_registry.register(RenamePathTool())
+        tool_registry.register(DeletePathTool())
         tool_registry.register(open_file_tool)
         tool_registry.register(
             CreateTrainingPdfTool(CreateTrainingPdfUseCase(PdfService(), open_file_tool)),

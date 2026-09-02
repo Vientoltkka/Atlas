@@ -98,6 +98,14 @@ class DesktopInteractionUseCase:
             if wait_response is not None:
                 return wait_response
 
+            filesystem_response = self._execute_filesystem_command(
+                text,
+                confirm,
+            )
+
+            if filesystem_response is not None:
+                return filesystem_response
+
             clipboard_response = self._execute_clipboard_command(
                 text,
                 normalized,
@@ -261,6 +269,65 @@ class DesktopInteractionUseCase:
             return f"Error: {exc}"
 
         return None
+
+    def _execute_filesystem_command(
+        self,
+        text: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Route one explicit, supervised filesystem operation."""
+        create = re.match(r"^\s*crea\s+la\s+carpeta\s+(.+?)\s*$", text, re.I)
+        if create:
+            path = create.group(1)
+            if not self._confirmed_filesystem(confirm, "crear la carpeta", path):
+                return "Acción cancelada."
+            result = self._execute("desktop.create_folder", ToolContext(parameters={"path": path}))
+            return f"✓ Carpeta {'creada' if result['created'] else 'ya existente'}: {result['path']}"
+
+        delete = re.match(r"^\s*elimina\s+(?:el\s+archivo\s+|la\s+carpeta\s+)?(.+?)\s*$", text, re.I)
+        if delete:
+            path = delete.group(1)
+            if not self._confirmed_filesystem(confirm, "eliminar", path):
+                return "Acción cancelada."
+            result = self._execute("desktop.delete_path", ToolContext(parameters={"path": path}))
+            return f"✓ {result['kind'].capitalize()} eliminado: {result['path']}"
+
+        for verb, tool_name, label in (
+            ("copia", "desktop.copy_path", "copiado"),
+            ("mueve", "desktop.move_path", "movido"),
+        ):
+            match = re.match(rf"^\s*{verb}\s+(.+?)\s+a\s+(.+?)\s*$", text, re.I)
+            if match:
+                source, destination = match.groups()
+                if not self._looks_like_path(source) or not self._looks_like_path(destination):
+                    return None
+                if len(re.findall(r"\s+a\s+", text, re.I)) != 1:
+                    raise ValueError("Orden ambigua: usa rutas sin separadores ambiguos.")
+                if not self._confirmed_filesystem(confirm, verb, f"{source} -> {destination}"):
+                    return "Acción cancelada."
+                result = self._execute(tool_name, ToolContext(parameters={"source_path": source, "destination_path": destination}))
+                return f"✓ {result['kind'].capitalize()} {label}: {result['source']} -> {result['destination']}"
+
+        rename = re.match(r"^\s*renombra\s+(.+?)\s+a\s+([^\\/]+?)\s*$", text, re.I)
+        if rename:
+            source, new_name = rename.groups()
+            if len(re.findall(r"\s+a\s+", text, re.I)) != 1:
+                raise ValueError("Orden ambigua: usa rutas sin separadores ambiguos.")
+            if not self._confirmed_filesystem(confirm, "renombrar", f"{source} -> {new_name}"):
+                return "Acción cancelada."
+            result = self._execute("desktop.rename_path", ToolContext(parameters={"source_path": source, "new_name": new_name}))
+            return f"✓ {result['kind'].capitalize()} renombrado: {result['source']} -> {result['destination']}"
+        return None
+
+    def _confirmed_filesystem(
+        self,
+        confirm: Callable[[str], str] | None,
+        operation: str,
+        target: str,
+    ) -> bool:
+        if confirm is None:
+            return False
+        return self._normalize(confirm(f"¿Confirmas {operation}?\n{target}\n[s/N]: ")) in {"s", "si", "y", "yes"}
 
     def _is_prepare_atlas_workspace_command(
         self,

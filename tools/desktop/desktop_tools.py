@@ -418,6 +418,130 @@ class OpenFileTool(DesktopTool):
         return f"Archivo abierto: {path}"
 
 
+
+class FileSystemTool(DesktopTool):
+    """Base class for supervised explicit filesystem changes."""
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        return ("filesystem.write",)
+
+    @staticmethod
+    def _path(context: ToolContext, name: str) -> Path:
+        raw = context.parameters.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"Missing parameter '{name}'.")
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ValueError("La ruta debe ser absoluta.")
+        return path.resolve(strict=False)
+
+    @classmethod
+    def _source(cls, context: ToolContext) -> Path:
+        source = cls._path(context, "source_path")
+        if not source.exists():
+            raise FileNotFoundError(str(source))
+        return source
+
+    @classmethod
+    def _destination(cls, context: ToolContext) -> Path:
+        destination = cls._path(context, "destination_path")
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(str(destination))
+        if not destination.parent.is_dir():
+            raise FileNotFoundError(str(destination.parent))
+        return destination
+
+    @staticmethod
+    def _kind(path: Path) -> str:
+        return "folder" if path.is_dir() and not path.is_symlink() else "file"
+
+
+class CreateFolderTool(FileSystemTool):
+    @property
+    def name(self) -> str:
+        return "desktop.create_folder"
+    @property
+    def description(self) -> str:
+        return "Create an explicit folder idempotently."
+    def execute(self, context: ToolContext) -> dict[str, object]:
+        path = self._path(context, "path")
+        if not path.parent.is_dir():
+            raise FileNotFoundError(str(path.parent))
+        return {"operation": "create_folder", "path": str(path), "created": self._controller.create_folder(path)}
+
+
+class CopyPathTool(FileSystemTool):
+    @property
+    def name(self) -> str:
+        return "desktop.copy_path"
+    @property
+    def description(self) -> str:
+        return "Copy an explicit file or folder without overwriting."
+    def execute(self, context: ToolContext) -> dict[str, object]:
+        source, destination = self._source(context), self._destination(context)
+        if source == destination:
+            raise ValueError("El origen y el destino no pueden coincidir.")
+        kind = self._kind(source)
+        self._controller.copy_path(source, destination)
+        return {"operation": "copy", "source": str(source), "destination": str(destination), "kind": kind}
+
+
+class MovePathTool(CopyPathTool):
+    @property
+    def name(self) -> str:
+        return "desktop.move_path"
+    @property
+    def description(self) -> str:
+        return "Move an explicit file or folder without overwriting."
+    def execute(self, context: ToolContext) -> dict[str, object]:
+        source, destination = self._source(context), self._destination(context)
+        if source == destination:
+            raise ValueError("El origen y el destino no pueden coincidir.")
+        kind = self._kind(source)
+        self._controller.move_path(source, destination)
+        return {"operation": "move", "source": str(source), "destination": str(destination), "kind": kind}
+
+
+class RenamePathTool(FileSystemTool):
+    @property
+    def name(self) -> str:
+        return "desktop.rename_path"
+    @property
+    def description(self) -> str:
+        return "Rename an explicit file or folder without overwriting."
+    def execute(self, context: ToolContext) -> dict[str, object]:
+        source = self._source(context)
+        new_name = context.parameters.get("new_name")
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise ValueError("Missing parameter 'new_name'.")
+        if Path(new_name).name != new_name or new_name in {".", ".."}:
+            raise ValueError("El nuevo nombre no puede incluir una ruta.")
+        destination = (source.parent / new_name).resolve(strict=False)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(str(destination))
+        kind = self._kind(source)
+        self._controller.rename_path(source, destination)
+        return {"operation": "rename", "source": str(source), "destination": str(destination), "kind": kind}
+
+
+class DeletePathTool(FileSystemTool):
+    @property
+    def name(self) -> str:
+        return "desktop.delete_path"
+    @property
+    def description(self) -> str:
+        return "Delete an explicit file or folder."
+    def execute(self, context: ToolContext) -> dict[str, object]:
+        path = self._path(context, "path")
+        if not path.exists() and not path.is_symlink():
+            raise FileNotFoundError(str(path))
+        if path == Path(path.anchor):
+            raise ValueError("No se puede eliminar una raíz de unidad.")
+        kind = self._kind(path)
+        self._controller.delete_path(path)
+        return {"operation": "delete", "path": str(path), "kind": kind}
+
 class TypeTextTool(DesktopTool):
     """Type literal text into the current foreground window."""
 
