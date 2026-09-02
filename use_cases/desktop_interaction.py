@@ -29,6 +29,7 @@ class DesktopInteractionUseCase:
 
     _DEFAULT_WINDOW_TITLE = "Visual Studio Code"
     _CONFIRMATION_PREFIX = "\u2713"
+    _WAKE_WORD_PREFIX_PATTERN = re.compile(r"^atlas\b[ ,.;:!?-]*", re.IGNORECASE)
 
     def __init__(
         self,
@@ -76,6 +77,7 @@ class DesktopInteractionUseCase:
     ) -> str | None:
         """Execute a supported desktop command."""
         text = prompt.strip()
+        text = self._strip_wake_word_prefix(text)
         normalized = self._normalize(text)
 
         try:
@@ -1708,6 +1710,14 @@ class DesktopInteractionUseCase:
             raise ValueError("Faltan teclas para el atajo.")
 
         return keys
+
+    def _strip_wake_word_prefix(
+        self,
+        text: str,
+    ) -> str:
+        """Drop one leading invocation prefix ("Atlas, abre ...") from the command."""
+        stripped = self._WAKE_WORD_PREFIX_PATTERN.sub("", text, count=1).strip()
+        return stripped if stripped else text
 
     def _normalize(
         self,

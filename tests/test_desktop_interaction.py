@@ -242,6 +242,16 @@ def test_desktop_interaction_rejects_arbitrary_command_execution() -> None:
     assert executor.calls == []
 
 
+def test_desktop_interaction_rejects_arbitrary_command_with_atlas_prefix() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("Atlas, ejecuta dir")
+
+    assert result == "Error: No se aceptan comandos arbitrarios."
+    assert executor.calls == []
+
+
 def test_desktop_interaction_checks_process_running() -> None:
     executor = FakeToolExecutor()
     executor.processes = [
@@ -532,6 +542,49 @@ def test_desktop_interaction_opens_folder_with_natural_prefix(
 
     assert result == f"\u2713 Abriendo {folder}."
     assert executor.calls[0][0] == "desktop.open_folder"
+
+
+def test_desktop_interaction_opens_folder_with_atlas_invocation_prefix(
+    tmp_path: Path,
+) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+    folder = tmp_path / "Atlas"
+    folder.mkdir()
+
+    result = use_case.execute(f"Atlas, abre {folder}")
+
+    assert result == f"\u2713 Abriendo {folder}."
+    assert executor.calls[0][0] == "desktop.open_folder"
+    assert executor.calls[0][1].parameters == {"path": str(folder)}
+
+
+def test_desktop_interaction_opens_file_with_atlas_invocation_prefix(
+    tmp_path: Path,
+) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+    file = tmp_path / "core" / "router.py"
+    file.parent.mkdir()
+    file.write_text("print('demo')", encoding="utf-8")
+
+    result = use_case.execute(f"Atlas abre {file}")
+
+    assert result == f"\u2713 Abriendo {file}."
+    assert executor.calls[0][0] == "desktop.open_file"
+    assert executor.calls[0][1].parameters == {"path": str(file)}
+
+
+def test_desktop_interaction_reports_missing_path_with_atlas_invocation_prefix(
+    tmp_path: Path,
+) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+
+    result = use_case.execute("Atlas, abre missing.py")
+
+    assert result == "La ruta no existe."
+    assert executor.calls == []
 
 
 def test_desktop_interaction_preserves_folder_path_with_spaces(tmp_path: Path) -> None:
@@ -1459,4 +1512,26 @@ def test_orchestrator_prioritizes_registered_desktop_folder() -> None:
     )
 
     assert orchestrator.process_prompt(r"Abre la carpeta C:\AI\Atlas", confirm=lambda _: "") == r"✓ Abriendo C:\AI\Atlas."
+    assert executor.calls[0][0] == "desktop.open_folder"
+
+
+def test_orchestrator_opens_registered_desktop_folder_with_atlas_prefix() -> None:
+    executor = FakeToolExecutor()
+    desktop = DesktopInteractionUseCase(executor)
+
+    class CapabilityGap:
+        pending_confirmation_id = None
+
+        def handle(self, _prompt: str):
+            raise AssertionError("desktop.open_folder must not reach capability gap")
+
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(create_plan=lambda prompt: SimpleNamespace(task="chat", objective=prompt)),
+        router=Router(), model_manager=SimpleNamespace(), memory=ConversationMemory(),
+        registry=SimpleNamespace(get=lambda _name: None),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop, execution_conversation=CapabilityGap(),
+    )
+
+    assert orchestrator.process_prompt(r"Atlas, abre C:\AI\Atlas", confirm=lambda _: "") == r"✓ Abriendo C:\AI\Atlas."
     assert executor.calls[0][0] == "desktop.open_folder"
