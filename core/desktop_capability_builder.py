@@ -45,6 +45,15 @@ _UNSAFE_TERMS = (
 )
 _PROPOSAL_ID = "improvement.desktop.open-file-with-application"
 _METRIC = "aperturas_de_archivo_con_aplicacion_correctas"
+_OPEN_APPS_PROPOSAL_ID = "improvement.desktop.open-applications-by-name"
+_OPEN_APPS_METRIC = "aperturas_de_aplicaciones_conocidas_por_nombre"
+_OPEN_APPS_SCOPE = (_USE_CASE_SOURCE, _TEST_SOURCE)
+_OPEN_APPS_TERMS = ("aplicaciones conocidas", "aplicacion conocida", "abrir aplicaciones", "abre aplicaciones")
+_OPEN_APPS_ALIAS_ENTRY = '"la calculadora"'
+_OPEN_APPS_TEST_MARKER = "abre la calculadora"
+_OPEN_APPLICATION_PRIMITIVE = '"desktop.open_application"'
+_CONTROLLER_CALC_ENTRY = '"calculadora": ("calc",)'
+_CONTROLLER_VSCODE_ENTRY = '"vs code": ('
 _TOOL_APPLICATION_ACCESS = 'context.parameters.get("application")'
 _CONTROLLER_SIGNATURE = "def open_file(self, path: Path, application: str | None = None) -> None:"
 
@@ -65,6 +74,13 @@ _ALIAS_METHOD = re.compile(
 _ALIAS_PAIR = re.compile(r'"(?P<alias>[^"\n]+)":\s*"(?P<value>[^"\n]+)"')
 _OPEN_WITH_APPLICATION_MARKER = "_open_file_application"
 _TESTS_COVER_GAP_MARKER = "con el bloc de notas"
+_ALIASES_BLOCK = re.compile(
+    r"(?m)^(?P<i>[ \t]+)aliases = \{\n"
+    r"(?P=i)    \"bloc de notas\": \"notepad\",\n"
+    r"(?P=i)    \"el bloc de notas\": \"notepad\",\n"
+    r"(?P=i)\}\n"
+    r"(?P=i)return aliases\.get\(self\._normalize\(target\), target\)$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +99,22 @@ class DesktopCapabilityImprovementBuilder:
     def __init__(self, project_root: Path) -> None:
         self._root = project_root.resolve()
         self._before_successes: int | None = None
+        self._before_open_apps_successes: int | None = None
 
     def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
         text = normalize_prompt(prompt)
         if not any(term in text for term in _DESKTOP_TERMS):
             return None
+        if any(term in text for term in _OPEN_APPS_TERMS):
+            return ImprovementDiagnosis(
+                ImprovementClassification.CAPABILITY_IMPROVEMENT,
+                "Abrir aplicaciones conocidas por nombre (bloc de notas, calculadora, chrome y vs code), incluidas sus formas con articulo, sin romper las funciones actuales.",
+                _OPEN_APPS_SCOPE,
+                (_TEST_SOURCE,),
+                ("aperturas de aplicaciones conocidas por nombre",),
+                "Anade entradas explicitas de nombres conocidos a la resolucion de alias de apertura; reutiliza desktop.open_application, sin shell arbitrario ni comandos libres.",
+                self._observed_open_apps_finding(),
+            )
         return ImprovementDiagnosis(
             ImprovementClassification.CAPABILITY_IMPROVEMENT,
             "Abrir archivos con una aplicacion conocida (variante 'con <aplicacion>') sin romper las funciones actuales.",
@@ -99,7 +126,10 @@ class DesktopCapabilityImprovementBuilder:
         )
 
     def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
-        return diagnosis.classification is ImprovementClassification.CAPABILITY_IMPROVEMENT and diagnosis.scope == _SCOPE
+        return (
+            diagnosis.classification is ImprovementClassification.CAPABILITY_IMPROVEMENT
+            and diagnosis.scope in (_SCOPE, _OPEN_APPS_SCOPE)
+        )
 
     def build(self, diagnosis: ImprovementDiagnosis, prompt: str) -> RepairProposal | None:
         if not self.can_handle(diagnosis, prompt):
@@ -107,7 +137,11 @@ class DesktopCapabilityImprovementBuilder:
         if any(term in normalize_prompt(prompt) for term in _UNSAFE_TERMS):
             return None
         inspection = self._inspect()
-        if inspection is None or not self._reproducible_gap(inspection):
+        if inspection is None:
+            return None
+        if diagnosis.scope == _OPEN_APPS_SCOPE:
+            return self._build_open_applications(diagnosis, inspection)
+        if not self._reproducible_gap(inspection):
             return None
         use_case = self._derived_use_case(inspection)
         if use_case is None:
@@ -124,18 +158,21 @@ class DesktopCapabilityImprovementBuilder:
             metric_directions={_METRIC: "increase"},
         )
 
-    def validator(self, _proposal: RepairProposal) -> RepairValidation:
-        before = self._before_successes
+    def validator(self, proposal: RepairProposal) -> RepairValidation:
+        if proposal.proposal_id == _OPEN_APPS_PROPOSAL_ID:
+            before, metric = self._before_open_apps_successes, _OPEN_APPS_METRIC
+        else:
+            before, metric = self._before_successes, _METRIC
         if before is None:
             return RepairValidation(False, detail="No existe una medicion previa confiable.")
-        after = self._measure_open_with_application()
+        after = self._measure_open_applications_by_name() if metric == _OPEN_APPS_METRIC else self._measure_open_with_application()
         basetemp = Path(tempfile.gettempdir()) / "atlas-supervised-pytest"
         tests = self._run("-m", "pytest", "-q", _TEST_SOURCE, "--basetemp", str(basetemp))
         compiled = self._run("-m", "py_compile", _USE_CASE_SOURCE)
         diff_checked = self._git("diff", "--check")
         passed = after > before and all(result.returncode == 0 for result in (tests, compiled, diff_checked))
         detail = "tests focales, py_compile y git diff --check correctos." if passed else self._validation_error(tests, compiled, diff_checked)
-        return RepairValidation(passed, {_METRIC: float(before)}, {_METRIC: float(after)}, detail)
+        return RepairValidation(passed, {metric: float(before)}, {metric: float(after)}, detail)
 
     def _observed_finding(self) -> str:
         inspection = self._inspect()
@@ -146,6 +183,18 @@ class DesktopCapabilityImprovementBuilder:
         return (
             f"Inspeccion real de {_USE_CASE_SOURCE}: la llamada desktop.open_file solo recibe 'path' mientras la tool y el "
             "controlador ya aceptan 'application'; abrir un archivo 'con el bloc de notas' no esta soportado, asi que el gap es reproducible."
+        )
+
+    def _observed_open_apps_finding(self) -> str:
+        inspection = self._inspect()
+        if inspection is None:
+            return "Inspeccion real: el estado actual de Control PC no es reconocible; no se puede derivar un cambio seguro."
+        if not self._reproducible_open_apps_gap(inspection):
+            return "Inspeccion real: las aplicaciones conocidas por nombre ya se resuelven o el estado no es reconocible; no hay un gap reproducible que cubrir."
+        return (
+            f"Inspeccion real de {_USE_CASE_SOURCE}: la primitiva segura desktop.open_application y el whitelist del controlador "
+            "ya existen, pero 'abre la calculadora' llega con el articulo incluido ('la calculadora') y el controlador no lo reconoce; "
+            "el whitelist de nombres conocidos (bloc de notas, calculadora, chrome, vs code) falta en la resolucion de alias, asi que el gap es reproducible."
         )
 
     def _inspect(self) -> _DesktopInspection | None:
@@ -177,6 +226,37 @@ class DesktopCapabilityImprovementBuilder:
             and _CONTROLLER_SIGNATURE in inspection.controller_source
             and _TARGET_PREP.search(inspection.use_case_source) is not None
             and _ALIAS_METHOD.search(inspection.use_case_source) is not None
+        )
+
+    @staticmethod
+    def _reproducible_open_apps_gap(inspection: _DesktopInspection) -> bool:
+        return (
+            _OPEN_APPS_ALIAS_ENTRY not in inspection.use_case_source
+            and _OPEN_APPS_TEST_MARKER not in inspection.tests_source
+            and _ALIASES_BLOCK.search(inspection.use_case_source) is not None
+            and _OPEN_APPLICATION_PRIMITIVE in inspection.use_case_source
+            and _CONTROLLER_CALC_ENTRY in inspection.controller_source
+            and _CONTROLLER_VSCODE_ENTRY in inspection.controller_source
+            and "class FakeToolExecutor" in inspection.tests_source
+            and "DesktopInteractionUseCase" in inspection.tests_source
+        )
+
+    def _build_open_applications(self, diagnosis: ImprovementDiagnosis, inspection: _DesktopInspection) -> RepairProposal | None:
+        if not self._reproducible_open_apps_gap(inspection):
+            return None
+        use_case = self._derived_open_apps_use_case(inspection)
+        if use_case is None:
+            return None
+        self._before_open_apps_successes = self._measure_open_applications_by_name()
+        return RepairProposal(
+            proposal_id=_OPEN_APPS_PROPOSAL_ID,
+            objective=diagnosis.objective,
+            files={
+                _USE_CASE_SOURCE: use_case,
+                _TEST_SOURCE: self._derived_open_apps_tests(inspection),
+            },
+            focused_tests=(_TEST_SOURCE,),
+            metric_directions={_OPEN_APPS_METRIC: "increase"},
         )
 
     @staticmethod
@@ -254,6 +334,84 @@ class DesktopCapabilityImprovementBuilder:
             "    assert executor.calls[0][1].parameters == {\"path\": str(file)}\n"
         )
         return inspection.tests_source + block
+
+    @staticmethod
+    def _derived_open_apps_use_case(inspection: _DesktopInspection) -> str | None:
+        block = _ALIASES_BLOCK.search(inspection.use_case_source)
+        if block is None:
+            return None
+        indent = block.group("i")
+        entry = indent + "    "
+        replacement = (
+            f"{indent}aliases = {{\n"
+            f"{entry}\"bloc de notas\": \"notepad\",\n"
+            f"{entry}\"el bloc de notas\": \"notepad\",\n"
+            f"{entry}\"calculadora\": \"calculadora\",\n"
+            f"{entry}\"la calculadora\": \"calculadora\",\n"
+            f"{entry}\"chrome\": \"chrome\",\n"
+            f"{entry}\"el chrome\": \"chrome\",\n"
+            f"{entry}\"vs code\": \"vs code\",\n"
+            f"{entry}\"el vs code\": \"vs code\",\n"
+            f"{indent}}}\n"
+            f"{indent}return aliases.get(self._normalize(target), target)"
+        )
+        return inspection.use_case_source.replace(block.group(0), replacement, 1)
+
+    @staticmethod
+    def _derived_open_apps_tests(inspection: _DesktopInspection) -> str:
+        block = (
+            "\n\n\n"
+            "def test_desktop_interaction_opens_known_application_by_name_with_article(tmp_path: Path) -> None:\n"
+            "    executor = FakeToolExecutor()\n"
+            "    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)\n"
+            "\n"
+            "    use_case.execute(\"abre la calculadora\")\n"
+            "\n"
+            "    assert executor.calls[0][0] == \"desktop.open_application\"\n"
+            "    assert executor.calls[0][1].parameters == {\"application\": \"calculadora\"}\n"
+            "\n"
+            "\n"
+            "def test_desktop_interaction_opens_vs_code_by_name_with_article(tmp_path: Path) -> None:\n"
+            "    executor = FakeToolExecutor()\n"
+            "    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)\n"
+            "\n"
+            "    use_case.execute(\"abre el vs code\")\n"
+            "\n"
+            "    assert executor.calls[0][0] == \"desktop.open_application\"\n"
+            "    assert executor.calls[0][1].parameters == {\"application\": \"vs code\"}\n"
+        )
+        return inspection.tests_source + block
+
+    def _measure_open_applications_by_name(self) -> int:
+        """Count known-application-by-name opening successes in a fresh interpreter."""
+        script = (
+            "from pathlib import Path\n"
+            "from use_cases.desktop_interaction import DesktopInteractionUseCase\n"
+            "\n"
+            "class _Executor:\n"
+            "    def __init__(self):\n"
+            "        self.calls = []\n"
+            "\n"
+            "    def requires_explicit_authorization(self, tool_name):\n"
+            "        return False\n"
+            "\n"
+            "    def execute(self, tool_name, context):\n"
+            "        self.calls.append((tool_name, dict(context.parameters)))\n"
+            "        return \"ok\"\n"
+            "\n"
+            "executor = _Executor()\n"
+            f"use_case = DesktopInteractionUseCase(executor, project_root=Path({str(self._root)!r}))\n"
+            "use_case.execute('abre la calculadora')\n"
+            "ok = bool(executor.calls)\n"
+            "ok = ok and executor.calls[0][0] == 'desktop.open_application'\n"
+            "ok = ok and executor.calls[0][1].get('application') == 'calculadora'\n"
+            "print(1 if ok else 0)\n"
+        )
+        result = subprocess.run((sys.executable, "-c", script), cwd=self._root, capture_output=True, text=True, check=False)
+        try:
+            return int(result.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            return 0
 
     def _measure_open_with_application(self) -> int:
         """Count open-with-application successes in a fresh interpreter."""

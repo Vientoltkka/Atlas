@@ -27,6 +27,10 @@ _TEST = "tests/test_desktop_interaction.py"
 _SOLUTION_MARKER = "_open_file_application"
 
 
+_REAL_OPEN_APPS_PROMPT = "Atlas, mejora Control PC para abrir aplicaciones conocidas por nombre."
+_REAL_NOTEPAD_PROMPT = "Atlas, mejora Control PC para abrir archivos con el Bloc de notas."
+
+
 def _default_registry() -> SupervisedRepairBuilderRegistry:
     return SupervisedRepairBuilderRegistry(
         (VoiceCodeRepairBuilder(_ROOT), RoutingRepairBuilder(_ROOT), FileReadCapabilityImprovementBuilder(_ROOT), DesktopCapabilityImprovementBuilder(_ROOT))
@@ -84,21 +88,28 @@ def test_control_pc_request_resolves_exactly_one_builder_in_the_default_registry
     assert isinstance(matches[0].builder, DesktopCapabilityImprovementBuilder)
 
 
-def test_reproducible_gap_produces_one_concrete_proposal() -> None:
+def test_open_applications_by_name_gap_produces_one_concrete_proposal() -> None:
     builder = DesktopCapabilityImprovementBuilder(_ROOT)
-    diagnosis = builder.diagnose(_PROMPT)
 
-    proposal = builder.build(diagnosis, _PROMPT)
+    proposal = builder.build(builder.diagnose(_REAL_OPEN_APPS_PROMPT), _REAL_OPEN_APPS_PROMPT)
 
     assert proposal is not None
-    assert proposal.proposal_id == "improvement.desktop.open-file-with-application"
+    assert proposal.proposal_id == "improvement.desktop.open-applications-by-name"
     assert set(proposal.files) == {_USE_CASE, _TEST}
     assert proposal.focused_tests == (_TEST,)
-    assert proposal.metric_directions == {"aperturas_de_archivo_con_aplicacion_correctas": "increase"}
+    assert proposal.metric_directions == {"aperturas_de_aplicaciones_conocidas_por_nombre": "increase"}
     derived = proposal.files[_USE_CASE]
     compile(derived, "derived_use_case", "exec")
-    assert derived.count("desktop.open_file") == 2
-    assert '"application": application' in derived
+    assert derived.count('"desktop.open_application"') == 1
+    assert '"la calculadora": "calculadora"' in derived
+    assert '"el vs code": "vs code"' in derived
+    assert '"el chrome": "chrome"' in derived
+    assert '"el bloc de notas": "notepad"' in derived
+    assert "return aliases.get(self._normalize(target), target)" in derived
+    derived_tests = proposal.files[_TEST]
+    compile(derived_tests, "derived_tests", "exec")
+    assert 'use_case.execute("abre la calculadora")' in derived_tests
+    assert 'use_case.execute("abre el vs code")' in derived_tests
 
 
 @pytest.mark.parametrize("solved_by", ["use_case", "tests"])
@@ -120,19 +131,19 @@ def test_already_solved_gap_yields_no_proposal(tmp_path: Path, solved_by: str) -
     assert proposal is None
 
 
-def test_real_request_stops_at_authorization_with_zero_writes() -> None:
+def test_generic_control_pc_request_stops_without_proposal_when_no_exact_change() -> None:
     targets = [_ROOT / _USE_CASE, _ROOT / _TEST]
     before = [target.read_text(encoding="utf-8") for target in targets]
     conversation = SelfImprovementConversation(_ROOT)
 
     response = conversation.handle(_PROMPT)
 
-    assert "improvement.desktop.open-file-with-application" in response
+    assert response.startswith("CLARIFICATION_REQUIRED")
     assert "No he modificado nada." in response
-    assert "¿Autorizas" in response
+    assert "¿Autorizas" not in response
     assert [target.read_text(encoding="utf-8") for target in targets] == before
-    assert conversation.proposal is not None
-    assert conversation.active
+    assert conversation.proposal is None
+    assert not conversation.active
 
 
 def test_out_of_desktop_scope_is_never_handled() -> None:
@@ -158,6 +169,7 @@ def test_out_of_desktop_scope_is_never_handled() -> None:
     [
         "Atlas, mejora Control PC para ejecutar cualquier comando de PowerShell",
         "Atlas, mejora Control PC para editar el registro de Windows",
+        "Atlas, mejora Control PC para abrir aplicaciones conocidas por nombre ejecutando comandos arbitrarios",
     ],
 )
 def test_dangerous_control_pc_requests_never_produce_a_proposal(prompt: str) -> None:
@@ -184,17 +196,32 @@ def test_ambiguous_control_pc_request_stops_without_silent_selection(tmp_path: P
     assert not conversation.active
 
 
-def test_open_with_notepad_prompt_reaches_authorization_with_zero_writes() -> None:
-    prompt = "Atlas, mejora Control PC para abrir archivos con el Bloc de notas."
+def test_open_with_notepad_prompt_stops_without_proposal_when_solved() -> None:
     targets = [_ROOT / _USE_CASE, _ROOT / _TEST]
     before = [target.read_text(encoding="utf-8") for target in targets]
     conversation = SelfImprovementConversation(_ROOT)
 
-    response = conversation.handle(prompt)
+    response = conversation.handle(_REAL_NOTEPAD_PROMPT)
 
-    assert "improvement.desktop.open-file-with-application" in response
+    assert response.startswith("CLARIFICATION_REQUIRED")
+    assert "No he modificado nada." in response
+    assert "¿Autorizas" not in response
+    assert [target.read_text(encoding="utf-8") for target in targets] == before
+    assert conversation.proposal is None
+    assert not conversation.active
+
+
+def test_real_open_applications_by_name_prompt_reaches_authorization_with_zero_writes() -> None:
+    targets = [_ROOT / _USE_CASE, _ROOT / _TEST]
+    before = [target.read_text(encoding="utf-8") for target in targets]
+    conversation = SelfImprovementConversation(_ROOT)
+
+    response = conversation.handle(_REAL_OPEN_APPS_PROMPT)
+
+    assert "improvement.desktop.open-applications-by-name" in response
     assert "No he modificado nada." in response
     assert "¿Autorizas" in response
     assert [target.read_text(encoding="utf-8") for target in targets] == before
     assert conversation.proposal is not None
+    assert conversation.proposal.proposal_id == "improvement.desktop.open-applications-by-name"
     assert conversation.active
