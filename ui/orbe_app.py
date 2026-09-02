@@ -76,25 +76,36 @@ _ANIMATION_PERIODS: dict[OrbVisualState, float | None] = {
 ANIMATION_FPS = 24
 
 _VISUAL_PROFILES: dict[OrbVisualState, dict[str, float]] = {
+    # One procedural renderer; these controls give every primary state its own motion language.
     OrbVisualState.IDLE: {
-        "ring_activity": 0.16, "halo_intensity": 0.72, "core_intensity": 0.85,
-        "particle_intensity": 0.48, "segment_activity": 0.45,
+        "ring_activity": 0.16, "ring_speed": 0.34, "ring_angle": 0.86, "ring_amplitude": 0.88,
+        "pulse_strength": 0.34, "halo_intensity": 0.72, "halo_strength": 0.72,
+        "core_intensity": 0.85, "core_pulse": 0.54, "particle_intensity": 0.48,
+        "segment_activity": 0.45, "base_intensity": 0.60,
     },
     OrbVisualState.PROCESSING: {
-        "ring_activity": 1.00, "halo_intensity": 1.12, "core_intensity": 1.18,
-        "particle_intensity": 0.82, "segment_activity": 1.00,
+        "ring_activity": 1.00, "ring_speed": 1.00, "ring_angle": 1.20, "ring_amplitude": 1.08,
+        "pulse_strength": 0.66, "halo_intensity": 1.12, "halo_strength": 1.12,
+        "core_intensity": 1.18, "core_pulse": 0.86, "particle_intensity": 0.82,
+        "segment_activity": 1.00, "base_intensity": 0.88,
     },
     OrbVisualState.SPEAKING: {
-        "ring_activity": 0.30, "halo_intensity": 1.28, "core_intensity": 1.12,
-        "particle_intensity": 0.86, "segment_activity": 0.72,
+        "ring_activity": 0.30, "ring_speed": 0.64, "ring_angle": 0.98, "ring_amplitude": 1.00,
+        "pulse_strength": 1.00, "halo_intensity": 1.28, "halo_strength": 1.28,
+        "core_intensity": 1.12, "core_pulse": 1.18, "particle_intensity": 0.86,
+        "segment_activity": 0.72, "base_intensity": 1.04,
     },
     OrbVisualState.AUTOMATION: {
-        "ring_activity": 1.34, "halo_intensity": 1.22, "core_intensity": 1.22,
-        "particle_intensity": 0.96, "segment_activity": 1.25,
+        "ring_activity": 1.34, "ring_speed": 1.42, "ring_angle": 1.34, "ring_amplitude": 1.16,
+        "pulse_strength": 0.92, "halo_intensity": 1.22, "halo_strength": 1.22,
+        "core_intensity": 1.22, "core_pulse": 1.04, "particle_intensity": 0.96,
+        "segment_activity": 1.25, "base_intensity": 1.12,
     },
     OrbVisualState.AUTHORIZATION: {
-        "ring_activity": 0.25, "halo_intensity": 0.92, "core_intensity": 1.04,
-        "particle_intensity": 0.58, "segment_activity": 0.56,
+        "ring_activity": 0.25, "ring_speed": 0.42, "ring_angle": 0.78, "ring_amplitude": 0.82,
+        "pulse_strength": 0.52, "halo_intensity": 0.92, "halo_strength": 0.92,
+        "core_intensity": 1.04, "core_pulse": 0.70, "particle_intensity": 0.58,
+        "segment_activity": 0.56, "base_intensity": 0.78,
     },
 }
 
@@ -130,9 +141,10 @@ def animation_frame(
 
     phase = (elapsed_seconds % period) / period
     wave = math.sin(2 * math.pi * phase)
+    profile = visual_profile(state)
 
     if state is OrbVisualState.IDLE:
-        scale = 1.0 + 0.03 * wave
+        scale = 1.0 + 0.024 * profile["pulse_strength"] * wave
         alpha_factor = 1.0
         rotation_deg = 18.0 * phase
     elif state is OrbVisualState.STARTING:
@@ -144,19 +156,19 @@ def animation_frame(
         alpha_factor = 1.0
         rotation_deg = 360.0 * phase
     elif state is OrbVisualState.PROCESSING:
-        scale = 1.0
-        alpha_factor = 1.0
+        scale = 1.0 + 0.012 * profile["pulse_strength"] * wave
+        alpha_factor = 0.92 + 0.08 * (wave * 0.5 + 0.5)
         rotation_deg = 360.0 * phase
     elif state is OrbVisualState.SPEAKING:
-        scale = 1.02 + 0.03 * (wave * 0.5 + 0.5)
+        scale = 1.018 + 0.048 * profile["pulse_strength"] * (wave * 0.5 + 0.5)
         alpha_factor = 0.85 + 0.15 * (wave * 0.5 + 0.5)
         rotation_deg = 360.0 * phase
     elif state is OrbVisualState.AUTHORIZATION:
-        scale = 1.0 + 0.015 * wave
+        scale = 1.0 + 0.022 * profile["pulse_strength"] * wave
         alpha_factor = 0.78 + 0.20 * (wave * 0.5 + 0.5)
         rotation_deg = 360.0 * phase
     elif state is OrbVisualState.AUTOMATION:
-        scale = 1.0 + 0.022 * wave
+        scale = 1.0 + 0.035 * profile["pulse_strength"] * wave
         alpha_factor = 0.88 + 0.12 * (wave * 0.5 + 0.5)
         rotation_deg = 360.0 * phase
     elif state is OrbVisualState.RECOVERING:
@@ -585,20 +597,20 @@ def create_orb_window(settings=None):
             size = self.width()
             path = QPainterPath()
             # Two diagonal arms form an open chevron; no horizontal A crossbar is used.
-            path.moveTo(size * 0.500, size * 0.355)
-            path.lineTo(size * 0.335, size * 0.595)
-            path.lineTo(size * 0.398, size * 0.615)
-            path.lineTo(size * 0.500, size * 0.445)
+            path.moveTo(size * 0.500, size * 0.405)
+            path.lineTo(size * 0.395, size * 0.565)
+            path.lineTo(size * 0.438, size * 0.578)
+            path.lineTo(size * 0.500, size * 0.470)
             path.closeSubpath()
-            path.moveTo(size * 0.500, size * 0.355)
-            path.lineTo(size * 0.665, size * 0.595)
-            path.lineTo(size * 0.602, size * 0.615)
-            path.lineTo(size * 0.500, size * 0.445)
+            path.moveTo(size * 0.500, size * 0.405)
+            path.lineTo(size * 0.605, size * 0.565)
+            path.lineTo(size * 0.562, size * 0.578)
+            path.lineTo(size * 0.500, size * 0.470)
             path.closeSubpath()
-            # The isolated lower triangle is the reference mark's second component.
-            path.moveTo(size * 0.500, size * 0.602)
-            path.lineTo(size * 0.448, size * 0.680)
-            path.lineTo(size * 0.552, size * 0.680)
+            # The isolated lower triangle keeps generous negative space inside the core.
+            path.moveTo(size * 0.500, size * 0.590)
+            path.lineTo(size * 0.464, size * 0.646)
+            path.lineTo(size * 0.536, size * 0.646)
             path.closeSubpath()
             return path
 
@@ -609,9 +621,11 @@ def create_orb_window(settings=None):
             alpha = max(0, min(255, int(base_alpha * frame["alpha_factor"])))
             size = self.width()
             center = size // 2
-            core_radius = max(18, int(size * CORE_RADIUS_FACTOR * frame["scale"]))
-            orbit_radius = max(28, int(size * 0.335 * frame["scale"]))
-            halo_radius = max(38, int(size * 0.435 * frame["scale"]))
+            profile = visual_profile(self._state)
+            core_scale = 1.0 + (frame["scale"] - 1.0) * profile["core_pulse"]
+            core_radius = max(18, int(size * CORE_RADIUS_FACTOR * core_scale))
+            orbit_radius = max(28, int(size * 0.335 * frame["scale"] * profile["ring_amplitude"]))
+            halo_radius = max(38, int(size * 0.435 * frame["scale"] * profile["halo_strength"]))
             phase = math.radians(frame["rotation_deg"])
             palette = {
                 OrbVisualState.PROCESSING: ((187, 116, 255), (75, 38, 132), (215, 175, 255), (165, 94, 255), (245, 232, 255)),
@@ -622,9 +636,9 @@ def create_orb_window(settings=None):
             halo_rgb, ring_dim_rgb, ring_light_rgb, ring_bright_rgb, ring_peak_rgb = palette.get(
                 self._state, ((70, 205, 255), (42, 142, 255), (120, 225, 255), (53, 179, 255), (216, 252, 255))
             )
-            profile = visual_profile(self._state)
-            active_glow = profile["halo_intensity"]
+            active_glow = profile["halo_strength"]
             projection_rgb = ring_bright_rgb
+            base_alpha = int(alpha * profile["base_intensity"])
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -645,8 +659,8 @@ def create_orb_window(settings=None):
             base_y = int(size * 0.79)
             beam_top = center + int(core_radius * 0.54)
             projection = QLinearGradient(center, beam_top, center, base_y)
-            projection.setColorAt(0.0, QColor(*projection_rgb, int(alpha * 0.26)))
-            projection.setColorAt(0.62, QColor(*projection_rgb, int(alpha * 0.08)))
+            projection.setColorAt(0.0, QColor(*projection_rgb, int(base_alpha * 0.26)))
+            projection.setColorAt(0.62, QColor(*projection_rgb, int(base_alpha * 0.08)))
             projection.setColorAt(1.0, QColor(*projection_rgb, 0))
             beam_width = max(16, int(size * 0.105))
             beam = QPainterPath()
@@ -658,17 +672,17 @@ def create_orb_window(settings=None):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(projection)
             painter.drawPath(beam)
-            painter.setPen(QPen(QColor(*projection_rgb, int(alpha * 0.060)), max(10.0, size * 0.046)))
+            painter.setPen(QPen(QColor(*projection_rgb, int(base_alpha * 0.060)), max(10.0, size * 0.046)))
             painter.drawLine(center, beam_top, center, base_y)
-            painter.setPen(QPen(QColor(*projection_rgb, int(alpha * 0.23)), max(3.0, size * 0.011)))
+            painter.setPen(QPen(QColor(*projection_rgb, int(base_alpha * 0.23)), max(3.0, size * 0.011)))
             painter.drawLine(center, beam_top, center, base_y)
             for index, (multiplier, squash, opacity, width) in enumerate(((0.14, 0.023, 0.86, 3.0), (0.21, 0.034, 0.46, 1.9), (0.29, 0.044, 0.20, 1.2))):
                 half_width = int(size * multiplier)
                 half_height = max(2, int(size * squash))
-                painter.setPen(QPen(QColor(*projection_rgb, int(alpha * opacity)), width))
+                painter.setPen(QPen(QColor(*projection_rgb, int(base_alpha * opacity)), width))
                 painter.drawEllipse(center - half_width, base_y - half_height, half_width * 2, half_height * 2)
                 if index < 2:
-                    painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * opacity)), max(1.0, width * 0.55)))
+                    painter.setPen(QPen(QColor(*ring_peak_rgb, int(base_alpha * opacity)), max(1.0, width * 0.55)))
                     painter.drawArc(center - half_width, base_y - half_height, half_width * 2, half_height * 2, (28 + index * 82) * 16, 46 * 16)
 
             orbit_speed = (
@@ -684,11 +698,11 @@ def create_orb_window(settings=None):
                 if self._state is OrbVisualState.LISTENING
                 else (0.16, -0.10, 0.07)
             )
-            orbit_speed = tuple(speed * profile["ring_activity"] for speed in orbit_speed)
+            orbit_speed = tuple(speed * profile["ring_activity"] * profile["ring_speed"] for speed in orbit_speed)
             ring_specs = (
-                (frame["rotation_deg"] * orbit_speed[0], 0.46, 1.10, 18),
-                (frame["rotation_deg"] * orbit_speed[1] + 57.0, 0.62, 1.00, 126),
-                (frame["rotation_deg"] * orbit_speed[2] + 119.0, 0.34, 0.90, 247),
+                (frame["rotation_deg"] * orbit_speed[0], 0.46 * profile["ring_angle"], 1.10, 18),
+                (frame["rotation_deg"] * orbit_speed[1] + 57.0, 0.62 * profile["ring_angle"], 1.00, 126),
+                (frame["rotation_deg"] * orbit_speed[2] + 119.0, 0.34 * profile["ring_angle"], 0.90, 247),
             )
             # Dim back segments establish that each orbit continues behind the core.
             for angle, squash, radius_factor, start_angle in ring_specs:
