@@ -317,6 +317,11 @@ class Bootstrap:
             ("calendar.events.list", "calendar_list_events"),
             ("project.tree", "project_tree"),
             ("desktop.application.open", "desktop.open_application"),
+            ("desktop.filesystem.create_folder", "desktop.create_folder"),
+            ("desktop.filesystem.copy", "desktop.copy_path"),
+            ("desktop.filesystem.move", "desktop.move_path"),
+            ("desktop.filesystem.rename", "desktop.rename_path"),
+            ("desktop.filesystem.delete", "desktop.delete_path"),
             ("desktop.file.open", "desktop.open_file"),
             ("desktop.text.type", "desktop.type_text"),
             ("desktop.clipboard.copy", "desktop.copy_clipboard_text"),
@@ -442,6 +447,21 @@ class Bootstrap:
                 ),
             )
         )
+        schema_registry.register(ArgumentSchema("desktop.filesystem.create_folder", (ArgumentField("path", str, required=True, description="Absolute folder path."),)))
+        schema_registry.register(ArgumentSchema("desktop.filesystem.copy", (
+            ArgumentField("source_path", str, required=True, description="Absolute source path."),
+            ArgumentField("destination_path", str, required=True, description="Absolute destination path."),
+        )))
+        schema_registry.register(ArgumentSchema("desktop.filesystem.move", (
+            ArgumentField("source_path", str, required=True, description="Absolute source path."),
+            ArgumentField("destination_path", str, required=True, description="Absolute destination path."),
+        )))
+        schema_registry.register(ArgumentSchema("desktop.filesystem.rename", (
+            ArgumentField("source_path", str, required=True, description="Absolute source path."),
+            ArgumentField("new_name", str, required=True, description="New leaf name."),
+        )))
+        schema_registry.register(ArgumentSchema("desktop.filesystem.delete", (ArgumentField("path", str, required=True, description="Absolute path to delete."),)))
+
         schema_registry.register(
             ArgumentSchema(
                 "desktop.text.type",

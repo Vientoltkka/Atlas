@@ -1,6 +1,13 @@
+from bootstrap.bootstrap import Bootstrap
+from core.orchestrator import AtlasOrchestrator
+from use_cases.execution_conversation import ExecutionConversationController
 from pathlib import Path
 
 import pytest
+
+from bootstrap.bootstrap import Bootstrap
+from core.orchestrator import AtlasOrchestrator
+from use_cases.execution_conversation import ExecutionConversationController
 
 from tools.desktop.desktop_tools import (
     CopyPathTool,
@@ -151,6 +158,77 @@ def test_open_file_and_folder_regression(tmp_path: Path) -> None:
     file = folder / "file.txt"
     file.write_text("Atlas", encoding="utf-8")
     OpenFolderTool(controller).execute(ToolContext(parameters={"path": str(folder)}))
+
+def _filesystem_orchestrator(controller: FileSystemController) -> tuple[AtlasOrchestrator, ExecutionConversationController]:
+    registry = ToolRegistry()
+    registry.register(CreateFolderTool(controller))
+    executor = ToolExecutor(registry)
+    conversation = ExecutionConversationController(Bootstrap.build_execution_coordinator(tool_registry=registry, executor=executor))
+    return AtlasOrchestrator(planner=None, router=None, model_manager=None, memory=None, registry=None, write_file=None, desktop_interaction=DesktopInteractionUseCase(executor), execution_conversation=conversation), conversation
+
+
+def test_filesystem_conversation_keeps_create_pending_then_confirms(tmp_path: Path) -> None:
+    controller = FileSystemController()
+    orchestrator, conversation = _filesystem_orchestrator(controller)
+    path = tmp_path / "pending folder"
+    prompt = f"crea la carpeta {path}"
+    pending = orchestrator.process_prompt(prompt, confirm=lambda _: "")
+    assert "Voy a crear la carpeta" in pending
+    assert str(path) in pending
+    assert not path.exists()
+    assert conversation.pending_confirmation_id is not None
+    assert conversation.pending_confirmation_context is not None
+    assert conversation.pending_confirmation_context.original_text == prompt
+    assert "'created': True" in orchestrator.process_prompt("sí", confirm=lambda _: "")
+    assert path.is_dir()
+    assert conversation.pending_confirmation_id is None
+
+
+def test_filesystem_conversation_rejects_without_changes(tmp_path: Path) -> None:
+    controller = FileSystemController()
+    orchestrator, conversation = _filesystem_orchestrator(controller)
+    path = tmp_path / "cancelled folder"
+    orchestrator.process_prompt(f"crea la carpeta {path}", confirm=lambda _: "")
+    assert "cancelada" in orchestrator.process_prompt("no", confirm=lambda _: "").lower()
+    assert not path.exists()
+    assert conversation.pending_confirmation_id is None
     assert controller.opened == ("folder", folder)
     OpenFileTool(controller).execute(ToolContext(parameters={"path": str(file)}))
     assert controller.opened == ("file", file, None)
+
+def _filesystem_orchestrator(controller: FileSystemController) -> tuple[AtlasOrchestrator, ExecutionConversationController]:
+    registry = ToolRegistry()
+    registry.register(CreateFolderTool(controller))
+    executor = ToolExecutor(registry)
+    conversation = ExecutionConversationController(Bootstrap.build_execution_coordinator(tool_registry=registry, executor=executor))
+    return AtlasOrchestrator(planner=None, router=None, model_manager=None, memory=None, registry=None, write_file=None, desktop_interaction=DesktopInteractionUseCase(executor), execution_conversation=conversation), conversation
+
+
+def test_filesystem_conversation_keeps_create_pending_then_confirms(tmp_path: Path) -> None:
+    controller = FileSystemController()
+    orchestrator, conversation = _filesystem_orchestrator(controller)
+    path = tmp_path / "pending folder"
+    prompt = f"crea la carpeta {path}"
+
+    pending = orchestrator.process_prompt(prompt, confirm=lambda _: "")
+
+    assert "Voy a crear la carpeta" in pending
+    assert str(path) in pending
+    assert not path.exists()
+    assert conversation.pending_confirmation_id is not None
+    assert conversation.pending_confirmation_context is not None
+    assert conversation.pending_confirmation_context.original_text == prompt
+    assert "'created': True" in orchestrator.process_prompt("sí", confirm=lambda _: "")
+    assert path.is_dir()
+    assert conversation.pending_confirmation_id is None
+
+
+def test_filesystem_conversation_rejects_without_changes(tmp_path: Path) -> None:
+    controller = FileSystemController()
+    orchestrator, conversation = _filesystem_orchestrator(controller)
+    path = tmp_path / "cancelled folder"
+
+    orchestrator.process_prompt(f"crea la carpeta {path}", confirm=lambda _: "")
+    assert "cancelada" in orchestrator.process_prompt("no", confirm=lambda _: "").lower()
+    assert not path.exists()
+    assert conversation.pending_confirmation_id is None

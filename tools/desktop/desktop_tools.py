@@ -423,9 +423,13 @@ class FileSystemTool(DesktopTool):
     """Base class for supervised explicit filesystem changes."""
 
     @property
+    def requires_confirmation(self) -> bool:
+        """Filesystem changes must enter the existing supervised flow."""
+        return True
+
+    @property
     def required_permissions(self) -> tuple[str, ...]:
         return ("filesystem.write",)
-
     @staticmethod
     def _path(context: ToolContext, name: str) -> Path:
         raw = context.parameters.get(name)

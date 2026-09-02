@@ -270,6 +270,35 @@ class DesktopInteractionUseCase:
 
         return None
 
+    def filesystem_tool_request(self, text: str) -> tuple[str, dict[str, str], str] | None:
+        """Resolve one explicit filesystem request for supervised execution."""
+        create = re.match(r"^\s*crea\s+la\s+carpeta\s+(.+?)\s*$", text, re.I)
+        if create:
+            path = create.group(1)
+            return "desktop.create_folder", {"path": path}, f"Voy a crear la carpeta:\n{path}\n¿Confirmas?"
+        delete = re.match(r"^\s*elimina\s+(?:el\s+archivo\s+|la\s+carpeta\s+)?(.+?)\s*$", text, re.I)
+        if delete:
+            path = delete.group(1)
+            return "desktop.delete_path", {"path": path}, f"Voy a eliminar:\n{path}\n¿Confirmas?"
+        for verb, tool_name, action in (("copia", "desktop.copy_path", "copiar"), ("mueve", "desktop.move_path", "mover")):
+            match = re.match(rf"^\s*{verb}\s+(.+?)\s+a\s+(.+?)\s*$", text, re.I)
+            if match:
+                source, destination = match.groups()
+                if not self._looks_like_path(source) or not self._looks_like_path(destination):
+                    return None
+                if len(re.findall(r"\s+a\s+", text, re.I)) != 1:
+                    raise ValueError("Orden ambigua: usa rutas sin separadores ambiguos.")
+                return tool_name, {"source_path": source, "destination_path": destination}, f"Voy a {action}:\n{source}\n→\n{destination}\n¿Confirmas?"
+        rename = re.match(r"^\s*renombra\s+(.+?)\s+a\s+([^\\/]+?)\s*$", text, re.I)
+        if rename:
+            source, new_name = rename.groups()
+            if not self._looks_like_path(source):
+                return None
+            if len(re.findall(r"\s+a\s+", text, re.I)) != 1:
+                raise ValueError("Orden ambigua: usa rutas sin separadores ambiguos.")
+            return "desktop.rename_path", {"source_path": source, "new_name": new_name}, f"Voy a renombrar:\n{source}\n→\n{new_name}\n¿Confirmas?"
+        return None
+
     def _execute_filesystem_command(
         self,
         text: str,

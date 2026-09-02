@@ -574,6 +574,18 @@ class AtlasOrchestrator:
         # while reusing Atlas' existing model health/fallback pipeline.
         if self._desktop_interaction is not None and self._execution_conversation is not None:
             activation_title = _conversational_activation_window_title(request.content)
+            filesystem_request = self._desktop_interaction.filesystem_tool_request(
+                request.content,
+            )
+            if filesystem_request is not None:
+                tool_name, arguments, confirmation_text = filesystem_request
+                outcome = self._execution_conversation.handle_registered_tool(
+                    tool_name,
+                    arguments,
+                    original_text=request.content,
+                    confirmation_text=confirmation_text,
+                )
+                return outcome.text
             if activation_title is not None:
                 resolved = self._desktop_interaction.resolve_window_for_activation(
                     activation_title,
