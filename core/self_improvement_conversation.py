@@ -128,12 +128,13 @@ class SelfImprovementConversation:
         elif proposal_builder is not None:
             registry = SupervisedRepairBuilderRegistry((_CallableRepairBuilder(proposal_builder, validator_factory),))
         else:
-            # Built-in deterministic repairs only; no model output and no discovery.
+            # Built-in deterministic repairs and improvements only; no model output and no discovery.
             from core.voice_repair_builder import VoiceCodeRepairBuilder
             from core.routing_repair_builder import RoutingRepairBuilder
+            from core.file_read_capability_builder import FileReadCapabilityImprovementBuilder
 
             registry = SupervisedRepairBuilderRegistry(
-                (VoiceCodeRepairBuilder(project_root), RoutingRepairBuilder(project_root))
+                (VoiceCodeRepairBuilder(project_root), RoutingRepairBuilder(project_root), FileReadCapabilityImprovementBuilder(project_root))
             )
         self._builders = registry
         self._workflow: SupervisedRepairWorkflow | None = None
@@ -158,7 +159,7 @@ class SelfImprovementConversation:
         diagnosis = self.diagnose(prompt)
         if diagnosis.classification is ImprovementClassification.CAPABILITY_GAP:
             return self._present_stop(diagnosis)
-        if diagnosis.classification is not ImprovementClassification.CODE_REPAIR:
+        if diagnosis.classification not in (ImprovementClassification.CODE_REPAIR, ImprovementClassification.CAPABILITY_IMPROVEMENT):
             return self._present_stop(diagnosis)
         builder = self._builders.builder_for(diagnosis, prompt)
         proposal = builder.build(diagnosis, prompt) if builder is not None else None
@@ -244,8 +245,10 @@ class SelfImprovementConversation:
 
     @staticmethod
     def _present_proposal(diagnosis: ImprovementDiagnosis, proposal: RepairProposal) -> str:
-        return "\n".join((
-            f"Detecto una posible reparación de Atlas ({diagnosis.classification.value}).",
+        lines = [f"Detecto una posible reparación de Atlas ({diagnosis.classification.value})."]
+        if diagnosis.classification is ImprovementClassification.CAPABILITY_IMPROVEMENT:
+            lines.append("Esto añade/mejora una capacidad; no es una reparación de bug.")
+        lines.extend((
             "No he modificado nada.",
             f"proposal_id: {proposal.proposal_id}",
             "", "Objetivo:", diagnosis.objective,
@@ -256,6 +259,7 @@ class SelfImprovementConversation:
             "", "Riesgo:", diagnosis.risk,
             "", "¿Autorizas que aplique esta reparación? [sí/No]",
         ))
+        return "\n".join(lines)
 
     @staticmethod
     def _present_stop(diagnosis: ImprovementDiagnosis) -> str:
