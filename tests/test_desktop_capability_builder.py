@@ -182,3 +182,19 @@ def test_ambiguous_control_pc_request_stops_without_silent_selection(tmp_path: P
     assert response.startswith("CLARIFICATION_REQUIRED")
     assert conversation.proposal is None
     assert not conversation.active
+
+
+def test_open_with_notepad_prompt_reaches_authorization_with_zero_writes() -> None:
+    prompt = "Atlas, mejora Control PC para abrir archivos con el Bloc de notas."
+    targets = [_ROOT / _USE_CASE, _ROOT / _TEST]
+    before = [target.read_text(encoding="utf-8") for target in targets]
+    conversation = SelfImprovementConversation(_ROOT)
+
+    response = conversation.handle(prompt)
+
+    assert "improvement.desktop.open-file-with-application" in response
+    assert "No he modificado nada." in response
+    assert "¿Autorizas" in response
+    assert [target.read_text(encoding="utf-8") for target in targets] == before
+    assert conversation.proposal is not None
+    assert conversation.active

@@ -24,6 +24,10 @@ _BOOTSTRAP_SOURCE = "bootstrap/bootstrap.py"
 _READ_TOOL_TEST = "tests/test_read_file_tool.py"
 _SCOPE = (_READ_TOOL_SOURCE, _BOOTSTRAP_SOURCE, _READ_TOOL_TEST)
 _FILE_TERMS = ("archivo", "archivos", "fichero", "ficheros", "lectura de archivos")
+# The desktop domain owns prompts that name Control PC explicitly; without this
+# guard one phrase ("mejora Control PC para abrir archivos...") matched two
+# builders and the conversation stopped at CLARIFICATION_REQUIRED.
+_DESKTOP_TERMS = ("control pc", "desktop", "escritorio")
 _METRIC = "lecturas_de_archivo_acotadas_correctas"
 _PROPOSAL_ID = "improvement.read-file.bounded-limit-read"
 
@@ -66,6 +70,8 @@ class FileReadCapabilityImprovementBuilder:
     def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
         text = normalize_prompt(prompt)
         if not any(term in text for term in _FILE_TERMS):
+            return None
+        if any(term in text for term in _DESKTOP_TERMS):
             return None
         return ImprovementDiagnosis(
             ImprovementClassification.CAPABILITY_IMPROVEMENT,
