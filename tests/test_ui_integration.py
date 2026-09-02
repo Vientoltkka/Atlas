@@ -888,6 +888,37 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> Non
     panel.close()
 
 
+def test_start_hidden_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    class FakeHotkey:
+        def __init__(self, callback, logger=None) -> None:
+            self.callback = callback
+
+        def start(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            return None
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=object(), application=qapp, orb=orb, transcript_panel=panel, hotkey_factory=FakeHotkey
+    )
+
+    controller.start(start_voice=False, start_hidden=True)
+    assert not orb.isVisible()
+    assert not panel.isVisible()
+    controller._chat_hotkey.callback()
+    _drain_events(qapp)
+    assert orb.isVisible()
+    assert not panel.isVisible()
+    orb.close()
+    panel.close()
+
+
 def test_orb_context_actions_reuse_chat_and_voice_controller_paths(qapp) -> None:
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel

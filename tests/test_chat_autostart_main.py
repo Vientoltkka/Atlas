@@ -26,18 +26,18 @@ def successful_preflight(monkeypatch):
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        (["main.py", "--chat"], (False, False)),
-        (["main.py", "--chat", "--start-hidden"], (False, False)),
-        (["main.py", "--ui"], (True, True)),
+        (["main.py", "--chat"], (False, False, False)),
+        (["main.py", "--chat", "--start-hidden"], (False, False, True)),
+        (["main.py", "--ui"], (True, True, False)),
     ],
 )
 def test_desktop_modes_preserve_voice_and_visibility(monkeypatch, argv, expected) -> None:
-    calls: list[tuple[bool, bool]] = []
+    calls: list[tuple[bool, bool, bool]] = []
     monkeypatch.setattr(
         main,
         "_run_desktop_ui",
-        lambda _logger, *, start_voice=True, show_on_start=True: calls.append(
-            (start_voice, show_on_start)
+        lambda _logger, *, start_voice=True, show_on_start=True, start_hidden=False: calls.append(
+            (start_voice, show_on_start, start_hidden)
         ) or 0,
     )
     monkeypatch.setattr(sys, "argv", argv)

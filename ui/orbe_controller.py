@@ -16,13 +16,15 @@ class _OrbHotkeyBridge(QObject):
 
     activated = Signal()
 
-    def __init__(self, show_orb) -> None:
+    def __init__(self, show_orb, logger) -> None:
         super().__init__()
         self._show_orb = show_orb
+        self._logger = logger
         self.activated.connect(self._show_orb_on_ui_thread)
 
     @Slot()
     def _show_orb_on_ui_thread(self) -> None:
+        self._logger.info("Callback de Ctrl+Espacio en hilo UI")
         self._show_orb()
 
 
@@ -58,7 +60,7 @@ class OrbeController:
         self._chat_threads: set[threading.Thread] = set()
         self._hotkey_factory = hotkey_factory
         self._chat_hotkey = None
-        self._chat_hotkey_bridge = _OrbHotkeyBridge(self.show_orb)
+        self._chat_hotkey_bridge = _OrbHotkeyBridge(self.show_orb, self._logger)
         self._voice_session_bridge = _VoiceSessionBridge()
         self._voice_session_bridge.state_received.connect(self._on_voice_state)
         self._voice_session_bridge.message_received.connect(self._on_voice_message)
@@ -92,14 +94,23 @@ class OrbeController:
     def bridge(self):
         return self._bridge
 
-    def start(self, *, start_voice: bool = True, show_on_start: bool = False) -> None:
+    def start(
+        self,
+        *,
+        start_voice: bool = True,
+        show_on_start: bool = False,
+        start_hidden: bool = False,
+    ) -> None:
         self._transcript_panel.set_hide_on_close(not start_voice)
         if show_on_start:
             self.show_chat()
         else:
-            # Windows autostart hides only the chat panel; the Atlas core remains visible.
             self._transcript_panel.hide()
-            self._orb.show()
+            if start_hidden:
+                self._orb.hide()
+                self._logger.info("Autoarranque oculto: Orbe y chat ocultos")
+            else:
+                self._orb.show()
         if not start_voice:
             self._application.setQuitOnLastWindowClosed(False)
             self._start_chat_hotkey()
@@ -115,6 +126,7 @@ class OrbeController:
         self._orb.show()
         self._orb.raise_()
         self._orb.activateWindow()
+        self._logger.info("Restauracion del Orbe ejecutada; chat permanece oculto")
 
     def _show_chat_without_overlap(self) -> None:
         """Show the existing chat once and resolve only an initial overlap."""
@@ -195,8 +207,18 @@ class OrbeController:
         else:
             self.start_voice()
 
-    def run(self, *, start_voice: bool = True, show_on_start: bool = True) -> int:
-        self.start(start_voice=start_voice, show_on_start=show_on_start)
+    def run(
+        self,
+        *,
+        start_voice: bool = True,
+        show_on_start: bool = True,
+        start_hidden: bool = False,
+    ) -> int:
+        self.start(
+            start_voice=start_voice,
+            show_on_start=show_on_start,
+            start_hidden=start_hidden,
+        )
         try:
             return self._application.exec()
         finally:
@@ -319,11 +341,16 @@ class OrbeController:
         if self._chat_hotkey is None:
             factory = self._hotkey_factory or WindowsGlobalHotkey
             self._chat_hotkey = factory(self._request_orb_visible, logger=self._logger)
-        self._chat_hotkey.start()
+        registered = self._chat_hotkey.start()
+        if registered is True:
+            self._logger.info("Listener global Ctrl+Espacio activo")
+        elif registered is False:
+            self._logger.warning("Listener global Ctrl+Espacio no quedo registrado")
 
     def _stop_chat_hotkey(self) -> None:
         if self._chat_hotkey is not None:
             self._chat_hotkey.stop()
 
     def _request_orb_visible(self) -> None:
+        self._logger.info("Callback de Ctrl+Espacio recibido; solicitando Orbe en hilo UI")
         self._chat_hotkey_bridge.activated.emit()

@@ -24,17 +24,22 @@ class WindowsGlobalHotkey:
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._ready = threading.Event()
+        self._registered = False
 
-    def start(self) -> None:
+    def start(self) -> bool:
         """Start the listener once; a duplicate registration is avoided."""
         if self._thread is not None and self._thread.is_alive():
-            return
+            return self._registered
         self._ready.clear()
+        self._registered = False
         self._thread = threading.Thread(
             target=self._listen, daemon=True, name="atlas-chat-hotkey"
         )
         self._thread.start()
         self._ready.wait(timeout=1.0)
+        if not self._ready.is_set():
+            self._logger.warning("El registro de Ctrl+Espacio no respondio en un segundo.")
+        return self._registered
 
     def stop(self) -> None:
         """Stop the native message loop when the application exits."""
@@ -52,12 +57,19 @@ class WindowsGlobalHotkey:
             self._ready.set()
             return
 
+        self._registered = True
+        self._logger.info("Atajo global Ctrl+Espacio registrado")
         self._ready.set()
         message = wintypes.MSG()
         try:
             while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
                 if message.message == _WM_HOTKEY:
-                    self._callback()
+                    self._logger.info("Ctrl+Espacio recibido; ejecutando callback")
+                    try:
+                        self._callback()
+                    except Exception:
+                        self._logger.exception("Fallo al ejecutar el callback de Ctrl+Espacio")
         finally:
             user32.UnregisterHotKey(None, _HOTKEY_ID)
+            self._registered = False
             self._thread_id = None

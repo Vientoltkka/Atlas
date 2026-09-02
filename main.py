@@ -93,7 +93,7 @@ def main() -> int:
             "Atlas continuara en modo degradado sin log de archivo."
         )
         print()
-    logger.info("Inicio solicitado | modo=%s", mode)
+    logger.info("Inicio solicitado | modo=%s | start_hidden=%s", mode, args.start_hidden)
     atlas = None
 
     try:
@@ -110,7 +110,10 @@ def main() -> int:
 
         if getattr(args, "chat", False):
             return _run_desktop_ui(
-                logger, start_voice=False, show_on_start=False
+                logger,
+                start_voice=False,
+                show_on_start=False,
+                start_hidden=args.start_hidden,
             )
 
         if getattr(args, "ui", False):
@@ -234,6 +237,7 @@ def _run_desktop_ui(
     *,
     start_voice: bool = True,
     show_on_start: bool = True,
+    start_hidden: bool = False,
 ) -> int:
     """Run at most one desktop chat/UI process on Windows."""
     from core.windows_ui_instance import WindowsUiInstance
@@ -242,9 +246,13 @@ def _run_desktop_ui(
     if not instance.acquire():
         logger.info("Se omitio una segunda instancia de la interfaz de Atlas")
         return 0
+    logger.info("Instancia unica de interfaz adquirida")
     try:
         return _run_ui_orb(
-            logger, start_voice=start_voice, show_on_start=show_on_start
+            logger,
+            start_voice=start_voice,
+            show_on_start=show_on_start,
+            start_hidden=start_hidden,
         )
     finally:
         instance.release()
@@ -255,6 +263,7 @@ def _run_ui_orb(
     *,
     start_voice: bool = True,
     show_on_start: bool = True,
+    start_hidden: bool = False,
 ) -> int:
     """Run Orbe through its explicit Qt-safe controller."""
     from ui.orbe_controller import OrbeController
@@ -267,7 +276,11 @@ def _run_ui_orb(
         transcript_panel=create_transcript_panel(),
         logger=logger,
     )
-    exit_code = controller.run(start_voice=start_voice, show_on_start=show_on_start)
+    exit_code = controller.run(
+        start_voice=start_voice,
+        show_on_start=show_on_start,
+        start_hidden=start_hidden,
+    )
     logger.info("Sesion del Orbe finalizada")
     return exit_code
 
