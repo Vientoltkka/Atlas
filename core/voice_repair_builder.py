@@ -54,8 +54,11 @@ class VoiceCodeRepairBuilder:
         self._root = project_root.resolve()
         self._before_latency_ms: float | None = None
 
+    def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
+        return diagnosis.scope == (_VOICE_SOURCE, _VOICE_TEST)
+
     def build(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> RepairProposal | None:
-        if diagnosis.scope != (_VOICE_SOURCE, _VOICE_TEST):
+        if not self.can_handle(diagnosis, _prompt):
             return None
         source_path, test_path = self._root / _VOICE_SOURCE, self._root / _VOICE_TEST
         try:

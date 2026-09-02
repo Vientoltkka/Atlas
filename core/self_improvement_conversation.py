@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import Protocol, runtime_checkable
 import unicodedata
 
 from core.supervised_repair import (
@@ -42,6 +43,50 @@ ProposalBuilder = Callable[[ImprovementDiagnosis, str], RepairProposal | None]
 ValidatorFactory = Callable[[RepairProposal], Callable[[RepairProposal], RepairValidation]]
 
 
+@runtime_checkable
+class SupervisedRepairBuilder(Protocol):
+    """Contract every supervised repair domain must satisfy.
+
+    A builder owns one bounded domain: it decides whether it can handle a
+    diagnosis, produces one exact reviewed proposal and provides the trusted
+    validator. It cannot bypass workflow scope, authorization, validation,
+    acceptance or rollback controls.
+    """
+
+    def can_handle(self, diagnosis: ImprovementDiagnosis, prompt: str) -> bool: ...
+
+    def build(self, diagnosis: ImprovementDiagnosis, prompt: str) -> RepairProposal | None: ...
+
+    def validator(self, proposal: RepairProposal) -> RepairValidation: ...
+
+
+class SupervisedRepairBuilderRegistry:
+    """Small, explicit first-match registry. No dynamic discovery."""
+
+    def __init__(self, builders: Sequence[SupervisedRepairBuilder]) -> None:
+        self._builders = tuple(builders)
+
+    def builder_for(self, diagnosis: ImprovementDiagnosis, prompt: str) -> SupervisedRepairBuilder | None:
+        return next((builder for builder in self._builders if builder.can_handle(diagnosis, prompt)), None)
+
+
+class _CallableRepairBuilder:
+    """Adapter preserving the injected proposal_builder/validator_factory path."""
+
+    def __init__(self, proposal_builder: ProposalBuilder, validator_factory: ValidatorFactory | None) -> None:
+        self._build, self._validator_factory = proposal_builder, validator_factory
+
+    def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
+        return diagnosis.classification is ImprovementClassification.CODE_REPAIR
+
+    def build(self, diagnosis: ImprovementDiagnosis, prompt: str) -> RepairProposal | None:
+        return self._build(diagnosis, prompt)
+
+    def validator(self, proposal: RepairProposal) -> RepairValidation:
+        factory = self._validator_factory or (lambda _proposal: _unavailable_validator)
+        return factory(proposal)(proposal)
+
+
 class SelfImprovementConversation:
     """Keeps a single active repair proposal in the normal conversation session."""
 
@@ -49,19 +94,24 @@ class SelfImprovementConversation:
         self,
         project_root: Path,
         *,
+        builders: Sequence[SupervisedRepairBuilder] | None = None,
         proposal_builder: ProposalBuilder | None = None,
         validator_factory: ValidatorFactory | None = None,
     ) -> None:
         self._root = project_root
-        if proposal_builder is None:
-            # The only built-in repair is a deterministic voice patch, not model output.
+        if builders is not None:
+            registry = SupervisedRepairBuilderRegistry(builders)
+        elif proposal_builder is not None:
+            registry = SupervisedRepairBuilderRegistry((_CallableRepairBuilder(proposal_builder, validator_factory),))
+        else:
+            # Built-in deterministic repairs only; no model output and no discovery.
             from core.voice_repair_builder import VoiceCodeRepairBuilder
+            from core.routing_repair_builder import RoutingRepairBuilder
 
-            voice_repair = VoiceCodeRepairBuilder(project_root)
-            proposal_builder = voice_repair.build
-            validator_factory = lambda _proposal: voice_repair.validator
-        self._proposal_builder = proposal_builder
-        self._validator_factory = validator_factory or (lambda _proposal: _unavailable_validator)
+            registry = SupervisedRepairBuilderRegistry(
+                (VoiceCodeRepairBuilder(project_root), RoutingRepairBuilder(project_root))
+            )
+        self._builders = registry
         self._workflow: SupervisedRepairWorkflow | None = None
         self._diagnosis: ImprovementDiagnosis | None = None
 
@@ -86,7 +136,8 @@ class SelfImprovementConversation:
             return self._present_stop(diagnosis)
         if diagnosis.classification is not ImprovementClassification.CODE_REPAIR:
             return self._present_stop(diagnosis)
-        proposal = self._proposal_builder(diagnosis, prompt) if self._proposal_builder else None
+        builder = self._builders.builder_for(diagnosis, prompt)
+        proposal = builder.build(diagnosis, prompt) if builder is not None else None
         if proposal is None:
             return self._present_stop(
                 ImprovementDiagnosis(
@@ -99,7 +150,7 @@ class SelfImprovementConversation:
                     "El diagnóstico está acotado, pero aún no hay un cambio exacto y revisable que sea seguro aplicar.",
                 )
             )
-        workflow = SupervisedRepairWorkflow(self._root, validator=self._validator_factory(proposal))
+        workflow = SupervisedRepairWorkflow(self._root, validator=builder.validator if builder is not None else _unavailable_validator)
         workflow.propose(proposal)
         self._workflow, self._diagnosis = workflow, diagnosis
         return self._present_proposal(diagnosis, proposal)
@@ -140,6 +191,16 @@ class SelfImprovementConversation:
                 ("éxito de la operación solicitada",),
                 "Puede afectar acciones locales; se mantiene la confirmación existente.",
                 "El alcance se limita a Control PC y sus pruebas.",
+            )
+        if any(term in text for term in ("routing", "router", "rutas")):
+            return ImprovementDiagnosis(
+                ImprovementClassification.CODE_REPAIR,
+                "Evitar que el enrutado de tareas dependa de mayúsculas accidentales.",
+                ("core/router.py", "tests/test_router.py"),
+                ("tests/test_router.py",),
+                ("rutas de tarea sensibles a mayusculas correctas",),
+                "Puede afectar qué agente ejecuta cada plan; alcance limitado al router y sus pruebas.",
+                "Un nombre de tarea con mayúsculas cae al agente chat en lugar del agente correcto.",
             )
         if "capacidad" in text or "puedas" in text:
             return ImprovementDiagnosis(ImprovementClassification.CAPABILITY_GAP, prompt, (), (), (), "La capacidad concreta no está suficientemente definida.", "Indica qué entrada, salida y entorno necesita la nueva capacidad.")
