@@ -90,6 +90,11 @@ class SupervisedRepairWorkflow:
     def state(self) -> RepairState | None:
         return self._state
 
+    @property
+    def proposal(self) -> RepairProposal | None:
+        """Return the active immutable proposal for conversational presentation."""
+        return self._proposal
+
     @staticmethod
     def classify(prompt: str, *, reusable: bool = False) -> ImprovementClassification:
         text = " ".join(prompt.casefold().split()) if isinstance(prompt, str) else ""

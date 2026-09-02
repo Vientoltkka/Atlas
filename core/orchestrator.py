@@ -97,6 +97,7 @@ from core.supervised_capability_gap import (
     SkillCreationResponse,
     SupervisedCapabilityGapDetector,
 )
+from core.self_improvement_conversation import SelfImprovementConversation
 
 from memory.conversation import ConversationMemory
 from use_cases.correction_interaction import CorrectionInteractionUseCase
@@ -161,6 +162,7 @@ class AtlasOrchestrator:
         web_search_tool: WebSearchTool | None = None,
         skill_system: SkillSystem | None = None,
         capability_gap_detector: SupervisedCapabilityGapDetector | None = None,
+        self_improvement_conversation: SelfImprovementConversation | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -239,6 +241,7 @@ class AtlasOrchestrator:
             self._print_atlas
         )
         self._project_root = project_root or Path(".")
+        self._self_improvement_conversation = self_improvement_conversation or SelfImprovementConversation(self._project_root)
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
 
     @property
@@ -506,6 +509,9 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        self_improvement_response = self._self_improvement_conversation.handle(prompt)
+        if self_improvement_response is not None:
+            return self_improvement_response
         if (
             self._execution_conversation is not None
             and getattr(
