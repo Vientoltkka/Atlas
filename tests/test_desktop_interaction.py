@@ -1535,3 +1535,29 @@ def test_orchestrator_opens_registered_desktop_folder_with_atlas_prefix() -> Non
 
     assert orchestrator.process_prompt(r"Atlas, abre C:\AI\Atlas", confirm=lambda _: "") == r"✓ Abriendo C:\AI\Atlas."
     assert executor.calls[0][0] == "desktop.open_folder"
+
+
+
+def test_desktop_interaction_opens_file_with_application_alias(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+    file = tmp_path / "notas.txt"
+    file.write_text("demo", encoding="utf-8")
+
+    result = use_case.execute(f"abre {file} con el bloc de notas")
+
+    assert result == f"\u2713 Abriendo {file} con notepad."
+    assert executor.calls[0][0] == "desktop.open_file"
+    assert executor.calls[0][1].parameters == {"path": str(file), "application": "notepad"}
+
+
+def test_desktop_interaction_without_application_keeps_previous_behavior(tmp_path: Path) -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor, project_root=tmp_path)
+    file = tmp_path / "notas.txt"
+    file.write_text("demo", encoding="utf-8")
+
+    use_case.execute(f"abre {file}")
+
+    assert executor.calls[0][0] == "desktop.open_file"
+    assert executor.calls[0][1].parameters == {"path": str(file)}

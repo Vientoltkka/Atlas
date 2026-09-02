@@ -914,6 +914,7 @@ class DesktopInteractionUseCase:
         """Open an application, folder, or file."""
         expected_kind = self._open_target_kind(target)
         target = self._clean_open_target(target)
+        target, application = self._open_file_application(target)
         target = self._resolve_application_alias(target)
 
         if not target:
@@ -933,6 +934,12 @@ class DesktopInteractionUseCase:
         if path.exists() and path.is_file():
             if expected_kind == "folder":
                 return "La ruta es un archivo, no una carpeta."
+            if application is not None:
+                return self._run(
+                    "desktop.open_file",
+                    {"path": str(path), "application": application},
+                    f"Abriendo {path} con {application}.",
+                )
             return self._run(
                 "desktop.open_file",
                 {"path": str(path)},
@@ -1183,6 +1190,21 @@ class DesktopInteractionUseCase:
             "el bloc de notas": "notepad",
         }
         return aliases.get(self._normalize(target), target)
+
+    def _open_file_application(
+        self,
+        target: str,
+    ) -> tuple[str, str | None]:
+        """Split one explicit "con/with <aplicacion>" suffix using known aliases only."""
+        stripped = target.strip()
+        match = re.search(r"\s+(?:con|with)\s+(.+)$", stripped, re.IGNORECASE)
+        if match is None:
+            return target, None
+        requested = match.group(1).strip()
+        application = self._resolve_application_alias(requested)
+        if self._normalize(application) == self._normalize(requested):
+            return target, None
+        return stripped[: match.start()].strip(), application
 
     def _run(
         self,
