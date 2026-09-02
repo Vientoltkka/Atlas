@@ -60,7 +60,6 @@ class WebSearchTool(BaseTool):
     def description(self) -> str:
         return "Busca resultados actuales en la web y devuelve título, URL, snippet y dominio."
 
-    @property
     def semantic_metadata(self) -> dict[str, object]:
         return {
             "category": "web", "capabilities": ("web_search", "research"), "supported_intents": ("web.search",),
