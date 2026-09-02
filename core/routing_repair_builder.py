@@ -6,12 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core.self_improvement_conversation import ImprovementDiagnosis
+from core.self_improvement_conversation import ImprovementClassification, ImprovementDiagnosis, normalize_prompt
 from core.supervised_repair import RepairProposal, RepairValidation
 
 
 _ROUTER_SOURCE = "core/router.py"
 _ROUTER_TEST = "tests/test_router.py"
+_ROUTER_TERMS = ("routing", "router", "rutas")
 _SOURCE_OLD = '        return self._TASK_ROUTES.get(plan.task, "chat")\n'
 _SOURCE_NEW = '        return self._TASK_ROUTES.get(plan.task.casefold(), "chat")\n'
 _TEST_HEADER = '"""Focused tests for the task router."""\n\nfrom core.planner import Plan\nfrom core.router import Router\n'
@@ -38,6 +39,20 @@ class RoutingRepairBuilder:
     def __init__(self, project_root: Path) -> None:
         self._root = project_root.resolve()
         self._before_matches: int | None = None
+
+    def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
+        text = normalize_prompt(prompt)
+        if not any(term in text for term in _ROUTER_TERMS):
+            return None
+        return ImprovementDiagnosis(
+            ImprovementClassification.CODE_REPAIR,
+            "Evitar que el enrutado de tareas dependa de mayúsculas accidentales.",
+            (_ROUTER_SOURCE, _ROUTER_TEST),
+            (_ROUTER_TEST,),
+            ("rutas de tarea sensibles a mayusculas correctas",),
+            "Puede afectar qué agente ejecuta cada plan; alcance limitado al router y sus pruebas.",
+            "Un nombre de tarea con mayúsculas cae al agente chat en lugar del agente correcto.",
+        )
 
     def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
         return diagnosis.scope == (_ROUTER_SOURCE, _ROUTER_TEST)

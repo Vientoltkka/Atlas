@@ -29,6 +29,9 @@ class _Models:
         return "test"
 
 
+_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _conversation(root: Path, *, passed: bool = True) -> SelfImprovementConversation:
     def build(diagnosis: ImprovementDiagnosis, _prompt: str) -> RepairProposal | None:
         if diagnosis.classification is not ImprovementClassification.CODE_REPAIR:
@@ -89,17 +92,17 @@ def test_detects_only_atlas_self_improvement_intent(prompt: str, expected: bool)
     ],
 )
 def test_classifies_self_improvement_requests(prompt: str, expected: ImprovementClassification) -> None:
-    assert SelfImprovementConversation.diagnose(prompt).classification is expected
+    assert SelfImprovementConversation(_ROOT).diagnose(prompt).classification is expected
 
 
 def test_voice_diagnosis_is_limited_to_voice_scope() -> None:
-    diagnosis = SelfImprovementConversation.diagnose("Atlas, corrige los fallos de la voz")
+    diagnosis = SelfImprovementConversation(_ROOT).diagnose("Atlas, corrige los fallos de la voz")
     assert diagnosis.scope == ("use_cases/voice_conversation.py", "tests/test_voice_conversation.py")
 
 
 def test_real_voice_builder_prepares_only_the_reviewed_voice_repair() -> None:
-    root = Path(__file__).resolve().parents[1]
-    diagnosis = SelfImprovementConversation.diagnose("Atlas, corrige los fallos de la voz sin romper las funciones actuales")
+    root = _ROOT
+    diagnosis = SelfImprovementConversation(root).diagnose("Atlas, corrige los fallos de la voz sin romper las funciones actuales")
     proposal = VoiceCodeRepairBuilder(root).build(diagnosis, "Atlas, corrige los fallos de la voz sin romper las funciones actuales")
 
     assert proposal is not None

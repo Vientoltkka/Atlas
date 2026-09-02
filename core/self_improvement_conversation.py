@@ -47,11 +47,16 @@ ValidatorFactory = Callable[[RepairProposal], Callable[[RepairProposal], RepairV
 class SupervisedRepairBuilder(Protocol):
     """Contract every supervised repair domain must satisfy.
 
-    A builder owns one bounded domain: it decides whether it can handle a
-    diagnosis, produces one exact reviewed proposal and provides the trusted
-    validator. It cannot bypass workflow scope, authorization, validation,
-    acceptance or rollback controls.
+    A builder owns one bounded domain: it recognizes the prompts it
+    understands (diagnose), decides whether it can handle a diagnosis,
+    produces one exact reviewed proposal and provides the trusted validator.
+    It cannot bypass workflow scope, authorization, validation, acceptance or
+    rollback controls.
     """
+
+    def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
+        """Return this builder's own domain diagnosis, or None if unrecognized."""
+        ...
 
     def can_handle(self, diagnosis: ImprovementDiagnosis, prompt: str) -> bool: ...
 
@@ -60,11 +65,27 @@ class SupervisedRepairBuilder(Protocol):
     def validator(self, proposal: RepairProposal) -> RepairValidation: ...
 
 
+@dataclass(frozen=True, slots=True)
+class BuilderDiagnosis:
+    """One builder's compatible diagnosis, in explicit registry order."""
+
+    builder: SupervisedRepairBuilder
+    diagnosis: ImprovementDiagnosis
+
+
 class SupervisedRepairBuilderRegistry:
     """Small, explicit first-match registry. No dynamic discovery."""
 
     def __init__(self, builders: Sequence[SupervisedRepairBuilder]) -> None:
         self._builders = tuple(builders)
+
+    def diagnose(self, prompt: str) -> tuple[BuilderDiagnosis, ...]:
+        """All compatible builder diagnoses, deterministic in declared order."""
+        return tuple(
+            BuilderDiagnosis(builder, diagnosis)
+            for builder in self._builders
+            if (diagnosis := builder.diagnose(prompt)) is not None
+        )
 
     def builder_for(self, diagnosis: ImprovementDiagnosis, prompt: str) -> SupervisedRepairBuilder | None:
         return next((builder for builder in self._builders if builder.can_handle(diagnosis, prompt)), None)
@@ -75,6 +96,9 @@ class _CallableRepairBuilder:
 
     def __init__(self, proposal_builder: ProposalBuilder, validator_factory: ValidatorFactory | None) -> None:
         self._build, self._validator_factory = proposal_builder, validator_factory
+
+    def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
+        return _legacy_domain_diagnosis(prompt)
 
     def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
         return diagnosis.classification is ImprovementClassification.CODE_REPAIR
@@ -163,8 +187,8 @@ class SelfImprovementConversation:
         # A normal editing request has neither Atlas nor one of its own surfaces.
         return any(term in text for term in ("atlas", "voz", "voice", "control pc", "desktop", "puedas", "capacidad"))
 
-    @staticmethod
-    def diagnose(prompt: str) -> ImprovementDiagnosis:
+    def diagnose(self, prompt: str) -> ImprovementDiagnosis:
+        """Classify a prompt without domain knowledge; builders own their domains."""
         text = _normal(prompt)
         if any(term in text for term in ("proveedor", "infraestructura", "integracion externa", "api externa")):
             return ImprovementDiagnosis(ImprovementClassification.CAPABILITY_GAP, prompt, (), (), (), "Requiere infraestructura o un proveedor externo no autorizado.", "La capacidad solicitada no puede resolverse sólo con cambios locales.")
@@ -172,39 +196,15 @@ class SelfImprovementConversation:
             return ImprovementDiagnosis(ImprovementClassification.SKILL_GAP, prompt, (), (), (), "Puede duplicar una Skill existente.", "Hay que comprobar Skills registradas antes de proponer una nueva.")
         if "usa" in text and "existente" in text:
             return ImprovementDiagnosis(ImprovementClassification.REUSE, prompt, (), (), (), "Una duplicación puede romper rutas ya registradas.", "La petición indica reutilizar una capacidad existente.")
-        if any(term in text for term in ("voz", "voice")):
-            return ImprovementDiagnosis(
-                ImprovementClassification.CODE_REPAIR,
-                "Evitar que un timeout de modelo bloquee indefinidamente el siguiente turno de voz.",
-                ("use_cases/voice_conversation.py", "tests/test_voice_conversation.py"),
-                ("tests/test_voice_conversation.py",),
-                ("latencia de espera post-timeout del modelo",),
-                "Puede afectar la interacción de voz; no se tocarán proveedores, secretos ni dependencias.",
-                "Un worker de modelo expirado puede dejar la siguiente interacción esperando sin límite si ignora la cancelación.",
-            )
-        if any(term in text for term in ("control pc", "desktop")):
-            return ImprovementDiagnosis(
-                ImprovementClassification.CODE_REPAIR,
-                "Mejorar Control PC dentro del comportamiento solicitado.",
-                ("use_cases/desktop_interaction.py", "tests/test_desktop_interaction.py"),
-                ("tests/test_desktop_interaction.py",),
-                ("éxito de la operación solicitada",),
-                "Puede afectar acciones locales; se mantiene la confirmación existente.",
-                "El alcance se limita a Control PC y sus pruebas.",
-            )
-        if any(term in text for term in ("routing", "router", "rutas")):
-            return ImprovementDiagnosis(
-                ImprovementClassification.CODE_REPAIR,
-                "Evitar que el enrutado de tareas dependa de mayúsculas accidentales.",
-                ("core/router.py", "tests/test_router.py"),
-                ("tests/test_router.py",),
-                ("rutas de tarea sensibles a mayusculas correctas",),
-                "Puede afectar qué agente ejecuta cada plan; alcance limitado al router y sus pruebas.",
-                "Un nombre de tarea con mayúsculas cae al agente chat en lugar del agente correcto.",
-            )
+        matches = self._builders.diagnose(prompt)
+        if len(matches) > 1:
+            # Never pick between compatible builders silently.
+            return _clarification_required(prompt)
+        if len(matches) == 1:
+            return matches[0].diagnosis
         if "capacidad" in text or "puedas" in text:
             return ImprovementDiagnosis(ImprovementClassification.CAPABILITY_GAP, prompt, (), (), (), "La capacidad concreta no está suficientemente definida.", "Indica qué entrada, salida y entorno necesita la nueva capacidad.")
-        return ImprovementDiagnosis(ImprovementClassification.CLARIFICATION_REQUIRED, prompt, (), (), (), "El alcance no es verificable.", "Indica la capacidad propia de Atlas que quieres mejorar.")
+        return _clarification_required(prompt)
 
     def _handle_pending(self, prompt: str) -> str | None:
         workflow = self._workflow
@@ -270,6 +270,51 @@ class SelfImprovementConversation:
 def _normal(value: str) -> str:
     decomposed = unicodedata.normalize("NFD", value)
     return "".join(char for char in decomposed if unicodedata.category(char) != "Mn").casefold().strip()
+
+
+def normalize_prompt(value: str) -> str:
+    """Accent-insensitive, case-folded prompt text shared with domain builders."""
+    return _normal(value)
+
+
+def _clarification_required(prompt: str) -> ImprovementDiagnosis:
+    return ImprovementDiagnosis(ImprovementClassification.CLARIFICATION_REQUIRED, prompt, (), (), (), "El alcance no es verificable.", "Indica la capacidad propia de Atlas que quieres mejorar.")
+
+
+def _legacy_domain_diagnosis(prompt: str) -> ImprovementDiagnosis | None:
+    """Legacy static domain recognition kept only for the proposal_builder path."""
+    text = _normal(prompt)
+    if any(term in text for term in ("voz", "voice")):
+        return ImprovementDiagnosis(
+            ImprovementClassification.CODE_REPAIR,
+            "Evitar que un timeout de modelo bloquee indefinidamente el siguiente turno de voz.",
+            ("use_cases/voice_conversation.py", "tests/test_voice_conversation.py"),
+            ("tests/test_voice_conversation.py",),
+            ("latencia de espera post-timeout del modelo",),
+            "Puede afectar la interacción de voz; no se tocarán proveedores, secretos ni dependencias.",
+            "Un worker de modelo expirado puede dejar la siguiente interacción esperando sin límite si ignora la cancelación.",
+        )
+    if any(term in text for term in ("control pc", "desktop")):
+        return ImprovementDiagnosis(
+            ImprovementClassification.CODE_REPAIR,
+            "Mejorar Control PC dentro del comportamiento solicitado.",
+            ("use_cases/desktop_interaction.py", "tests/test_desktop_interaction.py"),
+            ("tests/test_desktop_interaction.py",),
+            ("éxito de la operación solicitada",),
+            "Puede afectar acciones locales; se mantiene la confirmación existente.",
+            "El alcance se limita a Control PC y sus pruebas.",
+        )
+    if any(term in text for term in ("routing", "router", "rutas")):
+        return ImprovementDiagnosis(
+            ImprovementClassification.CODE_REPAIR,
+            "Evitar que el enrutado de tareas dependa de mayúsculas accidentales.",
+            ("core/router.py", "tests/test_router.py"),
+            ("tests/test_router.py",),
+            ("rutas de tarea sensibles a mayusculas correctas",),
+            "Puede afectar qué agente ejecuta cada plan; alcance limitado al router y sus pruebas.",
+            "Un nombre de tarea con mayúsculas cae al agente chat en lugar del agente correcto.",
+        )
+    return None
 
 
 def _unavailable_validator(_proposal: RepairProposal) -> RepairValidation:

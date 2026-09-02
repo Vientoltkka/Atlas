@@ -6,12 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core.self_improvement_conversation import ImprovementDiagnosis
+from core.self_improvement_conversation import ImprovementClassification, ImprovementDiagnosis, normalize_prompt
 from core.supervised_repair import RepairProposal, RepairValidation
 
 
 _VOICE_SOURCE = "use_cases/voice_conversation.py"
 _VOICE_TEST = "tests/test_voice_conversation.py"
+_VOICE_TERMS = ("voz", "voice")
 _WAIT_SECONDS = 0.25
 _MEASURE_SECONDS = 0.40
 _SOURCE_OLD = "    _TTS_WORKER_JOIN_TIMEOUT_SECONDS = 0.25\n"
@@ -53,6 +54,20 @@ class VoiceCodeRepairBuilder:
     def __init__(self, project_root: Path) -> None:
         self._root = project_root.resolve()
         self._before_latency_ms: float | None = None
+
+    def diagnose(self, prompt: str) -> ImprovementDiagnosis | None:
+        text = normalize_prompt(prompt)
+        if not any(term in text for term in _VOICE_TERMS):
+            return None
+        return ImprovementDiagnosis(
+            ImprovementClassification.CODE_REPAIR,
+            "Evitar que un timeout de modelo bloquee indefinidamente el siguiente turno de voz.",
+            (_VOICE_SOURCE, _VOICE_TEST),
+            (_VOICE_TEST,),
+            ("latencia de espera post-timeout del modelo",),
+            "Puede afectar la interacción de voz; no se tocarán proveedores, secretos ni dependencias.",
+            "Un worker de modelo expirado puede dejar la siguiente interacción esperando sin límite si ignora la cancelación.",
+        )
 
     def can_handle(self, diagnosis: ImprovementDiagnosis, _prompt: str) -> bool:
         return diagnosis.scope == (_VOICE_SOURCE, _VOICE_TEST)
