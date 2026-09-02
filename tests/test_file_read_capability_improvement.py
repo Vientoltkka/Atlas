@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -184,3 +185,118 @@ def test_real_builder_prepares_the_bounded_read_proposal_without_writes() -> Non
         ImprovementDiagnosis(ImprovementClassification.CODE_REPAIR, "x", _SCOPE, (), (), "x", "x"),
         "x",
     )
+
+
+def test_real_diagnosis_reports_the_observed_gap_from_the_actual_code() -> None:
+    diagnosis = FileReadCapabilityImprovementBuilder(_ROOT).diagnose(_PROMPT)
+
+    assert "Inspeccion real" in diagnosis.finding
+    assert "FileService.read(path)" in diagnosis.finding
+    assert "1 parametro(s)" in diagnosis.finding
+
+
+def test_real_proposal_is_derived_from_the_current_source_not_from_a_constant() -> None:
+    proposal = FileReadCapabilityImprovementBuilder(_ROOT).build(
+        FileReadCapabilityImprovementBuilder(_ROOT).diagnose(_PROMPT), _PROMPT
+    )
+
+    assert proposal is not None
+    assert "content = FileService.read(path)" in proposal.files["tools/filesystem/read_file_tool.py"]
+    assert 'ToolParameterSchema("path", str, required=True),' in proposal.files["bootstrap/bootstrap.py"]
+    assert "class ReadFileTool" in proposal.files["tools/filesystem/read_file_tool.py"].split("content =")[0]
+
+
+_BOOTSTRAP_FIXTURE = (
+    "from tools.filesystem.read_file_tool import ReadFileTool\n"
+    "from tools.tool_schema import ToolArgumentsSchema, ToolParameterSchema\n"
+    "\n"
+    "tool_registry.register(\n"
+    "    ReadFileTool(),\n"
+    "    arguments_schema=ToolArgumentsSchema(\n"
+    "        parameters=(\n"
+    '            ToolParameterSchema("path", str, required=True),\n'
+    "        ),\n"
+    "    ),\n"
+    ")\n"
+)
+
+
+def _fixture_root(tmp_path: Path, *, tool_source: str | None = None, bootstrap_source: str = _BOOTSTRAP_FIXTURE) -> Path:
+    root = tmp_path / "project"
+    (root / "tools" / "filesystem").mkdir(parents=True)
+    (root / "bootstrap").mkdir()
+    shutil.copyfile(_ROOT / "tools" / "filesystem" / "read_file_tool.py", root / "tools" / "filesystem" / "read_file_tool.py")
+    if tool_source is not None:
+        (root / "tools" / "filesystem" / "read_file_tool.py").write_text(tool_source, encoding="utf-8")
+    (root / "bootstrap" / "bootstrap.py").write_text(bootstrap_source, encoding="utf-8")
+    return root
+
+
+def test_proposal_adapts_when_the_inspected_state_changes(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    tool_path = root / "tools" / "filesystem" / "read_file_tool.py"
+    tool_path.write_text(tool_path.read_text(encoding="utf-8").replace("FileService.read(path)", "FileService.read(str(path))"), encoding="utf-8")
+    snapshots = {path: path.read_text(encoding="utf-8") for path in (tool_path, root / "bootstrap" / "bootstrap.py")}
+
+    builder = FileReadCapabilityImprovementBuilder(root)
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    tool_content = proposal.files["tools/filesystem/read_file_tool.py"]
+    assert "content = FileService.read(str(path))" in tool_content
+    assert "content = FileService.read(path)" not in tool_content
+    for path, snapshot in snapshots.items():
+        assert path.read_text(encoding="utf-8") == snapshot
+
+
+def test_unexpected_states_yield_no_safe_proposal(tmp_path: Path) -> None:
+    implemented = (_ROOT / "tools" / "filesystem" / "read_file_tool.py").read_text(encoding="utf-8")
+    with_limit = implemented.replace(
+        "        return FileService.read(path)",
+        "        content = FileService.read(path)\n"
+        "        limit = context.parameters.get(\"limit\")\n"
+        "        if limit is not None:\n"
+        "            return \"\\n\".join(content.splitlines()[:limit])\n"
+        "        return content",
+    )
+    without_return = implemented.replace("        return FileService.read(path)", "        content = FileService.read(path)\n        return content")
+    without_path_parameter = _BOOTSTRAP_FIXTURE.replace('ToolParameterSchema("path", str, required=True),', 'ToolParameterSchema("other", str, required=True),')
+
+    for kwargs in ({"tool_source": with_limit}, {"tool_source": without_return}, {"bootstrap_source": without_path_parameter}):
+        root = _fixture_root(tmp_path / f"case{len(list(tmp_path.iterdir()))}", **kwargs)
+        builder = FileReadCapabilityImprovementBuilder(root)
+
+        diagnosis = builder.diagnose(_PROMPT)
+        assert diagnosis is not None
+        assert "no hay un gap reproducible" in diagnosis.finding or "no es reconocible" in diagnosis.finding
+        assert builder.build(diagnosis, _PROMPT) is None
+
+
+def _project_snapshot(root: Path) -> list[tuple[str, bytes]]:
+    return sorted(
+        (str(path.relative_to(root)), path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+
+
+def test_diagnosis_and_build_never_write_any_file(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    before = _project_snapshot(root)
+
+    builder = FileReadCapabilityImprovementBuilder(root)
+    diagnosis = builder.diagnose(_PROMPT)
+    proposal = builder.build(diagnosis, _PROMPT)
+
+    assert proposal is not None
+    assert _project_snapshot(root) == before
+
+
+def test_proposed_scope_never_exceeds_the_declared_maximum(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    builder = FileReadCapabilityImprovementBuilder(root)
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    assert set(proposal.files) <= set(_SCOPE)
+    assert all(path.endswith(".py") for path in proposal.files)
