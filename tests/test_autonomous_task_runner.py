@@ -16,7 +16,9 @@ from core.autonomous_task_runner import (
     AutonomousTaskRunner,
     MAX_AUTONOMOUS_ITERATIONS,
     ModelPlanner,
+    REPLACE_TEXT_OPERATION,
     TaskGoalVerifier,
+    WORKER_SYSTEM_PROMPT,
     _history_prompt_lines,
 )
 from core.git_checkpoint import GitCheckpointManager
@@ -678,3 +680,221 @@ def test_model_planner_prompt_marks_timeout(tmp_path: Path) -> None:
 
     assert result.status is AutonomousRunnerStatus.SUCCESS
     assert "timed_out: True" in provider.prompts[1]
+
+# ---------------------------------------------------------------------------
+# Cambios acotados: replace_text
+# ---------------------------------------------------------------------------
+
+
+def _replace_plan(path: str, old_text: str, new_text: str) -> AutonomousPlan:
+    return AutonomousPlan(
+        reasoning="cambio mínimo",
+        changes=(
+            AutonomousFileChange(
+                path,
+                operation=REPLACE_TEXT_OPERATION,
+                old_text=old_text,
+                new_text=new_text,
+            ),
+        ),
+    )
+
+
+# A. replace_text correcto modifica solo el fragmento esperado
+
+
+def test_replace_text_changes_only_expected_fragment(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text(
+        "VALUE = 1\nOTHER = 9\n", encoding="utf-8"
+    )
+    planner = ScriptedPlanner([_replace_plan("pkg/module.py", "VALUE = 1", "VALUE = 2")])
+    tests = FakeTestRunner([True])
+
+    result = _runner(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    assert (
+        tmp_path / "pkg" / "module.py"
+    ).read_text(encoding="utf-8") == "VALUE = 2\nOTHER = 9\n"
+
+
+# B. old_text inexistente → fallo del cambio sin corrupción
+
+
+def test_replace_text_missing_old_text_fails_without_corruption(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    planner = ScriptedPlanner([_replace_plan("pkg/module.py", "NO_EXISTE", "x")])
+    tests = FakeTestRunner([True])
+
+    result = _runner(tmp_path, planner, tests, max_iterations=1).run()
+
+    assert result.status is AutonomousRunnerStatus.BLOCKED
+    assert result.reason == "max_iterations_reached"
+    assert result.iterations[0].restored is True
+    assert (
+        tmp_path / "pkg" / "module.py"
+    ).read_text(encoding="utf-8") == "original\n"
+
+
+# C. old_text ambiguo → fallo sin escribir
+
+
+def test_replace_text_ambiguous_old_text_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text(
+        "VALUE = 1\nVALUE = 1\n", encoding="utf-8"
+    )
+    planner = ScriptedPlanner([_replace_plan("pkg/module.py", "VALUE = 1", "VALUE = 2")])
+    tests = FakeTestRunner([True])
+
+    result = _runner(tmp_path, planner, tests, max_iterations=1).run()
+
+    assert result.status is AutonomousRunnerStatus.BLOCKED
+    assert result.reason == "max_iterations_reached"
+    assert result.iterations[0].restored is True
+    assert (
+        tmp_path / "pkg" / "module.py"
+    ).read_text(encoding="utf-8") == "VALUE = 1\nVALUE = 1\n"
+
+
+# D. replace_text fuera de allowed_paths → BLOCKED antes de escribir
+
+
+def test_replace_text_out_of_scope_path_blocks(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    planner = ScriptedPlanner([_replace_plan("other/module.py", "VALUE = 1", "VALUE = 2")])
+    tests = FakeTestRunner([True])
+
+    result = _runner(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.BLOCKED
+    assert result.reason.startswith("out_of_scope:")
+    assert (
+        tmp_path / "other" / "module.py"
+    ).read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+# E. rollback restaura el archivo tras replace_text con tests fallidos
+
+
+def test_replace_text_rollback_restores_original_file(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    planner = ScriptedPlanner([_replace_plan("pkg/module.py", "original", "broken")])
+    tests = FakeTestRunner([False])
+
+    result = _runner(tmp_path, planner, tests, max_iterations=1).run()
+
+    assert result.status is AutonomousRunnerStatus.BLOCKED
+    assert result.reason == "max_iterations_reached"
+    assert (
+        tmp_path / "pkg" / "module.py"
+    ).read_text(encoding="utf-8") == "original\n"
+    assert "restored" in result.checkpoint_events
+
+
+def test_replace_text_requires_exact_unique_old_text(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        AutonomousFileChange(
+            "pkg/module.py",
+            operation=REPLACE_TEXT_OPERATION,
+            old_text="",
+            new_text="x",
+        )
+    with pytest.raises(ValueError):
+        AutonomousFileChange(
+            "pkg/module.py",
+            operation=REPLACE_TEXT_OPERATION,
+            old_text="a",
+            new_text="",
+        )
+    with pytest.raises(ValueError):
+        AutonomousFileChange(
+            "pkg/module.py",
+            operation="free_edit",
+            old_text="a",
+            new_text="b",
+        )
+
+
+# F. el formato full-file actual sigue funcionando
+
+
+def test_full_file_format_still_works_end_to_end(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "new.py").write_text("old\n", encoding="utf-8")
+    planner = ScriptedPlanner([_plan("pkg/new.py", "complete file\n")])
+    tests = FakeTestRunner([True])
+
+    result = _runner(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    assert (tmp_path / "pkg" / "new.py").read_text(encoding="utf-8") == "complete file\n"
+
+
+def test_model_planner_parses_replace_text_and_legacy_payload() -> None:
+    planner = ModelPlanner(
+        FakeProvider(
+            '{"reasoning": "cambio acotado", "changes": ['
+            '{"op": "replace_text", "path": "pkg/module.py", '
+            '"old_text": "VALUE = 1", "new_text": "VALUE = 2"}]}'
+        ),
+        "glm-5.3-flash",
+    )
+
+    plan = planner("meta", 1, ())
+
+    assert plan.changes == (
+        AutonomousFileChange(
+            "pkg/module.py",
+            operation=REPLACE_TEXT_OPERATION,
+            old_text="VALUE = 1",
+            new_text="VALUE = 2",
+        ),
+    )
+
+
+def test_model_planner_parses_append_text_payload() -> None:
+    planner = ModelPlanner(
+        FakeProvider(
+            '{"reasoning": "anado helper", "changes": ['
+            '{"op": "append_text", "path": "pkg/module.py", "content": "\\n# helper\\n"}]}'
+        ),
+        "glm-5.3-flash",
+    )
+
+    plan = planner("meta", 1, ())
+
+    assert plan.changes[0].operation == "append_text"
+    assert plan.changes[0].content == "\n# helper\n"
+
+
+def test_model_planner_rejects_unknown_operation() -> None:
+    planner = ModelPlanner(
+        FakeProvider(
+            '{"reasoning": "x", "changes": ['
+            '{"op": "free_edit", "path": "pkg/module.py"}]}'
+        ),
+        "glm-5.3-flash",
+    )
+
+    with pytest.raises(ValueError):
+        planner("meta", 1, ())
+
+
+# G. el prompt del planner pide cambios mínimos
+
+
+def test_worker_prompt_requests_minimal_changes() -> None:
+    assert "replace_text" in WORKER_SYSTEM_PROMPT
+    assert "append_text" in WORKER_SYSTEM_PROMPT
+    assert "full_file" in WORKER_SYSTEM_PROMPT
+    assert "NUNCA devuelvas el archivo completo" in WORKER_SYSTEM_PROMPT
+    assert "old_text" in WORKER_SYSTEM_PROMPT
+    assert "ÚNICO" in WORKER_SYSTEM_PROMPT

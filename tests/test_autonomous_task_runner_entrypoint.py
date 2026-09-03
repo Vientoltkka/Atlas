@@ -277,3 +277,33 @@ def test_result_payload_exposes_audit_fields() -> None:
     assert payload["iterations"] == []
     assert payload["checkpoint_events"] == []
     assert payload["last_test_passed"] is None
+
+
+def test_execute_applies_replace_text_change(tmp_path: Path, capsys) -> None:
+    _sandbox(tmp_path)
+    planner = ScriptedPlanner(
+        [
+            AutonomousPlan(
+                reasoning="cambio acotado",
+                changes=(
+                    AutonomousFileChange(
+                        "pkg/mod.py",
+                        operation="replace_text",
+                        old_text="VALUE = 1",
+                        new_text="VALUE = 2",
+                    ),
+                ),
+            )
+        ]
+    )
+    code = _execute(
+        _args(tmp_path, "--max-iterations", "2"),
+        project_root=tmp_path,
+        components=EntrypointComponents(
+            planner=planner, reviewer=None, test_runner=FakeTestRunner([True])
+        ),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == AutonomousRunnerStatus.SUCCESS.value
+    assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "VALUE = 2\n"

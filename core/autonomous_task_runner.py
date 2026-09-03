@@ -59,18 +59,44 @@ class AutonomousRunnerStatus(str, Enum):
     BLOCKED = "BLOCKED"
 
 
+FULL_FILE_OPERATION = "full_file"
+REPLACE_TEXT_OPERATION = "replace_text"
+APPEND_TEXT_OPERATION = "append_text"
+CHANGE_OPERATIONS = (
+    FULL_FILE_OPERATION,
+    REPLACE_TEXT_OPERATION,
+    APPEND_TEXT_OPERATION,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AutonomousFileChange:
-    """One whole-file replacement scoped to the allowed paths."""
+    """One bounded change scoped to the allowed paths.
+
+    ``full_file`` replaces the whole file (legacy format). ``replace_text``
+    swaps one exact, unique fragment; ``append_text`` appends to the file.
+    """
 
     relative_path: str
-    content: str
+    content: str = ""
+    operation: str = FULL_FILE_OPERATION
+    old_text: str = ""
+    new_text: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.relative_path, str) or not self.relative_path.strip():
             raise ValueError("relative_path must be a non-empty string.")
         if not isinstance(self.content, str):
             raise ValueError("content must be text.")
+        if self.operation not in CHANGE_OPERATIONS:
+            raise ValueError("operation must be one of: " + ", ".join(CHANGE_OPERATIONS) + ".")
+        if self.operation == REPLACE_TEXT_OPERATION:
+            if not isinstance(self.old_text, str) or not self.old_text:
+                raise ValueError("replace_text requires a non-empty old_text.")
+            if not isinstance(self.new_text, str) or not self.new_text:
+                raise ValueError("replace_text requires a non-empty new_text.")
+        if self.operation == APPEND_TEXT_OPERATION and not self.content:
+            raise ValueError("append_text requires non-empty content.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +118,16 @@ class AutonomousPlan:
     @property
     def digest(self) -> str:
         payload = json.dumps(
-            [[change.relative_path, change.content] for change in self.changes],
+            [
+                [
+                    change.relative_path,
+                    change.operation,
+                    change.content,
+                    change.old_text,
+                    change.new_text,
+                ]
+                for change in self.changes
+            ],
             ensure_ascii=True,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -451,11 +486,31 @@ class AutonomousTaskRunner:
         failed: list[tuple[str, str]] = []
         for change in plan.changes:
             try:
-                self._checkpoints.write(change.relative_path, change.content)
+                self._apply_change(change)
                 applied.append(change.relative_path)
-            except (TypeError, ValueError, RuntimeError) as error:
+            except (TypeError, ValueError, RuntimeError, OSError, UnicodeError) as error:
                 failed.append((change.relative_path, _first_line(str(error))))
         return AutonomousModificationResult(tuple(applied), tuple(failed))
+
+    def _apply_change(self, change: AutonomousFileChange) -> None:
+        relative = self._validated_relative_path(change.relative_path)
+        if change.operation == REPLACE_TEXT_OPERATION:
+            target = self._root / relative
+            current = target.read_text(encoding="utf-8")
+            occurrences = current.count(change.old_text)
+            if occurrences == 0:
+                raise ValueError("old_text not found in target file.")
+            if occurrences > 1:
+                raise ValueError(
+                    f"old_text is ambiguous ({occurrences} occurrences in target file)."
+                )
+            self._checkpoints.write(relative, current.replace(change.old_text, change.new_text, 1))
+        elif change.operation == APPEND_TEXT_OPERATION:
+            target = self._root / relative
+            current = target.read_text(encoding="utf-8") if target.exists() else ""
+            self._checkpoints.write(relative, current + change.content)
+        else:
+            self._checkpoints.write(relative, change.content)
 
     def _safe_restore(self) -> bool:
         if self._checkpoints.active is None:
@@ -643,12 +698,22 @@ WORKER_SYSTEM_PROMPT = """
 Eres el planificador del runner autónomo de Atlas.
 
 Devuelve EXCLUSIVAMENTE un objeto JSON válido con esta forma exacta:
-{"reasoning": "<análisis breve>", "changes": [{"path": "ruta/relativa.py", "content": "archivo completo"}]}
+{"reasoning": "<análisis breve>", "changes": [<change, change, ...>]}
+
+Cada change puede ser de tres tipos:
+- {"op": "replace_text", "path": "ruta/relativa.py", "old_text": "fragmento exacto actual", "new_text": "fragmento nuevo"}
+- {"op": "append_text", "path": "ruta/relativa.py", "content": "texto a añadir al final"}
+- {"op": "full_file", "path": "ruta/relativa.py", "content": "archivo completo"}
 
 Reglas:
+- Prefiere "replace_text": cambia SOLO el fragmento mínimo necesario.
+- "old_text" debe ser un fragmento literal exacto y ÚNICO del archivo actual.
+- Si basta un fragmento, NUNCA devuelvas el archivo completo: la salida JSON
+  debe ser lo más pequeña posible.
+- Usa "full_file" solo para archivos nuevos o reescrituras imprescindibles.
+- Usa "append_text" solo para añadir contenido al final de un archivo.
 - Solo puedes modificar archivos dentro del alcance permitido indicado.
 - Nunca toques archivos .env, secretos, configuración de seguridad ni supervisor.
-- Cada change debe contener el archivo completo propuesto.
 - Si no necesitas cambios en esta iteración, devuelve "changes": [].
 - No inventes APIs ni dependencias nuevas.
 """
@@ -712,12 +777,7 @@ class ModelPlanner:
         if len(raw_changes) > self._max_changes:
             raise ValueError("planner payload exceeds the safe change limit.")
         changes = tuple(
-            AutonomousFileChange(
-                relative_path=_payload_text(entry, "path"),
-                content=_payload_text(entry, "content"),
-            )
-            for entry in raw_changes
-            if isinstance(entry, dict)
+            _plan_change_from_payload(entry) for entry in raw_changes
         )
         if len(changes) != len(raw_changes):
             raise ValueError("planner payload contains malformed change entries.")
@@ -771,6 +831,28 @@ def _payload_text(entry: dict, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"planner change entry requires a non-empty {key}.")
     return value
+
+
+def _plan_change_from_payload(entry: object) -> AutonomousFileChange:
+    if not isinstance(entry, dict):
+        raise ValueError("planner change entry must be an object.")
+    operation = entry.get("op", entry.get("operation"))
+    if operation is None:
+        operation = FULL_FILE_OPERATION
+    if operation not in CHANGE_OPERATIONS:
+        raise ValueError("planner change entry has an unknown op.")
+    if operation == REPLACE_TEXT_OPERATION:
+        return AutonomousFileChange(
+            relative_path=_payload_text(entry, "path"),
+            operation=operation,
+            old_text=_payload_text(entry, "old_text"),
+            new_text=_payload_text(entry, "new_text"),
+        )
+    return AutonomousFileChange(
+        relative_path=_payload_text(entry, "path"),
+        content=_payload_text(entry, "content"),
+        operation=operation,
+    )
 
 
 def _history_prompt_lines(history: Sequence[AutonomousIterationRecord]) -> list[str]:
