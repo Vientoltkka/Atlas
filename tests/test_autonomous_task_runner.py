@@ -247,7 +247,7 @@ def test_reviewer_error_blocks_with_reason(tmp_path: Path) -> None:
     ).run()
 
     assert result.status is AutonomousRunnerStatus.BLOCKED
-    assert result.reason == "reviewer_error:RuntimeError"
+    assert result.reason == "reviewer_error:RuntimeError:reviewer offline"
 
 
 def test_inconclusive_without_reviewer_blocks(tmp_path: Path) -> None:

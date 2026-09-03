@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Protocol
 
 from core.git_checkpoint import GitCheckpointManager
@@ -41,6 +42,8 @@ MAX_AUTONOMOUS_ITERATIONS = 20
 MAX_PLAN_CHANGES = 16
 MAX_HISTORY_ITEMS_IN_PROMPT = 5
 MAX_TEST_OUTPUT_CHARS_IN_PROMPT = 800
+MAX_ERROR_DETAIL_CHARS = 500
+MAX_ERROR_CAUSE_DEPTH = 4
 WORKER_ROLE_ENV = "ATLAS_AUTONOMY_WORKER_MODEL"
 REVIEWER_ROLE_ENV = "ATLAS_AUTONOMY_REVIEWER_MODEL"
 LOCAL_ROLE_ENV = "ATLAS_AUTONOMY_LOCAL_MODEL"
@@ -298,7 +301,7 @@ class AutonomousTaskRunner:
                 return self._terminal(
                     history,
                     AutonomousRunnerStatus.BLOCKED,
-                    f"planner_error:{type(error).__name__}",
+                    _failure_reason("planner_error", error),
                     last_test,
                 )
             for change in plan.changes:
@@ -396,7 +399,7 @@ class AutonomousTaskRunner:
                     return self._terminal(
                         history,
                         AutonomousRunnerStatus.BLOCKED,
-                        f"reviewer_error:{type(error).__name__}",
+                        _failure_reason("reviewer_error", error),
                         last_test,
                         rolled_back=restored,
                     )
@@ -632,8 +635,70 @@ def _display_path(raw: str) -> str:
         return "invalid_path"
 
 
-def _first_line(text: str) -> str:
-    return text.strip().splitlines()[0][:120] if text.strip() else "error"
+def _first_line(text: str, *, limit: int = 120) -> str:
+    return text.strip().splitlines()[0][:limit] if text.strip() else "error"
+
+
+# ---------------------------------------------------------------------------
+# Safe propagation of inference error details into BLOCKED reasons.
+# The detail is operational only: exception type, message, chained cause and
+# status/code when available. Secrets are redacted and the detail is capped.
+# ---------------------------------------------------------------------------
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)authorization\s*:\s*(?:\S+\s+)?\S+"),
+    re.compile(r"(?i)bearer\s+\S+"),
+    re.compile(
+        r"(?i)(?:api[_-]?key|access[_-]?token|secret|password|token|key)\s*[=:]\s*\S+"
+    ),
+)
+
+
+def _sanitize_error_detail(text: str) -> str:
+    collapsed = " ".join(text.split())
+    for pattern in _SECRET_PATTERNS:
+        collapsed = pattern.sub("[REDACTED]", collapsed)
+    return collapsed[:MAX_ERROR_DETAIL_CHARS]
+
+
+def _exception_status(error: BaseException) -> str:
+    for attribute in ("status_code", "status", "code"):
+        value = getattr(error, attribute, None)
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            return f"{attribute}={value}"
+        if isinstance(value, str) and value.strip():
+            return f"{attribute}={value.strip()[:60]}"
+    return ""
+
+
+def _error_detail(error: BaseException) -> str:
+    pieces: list[str] = []
+    message = str(error).strip()
+    if message:
+        status = _exception_status(error)
+        first = _first_line(message, limit=MAX_ERROR_DETAIL_CHARS)
+        pieces.append(f"{first} ({status})" if status else first)
+    seen = {id(error)}
+    cause = error.__cause__
+    depth = 0
+    while cause is not None and depth < MAX_ERROR_CAUSE_DEPTH and id(cause) not in seen:
+        seen.add(id(cause))
+        cause_status = _exception_status(cause)
+        cause_text = _first_line(str(cause), limit=MAX_ERROR_DETAIL_CHARS)
+        if cause_text:
+            piece = f"{type(cause).__name__}: {cause_text}"
+            pieces.append(f"{piece} ({cause_status})" if cause_status else piece)
+        cause = cause.__cause__
+        depth += 1
+    return _sanitize_error_detail(" <- ".join(pieces))
+
+
+def _failure_reason(prefix: str, error: BaseException) -> str:
+    base = f"{prefix}:{type(error).__name__}"
+    detail = _error_detail(error)
+    return f"{base}:{detail}" if detail else base
 
 
 # ---------------------------------------------------------------------------
