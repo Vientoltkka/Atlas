@@ -17,6 +17,7 @@ Safety invariants, by construction:
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -870,3 +871,177 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+# ---------------------------------------------------------------------------
+# Minimal development entrypoint: python -m core.autonomous_task_runner
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EntrypointComponents:
+    """Prebuilt collaborators injected by tests; None test_runner means default."""
+
+    planner: AutonomousPlanner
+    reviewer: AutonomousReviewer | None
+    test_runner: PytestRunner | None
+
+
+def _build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m core.autonomous_task_runner",
+        description=(
+            "Ejecuta una tarea autónoma acotada (GOAL → PLAN → MODIFY → TEST → "
+            "EVALUATE) con el AutonomousTaskRunner existente."
+        ),
+    )
+    parser.add_argument("goal", help="Objetivo de la tarea en lenguaje natural.")
+    parser.add_argument(
+        "--allowed-paths",
+        nargs="+",
+        required=True,
+        metavar="PATH",
+        help="Rutas relativas únicas permitidas para modificar (obligatorio).",
+    )
+    parser.add_argument(
+        "--test-paths",
+        nargs="+",
+        required=True,
+        metavar="PATH",
+        help="Rutas de pytest que validan el objetivo (obligatorio).",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        help=f"Iteraciones máximas, entre 1 y {MAX_AUTONOMOUS_ITERATIONS} (por defecto 5).",
+    )
+    parser.add_argument(
+        "--worker",
+        default=None,
+        help=(
+            "Identificador lógico del modelo worker; por defecto usa "
+            f"{WORKER_ROLE_ENV} desde la configuración existente."
+        ),
+    )
+    parser.add_argument(
+        "--project-root",
+        default=".",
+        help="Raíz del proyecto sobre la que opera la tarea (por defecto el cwd).",
+    )
+    return parser
+
+
+def _load_project_dotenv(project_root: Path) -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(project_root / ".env")
+
+
+def _model_manager_from_environment() -> ModelManager:
+    from core.model_registry import load_model_descriptors_from_environment
+
+    return ModelManager(
+        descriptors=load_model_descriptors_from_environment(
+            reserved_logical_ids=(
+                item.logical_id for item in ModelManager._DEFAULT_DESCRIPTORS
+            ),
+        ),
+    )
+
+
+def _default_components(
+    worker_id: str | None, *, model_manager: ModelManager | None = None
+) -> EntrypointComponents:
+    manager = model_manager if model_manager is not None else _model_manager_from_environment()
+    roles = resolve_model_roles(manager, worker_id=worker_id)
+    planner = worker_planner_from_roles(roles, model_manager=manager)
+    reviewer = reviewer_from_roles(roles, model_manager=manager)
+    return EntrypointComponents(planner=planner, reviewer=reviewer, test_runner=None)
+
+
+def _emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _error_payload(reason: str) -> dict[str, object]:
+    return {"status": AutonomousRunnerStatus.BLOCKED.value, "reason": reason, "iterations": []}
+
+
+def _execute(
+    args: argparse.Namespace,
+    *,
+    project_root: Path,
+    components: EntrypointComponents | None = None,
+    model_manager: ModelManager | None = None,
+) -> int:
+    if not project_root.is_dir():
+        _emit(_error_payload(f"project_root_does_not_exist:{project_root}"))
+        return 2
+    try:
+        config = AutonomousTaskConfig(
+            goal=args.goal,
+            allowed_paths=args.allowed_paths,
+            test_paths=args.test_paths,
+            max_iterations=args.max_iterations,
+        )
+    except ValueError as error:
+        _emit(_error_payload(f"invalid_config:{_first_line(str(error))}"))
+        return 2
+    if components is None:
+        try:
+            components = _default_components(args.worker, model_manager=model_manager)
+        except AutonomousRunnerError as error:
+            _emit(_error_payload(f"worker_unavailable:{_first_line(str(error))}"))
+            return 2
+    runner = AutonomousTaskRunner(
+        project_root,
+        config,
+        planner=components.planner,
+        reviewer=components.reviewer,
+        test_runner=components.test_runner,
+    )
+    result = runner.run()
+    _emit(_result_payload(result))
+    return 0 if result.success else 1
+
+
+def _result_payload(result: AutonomousTaskResult) -> dict[str, object]:
+    return {
+        "status": result.status.value,
+        "reason": result.reason,
+        "rolled_back": result.rolled_back,
+        "last_test_passed": (
+            None if result.last_test_result is None else result.last_test_result.passed
+        ),
+        "checkpoint_events": list(result.checkpoint_events),
+        "iterations": [_iteration_payload(record) for record in result.iterations],
+    }
+
+
+def _iteration_payload(record: AutonomousIterationRecord) -> dict[str, object]:
+    return {
+        "iteration": record.iteration,
+        "outcome": record.outcome,
+        "reasoning": record.reasoning,
+        "changed_paths": list(record.changed_paths),
+        "evaluation_status": record.evaluation_status,
+        "evaluation_reason": record.evaluation_reason,
+        "test_passed": record.test_passed,
+        "reviewer_consulted": record.reviewer_consulted,
+        "reviewer_approved": record.reviewer_approved,
+        "restored": record.restored,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _build_argument_parser().parse_args(argv)
+    project_root = Path(args.project_root).resolve()
+    _load_project_dotenv(project_root)
+    return _execute(args, project_root=project_root)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
