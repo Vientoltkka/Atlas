@@ -146,6 +146,51 @@ def test_modo_escritura_centers_window_with_focus_size() -> None:
     assert controller.resized == [(22, 510, 190, 900, 700)]
 
 
+def test_modo_investigacion_places_two_windows_side_by_side() -> None:
+    controller = _controller()
+
+    output = _handler(_executor(controller)).modo_investigacion(
+        {
+            "window_title": "bloc de notas",
+            "secondary_title": "navegador",
+        }
+    )
+
+    assert output == {
+        "result": (
+            "Modo investigacion listo: "
+            "'Documento - Bloc de notas' a la izquierda y "
+            "'Atlas - Navegador' a la derecha."
+        )
+    }
+    assert controller.front == [11, 22]
+    assert controller.resized == [
+        (11, 0, 0, 960, 1080),
+        (22, 960, 0, 960, 1080),
+    ]
+
+
+def test_modo_investigacion_with_single_window_places_only_left_half() -> None:
+    controller = _controller()
+
+    output = _handler(_executor(controller)).modo_investigacion({})
+
+    assert controller.front == [11]
+    assert controller.resized == [(11, 0, 0, 960, 1080)]
+    assert "a la izquierda" in output["result"]
+
+
+def test_modo_investigacion_with_missing_secondary_never_moves_anything() -> None:
+    controller = _controller()
+
+    with pytest.raises(ValueError, match="No se encontraron ventanas"):
+        _handler(_executor(controller)).modo_investigacion(
+            {"window_title": "bloc de notas", "secondary_title": "terminal"}
+        )
+
+    assert controller.resized == []
+
+
 def test_desktop_manifests_are_discovered_and_registered() -> None:
     system = build_core_skill_system(
         skill_handler_registry=build_builtin_skill_handler_registry()
@@ -156,6 +201,7 @@ def test_desktop_manifests_are_discovered_and_registered() -> None:
     assert registration.status.value == "COMPLETED"
     assert registration.registered_skill_ids == (
         "skill.modo-escritura",
+        "skill.modo-investigacion",
         "skill.modo-trabajo",
     )
     skill = system.skill_registry.get("skill.modo-trabajo")

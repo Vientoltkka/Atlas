@@ -18,6 +18,7 @@ from use_cases.desktop_interaction import DesktopInteractionUseCase
 
 _MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 _MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
+_MODO_INVESTIGACION_HANDLER_ID = "handler.modo-investigacion"
 _WRITING_WIDTH = 900
 _WRITING_HEIGHT = 700
 
@@ -66,6 +67,35 @@ class WindowLayoutSkills:
                 f"{rect[2]} x {rect[3]}."
             )
         }
+
+    def modo_investigacion(
+        self,
+        inputs: Mapping[str, object],
+        *,
+        execution_context: Any = None,
+    ) -> Mapping[str, object]:
+        title = _optional_title(inputs.get("window_title"))
+        primary = (
+            self._resolve_window(title)
+            if title is not None
+            else self._foreground_window()
+        )
+        secondary_title = _optional_title(inputs.get("secondary_title"))
+        secondary = (
+            self._resolve_window(secondary_title)
+            if secondary_title is not None
+            else None
+        )
+
+        self._snap(primary, self._placement_rect("mitad-izquierda"))
+        labels = [f"'{str(primary.get('title', '')).strip()}' a la izquierda"]
+        if secondary is not None:
+            self._snap(secondary, self._placement_rect("mitad-derecha"))
+            labels.append(
+                f"'{str(secondary.get('title', '')).strip()}' a la derecha"
+            )
+
+        return {"result": "Modo investigacion listo: " + " y ".join(labels) + "."}
 
     # ------------------------------------------------------------------
     # Reused desktop tool plumbing

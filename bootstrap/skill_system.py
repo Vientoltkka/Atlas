@@ -31,6 +31,7 @@ DESKTOP_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills" / "desktop"
 TEXT_UPPERCASE_HANDLER_ID = "handler.text-uppercase"
 MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
+MODO_INVESTIGACION_HANDLER_ID = "handler.modo-investigacion"
 
 
 def build_core_skill_system(
@@ -70,6 +71,7 @@ def build_builtin_skill_handler_registry(
     layout_skills = WindowLayoutSkills(tool_executor)
     registry.register(MODO_TRABAJO_HANDLER_ID, layout_skills.modo_trabajo)
     registry.register(MODO_ESCRITURA_HANDLER_ID, layout_skills.modo_escritura)
+    registry.register(MODO_INVESTIGACION_HANDLER_ID, layout_skills.modo_investigacion)
     return registry
 
 
