@@ -38,6 +38,30 @@ class DesktopInteractionUseCase:
         "vs code": ("visual studio code",),
         "vscode": ("visual studio code",),
     }
+    _WINDOW_ORDINALS: dict[str, int] = {
+        "primera": 1,
+        "primero": 1,
+        "primer": 1,
+        "segunda": 2,
+        "segundo": 2,
+        "tercera": 3,
+        "tercero": 3,
+        "tercer": 3,
+        "cuarta": 4,
+        "cuarto": 4,
+        "quinta": 5,
+        "quinto": 5,
+    }
+    _WINDOW_ORDINAL_PATTERN = re.compile(
+        r"^(?:el |la |al )?(primera|primero|primer|segunda|segundo|tercera"
+        r"|tercero|tercer|cuarta|cuarto|quinta|quinto)"
+        r"(?:\s+ventana)?(?:\s+de\s+|\s+)?(.*)$",
+        re.IGNORECASE,
+    )
+    _NAMED_WINDOW_PATTERN = re.compile(
+        r"^(?:la\s+|el\s+)?(?:ventana\s+(?:de\s+)?)?.+?\s+llamad[oa]\s+(.+)$",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -1545,6 +1569,10 @@ class DesktopInteractionUseCase:
             return self._activate_window(text[len("ve a ") :].strip())
         if normalized.startswith("cambia a "):
             return self._activate_window(text[len("cambia a ") :].strip())
+        if normalized.startswith("cambia al "):
+            return self._activate_window(text[len("cambia al ") :].strip())
+        if normalized.startswith("ve al "):
+            return self._activate_window(text[len("ve al ") :].strip())
         if normalized.startswith("cierra "):
             title = text[len("cierra ") :].strip()
             return self._close_window(title, confirm)
@@ -1608,11 +1636,12 @@ class DesktopInteractionUseCase:
 
     def resolve_window_for_activation(self, title: str) -> tuple[int, str] | str:
         """Resolve one activation target without bringing it to the foreground."""
-        query = self._normalize(self._strip_leading_article(title))
-        if not query:
+        ordinal, base = self._extract_window_ordinal(title)
+        if not base and ordinal is None:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
-        queries = [query, *self._ACTIVATION_TITLE_ALIASES.get(query, ())]
+        query = self._normalize(self._strip_leading_article(base))
+        queries = [query, *self._ACTIVATION_TITLE_ALIASES.get(query, ())] if query else []
 
         result = self._execute(
             "desktop.list_windows",
@@ -1628,9 +1657,16 @@ class DesktopInteractionUseCase:
                 candidate in self._normalize(str(window.get("title", "")))
                 for candidate in queries
             )
-        ]
+        ] if queries else list(result)
         if not matches:
             return f"No se encontro ninguna ventana para '{title}'."
+        if ordinal is not None:
+            if len(matches) < ordinal:
+                return (
+                    f"Solo hay {len(matches)} ventana(s) para '{title}'."
+                )
+            window = matches[ordinal - 1]
+            return int(window["handle"]), str(window["title"])
         if len(matches) > 1:
             return "Varias ventanas coinciden:\n" + "\n".join(
                 f"- {window['title']}" for window in matches
@@ -2017,10 +2053,21 @@ class DesktopInteractionUseCase:
         if not title:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
-        matches = self._list_windows(title)
+        ordinal, base = self._extract_window_ordinal(title)
+        matches = self._list_windows(
+            base,
+            allow_all=ordinal is not None and not base,
+        )
 
         if not matches:
             raise ValueError(f"No se encontraron ventanas para '{title}'.")
+
+        if ordinal is not None:
+            if len(matches) < ordinal:
+                raise ValueError(
+                    f"Solo hay {len(matches)} ventana(s) para '{title}'."
+                )
+            return matches[ordinal - 1]
 
         if len(matches) == 1:
             return matches[0]
@@ -2048,10 +2095,19 @@ class DesktopInteractionUseCase:
     def _list_windows(
         self,
         title: str,
+        allow_all: bool = False,
     ) -> list[dict[str, object]]:
         """Return visible windows matching title."""
         if not title:
-            raise ValueError("Orden incompleta: falta el titulo de ventana.")
+            if not allow_all:
+                raise ValueError("Orden incompleta: falta el titulo de ventana.")
+            result = self._execute(
+                "desktop.list_windows",
+                ToolContext(parameters={}),
+            )
+            if not isinstance(result, list):
+                raise RuntimeError("Respuesta de ventanas invalida.")
+            return result
 
         query = self._normalize(title)
 
@@ -2063,6 +2119,27 @@ class DesktopInteractionUseCase:
         result = self._execute(
             "desktop.list_windows",
             ToolContext(parameters={"title": title}),
+        )
+
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de ventanas invalida.")
+
+        if result:
+            return result
+
+        named_match = self._NAMED_WINDOW_PATTERN.match(title.strip())
+
+        if named_match is None:
+            return result
+
+        named_query = named_match.group(1).strip()
+
+        if not named_query:
+            return result
+
+        result = self._execute(
+            "desktop.list_windows",
+            ToolContext(parameters={"title": named_query}),
         )
 
         if not isinstance(result, list):
@@ -2239,6 +2316,20 @@ class DesktopInteractionUseCase:
         """Drop one leading invocation prefix ("Atlas, abre ...") from the command."""
         stripped = self._WAKE_WORD_PREFIX_PATTERN.sub("", text, count=1).strip()
         return stripped if stripped else text
+
+    def _extract_window_ordinal(self, title: str) -> tuple[int | None, str]:
+        """Return (1-based ordinal, base query) for "el segundo bloc de notas"."""
+        match = self._WINDOW_ORDINAL_PATTERN.match(title.strip())
+
+        if match is None:
+            return None, title
+
+        ordinal = self._WINDOW_ORDINALS.get(match.group(1).lower())
+
+        if ordinal is None:
+            return None, title
+
+        return ordinal, match.group(2).strip()
 
     def _strip_leading_article(
         self,
