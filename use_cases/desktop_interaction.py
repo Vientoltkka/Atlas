@@ -322,6 +322,8 @@ class DesktopInteractionUseCase:
         if not query or self._normalize(query) in {"todo", "everything", "all"}:
             return None
 
+        query = self._strip_leading_article(query)
+
         processes = self._list_processes(query)
 
         if len(processes) != 1:
@@ -1778,6 +1780,20 @@ class DesktopInteractionUseCase:
         """Drop one leading invocation prefix ("Atlas, abre ...") from the command."""
         stripped = self._WAKE_WORD_PREFIX_PATTERN.sub("", text, count=1).strip()
         return stripped if stripped else text
+
+    def _strip_leading_article(
+        self,
+        query: str,
+    ) -> str:
+        """Drop one leading Spanish article ("cierra la calculadora") from the target."""
+        stripped = re.sub(
+            r"^(?:el|la|los|las)\s+",
+            "",
+            query,
+            count=1,
+            flags=re.I,
+        ).strip()
+        return stripped if stripped else query
 
     def _normalize(
         self,

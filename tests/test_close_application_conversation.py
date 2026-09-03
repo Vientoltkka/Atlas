@@ -136,6 +136,43 @@ def test_close_application_with_atlas_prefix_cancels_on_no() -> None:
     assert conversation.pending_confirmation_id is None
 
 
+def test_close_application_with_article_asks_confirmation_then_closes_on_yes() -> None:
+    controller = FakeProcessController(
+        [_process(4321, "Calculator.exe", "Calculadora")]
+    )
+    orchestrator, conversation = _close_orchestrator(controller)
+
+    pending = orchestrator.process_prompt(
+        "atlas cierra la calculadora",
+        confirm=lambda _: "",
+    )
+
+    assert "Voy a cerrar Calculator.exe - PID 4321" in pending
+    assert "No se encontraron ventanas" not in pending
+    assert controller.close_requests == []
+    assert conversation.pending_confirmation_id is not None
+
+    confirmation = orchestrator.process_prompt("sí", confirm=lambda _: "")
+
+    assert controller.close_requests == [4321]
+    assert "cierre" in confirmation.lower()
+
+
+def test_close_application_with_article_cancels_on_no() -> None:
+    controller = FakeProcessController(
+        [_process(4321, "Calculator.exe", "Calculadora")]
+    )
+    orchestrator, conversation = _close_orchestrator(controller)
+
+    orchestrator.process_prompt("atlas cierra la calculadora", confirm=lambda _: "")
+
+    rejection = orchestrator.process_prompt("no", confirm=lambda _: "")
+
+    assert controller.close_requests == []
+    assert "cancel" in rejection.lower()
+    assert conversation.pending_confirmation_id is None
+
+
 def test_close_application_without_matches_falls_back_to_legacy_routing() -> None:
     controller = FakeProcessController([])
     registry = ToolRegistry()
