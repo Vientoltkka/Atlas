@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import subprocess
 
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
@@ -1438,7 +1439,7 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, errors=None, shell=False):
+    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0):
         calls.append(
             {
                 "args": args,
@@ -1446,6 +1447,7 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
                 "text": text,
                 "errors": errors,
                 "shell": shell,
+                "creationflags": creationflags,
             }
         )
         return Completed()
@@ -1462,6 +1464,7 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
     assert result[1].window_titles == ("Atlas - Visual Studio Code",)
     assert calls[0]["args"] == ["tasklist", "/FO", "CSV", "/V"]
     assert calls[0]["shell"] is False
+    assert calls[0]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def test_windows_controller_list_processes_falls_back_when_verbose_denied(
@@ -1482,7 +1485,7 @@ def test_windows_controller_list_processes_falls_back_when_verbose_denied(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, errors=None, shell=False):
+    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0):
         calls.append(args)
         return Denied() if len(calls) == 1 else Completed()
 
@@ -1511,13 +1514,14 @@ def test_windows_controller_terminate_process_uses_taskkill_without_shell(
         stdout = ""
         stderr = ""
 
-    def fake_run(args, capture_output, text, shell=False):
+    def fake_run(args, capture_output, text, shell=False, creationflags=0):
         calls.append(
             {
                 "args": args,
                 "capture_output": capture_output,
                 "text": text,
                 "shell": shell,
+                "creationflags": creationflags,
             }
         )
         return Completed()
@@ -1532,6 +1536,7 @@ def test_windows_controller_terminate_process_uses_taskkill_without_shell(
 
     assert calls[0]["args"] == ["taskkill", "/PID", "1234", "/F"]
     assert calls[0]["shell"] is False
+    assert calls[0]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 def test_windows_controller_resolves_vs_code_from_standard_installation(
     monkeypatch: pytest.MonkeyPatch,

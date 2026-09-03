@@ -13,6 +13,8 @@ import subprocess
 from io import StringIO
 from typing import Protocol
 
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 @dataclass(frozen=True)
 class ProcessInfo:
@@ -907,6 +909,7 @@ class WindowsDesktopController:
             capture_output=True,
             text=True,
             shell=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
         )
 
         if completed.returncode != 0:
@@ -995,6 +998,7 @@ class WindowsDesktopController:
             text=True,
             errors="replace",
             shell=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
         )
 
         if completed.returncode != 0:
@@ -1004,6 +1008,7 @@ class WindowsDesktopController:
                 text=True,
                 errors="replace",
                 shell=False,
+                creationflags=_SUBPROCESS_NO_WINDOW,
             )
 
             if completed.returncode != 0:

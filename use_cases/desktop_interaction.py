@@ -306,7 +306,8 @@ class DesktopInteractionUseCase:
         text: str,
     ) -> tuple[str, dict[str, object], str] | None:
         """Resolve one explicit application-close request for supervised execution."""
-        stripped = text.strip().rstrip("¿?").strip()
+        stripped = self._strip_wake_word_prefix(text.strip())
+        stripped = stripped.rstrip("¿?").strip()
         normalized = self._normalize(stripped)
 
         if normalized.startswith("cierra "):
