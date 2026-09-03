@@ -161,7 +161,8 @@ class GitCheckpointManager:
         if candidate == self._root or self._root not in candidate.parents:
             raise ValueError("checkpoint scope must remain inside the project root.")
         if not any(
-            scope_dir == candidate.parent
+            scope_dir == candidate
+            or scope_dir == candidate.parent
             or scope_dir in candidate.parents
             or scope_dir == self._root
             for scope_dir in self._scope_dirs
