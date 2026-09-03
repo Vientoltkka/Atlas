@@ -23,10 +23,13 @@ from core.skill_registry import SkillRegistry
 from core.skill_resolver import SkillResolver
 from core.skill_system import SkillSystem, build_skill_system
 from tools.executor import ToolExecutor
+from use_cases.desktop_layout_skills import WindowLayoutSkills
 
 
 BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills" / "builtin"
+DESKTOP_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills" / "desktop"
 TEXT_UPPERCASE_HANDLER_ID = "handler.text-uppercase"
+MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 
 
 def build_core_skill_system(
@@ -56,22 +59,39 @@ def build_core_skill_system(
     )
 
 
-def build_builtin_skill_handler_registry() -> SkillHandlerRegistry:
+def build_builtin_skill_handler_registry(
+    tool_executor: ToolExecutor | None = None,
+) -> SkillHandlerRegistry:
     """Build the explicit registry for handlers shipped with Atlas."""
 
     registry = SkillHandlerRegistry()
     registry.register(TEXT_UPPERCASE_HANDLER_ID, _text_uppercase_handler)
+    layout_skills = WindowLayoutSkills(tool_executor)
+    registry.register(MODO_TRABAJO_HANDLER_ID, layout_skills.modo_trabajo)
     return registry
 
 
 def register_builtin_skills(skill_system: SkillSystem) -> SkillRegistrationResult:
     """Discover and register the declarative builtin manifests."""
 
+    return _register_manifests(skill_system, BUILTIN_SKILLS_ROOT)
+
+
+def register_desktop_skills(skill_system: SkillSystem) -> SkillRegistrationResult:
+    """Discover and register the declarative desktop layout manifests."""
+
+    return _register_manifests(skill_system, DESKTOP_SKILLS_ROOT)
+
+
+def _register_manifests(
+    skill_system: SkillSystem,
+    root: Path,
+) -> SkillRegistrationResult:
     if not isinstance(skill_system, SkillSystem):
         raise TypeError("skill_system must be SkillSystem.")
     result = skill_system.skill_registration_service.register(
         SkillRegistrationRequest(
-            (str(BUILTIN_SKILLS_ROOT),),
+            (str(root),),
             recursive=True,
             policy=SkillRegistrationPolicy(
                 duplicate_policy=SkillDuplicatePolicy.KEEP_EXISTING,

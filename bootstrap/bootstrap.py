@@ -24,6 +24,7 @@ from bootstrap.agent_system import build_core_agent_system
 from bootstrap.skill_system import (
     build_builtin_skill_handler_registry,
     register_builtin_skills,
+    register_desktop_skills,
 )
 from bootstrap.capability_execution_service import build_capability_execution_service
 from bootstrap.capability_orchestrator import build_core_capability_orchestrator
@@ -996,7 +997,7 @@ class Bootstrap:
             execution_plan_libraries=execution_plan_libraries,
             execution_plan_registry=execution_plan_registry,
         )
-        skill_handler_registry = build_builtin_skill_handler_registry()
+        skill_handler_registry = build_builtin_skill_handler_registry(tool_executor)
         agent_system_result = build_core_agent_system(
             tool_executor=tool_executor,
             capability_execution_service=capability_execution_service,
@@ -1005,6 +1006,7 @@ class Bootstrap:
         agent_system = agent_system_result.system if agent_system_result.system is not None else None
         if agent_system is not None:
             register_builtin_skills(agent_system.skill_system)
+            register_desktop_skills(agent_system.skill_system)
         capability_gap_detector = SupervisedCapabilityGapDetector.from_registries(
             tool_registry=tool_registry,
             execution_plan_libraries=execution_plan_libraries,

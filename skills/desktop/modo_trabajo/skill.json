@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.modo-trabajo",
+  "name": "Modo Trabajo",
+  "version": "1.0",
+  "description": "Prepara el entorno de trabajo anclando la ventana indicada (o la ventana en primer plano) a la mitad izquierda de la pantalla.",
+  "enabled": true,
+  "input_fields": [
+    {
+      "name": "window_title",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "output_fields": [
+    {
+      "name": "result",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "execution_target": "handler.modo-trabajo",
+  "execution_target_type": "handler",
+  "handler_id": "handler.modo-trabajo"
+}
