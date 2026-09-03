@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 import difflib
 from pathlib import Path
 import secrets
@@ -35,6 +35,18 @@ class AppliedCapabilityChange:
     capability_id: str
     original_contents: tuple[tuple[str, str | None], ...]
     applied_contents: tuple[tuple[str, str], ...]
+
+
+MAX_DELEGATED_ITERATIONS = 20
+
+
+@dataclass(frozen=True)
+class DelegatedAuthorization:
+    """Explicit, bounded delegation granted by the supervising operator."""
+
+    allowed_paths: tuple[str, ...]
+    max_iterations: int
+    used_iterations: int = 0
 
 
 class CodingAgent(BaseAgent):
@@ -72,6 +84,7 @@ Tu trabajo es:
         self._applied_capability_change: AppliedCapabilityChange | None = None
         self._validated_capability_change: AppliedCapabilityChange | None = None
         self._capability_validation_status: str | None = None
+        self._delegated_authorization: DelegatedAuthorization | None = None
 
     @property
     def name(self) -> str:
@@ -343,6 +356,99 @@ Código:
         if not resolved.is_file():
             raise ValueError("La ruta debe identificar un archivo existente dentro del proyecto.")
         return resolved
+
+    @property
+    def delegated_authorization_active(self) -> bool:
+        """Return whether an explicit bounded delegation is currently enabled."""
+        return self._delegated_authorization is not None
+
+    def enable_delegated_authorization(
+        self, *, allowed_paths: Sequence[str], max_iterations: int
+    ) -> str:
+        """Opt-in delegation limited by scope and iteration budget."""
+        if self._delegated_authorization is not None:
+            raise PendingCodingChangeError("La autorización delegada ya está activada.")
+        if isinstance(allowed_paths, (str, bytes)) or not hasattr(allowed_paths, "__iter__"):
+            raise PendingCodingChangeError("allowed_paths debe ser una secuencia de rutas.")
+        scope: list[str] = []
+        for entry in allowed_paths:
+            scope.append(self._validated_delegation_path(entry))
+        if not scope:
+            raise PendingCodingChangeError("allowed_paths requiere al menos una ruta.")
+        if isinstance(max_iterations, bool) or not isinstance(max_iterations, int):
+            raise PendingCodingChangeError("max_iterations debe ser un entero.")
+        if max_iterations < 1 or max_iterations > MAX_DELEGATED_ITERATIONS:
+            raise PendingCodingChangeError(
+                f"max_iterations debe estar entre 1 y {MAX_DELEGATED_ITERATIONS}."
+            )
+        self._delegated_authorization = DelegatedAuthorization(
+            allowed_paths=tuple(dict.fromkeys(scope)),
+            max_iterations=max_iterations,
+        )
+        return (
+            "Autorización delegada activada. Alcance: "
+            + ", ".join(self._delegated_authorization.allowed_paths)
+            + f". Iteraciones: {max_iterations}. Sin push, reset ni stash."
+        )
+
+    def disable_delegated_authorization(self) -> str:
+        """Revoke any active delegation immediately."""
+        self._delegated_authorization = None
+        return "Autorización delegada desactivada."
+
+    def delegated_authorize_pending_change(self) -> PendingCodingChange:
+        """Consume one delegated iteration for the pending scoped change."""
+        delegation = self._delegated_authorization
+        if delegation is None:
+            raise PendingCodingChangeError("El modo delegado no está activado.")
+        if delegation.used_iterations >= delegation.max_iterations:
+            raise PendingCodingChangeError("El presupuesto delegado está agotado.")
+        pending = self._pending_change
+        if pending is None:
+            raise PendingCodingChangeError("No hay una propuesta pendiente para aplicar.")
+        try:
+            self._validated_delegation_path(pending.relative_path)
+        except PendingCodingChangeError:
+            self.clear_generated()
+            raise
+        resolved = pending.path.resolve()
+        within_scope = any(
+            resolved == (self._project_root / entry).resolve()
+            or (self._project_root / entry).resolve() in resolved.parents
+            for entry in delegation.allowed_paths
+        )
+        if not within_scope:
+            self.clear_generated()
+            raise PendingCodingChangeError(
+                "El cambio propuesto está fuera del alcance delegado: "
+                + pending.relative_path
+            )
+        self._delegated_authorization = replace(
+            delegation, used_iterations=delegation.used_iterations + 1
+        )
+        self.clear_generated()
+        return pending
+
+    def _validated_delegation_path(self, raw_path: object) -> str:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise PendingCodingChangeError("Las rutas delegadas deben ser cadenas no vacías.")
+        candidate = Path(raw_path.strip())
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise PendingCodingChangeError(
+                "Las rutas delegadas deben ser relativas y no pueden escapar del proyecto."
+            )
+        if candidate.suffix == ".env" or ".env" in candidate.name:
+            raise PendingCodingChangeError(
+                "Los archivos de secretos están fuera del alcance delegado."
+            )
+        resolved = (self._project_root / candidate).resolve()
+        try:
+            resolved.relative_to(self._project_root)
+        except ValueError as exc:
+            raise PendingCodingChangeError(
+                "Las rutas delegadas deben estar dentro de C:\\AI\\Atlas."
+            ) from exc
+        return candidate.as_posix()
 
     @staticmethod
     def _render_diff(relative_path: str, original: str, proposed: str) -> str:
