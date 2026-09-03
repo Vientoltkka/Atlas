@@ -32,6 +32,7 @@ class DesktopInteractionUseCase:
     _WAKE_WORD_PREFIX_PATTERN = re.compile(r"^atlas\b[ ,.;:!?-]*", re.IGNORECASE)
     _ACTIVATION_TITLE_ALIASES: dict[str, tuple[str, ...]] = {
         "calculator": ("calculadora",),
+        "calculadora": ("calculator",),
         "notepad": ("bloc de notas",),
         "bloc de notas": ("notepad",),
         "vs code": ("visual studio code",),
@@ -333,17 +334,64 @@ class DesktopInteractionUseCase:
 
         processes = self._list_processes(query)
 
+        if not processes:
+            return None
+
+        window = self._uwp_window_close_target(query, processes)
+
+        if window is not None:
+            title = str(window["title"])
+            names = ", ".join(sorted({str(p["name"]) for p in processes}))
+            pids = ", ".join(str(p["pid"]) for p in processes)
+            return (
+                "desktop.close_window",
+                {"handle": int(window["handle"])},
+                f"Voy a cerrar la ventana '{title}' ({names} - PID {pids}). ¿Confirmas?",
+            )
+
         if len(processes) != 1:
             return None
 
         process = processes[0]
         name = str(process["name"])
         pid = int(process["pid"])
-        return (
+        pid_request = (
             "desktop.close_application",
             {"pid": pid},
             f"Voy a cerrar {name} - PID {pid}. ¿Confirmas?",
         )
+
+        if process.get("window_titles"):
+            return pid_request
+
+        matches = self._close_window_matches(query)
+
+        if len(matches) == 1:
+            window = matches[0]
+            title = str(window["title"])
+            return (
+                "desktop.close_window",
+                {"handle": int(window["handle"])},
+                f"Voy a cerrar la ventana '{title}' ({name} - PID {pid}). ¿Confirmas?",
+            )
+
+        return pid_request
+
+    def _uwp_window_close_target(
+        self,
+        query: str,
+        processes: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        """Return one unambiguous visible window when no nominal process owns windows."""
+        if any(process.get("window_titles") for process in processes):
+            return None
+
+        matches = self._close_window_matches(query)
+
+        if len(matches) == 1:
+            return matches[0]
+
+        return None
 
     def _execute_filesystem_command(
         self,
@@ -844,9 +892,51 @@ class DesktopInteractionUseCase:
         confirm: Callable[[str], str] | None,
     ) -> str:
         """Request normal application close after explicit confirmation."""
+        window = self._uwp_window_close_target(query, processes)
+
+        if window is not None:
+            title = str(window["title"])
+            handle = int(window["handle"])
+
+            if not self._confirmed_close(confirm, title):
+                return "Acción cancelada."
+
+            self._execute(
+                "desktop.close_window",
+                ToolContext(parameters={"handle": handle}),
+            )
+
+            names = ", ".join(sorted({str(p["name"]) for p in processes}))
+            pids = ", ".join(str(p["pid"]) for p in processes)
+            return (
+                f"{self._CONFIRMATION_PREFIX} Solicitud de cierre enviada: "
+                f"ventana '{title}' ({names} - PID {pids})"
+            )
+
         process = self._select_process(query, processes, confirm)
         name = str(process["name"])
         pid = int(process["pid"])
+        window_titles = tuple(process.get("window_titles") or ())
+
+        if not window_titles:
+            window = self._single_close_window_target(query, confirm)
+
+            if window is not None:
+                title = str(window["title"])
+                handle = int(window["handle"])
+
+                if not self._confirmed_close(confirm, title):
+                    return "Acción cancelada."
+
+                self._execute(
+                    "desktop.close_window",
+                    ToolContext(parameters={"handle": handle}),
+                )
+
+                return (
+                    f"{self._CONFIRMATION_PREFIX} Solicitud de cierre enviada: "
+                    f"ventana '{title}' ({name} - PID {pid})"
+                )
 
         if not self._confirmed_close_application(confirm, query, pid):
             return "Cierre cancelado."
@@ -857,6 +947,68 @@ class DesktopInteractionUseCase:
         )
 
         return f"{self._CONFIRMATION_PREFIX} Solicitud de cierre enviada: {name} - PID {pid}"
+
+    def _single_close_window_target(
+        self,
+        query: str,
+        confirm: Callable[[str], str] | None,
+    ) -> dict[str, object] | None:
+        """Return one safe visible-window target for an app close, if any."""
+        matches = self._close_window_matches(query)
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
+            if confirm is None:
+                raise ValueError(
+                    "Varias ventanas coinciden. Se requiere seleccion explicita."
+                )
+
+            selection = confirm(
+                self._format_window_matches(matches)
+                + f"\nSelecciona una ventana [1-{len(matches)}]: "
+            )
+
+            if not selection.strip().isdigit():
+                raise ValueError("Seleccion invalida.")
+
+            index = int(selection.strip())
+
+            if index < 1 or index > len(matches):
+                raise ValueError("Seleccion invalida.")
+
+            return matches[index - 1]
+
+        return None
+
+    def _close_window_matches(
+        self,
+        query: str,
+    ) -> list[dict[str, object]]:
+        """Return visible windows matching the close query or its aliases."""
+        normalized = self._normalize(self._strip_leading_article(query))
+
+        if not normalized:
+            return []
+
+        candidates = {normalized, *self._ACTIVATION_TITLE_ALIASES.get(normalized, ())}
+        result = self._execute(
+            "desktop.list_windows",
+            ToolContext(parameters={}),
+        )
+
+        if not isinstance(result, list):
+            raise RuntimeError("Respuesta de ventanas invalida.")
+
+        return [
+            window
+            for window in result
+            if any(
+                candidate in self._normalize(str(window.get("title", "")))
+                for candidate in candidates
+            )
+        ]
 
     def _select_process(
         self,

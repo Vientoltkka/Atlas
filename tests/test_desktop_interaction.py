@@ -65,16 +65,20 @@ class FakeToolExecutor:
 
         if tool_name == "desktop.list_processes":
             query = str(context.parameters["query"]).lower()
-            query = {
-                "visual studio code": "code",
-                "vs code": "code",
-                "vscode": "code",
-            }.get(query, query)
+            candidates = {query}
+            if query in {"calculadora", "calculator"}:
+                candidates.add("calculatorapp")
+            if query in {"visual studio code", "vs code", "vscode"}:
+                candidates.add("code")
             return [
                 process
                 for process in self.processes
-                if query in str(process["name"]).lower()
-                or query in str(process["name"]).lower().replace(".exe", "")
+                if any(
+                    candidate in str(process["name"]).lower()
+                    or candidate
+                    in str(process["name"]).lower().replace(".exe", "")
+                    for candidate in candidates
+                )
             ]
 
         if tool_name == "desktop.get_process":
@@ -462,6 +466,93 @@ def test_desktop_interaction_close_application_rejects_invalid_selection() -> No
 
     assert result == "Error: Seleccion invalida."
     assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_close_uwp_process_uses_visible_window() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 30,
+            "name": "CalculatorApp.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    executor.windows = [
+        {
+            "handle": 555,
+            "title": "Calculadora",
+            "rect": (0, 0, 300, 500),
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra calculadora", confirm=lambda _: "s")
+
+    assert result == (
+        "\u2713 Solicitud de cierre enviada: "
+        "ventana 'Calculadora' (CalculatorApp.exe - PID 30)"
+    )
+    assert executor.calls[-1][0] == "desktop.close_window"
+    assert executor.calls[-1][1].parameters == {"handle": 555}
+    assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_close_uwp_process_cancels_without_window_close() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 30,
+            "name": "CalculatorApp.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    executor.windows = [
+        {
+            "handle": 555,
+            "title": "Calculadora",
+            "rect": (0, 0, 300, 500),
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra calculadora", confirm=lambda _: "n")
+
+    assert result == "Acción cancelada."
+    assert all(call[0] != "desktop.close_window" for call in executor.calls)
+    assert all(call[0] != "desktop.close_application" for call in executor.calls)
+
+
+def test_desktop_interaction_close_process_without_window_match_keeps_pid() -> None:
+    executor = FakeToolExecutor()
+    executor.processes = [
+        {
+            "pid": 30,
+            "name": "CalculatorApp.exe",
+            "executable_path": None,
+            "window_titles": (),
+            "is_running": True,
+        }
+    ]
+    executor.windows = [
+        {
+            "handle": 555,
+            "title": "Otra ventana",
+            "rect": (0, 0, 300, 500),
+        }
+    ]
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cierra calculadora", confirm=lambda _: "s")
+
+    assert result == (
+        "\u2713 Solicitud de cierre enviada: CalculatorApp.exe - PID 30"
+    )
+    assert executor.calls[-1][0] == "desktop.close_application"
+    assert executor.calls[-1][1].parameters == {"pid": 30}
 
 
 def test_desktop_interaction_terminate_process_validates_pid() -> None:

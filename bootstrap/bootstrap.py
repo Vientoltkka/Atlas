@@ -342,6 +342,7 @@ class Bootstrap:
             ("desktop.hotkey.press", "desktop.press_hotkey"),
             ("desktop.windows.list", "desktop.list_windows"),
             ("desktop.window.bring_to_front", "desktop.bring_window_to_front"),
+            ("desktop.window.close", "desktop.close_window"),
         ):
             if registry.exists(tool_name):
                 intent_registry.register(action, tool_name)
@@ -542,6 +543,20 @@ class Bootstrap:
         schema_registry.register(
             ArgumentSchema(
                 "desktop.window.bring_to_front",
+                (
+                    ArgumentField(
+                        "handle",
+                        int,
+                        required=True,
+                        description="Exact target window handle.",
+                    ),
+                ),
+            )
+        )
+
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.window.close",
                 (
                     ArgumentField(
                         "handle",
