@@ -1472,6 +1472,102 @@ def test_desktop_interaction_resizes_window_with_alias() -> None:
     assert executor.calls[1][0] == "desktop.resize_window"
 
 
+def test_desktop_interaction_resizes_window_with_x_format() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("redimensiona Visual Studio Code a 800x600")
+
+    assert result == "\u2713 Ventana redimensionada a 800 x 600."
+    assert executor.calls[1][0] == "desktop.resize_window"
+    assert executor.calls[1][1].parameters == {
+        "handle": 10,
+        "width": 800,
+        "height": 600,
+    }
+
+
+def test_desktop_interaction_moves_window_to_left_edge() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve Visual Studio Code a la izquierda")
+
+    assert result == "\u2713 Ventana movida a la izquierda."
+    assert executor.calls[-1][0] == "desktop.move_window"
+    assert executor.calls[-1][1].parameters == {"handle": 10, "x": 0, "y": 30}
+
+
+def test_desktop_interaction_moves_window_to_right_edge() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve Visual Studio Code a la derecha")
+
+    assert result == "\u2713 Ventana movida a la derecha."
+    assert executor.calls[-1][0] == "desktop.move_window"
+    assert executor.calls[-1][1].parameters == {
+        "handle": 10,
+        "x": 1120,
+        "y": 30,
+    }
+
+
+def test_desktop_interaction_centers_window() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra Visual Studio Code")
+
+    assert result == "\u2713 Ventana centrada en (560, 240)."
+    assert executor.calls[-1][0] == "desktop.move_window"
+    assert executor.calls[-1][1].parameters == {
+        "handle": 10,
+        "x": 560,
+        "y": 240,
+    }
+
+
+def test_desktop_interaction_centers_window_with_alias_and_article() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra la calculadora")
+
+    assert result == "\u2713 Ventana centrada en (800, 290)."
+    assert executor.calls[-1][1].parameters == {
+        "handle": 30,
+        "x": 800,
+        "y": 290,
+    }
+
+
+def test_desktop_interaction_moves_calculator_to_left_edge() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("mueve calculadora a la izquierda")
+
+    assert result == "\u2713 Ventana movida a la izquierda."
+    assert executor.calls[-1][1].parameters == {"handle": 30, "x": 0, "y": 0}
+
+
+def test_desktop_interaction_rejects_bare_centra() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra")
+
+    assert result == "Error: Orden incompleta: falta el titulo de ventana."
+    assert executor.calls == []
+
+
 def test_desktop_interaction_moves_and_resizes_window() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)

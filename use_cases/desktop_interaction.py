@@ -1398,8 +1398,25 @@ class DesktopInteractionUseCase:
             "ve",
             "pon",
             "cambia",
+            "centra",
         }:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        if normalized.startswith("centra "):
+            title = text[len("centra ") :].strip()
+            return self._center_window(title, confirm)
+
+        if normalized.startswith("mueve ") and normalized.endswith(
+            " a la izquierda"
+        ):
+            title = text[len("mueve ") : -len(" a la izquierda")].strip()
+            return self._move_window_to_edge(title, "izquierda", confirm)
+
+        if normalized.startswith("mueve ") and normalized.endswith(
+            " a la derecha"
+        ):
+            title = text[len("mueve ") : -len(" a la derecha")].strip()
+            return self._move_window_to_edge(title, "derecha", confirm)
 
         if normalized.startswith("mueve y cambia el tamano de "):
             return self._move_resize_window(text, confirm)
@@ -1498,6 +1515,61 @@ class DesktopInteractionUseCase:
         )
 
         return f"{self._CONFIRMATION_PREFIX} Ventana movida a ({x}, {y})."
+
+    def _center_window(
+        self,
+        title: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Center a resolved window on the screen."""
+        window = self._resolve_window(title, confirm)
+        handle = int(window["handle"])
+        left, top, right, bottom = self._execute(
+            "desktop.get_window_rect",
+            ToolContext(parameters={"handle": handle}),
+        )
+        screen_width, screen_height = self._execute_tuple(
+            "desktop.get_screen_size",
+            {},
+        )
+        x = max(0, (screen_width - (right - left)) // 2)
+        y = max(0, (screen_height - (bottom - top)) // 2)
+        self._execute(
+            "desktop.move_window",
+            ToolContext(parameters={"handle": handle, "x": x, "y": y}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} Ventana centrada en ({x}, {y})."
+
+    def _move_window_to_edge(
+        self,
+        title: str,
+        edge: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Move a resolved window to the left or right screen edge."""
+        window = self._resolve_window(title, confirm)
+        handle = int(window["handle"])
+        left, top, right, _ = self._execute(
+            "desktop.get_window_rect",
+            ToolContext(parameters={"handle": handle}),
+        )
+
+        if edge == "izquierda":
+            x = 0
+        else:
+            screen_width, _ = self._execute_tuple(
+                "desktop.get_screen_size",
+                {},
+            )
+            x = max(0, screen_width - (right - left))
+
+        self._execute(
+            "desktop.move_window",
+            ToolContext(parameters={"handle": handle, "x": x, "y": top}),
+        )
+
+        return f"{self._CONFIRMATION_PREFIX} Ventana movida a la {edge}."
 
     def _resize_window(
         self,
@@ -1687,6 +1759,8 @@ class DesktopInteractionUseCase:
         expected: int,
     ) -> list[int]:
         """Extract an exact number of integer parameters."""
+        text = re.sub(r"(?<=\d)\s*[x\u00d7]\s*(?=-?\d)", " ", text)
+
         if re.search(r"[A-Za-z]+", text):
             raise ValueError("Los parametros deben ser numericos.")
 
