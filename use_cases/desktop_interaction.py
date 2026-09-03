@@ -62,6 +62,22 @@ class DesktopInteractionUseCase:
         r"^(?:la\s+|el\s+)?(?:ventana\s+(?:de\s+)?)?.+?\s+llamad[oa]\s+(.+)$",
         re.IGNORECASE,
     )
+    _WINDOW_PLACEMENTS: dict[str, str] = {
+        "en la mitad izquierda": "mitad-izquierda",
+        "en la mitad derecha": "mitad-derecha",
+        "arriba a la izquierda": "arriba-izquierda",
+        "arriba a la derecha": "arriba-derecha",
+        "abajo a la izquierda": "abajo-izquierda",
+        "abajo a la derecha": "abajo-derecha",
+    }
+    _WINDOW_PLACEMENT_LABELS: dict[str, str] = {
+        "mitad-izquierda": "a la mitad izquierda",
+        "mitad-derecha": "a la mitad derecha",
+        "arriba-izquierda": "arriba a la izquierda",
+        "arriba-derecha": "arriba a la derecha",
+        "abajo-izquierda": "abajo a la izquierda",
+        "abajo-derecha": "abajo a la derecha",
+    }
 
     def __init__(
         self,
@@ -1561,6 +1577,12 @@ class DesktopInteractionUseCase:
         if normalized.startswith("activa "):
             return self._activate_window(text[len("activa ") :].strip())
 
+        snap = self._parse_snap_window_command(text, normalized)
+
+        if snap is not None:
+            title, placement = snap
+            return self._snap_window_to_placement(title, placement, confirm)
+
         if normalized.startswith("pon ") and normalized.endswith(" delante"):
             return self._activate_window(text[len("pon ") : -len(" delante")].strip())
         if normalized.startswith("pon "):
@@ -1756,6 +1778,98 @@ class DesktopInteractionUseCase:
         self._move_window_handle_to_edge(int(window["handle"]), edge)
 
         return f"{self._CONFIRMATION_PREFIX} Ventana movida a la {edge}."
+
+    def _parse_snap_window_command(
+        self,
+        text: str,
+        normalized: str,
+    ) -> tuple[str, str] | None:
+        """Parse "pon <title> en la mitad izquierda" style placement commands."""
+        if not normalized.startswith("pon "):
+            return None
+
+        for suffix, placement in self._WINDOW_PLACEMENTS.items():
+            if normalized.endswith(" " + suffix):
+                title = text[len("pon ") : -len(suffix)].strip()
+                if title:
+                    return title, placement
+                return None
+
+        return None
+
+    def _snap_window_to_placement(
+        self,
+        title: str,
+        placement: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str:
+        """Snap a resolved window to a useful screen placement."""
+        window = self._resolve_window(title, confirm)
+        screen_width, screen_height = self._execute_tuple(
+            "desktop.get_screen_size",
+            {},
+        )
+        x, y, width, height = self._window_placement_rect(
+            placement,
+            screen_width,
+            screen_height,
+        )
+        self._execute(
+            "desktop.move_resize_window",
+            ToolContext(
+                parameters={
+                    "handle": int(window["handle"]),
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                }
+            ),
+        )
+
+        return (
+            f"{self._CONFIRMATION_PREFIX} "
+            f"Ventana anclada {self._WINDOW_PLACEMENT_LABELS[placement]}."
+        )
+
+    @staticmethod
+    def _window_placement_rect(
+        placement: str,
+        screen_width: int,
+        screen_height: int,
+    ) -> tuple[int, int, int, int]:
+        """Return (x, y, width, height) for a screen placement."""
+        half_width = screen_width // 2
+        half_height = screen_height // 2
+        rects = {
+            "mitad-izquierda": (0, 0, half_width, screen_height),
+            "mitad-derecha": (
+                half_width,
+                0,
+                screen_width - half_width,
+                screen_height,
+            ),
+            "arriba-izquierda": (0, 0, half_width, half_height),
+            "arriba-derecha": (
+                half_width,
+                0,
+                screen_width - half_width,
+                half_height,
+            ),
+            "abajo-izquierda": (0, half_height, half_width, screen_height - half_height),
+            "abajo-derecha": (
+                half_width,
+                half_height,
+                screen_width - half_width,
+                screen_height - half_height,
+            ),
+        }
+        rect = rects.get(placement)
+
+        if rect is None:
+            raise ValueError("Posicion de ventana no soportada.")
+
+        return rect
 
     def _move_window_handle_to_edge(
         self,

@@ -153,3 +153,71 @@ def test_single_window_activation_without_ordinal_unaffected() -> None:
 
     assert result == "\u2713 Ventana activada:\nCalculadora"
     assert executor.calls[1][1].parameters == {"handle": 30}
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_rect"),
+    [
+        ("pon la calculadora en la mitad izquierda", (0, 0, 960, 1080)),
+        ("pon la calculadora en la mitad derecha", (960, 0, 960, 1080)),
+        ("pon la calculadora arriba a la izquierda", (0, 0, 960, 540)),
+        ("pon la calculadora arriba a la derecha", (960, 0, 960, 540)),
+        ("pon la calculadora abajo a la izquierda", (0, 540, 960, 540)),
+        ("pon la calculadora abajo a la derecha", (960, 540, 960, 540)),
+    ],
+)
+def test_snap_commands_move_and_resize_to_screen_placements(
+    command: str,
+    expected_rect: tuple[int, int, int, int],
+) -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(command)
+
+    assert result.startswith("\u2713 Ventana anclada")
+    assert executor.calls[-1][0] == "desktop.move_resize_window"
+    assert executor.calls[-1][1].parameters == {
+        "handle": 30,
+        "x": expected_rect[0],
+        "y": expected_rect[1],
+        "width": expected_rect[2],
+        "height": expected_rect[3],
+    }
+
+
+def test_snap_uses_resolved_window_when_several_match_with_confirm() -> None:
+    executor, use_case = _build_use_case_with_two_notepads()
+
+    result = use_case.execute(
+        "pon el segundo bloc de notas en la mitad derecha",
+        confirm=lambda _prompt: "2",
+    )
+
+    assert result == "\u2713 Ventana anclada a la mitad derecha."
+    assert executor.calls[-1][0] == "desktop.move_resize_window"
+    assert executor.calls[-1][1].parameters == {
+        "handle": 22,
+        "x": 960,
+        "y": 0,
+        "width": 960,
+        "height": 1080,
+    }
+
+
+def test_bare_pon_still_activates_instead_of_snapping() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pon la calculadora")
+
+    assert result == "\u2713 Ventana activada:\nCalculadora"
+    assert all(
+        name != "desktop.move_resize_window" for name, _ in executor.calls
+    )
