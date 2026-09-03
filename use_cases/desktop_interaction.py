@@ -1469,6 +1469,14 @@ class DesktopInteractionUseCase:
         if normalized in {"mueve el raton", "mueve el cursor"}:
             return None
 
+        compound_response = self._execute_compound_window_command(
+            normalized,
+            confirm,
+        )
+
+        if compound_response is not None:
+            return compound_response
+
         if normalized in {
             "que ventanas tengo abiertas",
             "lista las ventanas abiertas",
@@ -1675,7 +1683,15 @@ class DesktopInteractionUseCase:
     ) -> str:
         """Center a resolved window on the screen."""
         window = self._resolve_window(title, confirm)
-        handle = int(window["handle"])
+        x, y = self._center_window_handle(int(window["handle"]))
+
+        return f"{self._CONFIRMATION_PREFIX} Ventana centrada en ({x}, {y})."
+
+    def _center_window_handle(
+        self,
+        handle: int,
+    ) -> tuple[int, int]:
+        """Center one window handle on the screen."""
         left, top, right, bottom = self._execute(
             "desktop.get_window_rect",
             ToolContext(parameters={"handle": handle}),
@@ -1691,7 +1707,7 @@ class DesktopInteractionUseCase:
             ToolContext(parameters={"handle": handle, "x": x, "y": y}),
         )
 
-        return f"{self._CONFIRMATION_PREFIX} Ventana centrada en ({x}, {y})."
+        return x, y
 
     def _move_window_to_edge(
         self,
@@ -1701,7 +1717,16 @@ class DesktopInteractionUseCase:
     ) -> str:
         """Move a resolved window to the left or right screen edge."""
         window = self._resolve_window(title, confirm)
-        handle = int(window["handle"])
+        self._move_window_handle_to_edge(int(window["handle"]), edge)
+
+        return f"{self._CONFIRMATION_PREFIX} Ventana movida a la {edge}."
+
+    def _move_window_handle_to_edge(
+        self,
+        handle: int,
+        edge: str,
+    ) -> None:
+        """Move one window handle to the left or right screen edge."""
         left, top, right, _ = self._execute(
             "desktop.get_window_rect",
             ToolContext(parameters={"handle": handle}),
@@ -1721,7 +1746,187 @@ class DesktopInteractionUseCase:
             ToolContext(parameters={"handle": handle, "x": x, "y": top}),
         )
 
-        return f"{self._CONFIRMATION_PREFIX} Ventana movida a la {edge}."
+    def _execute_compound_window_command(
+        self,
+        normalized: str,
+        confirm: Callable[[str], str] | None,
+    ) -> str | None:
+        """Execute two ordered window actions over one safely resolved window."""
+        parsed = self._parse_compound_window_command(normalized)
+
+        if parsed is None:
+            return None
+
+        title, steps = parsed
+        window = self._resolve_window(title, confirm)
+        handle = int(window["handle"])
+        messages = []
+
+        for kind, argument in steps:
+            messages.append(
+                self._run_compound_window_step(handle, kind, argument)
+            )
+
+        return "\n".join(
+            f"{self._CONFIRMATION_PREFIX} {message}" for message in messages
+        )
+
+    def _parse_compound_window_command(
+        self,
+        normalized: str,
+    ) -> tuple[str, list[tuple[str, object]]] | None:
+        """Parse one compound command into a title and ordered steps."""
+        edge_match = re.match(
+            r"^(?:pon|mueve) (?:el |la )?(.+?) a la (izquierda|derecha) y (.+)$",
+            normalized,
+        )
+
+        if edge_match is not None:
+            title = edge_match.group(1)
+            clause = edge_match.group(3)
+            steps: list[tuple[str, object]] = [("edge", edge_match.group(2))]
+        else:
+            state_match = re.match(
+                r"^(centra|restaura|maximiza|minimiza) (?:el |la )?(.+?) y (.+)$",
+                normalized,
+            )
+
+            if state_match is None:
+                return None
+
+            title = state_match.group(2)
+            clause = state_match.group(3)
+            steps = [
+                (
+                    {
+                        "centra": "center",
+                        "restaura": "restore",
+                        "maximiza": "maximize",
+                        "minimiza": "minimize",
+                    }[state_match.group(1)],
+                    None,
+                )
+            ]
+
+        second = self._parse_compound_second_action(clause, title)
+
+        if second is None:
+            raise ValueError(
+                "Orden compuesta no soportada: segunda accion no reconocida."
+            )
+
+        steps.append(second)
+
+        return title, steps
+
+    def _parse_compound_second_action(
+        self,
+        clause: str,
+        first_title: str,
+    ) -> tuple[str, object] | None:
+        """Parse the second clitic or repeated-title action of a compound command."""
+        clause = clause.strip().rstrip(" .,;:!?").strip()
+
+        resize = re.match(
+            r"^(?:redimensiona(?:la|lo)? a|haz(?:la|lo)? de) (\d+)[x\u00d7](\d+)$",
+            clause,
+        )
+
+        if resize is not None:
+            return ("resize", (int(resize.group(1)), int(resize.group(2))))
+
+        pronoun_kinds = {
+            "maximizala": "maximize",
+            "maximizalo": "maximize",
+            "minimizala": "minimize",
+            "minimizalo": "minimize",
+            "restaurala": "restore",
+            "restauralo": "restore",
+            "centrala": "center",
+            "centralo": "center",
+        }
+
+        pronoun_kind = pronoun_kinds.get(clause)
+
+        if pronoun_kind is not None:
+            return (pronoun_kind, None)
+
+        repeated = re.match(
+            r"^(maximiza|minimiza|restaura|centra) (?:el |la )?(.+)$",
+            clause,
+        )
+
+        if repeated is not None:
+            if self._normalize(
+                self._strip_leading_article(repeated.group(2))
+            ) != self._normalize(self._strip_leading_article(first_title)):
+                raise ValueError(
+                    "Orden compuesta no soportada: solo una ventana por orden."
+                )
+
+            return (
+                {
+                    "maximiza": "maximize",
+                    "minimiza": "minimize",
+                    "restaura": "restore",
+                    "centra": "center",
+                }[repeated.group(1)],
+                None,
+            )
+
+        return None
+
+    def _run_compound_window_step(
+        self,
+        handle: int,
+        kind: str,
+        argument: object,
+    ) -> str:
+        """Run one compound step against an already resolved window handle."""
+        if kind == "edge":
+            self._move_window_handle_to_edge(handle, str(argument))
+            return f"Ventana movida a la {argument}."
+
+        if kind == "center":
+            x, y = self._center_window_handle(handle)
+            return f"Ventana centrada en ({x}, {y})."
+
+        if kind == "resize":
+            width, height = argument
+            self._execute(
+                "desktop.resize_window",
+                ToolContext(
+                    parameters={
+                        "handle": handle,
+                        "width": width,
+                        "height": height,
+                    }
+                ),
+            )
+            return f"Ventana redimensionada a {width} x {height}."
+
+        if kind == "maximize":
+            self._execute(
+                "desktop.maximize_window",
+                ToolContext(parameters={"handle": handle}),
+            )
+            return "Ventana maximizada."
+
+        if kind == "minimize":
+            self._execute(
+                "desktop.minimize_window",
+                ToolContext(parameters={"handle": handle}),
+            )
+            return "Ventana minimizada."
+
+        if kind == "restore":
+            self._execute(
+                "desktop.restore_window",
+                ToolContext(parameters={"handle": handle}),
+            )
+            return "Ventana restaurada."
+
+        raise ValueError("Accion de ventana no soportada.")
 
     def _resize_window(
         self,

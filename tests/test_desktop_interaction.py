@@ -1917,3 +1917,134 @@ def test_desktop_interaction_opens_known_application_with_trailing_punctuation(t
 
     assert executor.calls[0][0] == "desktop.open_application"
     assert executor.calls[0][1].parameters == {"application": "calculadora"}
+
+
+class _FailingMoveExecutor(FakeToolExecutor):
+    def execute(self, tool_name, context):
+        if tool_name == "desktop.move_window":
+            raise RuntimeError("move failed")
+        return super().execute(tool_name, context)
+
+
+def test_desktop_interaction_compound_left_then_resize() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "pon calculadora a la izquierda y redimensiónala a 700x700"
+    )
+
+    assert result == (
+        "\u2713 Ventana movida a la izquierda.\n"
+        "\u2713 Ventana redimensionada a 700 x 700."
+    )
+    move_calls = [call for call in executor.calls if call[0] == "desktop.move_window"]
+    assert move_calls[0][1].parameters == {"handle": 30, "x": 0, "y": 0}
+    resize_calls = [
+        call for call in executor.calls if call[0] == "desktop.resize_window"
+    ]
+    assert resize_calls == [
+        (call[0], call[1])
+        for call in resize_calls
+    ]
+    assert resize_calls[0][1].parameters == {
+        "handle": 30,
+        "width": 700,
+        "height": 700,
+    }
+
+
+def test_desktop_interaction_compound_right_then_resize() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "pon calculadora a la derecha y hazla de 600x500"
+    )
+
+    assert result == (
+        "\u2713 Ventana movida a la derecha.\n"
+        "\u2713 Ventana redimensionada a 600 x 500."
+    )
+    move_calls = [call for call in executor.calls if call[0] == "desktop.move_window"]
+    assert move_calls[0][1].parameters == {"handle": 30, "x": 1600, "y": 0}
+    resize_calls = [
+        call for call in executor.calls if call[0] == "desktop.resize_window"
+    ]
+    assert resize_calls[0][1].parameters == {
+        "handle": 30,
+        "width": 600,
+        "height": 500,
+    }
+
+
+def test_desktop_interaction_compound_center_then_maximize() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra calculadora y maximízala")
+
+    assert result == (
+        "\u2713 Ventana centrada en (800, 290).\n"
+        "\u2713 Ventana maximizada."
+    )
+    move_calls = [call for call in executor.calls if call[0] == "desktop.move_window"]
+    assert move_calls[0][1].parameters == {"handle": 30, "x": 800, "y": 290}
+    assert executor.calls[-1][0] == "desktop.maximize_window"
+    assert executor.calls[-1][1].parameters == {"handle": 30}
+
+
+def test_desktop_interaction_compound_restore_then_center() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("restaura calculadora y céntrala")
+
+    assert result == (
+        "\u2713 Ventana restaurada.\n"
+        "\u2713 Ventana centrada en (800, 290)."
+    )
+    assert executor.calls[1][0] == "desktop.restore_window"
+    assert executor.calls[1][1].parameters == {"handle": 30}
+    move_calls = [call for call in executor.calls if call[0] == "desktop.move_window"]
+    assert move_calls[0][1].parameters == {"handle": 30, "x": 800, "y": 290}
+
+
+def test_desktop_interaction_compound_stops_after_first_failure() -> None:
+    executor = _FailingMoveExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra calculadora y maximízala")
+
+    assert result == "Error: move failed"
+    assert not any(call[0] == "desktop.maximize_window" for call in executor.calls)
+
+
+def test_desktop_interaction_compound_rejects_unknown_second_action() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("centra calculadora y abre el bloc de notas")
+
+    assert result == (
+        "Error: Orden compuesta no soportada: segunda accion no reconocida."
+    )
+    assert not any(call[0] == "desktop.move_window" for call in executor.calls)
