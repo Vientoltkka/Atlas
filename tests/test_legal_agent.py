@@ -82,3 +82,30 @@ def test_legal_agent_has_a_local_fallback_only_for_contract_clauses() -> None:
     assert agent.local_calculation_fallback(
         [{"role": "user", "content": "¿Cómo funciona una reclamación de consumo?"}]
     ) is None
+
+
+def test_conversation_executes_legal_agent_with_mocked_model(monkeypatch) -> None:
+    orchestrator = Bootstrap.build()
+    legal = orchestrator._registry.get("legal")
+    assert isinstance(legal, LegalAgent)
+    calls: list[tuple[str, list[dict[str, str]]]] = []
+
+    monkeypatch.setattr(legal._client, "check_model_health", lambda *_args, **_kwargs: None)
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append((model, messages))
+        return "Analisis legal prudente generado."
+
+    monkeypatch.setattr(legal._client, "ask", respond)
+
+    response = orchestrator.process_prompt(
+        "Necesito revisar las clausulas de un contrato de alquiler.",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "Analisis legal prudente generado."
+    assert len(calls) == 1
+    assert calls[0][1][-1] == {
+        "role": "user",
+        "content": "Necesito revisar las clausulas de un contrato de alquiler.",
+    }
