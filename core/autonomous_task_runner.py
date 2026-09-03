@@ -40,6 +40,7 @@ from core.test_runner import PytestRunner, TestRunResult
 MAX_AUTONOMOUS_ITERATIONS = 20
 MAX_PLAN_CHANGES = 16
 MAX_HISTORY_ITEMS_IN_PROMPT = 5
+MAX_TEST_OUTPUT_CHARS_IN_PROMPT = 800
 WORKER_ROLE_ENV = "ATLAS_AUTONOMY_WORKER_MODEL"
 REVIEWER_ROLE_ENV = "ATLAS_AUTONOMY_REVIEWER_MODEL"
 LOCAL_ROLE_ENV = "ATLAS_AUTONOMY_LOCAL_MODEL"
@@ -138,6 +139,9 @@ class AutonomousIterationRecord:
     evaluation_status: str
     evaluation_reason: str
     test_passed: bool | None = None
+    test_exit_code: int | None = None
+    test_timed_out: bool = False
+    test_output_tail: str = ""
     reviewer_consulted: bool = False
     reviewer_approved: bool | None = None
     restored: bool = False
@@ -485,6 +489,9 @@ class AutonomousTaskRunner:
             evaluation_status=evaluation.status.value,
             evaluation_reason=evaluation.reason,
             test_passed=None if test_result is None else test_result.passed,
+            test_exit_code=None if test_result is None else test_result.exit_code,
+            test_timed_out=False if test_result is None else test_result.timed_out,
+            test_output_tail="" if test_result is None else test_result.output_tail,
             reviewer_consulted=reviewer_consulted,
             reviewer_approved=reviewer_approved,
             restored=restored,
@@ -677,10 +684,7 @@ class ModelPlanner:
     def __call__(
         self, goal: str, iteration: int, history: Sequence[AutonomousIterationRecord]
     ) -> AutonomousPlan:
-        recent = [
-            f"- {record.iteration} | {record.outcome} | {record.evaluation_reason}"
-            for record in history[-MAX_HISTORY_ITEMS_IN_PROMPT:]
-        ] or ["- (sin historial)"]
+        recent = _history_prompt_lines(history)
         prompt = "\n".join(
             (
                 f"Objetivo: {goal}",
@@ -767,6 +771,27 @@ def _payload_text(entry: dict, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"planner change entry requires a non-empty {key}.")
     return value
+
+
+def _history_prompt_lines(history: Sequence[AutonomousIterationRecord]) -> list[str]:
+    lines: list[str] = []
+    for record in history[-MAX_HISTORY_ITEMS_IN_PROMPT:]:
+        lines.append(
+            f"- iteración {record.iteration} | {record.outcome} | "
+            f"{record.evaluation_status} | {record.evaluation_reason}"
+        )
+        if record.changed_paths:
+            lines.append(f"  changed_paths: {', '.join(record.changed_paths)}")
+        if record.test_passed is False:
+            lines.append(f"  exit_code: {record.test_exit_code}")
+            lines.append(f"  timed_out: {record.test_timed_out}")
+            tail = record.test_output_tail.strip()
+            if tail:
+                lines.append("  Salida de tests (recortada):")
+                lines.extend(
+                    f"    {line}" for line in tail[-MAX_TEST_OUTPUT_CHARS_IN_PROMPT:].splitlines()
+                )
+    return lines or ["- (sin historial)"]
 
 
 def _message_content(response: object) -> str:
@@ -1030,6 +1055,9 @@ def _iteration_payload(record: AutonomousIterationRecord) -> dict[str, object]:
         "evaluation_status": record.evaluation_status,
         "evaluation_reason": record.evaluation_reason,
         "test_passed": record.test_passed,
+        "test_exit_code": record.test_exit_code,
+        "test_timed_out": record.test_timed_out,
+        "test_output_tail": record.test_output_tail,
         "reviewer_consulted": record.reviewer_consulted,
         "reviewer_approved": record.reviewer_approved,
         "restored": record.restored,

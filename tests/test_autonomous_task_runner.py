@@ -9,6 +9,7 @@ import pytest
 from agents.coding_agent import CodingAgent, PendingCodingChangeError
 from core.autonomous_task_runner import (
     AutonomousFileChange,
+    AutonomousIterationRecord,
     AutonomousPlan,
     AutonomousRunnerStatus,
     AutonomousTaskConfig,
@@ -16,6 +17,7 @@ from core.autonomous_task_runner import (
     MAX_AUTONOMOUS_ITERATIONS,
     ModelPlanner,
     TaskGoalVerifier,
+    _history_prompt_lines,
 )
 from core.git_checkpoint import GitCheckpointManager
 from core.goal_evaluator import GoalEvaluator
@@ -440,3 +442,239 @@ def test_model_planner_rejects_malformed_payload() -> None:
 
     with pytest.raises(ValueError):
         planner("meta", 1, ())
+
+
+# J. feedback del intento anterior hacia el planner
+
+
+class FeedbackTestRunner:
+    def __init__(self, results: list[TestRunResult]) -> None:
+        self._results = list(results)
+
+    def run(self, test_paths: tuple[str, ...]) -> TestRunResult:
+        if len(self._results) > 1:
+            return self._results.pop(0)
+        return self._results[0]
+
+
+class CapturingProvider:
+    def __init__(self, payloads: list[str]) -> None:
+        self._payloads = list(payloads)
+        self.prompts: list[str] = []
+
+    def chat(self, *, model: str, messages: list[dict[str, str]], stream: bool) -> dict:
+        self.prompts.append(messages[-1]["content"])
+        return {"model": model, "message": {"content": self._payloads.pop(0)}}
+
+
+def _failed_result(output_tail: str, *, timed_out: bool = False) -> TestRunResult:
+    return TestRunResult(
+        passed=False,
+        exit_code=None if timed_out else 1,
+        timed_out=timed_out,
+        detail=(
+            "pytest timed out after 120.0 seconds."
+            if timed_out
+            else "pytest exited with code 1."
+        ),
+        output_tail=output_tail,
+        command=("pytest", "tests/test_autonomous_fake.py"),
+        basetemp=None,
+    )
+
+
+def _passed_result() -> TestRunResult:
+    return TestRunResult(
+        passed=True,
+        exit_code=0,
+        timed_out=False,
+        detail="pytest exited with code 0.",
+        output_tail="1 passed in 0.01s",
+        command=("pytest", "tests/test_autonomous_fake.py"),
+        basetemp=None,
+    )
+
+
+class RecordingHistoryPlanner:
+    def __init__(self, plans: list[AutonomousPlan]) -> None:
+        self._plans = list(plans)
+        self.histories: list[tuple[AutonomousIterationRecord, ...]] = []
+
+    def __call__(
+        self, goal: str, iteration: int, history: object
+    ) -> AutonomousPlan:
+        self.histories.append(tuple(history))  # type: ignore[arg-type]
+        return self._plans.pop(0)
+
+
+def _runner_with_history(
+    tmp_path: Path, planner: object, tests: FeedbackTestRunner
+) -> AutonomousTaskRunner:
+    return AutonomousTaskRunner(
+        tmp_path,
+        _config(tmp_path, max_iterations=2),
+        planner=planner,  # type: ignore[arg-type]
+        test_runner=tests,
+        evaluator=GoalEvaluator(TaskGoalVerifier()),
+        checkpoint_manager=GitCheckpointManager(tmp_path, allowed_scope=("pkg",)),
+    )
+
+
+# A + B. fallo en iteración 1 → rollback → iteración 2 recibe el feedback
+
+
+def test_failed_iteration_feedback_reaches_planner_history(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    planner = RecordingHistoryPlanner(
+        [_plan("pkg/module.py", "broken\n"), _plan("pkg/module.py", "fixed\n")]
+    )
+    tests = FeedbackTestRunner(
+        [
+            _failed_result(
+                "AssertionError: expected 5 got 4\nFAILED tests/test_autonomous_fake.py"
+            ),
+            _passed_result(),
+        ]
+    )
+
+    result = _runner_with_history(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    # A. iteración 1: fallo y rollback
+    assert result.iterations[0].outcome == "RETRY"
+    assert result.iterations[0].restored is True
+    assert "restored" in result.checkpoint_events
+    # B. iteración 2 recibe el feedback del intento anterior
+    second_history = planner.histories[1]
+    assert len(second_history) == 1
+    record = second_history[0]
+    assert record.test_exit_code == 1
+    assert record.test_timed_out is False
+    assert "expected 5 got 4" in record.test_output_tail
+    assert record.evaluation_status == "RETRY"
+    assert record.evaluation_reason == "tests_failed"
+    assert record.changed_paths == ("pkg/module.py",)
+
+
+def test_model_planner_prompt_includes_previous_failure_feedback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    provider = CapturingProvider(
+        [
+            '{"reasoning": "intento 1", "changes": '
+            '[{"path": "pkg/module.py", "content": "broken\\n"}]}',
+            '{"reasoning": "intento 2", "changes": '
+            '[{"path": "pkg/module.py", "content": "fixed\\n"}]}',
+        ]
+    )
+    planner = ModelPlanner(provider, "glm-5.3-flash")
+    tests = FeedbackTestRunner(
+        [_failed_result("AssertionError: expected 5 got 4"), _passed_result()]
+    )
+
+    result = _runner_with_history(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    assert len(provider.prompts) == 2
+    prompt = provider.prompts[1]
+    assert "exit_code: 1" in prompt
+    assert "expected 5 got 4" in prompt
+    assert "tests_failed" in prompt
+    assert "changed_paths: pkg/module.py" in prompt
+
+
+# C. tests PASS → no se inventa feedback de error
+
+
+def test_passing_history_does_not_invent_failure_feedback() -> None:
+    record = AutonomousIterationRecord(
+        iteration=1,
+        outcome="SUCCESS",
+        reasoning="ok",
+        changed_paths=("pkg/module.py",),
+        evaluation_status="SUCCESS",
+        evaluation_reason="verified",
+        test_passed=True,
+        test_exit_code=0,
+        test_timed_out=False,
+        test_output_tail="1 passed in 0.01s",
+    )
+
+    prompt = "\n".join(_history_prompt_lines((record,)))
+
+    assert "exit_code" not in prompt
+    assert "timed_out" not in prompt
+    assert "Salida de tests" not in prompt
+    assert "1 passed" not in prompt
+
+
+def test_test_output_tail_is_truncated_in_planner_prompt() -> None:
+    tail = "x" * 2000 + "REAL_ERROR"
+    record = AutonomousIterationRecord(
+        iteration=1,
+        outcome="RETRY",
+        reasoning="intento",
+        changed_paths=("pkg/module.py",),
+        evaluation_status="RETRY",
+        evaluation_reason="tests_failed",
+        test_passed=False,
+        test_exit_code=1,
+        test_timed_out=False,
+        test_output_tail=tail,
+    )
+
+    prompt = "\n".join(_history_prompt_lines((record,)))
+
+    assert "REAL_ERROR" in prompt
+    assert "x" * 1000 not in prompt
+
+
+# D. timeout → planner recibe timed_out=True
+
+
+def test_timeout_feedback_reaches_planner_history(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    planner = RecordingHistoryPlanner(
+        [_plan("pkg/module.py", "hang\n"), _plan("pkg/module.py", "fixed\n")]
+    )
+    tests = FeedbackTestRunner(
+        [
+            _failed_result("pytest timed out after 120.0 seconds.", timed_out=True),
+            _passed_result(),
+        ]
+    )
+
+    result = _runner_with_history(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    record = planner.histories[1][-1]
+    assert record.test_timed_out is True
+    assert record.test_exit_code is None
+    assert record.test_passed is False
+
+
+def test_model_planner_prompt_marks_timeout(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "module.py").write_text("original\n", encoding="utf-8")
+    provider = CapturingProvider(
+        [
+            '{"reasoning": "a", "changes": [{"path": "pkg/module.py", "content": "hang\\n"}]}',
+            '{"reasoning": "b", "changes": [{"path": "pkg/module.py", "content": "fixed\\n"}]}',
+        ]
+    )
+    planner = ModelPlanner(provider, "glm-5.3-flash")
+    tests = FeedbackTestRunner(
+        [
+            _failed_result("pytest timed out after 120.0 seconds.", timed_out=True),
+            _passed_result(),
+        ]
+    )
+
+    result = _runner_with_history(tmp_path, planner, tests).run()
+
+    assert result.status is AutonomousRunnerStatus.SUCCESS
+    assert "timed_out: True" in provider.prompts[1]
