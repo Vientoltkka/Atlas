@@ -221,3 +221,28 @@ def test_bare_pon_still_activates_instead_of_snapping() -> None:
     assert all(
         name != "desktop.move_resize_window" for name, _ in executor.calls
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "tráeme calculadora al frente",
+        "traeme calculadora al frente",
+        "pon calculadora delante",
+        "cambia a calculadora",
+        "ve a calculadora",
+        "trae calculadora al frente",
+    ],
+)
+def test_natural_focus_variants_activate_the_window(command: str) -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(command)
+
+    assert result == "\u2713 Ventana activada:\nCalculadora"
+    assert executor.calls[-1][0] == "desktop.bring_window_to_front"
+    assert executor.calls[-1][1].parameters == {"handle": 30}

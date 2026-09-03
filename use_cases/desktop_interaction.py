@@ -1574,6 +1574,17 @@ class DesktopInteractionUseCase:
                 confirm,
             )
 
+        if normalized.startswith("traeme ") and normalized.endswith(
+            " al frente"
+        ):
+            title = text[len("traeme ") : -len(" al frente")].strip()
+            return self._window_state_action(
+                title,
+                "desktop.bring_window_to_front",
+                "Ventana activada",
+                confirm,
+            )
+
         if normalized.startswith("activa "):
             return self._activate_window(text[len("activa ") :].strip())
 
