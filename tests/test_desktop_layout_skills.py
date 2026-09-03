@@ -132,6 +132,20 @@ def test_layout_handler_without_tool_executor_fails_safe() -> None:
         WindowLayoutSkills(None).modo_trabajo({})
 
 
+def test_modo_escritura_centers_window_with_focus_size() -> None:
+    controller = _controller()
+
+    output = _handler(_executor(controller)).modo_escritura(
+        {"window_title": "navegador"}
+    )
+
+    assert output == {
+        "result": "Modo escritura listo: 'Atlas - Navegador' centrada en 900 x 700."
+    }
+    assert controller.front == [22]
+    assert controller.resized == [(22, 510, 190, 900, 700)]
+
+
 def test_desktop_manifests_are_discovered_and_registered() -> None:
     system = build_core_skill_system(
         skill_handler_registry=build_builtin_skill_handler_registry()
@@ -140,7 +154,10 @@ def test_desktop_manifests_are_discovered_and_registered() -> None:
     registration = register_desktop_skills(system)
 
     assert registration.status.value == "COMPLETED"
-    assert registration.registered_skill_ids == ("skill.modo-trabajo",)
+    assert registration.registered_skill_ids == (
+        "skill.modo-escritura",
+        "skill.modo-trabajo",
+    )
     skill = system.skill_registry.get("skill.modo-trabajo")
     assert skill.execution_target_type is SkillExecutionTargetType.HANDLER
     assert skill.handler_id == "handler.modo-trabajo"

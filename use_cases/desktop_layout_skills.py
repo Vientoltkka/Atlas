@@ -17,6 +17,9 @@ from use_cases.desktop_interaction import DesktopInteractionUseCase
 
 
 _MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
+_MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
+_WRITING_WIDTH = 900
+_WRITING_HEIGHT = 700
 
 
 class WindowLayoutSkills:
@@ -41,6 +44,28 @@ class WindowLayoutSkills:
         self._snap(window, rect)
         label = str(window.get("title", "")).strip()
         return {"result": f"Modo trabajo listo: '{label}' anclada a la mitad izquierda."}
+
+    def modo_escritura(
+        self,
+        inputs: Mapping[str, object],
+        *,
+        execution_context: Any = None,
+    ) -> Mapping[str, object]:
+        title = _optional_title(inputs.get("window_title"))
+        window = (
+            self._resolve_window(title)
+            if title is not None
+            else self._foreground_window()
+        )
+        rect = self._centered_rect(_WRITING_WIDTH, _WRITING_HEIGHT)
+        self._snap(window, rect)
+        label = str(window.get("title", "")).strip()
+        return {
+            "result": (
+                f"Modo escritura listo: '{label}' centrada en "
+                f"{rect[2]} x {rect[3]}."
+            )
+        }
 
     # ------------------------------------------------------------------
     # Reused desktop tool plumbing
@@ -92,6 +117,18 @@ class WindowLayoutSkills:
             width,
             height,
         )
+
+    def _centered_rect(
+        self,
+        width: int,
+        height: int,
+    ) -> tuple[int, int, int, int]:
+        screen_width, screen_height = self._screen_size()
+        width = min(width, screen_width)
+        height = min(height, screen_height)
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        return (x, y, width, height)
 
     def _snap(
         self,

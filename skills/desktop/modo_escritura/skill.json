@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.modo-escritura",
+  "name": "Modo Escritura",
+  "version": "1.0",
+  "description": "Prepara una disposicion para escribir anclando la ventana indicada (o la ventana en primer plano) centrada en pantalla con tamano de foco 900x700.",
+  "enabled": true,
+  "input_fields": [
+    {
+      "name": "window_title",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "output_fields": [
+    {
+      "name": "result",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "execution_target": "handler.modo-escritura",
+  "execution_target_type": "handler",
+  "handler_id": "handler.modo-escritura"
+}
