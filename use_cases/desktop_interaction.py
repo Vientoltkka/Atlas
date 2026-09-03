@@ -1608,6 +1608,8 @@ class DesktopInteractionUseCase:
         if query in {"vs code", "vscode"}:
             title = "Visual Studio Code"
 
+        title = self._strip_leading_article(title.strip())
+
         result = self._execute(
             "desktop.list_windows",
             ToolContext(parameters={"title": title}),

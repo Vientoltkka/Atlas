@@ -36,6 +36,15 @@ def _controller() -> WindowsDesktopController:
     return controller
 
 
+class _Dwmapi:
+    def __init__(self, cloaked: dict[int, int]) -> None:
+        self._cloaked = cloaked
+
+    def DwmGetWindowAttribute(self, handle, _attribute, value, _size):
+        value._obj.value = self._cloaked.get(int(handle), 0)
+        return 0
+
+
 def test_list_windows_includes_visible_window_with_title() -> None:
     assert _controller().list_windows() == [
         {"handle": 1, "title": "Bloc de notas", "process_id": 101}
@@ -52,3 +61,23 @@ def test_list_windows_excludes_empty_title() -> None:
     windows = _controller().list_windows()
 
     assert all(window["handle"] != 3 for window in windows)
+
+
+def test_list_windows_excludes_cloaked_window() -> None:
+    controller = _controller()
+    controller._USER32._visible = {1: True, 2: True, 3: True}
+    controller._USER32._titles = {1: "Calculadora", 2: "Calculadora", 3: ""}
+    controller._DWMAPI = _Dwmapi({2: 2})
+
+    windows = controller.list_windows()
+
+    assert [window["handle"] for window in windows] == [1]
+
+
+def test_list_windows_includes_uncloaked_window_when_dwm_reports_zero() -> None:
+    controller = _controller()
+    controller._DWMAPI = _Dwmapi({})
+
+    windows = controller.list_windows()
+
+    assert [window["handle"] for window in windows] == [1]

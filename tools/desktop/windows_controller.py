@@ -171,6 +171,7 @@ class WindowsDesktopController:
     _GDI32 = ctypes.windll.gdi32
     _GDIPLUS = ctypes.windll.gdiplus
     _OLE32 = ctypes.windll.ole32
+    _DWMAPI = ctypes.windll.dwmapi
 
     _KERNEL32.GlobalAlloc.restype = wintypes.HGLOBAL
     _KERNEL32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
@@ -410,6 +411,7 @@ class WindowsDesktopController:
     _SW_MAXIMIZE = 3
     _SW_MINIMIZE = 6
     _WM_CLOSE = 0x0010
+    _DWMWA_CLOAKED = 14
     _TH32CS_SNAPPROCESS = 0x00000002
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
     _CF_UNICODETEXT = 13
@@ -709,6 +711,18 @@ class WindowsDesktopController:
             if not self._USER32.IsWindow(handle):
                 return True
             if not self._USER32.IsWindowVisible(handle):
+                return True
+            cloaked = wintypes.DWORD()
+            if (
+                self._DWMAPI.DwmGetWindowAttribute(
+                    handle,
+                    self._DWMWA_CLOAKED,
+                    ctypes.byref(cloaked),
+                    ctypes.sizeof(cloaked),
+                )
+                == 0
+                and cloaked.value != 0
+            ):
                 return True
             length = self._USER32.GetWindowTextLengthW(handle)
             if length <= 0:

@@ -1267,6 +1267,80 @@ def test_desktop_interaction_restores_window() -> None:
     assert executor.calls[1][0] == "desktop.restore_window"
 
 
+def test_desktop_interaction_maximizes_window_with_article() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 20,
+            "title": "Calculadora",
+            "rect": (100, 100, 500, 700),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza la calculadora")
+
+    assert result == "\u2713 Ventana maximizada:\nCalculadora"
+    assert [call[0] for call in executor.calls] == [
+        "desktop.list_windows",
+        "desktop.maximize_window",
+    ]
+    assert executor.calls[1][1].parameters == {"handle": 20}
+
+
+def test_desktop_interaction_minimizes_window_with_article() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 20,
+            "title": "Calculadora",
+            "rect": (100, 100, 500, 700),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("minimiza la calculadora")
+
+    assert result == "\u2713 Ventana minimizada:\nCalculadora"
+    assert executor.calls[1][0] == "desktop.minimize_window"
+    assert executor.calls[1][1].parameters == {"handle": 20}
+
+
+def test_desktop_interaction_restores_window_with_article() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 20,
+            "title": "Calculadora",
+            "rect": (100, 100, 500, 700),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("restaura la calculadora")
+
+    assert result == "\u2713 Ventana restaurada:\nCalculadora"
+    assert executor.calls[1][0] == "desktop.restore_window"
+    assert executor.calls[1][1].parameters == {"handle": 20}
+
+
+def test_desktop_interaction_window_state_without_article_matches_title() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 20,
+            "title": "Calculadora",
+            "rect": (100, 100, 500, 700),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("maximiza calculadora")
+
+    assert result == "\u2713 Ventana maximizada:\nCalculadora"
+    assert executor.calls[1][0] == "desktop.maximize_window"
+
+
 def test_desktop_interaction_brings_window_to_front_with_aliases() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)
