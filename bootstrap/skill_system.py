@@ -32,6 +32,7 @@ TEXT_UPPERCASE_HANDLER_ID = "handler.text-uppercase"
 MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
 MODO_INVESTIGACION_HANDLER_ID = "handler.modo-investigacion"
+PREPARAR_VENTANA_HANDLER_ID = "handler.preparar-ventana"
 
 
 def build_core_skill_system(
@@ -72,6 +73,7 @@ def build_builtin_skill_handler_registry(
     registry.register(MODO_TRABAJO_HANDLER_ID, layout_skills.modo_trabajo)
     registry.register(MODO_ESCRITURA_HANDLER_ID, layout_skills.modo_escritura)
     registry.register(MODO_INVESTIGACION_HANDLER_ID, layout_skills.modo_investigacion)
+    registry.register(PREPARAR_VENTANA_HANDLER_ID, layout_skills.preparar_ventana)
     return registry
 
 

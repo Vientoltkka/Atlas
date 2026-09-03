@@ -105,6 +105,78 @@ def test_inputs_empty_without_extractable_value() -> None:
     assert skill_inputs_from_text("ejecuta la skill", skill) == {}
 
 
+def _layout_skill(*fields: SkillFieldDefinition) -> SkillDefinition:
+    return make_skill(
+        skill_id="skill.preparar-ventana",
+        name="Preparar Ventana",
+        input_fields=fields,
+    )
+
+
+_WINDOW_FIELDS = (
+    SkillFieldDefinition("window_title", "string", True),
+    SkillFieldDefinition("width", "integer", True),
+    SkillFieldDefinition("height", "integer", True),
+    SkillFieldDefinition("position", "string", False),
+)
+
+
+def test_layout_inputs_extract_title_size_and_position() -> None:
+    skill = _layout_skill(*_WINDOW_FIELDS)
+    inputs = skill_inputs_from_text(
+        'Usa la skill Preparar Ventana con "Bloc de notas" a la derecha en 800x700',
+        skill,
+    )
+    assert inputs == {
+        "window_title": "Bloc de notas",
+        "width": 800,
+        "height": 700,
+        "position": "derecha",
+    }
+
+
+def test_layout_inputs_support_spaced_size_and_center() -> None:
+    skill = _layout_skill(*_WINDOW_FIELDS)
+    inputs = skill_inputs_from_text(
+        'skill Preparar Ventana con "Notas" en 800 x 700 al centro',
+        skill,
+    )
+    assert inputs == {
+        "window_title": "Notas",
+        "width": 800,
+        "height": 700,
+        "position": "centro",
+    }
+
+
+def test_layout_inputs_default_to_empty_without_parameters() -> None:
+    skill = _layout_skill(*_WINDOW_FIELDS)
+    assert skill_inputs_from_text("usa la skill Preparar Ventana", skill) == {}
+
+
+def test_layout_inputs_map_second_quote_to_secondary_title() -> None:
+    skill = _layout_skill(
+        SkillFieldDefinition("window_title", "string", False),
+        SkillFieldDefinition("secondary_title", "string", False),
+    )
+    inputs = skill_inputs_from_text(
+        'skill Modo Investigacion con "Notas" y "Navegador"',
+        skill,
+    )
+    assert inputs == {
+        "window_title": "Notas",
+        "secondary_title": "Navegador",
+    }
+
+
+def test_layout_inputs_ignored_for_non_layout_skills() -> None:
+    skill = make_skill(input_names=("source", "target"))
+    assert skill_inputs_from_text(
+        'skill rara "titulo" 800x700 a la derecha',
+        skill,
+    ) == {}
+
+
 def test_presentation_prefers_result_key() -> None:
     assert present_skill_output({"result": "OK", "other": "x"}) == "OK"
 

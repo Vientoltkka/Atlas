@@ -19,6 +19,8 @@ from use_cases.desktop_interaction import DesktopInteractionUseCase
 _MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 _MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
 _MODO_INVESTIGACION_HANDLER_ID = "handler.modo-investigacion"
+_PREPARAR_VENTANA_HANDLER_ID = "handler.preparar-ventana"
+_LAYOUT_POSITIONS = ("izquierda", "derecha", "centro")
 _WRITING_WIDTH = 900
 _WRITING_HEIGHT = 700
 
@@ -97,6 +99,45 @@ class WindowLayoutSkills:
 
         return {"result": "Modo investigacion listo: " + " y ".join(labels) + "."}
 
+    def preparar_ventana(
+        self,
+        inputs: Mapping[str, object],
+        *,
+        execution_context: Any = None,
+    ) -> Mapping[str, object]:
+        title = _optional_title(inputs.get("window_title"))
+        if title is None:
+            raise ValueError("Falta el titulo de la ventana a preparar.")
+        width = inputs.get("width")
+        height = inputs.get("height")
+        if not isinstance(width, int) or not isinstance(height, int):
+            raise ValueError("El tamano debe ser numerico: ancho y alto enteros.")
+        if width <= 0 or height <= 0:
+            raise ValueError("El ancho y el alto deben ser mayores que cero.")
+
+        position = inputs.get("position")
+        position = "derecha" if position is None else str(position).strip().casefold()
+        if position not in _LAYOUT_POSITIONS:
+            raise ValueError(
+                "Posicion no soportada: usa izquierda, derecha o centro."
+            )
+
+        window = self._resolve_window(title)
+        rect = self._positioned_rect(position, width, height)
+        self._snap(window, rect)
+        label = str(window.get("title", "")).strip()
+        position_phrase = {
+            "izquierda": "a la izquierda",
+            "derecha": "a la derecha",
+            "centro": "en el centro",
+        }[position]
+        return {
+            "result": (
+                f"Ventana '{label}' preparada {position_phrase} en "
+                f"{rect[2]} x {rect[3]}."
+            )
+        }
+
     # ------------------------------------------------------------------
     # Reused desktop tool plumbing
     # ------------------------------------------------------------------
@@ -159,6 +200,22 @@ class WindowLayoutSkills:
         x = (screen_width - width) // 2
         y = (screen_height - height) // 2
         return (x, y, width, height)
+
+    def _positioned_rect(
+        self,
+        position: str,
+        width: int,
+        height: int,
+    ) -> tuple[int, int, int, int]:
+        screen_width, screen_height = self._screen_size()
+        width = min(width, screen_width)
+        height = min(height, screen_height)
+        y = (screen_height - height) // 2
+        if position == "izquierda":
+            return (0, y, width, height)
+        if position == "derecha":
+            return (screen_width - width, y, width, height)
+        return ((screen_width - width) // 2, y, width, height)
 
     def _snap(
         self,

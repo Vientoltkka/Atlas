@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.preparar-ventana",
+  "name": "Preparar Ventana",
+  "version": "1.0",
+  "description": "Prepara una ventana concreta en una posicion y tamano dados: 'prepara <app> a la derecha en 800x700' ancla la ventana cuyo titulo coincida al borde derecho con ese tamano.",
+  "enabled": true,
+  "input_fields": [
+    {
+      "name": "window_title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "width",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "height",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "position",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "output_fields": [
+    {
+      "name": "result",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "execution_target": "handler.preparar-ventana",
+  "execution_target_type": "handler",
+  "handler_id": "handler.preparar-ventana"
+}

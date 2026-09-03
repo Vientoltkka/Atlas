@@ -191,6 +191,86 @@ def test_modo_investigacion_with_missing_secondary_never_moves_anything() -> Non
     assert controller.resized == []
 
 
+def test_preparar_ventana_right_placement_with_given_size() -> None:
+    controller = _controller()
+
+    output = _handler(_executor(controller)).preparar_ventana(
+        {"window_title": "navegador", "width": 800, "height": 700}
+    )
+
+    assert output == {
+        "result": "Ventana 'Atlas - Navegador' preparada a la derecha en 800 x 700."
+    }
+    assert controller.front == [22]
+    assert controller.resized == [(22, 1120, 190, 800, 700)]
+
+
+def test_preparar_ventana_supports_left_and_center_positions() -> None:
+    controller = _controller()
+    handler = _handler(_executor(controller))
+
+    handler.preparar_ventana(
+        {
+            "window_title": "bloc de notas",
+            "width": 800,
+            "height": 700,
+            "position": "izquierda",
+        }
+    )
+    handler.preparar_ventana(
+        {
+            "window_title": "bloc de notas",
+            "width": 800,
+            "height": 700,
+            "position": "centro",
+        }
+    )
+
+    assert controller.resized == [
+        (11, 0, 190, 800, 700),
+        (11, 560, 190, 800, 700),
+    ]
+
+
+def test_preparar_ventana_rejects_invalid_size_and_position_without_moving() -> None:
+    controller = _controller()
+    handler = _handler(_executor(controller))
+
+    with pytest.raises(ValueError, match="tamano"):
+        handler.preparar_ventana(
+            {"window_title": "navegador", "width": "800", "height": 700}
+        )
+    with pytest.raises(ValueError, match="mayores que cero"):
+        handler.preparar_ventana(
+            {"window_title": "navegador", "width": 0, "height": 700}
+        )
+    with pytest.raises(ValueError, match="Posicion no soportada"):
+        handler.preparar_ventana(
+            {
+                "window_title": "navegador",
+                "width": 800,
+                "height": 700,
+                "position": "arriba",
+            }
+        )
+    with pytest.raises(ValueError, match="Falta el titulo"):
+        handler.preparar_ventana({"width": 800, "height": 700})
+
+    assert controller.resized == []
+    assert controller.front == []
+
+
+def test_preparar_ventana_clamps_size_to_screen() -> None:
+    controller = _controller()
+
+    output = _handler(_executor(controller)).preparar_ventana(
+        {"window_title": "navegador", "width": 4000, "height": 700}
+    )
+
+    assert controller.resized == [(22, 0, 190, 1920, 700)]
+    assert "1920 x 700" in output["result"]
+
+
 def test_desktop_manifests_are_discovered_and_registered() -> None:
     system = build_core_skill_system(
         skill_handler_registry=build_builtin_skill_handler_registry()
@@ -203,6 +283,7 @@ def test_desktop_manifests_are_discovered_and_registered() -> None:
         "skill.modo-escritura",
         "skill.modo-investigacion",
         "skill.modo-trabajo",
+        "skill.preparar-ventana",
     )
     skill = system.skill_registry.get("skill.modo-trabajo")
     assert skill.execution_target_type is SkillExecutionTargetType.HANDLER
