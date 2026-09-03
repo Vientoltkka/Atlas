@@ -30,6 +30,13 @@ class DesktopInteractionUseCase:
     _DEFAULT_WINDOW_TITLE = "Visual Studio Code"
     _CONFIRMATION_PREFIX = "\u2713"
     _WAKE_WORD_PREFIX_PATTERN = re.compile(r"^atlas\b[ ,.;:!?-]*", re.IGNORECASE)
+    _ACTIVATION_TITLE_ALIASES: dict[str, tuple[str, ...]] = {
+        "calculator": ("calculadora",),
+        "notepad": ("bloc de notas",),
+        "bloc de notas": ("notepad",),
+        "vs code": ("visual studio code",),
+        "vscode": ("visual studio code",),
+    }
 
     def __init__(
         self,
@@ -1372,6 +1379,12 @@ class DesktopInteractionUseCase:
 
         if normalized.startswith("pon ") and normalized.endswith(" delante"):
             return self._activate_window(text[len("pon ") : -len(" delante")].strip())
+        if normalized.startswith("pon "):
+            return self._activate_window(text[len("pon ") :].strip())
+        if normalized.startswith("ve a "):
+            return self._activate_window(text[len("ve a ") :].strip())
+        if normalized.startswith("cambia a "):
+            return self._activate_window(text[len("cambia a ") :].strip())
         if normalized.startswith("cierra "):
             title = text[len("cierra ") :].strip()
             return self._close_window(title, confirm)
@@ -1382,6 +1395,9 @@ class DesktopInteractionUseCase:
             "restaura",
             "cierra",
             "activa",
+            "ve",
+            "pon",
+            "cambia",
         }:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
@@ -1415,9 +1431,11 @@ class DesktopInteractionUseCase:
 
     def resolve_window_for_activation(self, title: str) -> tuple[int, str] | str:
         """Resolve one activation target without bringing it to the foreground."""
-        query = self._normalize(title)
+        query = self._normalize(self._strip_leading_article(title))
         if not query:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
+
+        queries = [query, *self._ACTIVATION_TITLE_ALIASES.get(query, ())]
 
         result = self._execute(
             "desktop.list_windows",
@@ -1429,7 +1447,10 @@ class DesktopInteractionUseCase:
         matches = [
             window
             for window in result
-            if query in self._normalize(str(window.get("title", "")))
+            if any(
+                candidate in self._normalize(str(window.get("title", "")))
+                for candidate in queries
+            )
         ]
         if not matches:
             return f"No se encontro ninguna ventana para '{title}'."

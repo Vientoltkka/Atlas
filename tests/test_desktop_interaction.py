@@ -1361,6 +1361,70 @@ def test_desktop_interaction_activates_window_alias() -> None:
     assert executor.calls[1][0] == "desktop.bring_window_to_front"
 
 
+def test_desktop_interaction_activates_window_with_go_to_variant() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("ve a calculadora")
+
+    assert result == "\u2713 Ventana activada:\nCalculadora"
+    assert [name for name, _ in executor.calls] == [
+        "desktop.list_windows",
+        "desktop.bring_window_to_front",
+    ]
+    assert executor.calls[1][1].parameters == {"handle": 30}
+
+
+def test_desktop_interaction_activates_window_with_switch_to_variant_and_app_alias() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {
+            "handle": 40,
+            "title": "Sin título - Bloc de notas",
+            "rect": (0, 0, 640, 480),
+        }
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("cambia a notepad")
+
+    assert result == "\u2713 Ventana activada:\nSin título - Bloc de notas"
+    assert [name for name, _ in executor.calls] == [
+        "desktop.list_windows",
+        "desktop.bring_window_to_front",
+    ]
+    assert executor.calls[1][1].parameters == {"handle": 40}
+
+
+def test_desktop_interaction_activates_window_with_bare_pon_variant() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("pon la calculadora")
+
+    assert result == "\u2713 Ventana activada:\nCalculadora"
+    assert executor.calls[1][1].parameters == {"handle": 30}
+
+
+def test_desktop_interaction_activates_window_with_leading_article() -> None:
+    executor = FakeToolExecutor()
+    executor.windows.append(
+        {"handle": 30, "title": "Calculadora", "rect": (0, 0, 320, 500)}
+    )
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute("activa la calculadora")
+
+    assert result == "\u2713 Ventana activada:\nCalculadora"
+    assert executor.calls[1][1].parameters == {"handle": 30}
+
+
 def test_desktop_interaction_moves_window_with_comma_coordinates() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)

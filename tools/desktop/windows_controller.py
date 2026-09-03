@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from io import StringIO
 from typing import Protocol
 
@@ -413,6 +414,10 @@ class WindowsDesktopController:
     _WM_CLOSE = 0x0010
     _DWMWA_CLOAKED = 14
     _TH32CS_SNAPPROCESS = 0x00000002
+    _FOREGROUND_ATTEMPTS = 4
+    _FOREGROUND_RETRY_DELAY_SECONDS = 0.1
+    _VK_MENU = 0x12
+    _KEYEVENTF_KEYUP = 0x0002
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
     _CF_UNICODETEXT = 13
     _GMEM_MOVEABLE = 0x0002
@@ -762,9 +767,14 @@ class WindowsDesktopController:
             int(rect.right),
             int(rect.bottom),
         )
+    def _current_foreground_handle(self) -> int:
+        """Return the foreground handle (0 while no window is foreground)."""
+        handle = self._USER32.GetForegroundWindow()
+        return int(handle) if handle else 0
+
     def get_foreground_window(self) -> dict[str, object]:
         """Return the current foreground window."""
-        handle = int(self._USER32.GetForegroundWindow())
+        handle = self._current_foreground_handle()
 
         if handle <= 0:
             raise RuntimeError("No se pudo obtener la ventana activa.")
@@ -792,14 +802,31 @@ class WindowsDesktopController:
         """Bring a window to the foreground."""
         self._ensure_window(handle)
         self._USER32.ShowWindow(handle, self._SW_RESTORE)
-        self._USER32.SetForegroundWindow(handle)
+        self._unlock_foreground()
 
-        if int(self._USER32.GetForegroundWindow()) == handle:
+        # Windows applies foreground changes asynchronously and may reject
+        # SetForegroundWindow while the foreground-lock is held, so the
+        # direct + attach-input sequence is retried briefly before failing.
+        for _ in range(self._FOREGROUND_ATTEMPTS):
+            self._USER32.SetForegroundWindow(handle)
+            if self._current_foreground_handle() == handle:
+                return
+
+            time.sleep(self._FOREGROUND_RETRY_DELAY_SECONDS)
+            self._attach_and_set_foreground(handle)
+            if self._current_foreground_handle() == handle:
+                return
+            time.sleep(self._FOREGROUND_RETRY_DELAY_SECONDS)
+
+        raise RuntimeError("No se pudo activar la ventana.")
+
+    def _unlock_foreground(self) -> None:
+        """Tap Alt so Windows grants the caller permission to set foreground."""
+        keybd_event = getattr(self._USER32, "keybd_event", None)
+        if keybd_event is None:
             return
-
-        self._attach_and_set_foreground(handle)
-        if int(self._USER32.GetForegroundWindow()) != handle:
-            raise RuntimeError("No se pudo activar la ventana.")
+        keybd_event(self._VK_MENU, 0, 0, 0)
+        keybd_event(self._VK_MENU, 0, self._KEYEVENTF_KEYUP, 0)
 
     def maximize_window(self, handle: int) -> None:
         """Maximize a window."""
@@ -1236,7 +1263,7 @@ class WindowsDesktopController:
         handle: int,
     ) -> None:
         """Try foreground activation by temporarily joining exact input queues."""
-        foreground = int(self._USER32.GetForegroundWindow())
+        foreground = self._current_foreground_handle()
         target_thread = self._USER32.GetWindowThreadProcessId(handle, None)
         foreground_thread = (
             self._USER32.GetWindowThreadProcessId(foreground, None)

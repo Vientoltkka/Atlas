@@ -586,7 +586,6 @@ class AtlasOrchestrator:
         # Specialized agents bypass the legacy execution-conversation gate
         # while reusing Atlas' existing model health/fallback pipeline.
         if self._desktop_interaction is not None and self._execution_conversation is not None:
-            activation_title = _conversational_activation_window_title(request.content)
             filesystem_request = self._desktop_interaction.filesystem_tool_request(
                 request.content,
             )
@@ -599,23 +598,29 @@ class AtlasOrchestrator:
                     confirmation_text=confirmation_text,
                 )
                 return outcome.text
-            if activation_title is not None:
+            activation_request = _conversational_activation_window_title(
+                request.content,
+            )
+            if activation_request is not None:
+                activation_title, activation_strict = activation_request
                 resolved = self._desktop_interaction.resolve_window_for_activation(
                     activation_title,
                 )
                 if isinstance(resolved, str):
-                    return resolved
-                target_handle, target_title = resolved
-                outcome = self._execution_conversation.handle_registered_tool(
-                    "desktop.bring_window_to_front",
-                    {"handle": target_handle},
-                    original_text=request.content,
-                    confirmation_text=(
-                        f"Voy a activar '{target_title}'. ¿Confirmas?"
-                    ),
-                    pending_target_handle=target_handle,
-                )
-                return outcome.text
+                    if activation_strict:
+                        return resolved
+                else:
+                    target_handle, target_title = resolved
+                    outcome = self._execution_conversation.handle_registered_tool(
+                        "desktop.bring_window_to_front",
+                        {"handle": target_handle},
+                        original_text=request.content,
+                        confirmation_text=(
+                            f"Voy a activar '{target_title}'. ¿Confirmas?"
+                        ),
+                        pending_target_handle=target_handle,
+                    )
+                    return outcome.text
             copy_text = self._desktop_interaction._extract_clipboard_copy_text(  # noqa: SLF001
                 request.content,
             )
@@ -2502,13 +2507,25 @@ def _with_message_prefix(
     return replace(response, message=prefix + response.message)
 
 
-def _conversational_activation_window_title(prompt: str) -> str | None:
-    """Return the requested title for the narrowly supported activation command."""
+def _conversational_activation_window_title(prompt: str) -> tuple[str, bool] | None:
+    """Return (title, strict) for the narrowly supported activation commands.
+
+    ``strict`` commands (activa/ve a/cambia a) surface resolution errors; the
+    loose ``pon <title>`` variant falls back to conversation when no window
+    matches, so unrelated "pon ..." requests keep their previous behavior.
+    """
     normalized = " ".join(prompt.strip().split())
-    if not normalized.casefold().startswith("activa "):
-        return None
-    title = normalized[len("activa ") :].strip()
-    return title or None
+    folded = normalized.casefold()
+    for prefix in ("activa ", "ve a ", "cambia a ", "pon "):
+        if not folded.startswith(prefix):
+            continue
+        title = normalized[len(prefix) :].strip()
+        if prefix == "pon " and title.casefold().endswith(" delante"):
+            title = title[: -len(" delante")].strip()
+        if not title:
+            return None
+        return title, prefix != "pon "
+    return None
 
 def _is_conversational_type_text_request(prompt: str) -> bool:
     """Recognize active-window typing requests, excluding file writes."""
