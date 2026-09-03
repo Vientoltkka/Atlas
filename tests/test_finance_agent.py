@@ -70,7 +70,7 @@ def test_conversation_executes_finance_agent_with_mocked_model(monkeypatch) -> N
     assert isinstance(finance, FinanceAgent)
     calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    monkeypatch.setattr(finance._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(finance._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         calls.append((model, messages))
@@ -133,3 +133,4 @@ def test_finance_agent_budget_fallback_requires_income_and_savings_goal() -> Non
     )
 
     assert response is None
+

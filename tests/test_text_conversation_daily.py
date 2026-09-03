@@ -24,7 +24,7 @@ def _configure_runtime(monkeypatch, tmp_path: Path):
 def _install_chat_responder(monkeypatch, orchestrator, responder):
     chat_agent = orchestrator._registry.get("chat")
     assert chat_agent is not None
-    monkeypatch.setattr(chat_agent._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(chat_agent._client, "check_model_health", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(chat_agent._client, "ask", responder)
 
 
@@ -295,3 +295,4 @@ def test_sensitive_file_result_is_not_kept_in_conversation_memory(
     assert secret not in response
     assert secret not in history
     assert "[redacted]" in history
+

@@ -158,7 +158,7 @@ def test_conversation_executes_existing_training_agent_with_mocked_model(
     assert training is not None
     calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    monkeypatch.setattr(training._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(training._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         calls.append((model, messages))

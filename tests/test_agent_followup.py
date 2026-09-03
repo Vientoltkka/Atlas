@@ -23,7 +23,7 @@ def _nutrition_orchestrator(monkeypatch, responses: list[str]):
     nutrition = orchestrator._registry.get("nutrition")
     assert isinstance(nutrition, NutritionAgent)
     calls: list[list[dict[str, str]]] = []
-    monkeypatch.setattr(nutrition._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(nutrition._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         del model
@@ -92,7 +92,7 @@ def test_nutrition_followup_uses_local_calculation_when_provider_is_unavailable(
     monkeypatch.setattr(
         nutrition._client,
         "check_model_health",
-        lambda model: (_ for _ in ()).throw(InferenceBackendError(model, "backend unavailable")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(InferenceBackendError("model", "backend unavailable")),
     )
 
     response = orchestrator.process_prompt("48 años, hombre.", confirm=lambda _prompt: "")
@@ -124,7 +124,7 @@ def test_short_answer_without_followup_does_not_select_nutrition(monkeypatch) ->
     nutrition = orchestrator._registry.get("nutrition")
     assert isinstance(nutrition, NutritionAgent)
     calls: list[list[dict[str, str]]] = []
-    monkeypatch.setattr(nutrition._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(nutrition._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         del model
@@ -137,3 +137,4 @@ def test_short_answer_without_followup_does_not_select_nutrition(monkeypatch) ->
         "Atlas todavia no dispone de la capacidad necesaria para esa accion."
     )
     assert calls == []
+

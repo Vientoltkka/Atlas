@@ -70,7 +70,7 @@ def test_conversation_executes_medical_agent_with_mocked_model(monkeypatch) -> N
     assert isinstance(medical, MedicalAgent)
     calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    monkeypatch.setattr(medical._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(medical._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         calls.append((model, messages))
@@ -121,3 +121,4 @@ def test_medical_agent_provides_local_post_exercise_triage_without_provider() ->
         "atención urgente",
     ):
         assert detail in response.text
+

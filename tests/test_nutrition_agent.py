@@ -168,7 +168,7 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
     assert nutrition is not None
     calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    monkeypatch.setattr(nutrition._client, "check_model_health", lambda _model: None)
+    monkeypatch.setattr(nutrition._client, "check_model_health", lambda *_args, **_kwargs: None)
 
     def respond(*, model: str, messages: list[dict[str, str]]) -> str:
         calls.append((model, messages))
@@ -187,3 +187,4 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
         "role": "user",
         "content": "Calcula mis macros para ganar masa: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
     }
+
