@@ -1603,6 +1603,11 @@ class DesktopInteractionUseCase:
         if not title:
             raise ValueError("Orden incompleta: falta el titulo de ventana.")
 
+        query = self._normalize(title)
+
+        if query in {"vs code", "vscode"}:
+            title = "Visual Studio Code"
+
         result = self._execute(
             "desktop.list_windows",
             ToolContext(parameters={"title": title}),
