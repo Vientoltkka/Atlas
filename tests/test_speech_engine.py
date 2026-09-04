@@ -1420,6 +1420,9 @@ def test_faster_whisper_is_configured_for_short_spanish_phrases(tmp_path: Path) 
     assert result.language == "es"
     assert model.kwargs["language"] == "es"
     assert "capital de Francia" in model.kwargs["initial_prompt"]
+    assert "maximiza calculadora" in model.kwargs["initial_prompt"]
+    assert "usa la skill modo trabajo" in model.kwargs["initial_prompt"]
+    assert "mi entrenamiento" in model.kwargs["initial_prompt"]
     assert model.kwargs["task"] == "transcribe"
     assert model.kwargs["vad_filter"] is True
     assert model.kwargs["condition_on_previous_text"] is False

@@ -156,7 +156,10 @@ class FasterWhisperSpeechToTextProvider:
         self._language = language or os.getenv("ATLAS_STT_LANGUAGE", "es").strip() or "es"
         self._initial_prompt = initial_prompt or os.getenv(
             "ATLAS_STT_INITIAL_PROMPT",
-            "Atlas, hora, fecha, capital de Francia, abrir Bloc de notas, abrir VS Code",
+            "Atlas, que hora es, abre la calculadora, abre Bloc de notas, "
+            "abre VS Code, maximiza calculadora, minimiza, trae calculadora "
+            "al frente, usa la skill modo trabajo, mi entrenamiento de hoy, "
+            "mi nutricion, consulta medica, consulta legal, fecha, capital de Francia",
         )
         self._min_confidence = (
             min_confidence
