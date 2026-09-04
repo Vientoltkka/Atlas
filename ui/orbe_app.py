@@ -646,10 +646,10 @@ def create_orb_window(settings=None):
 
             # Narrow halo shells frame the structure without flattening the orbital silhouette.
             for multiplier, opacity, width in (
-                (1.10, 0.018 * active_glow, 11.0),
-                (1.03, 0.038 * active_glow, 7.0),
-                (0.96, 0.070 * active_glow, 4.0),
-                (0.89, 0.15 * active_glow, 1.8),
+                (1.10, 0.030 * active_glow, 12.0),
+                (1.03, 0.060 * active_glow, 8.0),
+                (0.96, 0.105 * active_glow, 4.5),
+                (0.89, 0.22 * active_glow, 2.0),
             ):
                 radius = int(halo_radius * multiplier)
                 painter.setPen(QPen(QColor(*halo_rgb, int(alpha * opacity)), width))
@@ -659,8 +659,8 @@ def create_orb_window(settings=None):
             base_y = int(size * 0.79)
             beam_top = center + int(core_radius * 0.54)
             projection = QLinearGradient(center, beam_top, center, base_y)
-            projection.setColorAt(0.0, QColor(*projection_rgb, int(base_alpha * 0.26)))
-            projection.setColorAt(0.62, QColor(*projection_rgb, int(base_alpha * 0.08)))
+            projection.setColorAt(0.0, QColor(*projection_rgb, int(base_alpha * 0.34)))
+            projection.setColorAt(0.62, QColor(*projection_rgb, int(base_alpha * 0.11)))
             projection.setColorAt(1.0, QColor(*projection_rgb, 0))
             beam_width = max(16, int(size * 0.105))
             beam = QPainterPath()
@@ -676,7 +676,7 @@ def create_orb_window(settings=None):
             painter.drawLine(center, beam_top, center, base_y)
             painter.setPen(QPen(QColor(*projection_rgb, int(base_alpha * 0.23)), max(3.0, size * 0.011)))
             painter.drawLine(center, beam_top, center, base_y)
-            for index, (multiplier, squash, opacity, width) in enumerate(((0.14, 0.023, 0.86, 3.0), (0.21, 0.034, 0.46, 1.9), (0.29, 0.044, 0.20, 1.2))):
+            for index, (multiplier, squash, opacity, width) in enumerate(((0.14, 0.023, 1.00, 3.4), (0.21, 0.034, 0.60, 2.2), (0.29, 0.044, 0.28, 1.4))):
                 half_width = int(size * multiplier)
                 half_height = max(2, int(size * squash))
                 painter.setPen(QPen(QColor(*projection_rgb, int(base_alpha * opacity)), width))
@@ -711,9 +711,9 @@ def create_orb_window(settings=None):
                 painter.translate(center, center)
                 painter.rotate(angle)
                 painter.scale(1.0, squash)
-                painter.setPen(QPen(QColor(*ring_dim_rgb, int(alpha * 0.23)), 3.4))
+                painter.setPen(QPen(QColor(*ring_dim_rgb, int(alpha * 0.38)), 4.2))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, start_angle * 16, 112 * 16)
-                painter.setPen(QPen(QColor(*ring_light_rgb, int(alpha * 0.12)), 1.2))
+                painter.setPen(QPen(QColor(*ring_light_rgb, int(alpha * 0.20)), 1.6))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 154) * 16, 58 * 16)
                 painter.restore()
 
@@ -741,8 +741,8 @@ def create_orb_window(settings=None):
                 shell_gradient.setColorAt(0.77, QColor(23, 177, 103, int(alpha * 0.84)))
             else:
                 shell_gradient.setColorAt(0.0, QColor(3, 13, 38, min(255, alpha + 18)))
-                shell_gradient.setColorAt(0.48, QColor(5, 31, 78, int(alpha * 0.96)))
-                shell_gradient.setColorAt(0.77, QColor(15, 104, 188, int(alpha * 0.82)))
+                shell_gradient.setColorAt(0.48, QColor(7, 42, 104, int(alpha * 0.96)))
+                shell_gradient.setColorAt(0.77, QColor(20, 122, 214, int(alpha * 0.84)))
             shell_gradient.setColorAt(1.0, QColor(red, green, blue, 0))
             painter.setBrush(shell_gradient)
             painter.setPen(QPen(QColor(*halo_rgb, int(alpha * 0.56)), 2.2))
@@ -768,13 +768,21 @@ def create_orb_window(settings=None):
 
             energy_radius = max(10, int(core_radius * 0.64))
             energy_gradient = QRadialGradient(center - energy_radius * 0.18, center - energy_radius * 0.20, energy_radius)
-            energy_gradient.setColorAt(0.0, QColor(*ring_peak_rgb, int(alpha * 0.60 * profile["core_intensity"])))
-            energy_gradient.setColorAt(0.22, QColor(*ring_light_rgb, int(alpha * 0.50 * profile["core_intensity"])))
-            energy_gradient.setColorAt(0.58, QColor(*ring_dim_rgb, int(alpha * 0.28)))
+            energy_gradient.setColorAt(0.0, QColor(*ring_peak_rgb, int(alpha * 0.78 * profile["core_intensity"])))
+            energy_gradient.setColorAt(0.22, QColor(*ring_light_rgb, int(alpha * 0.62 * profile["core_intensity"])))
+            energy_gradient.setColorAt(0.58, QColor(*ring_dim_rgb, int(alpha * 0.34)))
             energy_gradient.setColorAt(1.0, QColor(*ring_dim_rgb, 0))
             painter.setBrush(energy_gradient)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(center - energy_radius, center - energy_radius, energy_radius * 2, energy_radius * 2)
+            # A hot plasma centre behind the emblem matches the reference luminous core.
+            plasma_radius = max(6, int(core_radius * 0.55))
+            plasma_gradient = QRadialGradient(center, center + core_radius * 0.05, plasma_radius)
+            plasma_gradient.setColorAt(0.0, QColor(226, 250, 255, min(255, int(alpha * 1.05 * profile["core_intensity"]))))
+            plasma_gradient.setColorAt(0.35, QColor(*ring_peak_rgb, int(alpha * 0.62 * profile["core_intensity"])))
+            plasma_gradient.setColorAt(1.0, QColor(*ring_peak_rgb, 0))
+            painter.setBrush(plasma_gradient)
+            painter.drawEllipse(center - plasma_radius, center - plasma_radius, plasma_radius * 2, plasma_radius * 2)
 
             if self._state is OrbVisualState.LISTENING:
                 # Three cheap exterior ripples make listening distinct from idle.
@@ -806,10 +814,10 @@ def create_orb_window(settings=None):
                 painter.translate(center, center)
                 painter.rotate(angle)
                 painter.scale(1.0, squash)
-                painter.setPen(QPen(QColor(*ring_bright_rgb, int(alpha * 0.86)), 5.5 * profile["segment_activity"]))
-                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 218) * 16, 48 * 16)
-                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 278) * 16, 30 * 16)
-                painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * 0.96)), 2.1))
+                painter.setPen(QPen(QColor(*ring_bright_rgb, int(alpha * 0.95)), 6.5 * profile["segment_activity"]))
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 218) * 16, 64 * 16)
+                painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 278) * 16, 40 * 16)
+                painter.setPen(QPen(QColor(*ring_peak_rgb, min(255, alpha + 8)), 2.4))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 240) * 16, 22 * 16)
                 painter.setPen(QPen(QColor(*ring_peak_rgb, int(alpha * 0.82)), 1.1))
                 painter.drawArc(-radius, -radius, radius * 2, radius * 2, (start_angle + 222) * 16, 9 * 16)
