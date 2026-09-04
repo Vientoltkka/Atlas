@@ -439,6 +439,19 @@ class Bootstrap:
         )
         schema_registry.register(
             ArgumentSchema(
+                "web.search",
+                (
+                    ArgumentField(
+                        "query",
+                        str,
+                        required=True,
+                        description="Consulta de texto para buscar en la web.",
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
                 "training.pdf.create",
                 (
                     ArgumentField("content", str, required=True, description="Training content."),
