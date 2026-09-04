@@ -896,6 +896,8 @@ def _memory_operation(text: str) -> MemoryOperation | None:
 
 
 def _single_tool_action(text: str) -> str | None:
+    if _is_calendar_create_request(text):
+        return "calendar_create"
     if _is_calendar_list_request(text):
         return "calendar_list"
     if _is_gmail_list_request(text):
@@ -921,6 +923,19 @@ def _single_tool_action(text: str) -> str | None:
     if text in {"que hora es", "dime la hora", "hora actual"}:
         return "time"
     return None
+
+
+def _is_calendar_create_request(text: str) -> bool:
+    create_markers = ("crea ", "crear ", "apunta ", "apuntar ", "agenda ", "agendar ", "programa ", "programar ", "create ")
+    object_markers = (
+        "reunion",
+        "evento",
+        "cita",
+        "entrenamiento",
+        "recordatorio",
+        "calendario",
+    )
+    return _contains_any(text, create_markers) and _contains_any(text, object_markers)
 
 
 def _is_gmail_list_request(text: str) -> bool:
@@ -985,6 +1000,8 @@ def _tool_matches(
 ) -> bool:
     if action == "calendar_list":
         return descriptor.name == "calendar_list_events"
+    if action == "calendar_create":
+        return descriptor.name == "calendar_create_event"
     if action == "gmail_list":
         return descriptor.name == "gmail_list"
     if action == "gmail_read":
@@ -998,6 +1015,7 @@ def _tool_matches(
         "write": ("write", "escribe", "guardar", "file", "archivo"),
         "list": ("list", "listar", "folder", "carpeta"),
         "calendar_list": ("calendar", "events", "calendario", "eventos"),
+        "calendar_create": ("calendar", "calendario", "create", "crear", "evento"),
         "gmail_list": ("gmail", "email", "correo", "mail"),
         "gmail_read": ("gmail", "email", "correo", "mail"),
         "gmail_send": ("gmail", "email", "correo", "mail", "send", "enviar"),
@@ -1054,6 +1072,7 @@ def _tool_match_score(descriptor: ToolDescriptor, text: str, action: str) -> flo
         "write": "write_file",
         "list": "list_directory",
         "calendar_list": "calendar_list_events",
+        "calendar_create": "calendar_create_event",
         "gmail_list": "gmail_list",
         "gmail_read": "gmail_read",
         "gmail_send": "gmail_send",

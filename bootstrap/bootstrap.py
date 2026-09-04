@@ -117,6 +117,10 @@ from tools.calendar.calendar_request_parser import (
     require_calendar_max_results,
     require_rfc3339_timestamp,
 )
+from tools.calendar.calendar_create_event_tool import (
+    CALENDAR_CREATE_EVENT_ARGUMENTS_SCHEMA,
+    CalendarCreateEventTool,
+)
 from tools.gmail.gmail_request_parser import extract_gmail_arguments
 from tools.gmail.gmail_service import (
     require_email_address,
@@ -274,6 +278,10 @@ class Bootstrap:
             arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
         )
         tool_registry.register(
+            CalendarCreateEventTool(),
+            arguments_schema=CALENDAR_CREATE_EVENT_ARGUMENTS_SCHEMA,
+        )
+        tool_registry.register(
             GmailListTool(),
             arguments_schema=ToolArgumentsSchema(
                 parameters=(
@@ -374,6 +382,7 @@ class Bootstrap:
             ("training.pdf.create", "training.create_pdf"),
             ("directory.list", "list_directory"),
             ("calendar.events.list", "calendar_list_events"),
+            ("calendar.events.create", "calendar_create_event"),
             ("gmail.messages.list", "gmail_list"),
             ("gmail.messages.read", "gmail_read"),
             ("gmail.messages.send", "gmail_send"),
@@ -530,6 +539,33 @@ class Bootstrap:
                         required=True,
                         description="Plain text email body.",
                         validator=require_gmail_body,
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "calendar.events.create",
+                (
+                    ArgumentField(
+                        "title",
+                        str,
+                        required=True,
+                        description="Event title.",
+                    ),
+                    ArgumentField(
+                        "start_time",
+                        str,
+                        required=True,
+                        description="RFC3339 event start.",
+                        validator=require_rfc3339_timestamp,
+                    ),
+                    ArgumentField(
+                        "end_time",
+                        str,
+                        required=True,
+                        description="RFC3339 event end.",
+                        validator=require_rfc3339_timestamp,
                     ),
                 ),
             )

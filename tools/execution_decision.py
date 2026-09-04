@@ -199,6 +199,15 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "calendar_create_event",
+        "calendar.events.create",
+        (
+            r"\b(?:crea|crear|apunta|apuntar|agenda|agendar|programa|programar)\b.*\b(?:reunion|evento|cita|entrenamiento|recordatorio|cita medica)\b",
+            r"\b(?:crea|crear|apunta|apuntar|agenda|agendar|programa|programar)\b.*\b(?:un|una|el|la)\s+.*\bcalendario\b",
+            r"\b(?:create)\b.*\b(?:calendar|event)\b",
+        ),
+    ),
+    (
         "gmail_send",
         "gmail.messages.send",
         (

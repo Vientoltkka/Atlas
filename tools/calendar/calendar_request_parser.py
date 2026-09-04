@@ -9,6 +9,18 @@ import unicodedata
 
 from tools.calendar.calendar_list_events_tool import MAX_RESULTS_LIMIT
 
+DEFAULT_EVENT_DURATION_MINUTES = 60
+
+_WEEKDAY_NAMES = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
+
 
 _RFC3339_TEXT = (
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
@@ -117,3 +129,121 @@ def require_calendar_max_results(value: Any) -> None:
     """Keep calendar result limits within the adapter's supported range."""
     if type(value) is not int or not 1 <= value <= MAX_RESULTS_LIMIT:
         raise ValueError(f"value must be between 1 and {MAX_RESULTS_LIMIT}")
+
+
+def extract_calendar_create_arguments(
+    source_text: str,
+    *,
+    current_time: datetime | None = None,
+) -> dict[str, Any]:
+    """Extract title, start and end for one event creation request."""
+    now = current_time or datetime.now().astimezone()
+    normalized = _normalize(source_text)
+
+    title = _extract_event_title(source_text, normalized)
+    start = _extract_event_start(normalized, now)
+    if start is None:
+        return {}
+
+    end = _extract_event_end(normalized, now, start)
+    return {
+        "title": title,
+        "start_time": start.isoformat(timespec="seconds"),
+        "end_time": end.isoformat(timespec="seconds"),
+    }
+
+
+def _extract_event_title(source_text: str, normalized: str) -> str | None:
+    quoted = re.search(
+        r"[\"'“”‘’](?P<value>[^\"'“”‘’]+)[\"'“”‘’]",
+        source_text,
+    )
+    if quoted:
+        return quoted.group("value").strip()
+
+    create_match = re.search(
+        r"\b(?:crea|crear|apunta|apuntar|agenda|agendar|programa|programar)\b"
+        r"\s+(?P<rest>.+)$",
+        normalized,
+    )
+    if create_match:
+        rest = create_match.group("rest")
+        date_marker = re.search(
+            r"\b(?:pasado\s+manana|manana|hoy|lunes|martes|miercoles|jueves"
+            r"|viernes|sabado|domingo|a\s+las|de\s+las)\b",
+            rest,
+        )
+        title = rest[: date_marker.start()] if date_marker else rest
+        title = re.sub(
+            r"^(?:una?\s+|el\s+|la\s+|los\s+|las\s+|un\s+)",
+            "",
+            title.strip(),
+        )
+        title = re.sub(
+            r"\s+(?:el|la|los|las|un|una|para|este|esta|proximo|proxima|siguiente)$",
+            "",
+            title.strip(),
+        )
+        title = title.strip()
+        if title:
+            return title[:1].upper() + title[1:]
+
+    return None
+
+
+def _extract_event_start(
+    normalized: str,
+    now: datetime,
+) -> datetime | None:
+    hour_match = re.search(r"\ba\s+las?\s+(\d{1,2})(?::(\d{2}))?", normalized)
+    if hour_match is None:
+        return None
+    hour = int(hour_match.group(1))
+    minute = int(hour_match.group(2) or 0)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+
+    day_offset = _extract_event_day_offset(normalized, now)
+    start = datetime.combine(
+        now.date() + timedelta(days=day_offset),
+        time(hour=hour, minute=minute),
+        tzinfo=now.tzinfo,
+    )
+    return start
+
+
+def _extract_event_day_offset(normalized: str, now: datetime) -> int:
+    if re.search(r"\bpasado\s+manana\b", normalized):
+        return 2
+    if re.search(r"\bmanana\b", normalized):
+        return 1
+    if re.search(r"\bhoy\b", normalized):
+        return 0
+    for name, weekday in _WEEKDAY_NAMES.items():
+        if re.search(rf"\b(?:el\s+|proximo\s+|siguiente\s+)?{name}\b", normalized):
+            offset = (weekday - now.weekday()) % 7
+            if offset == 0:
+                offset = 7
+            return offset
+    return 0
+
+
+def _extract_event_end(
+    normalized: str,
+    now: datetime,
+    start: datetime,
+) -> datetime:
+    end_match = re.search(r"\bhasta\s+las?\s+(\d{1,2})(?::(\d{2}))?", normalized)
+    if end_match:
+        hour = int(end_match.group(1))
+        minute = int(end_match.group(2) or 0)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            end = datetime.combine(
+                start.date(),
+                time(hour=hour, minute=minute),
+                tzinfo=now.tzinfo,
+            )
+            if end <= start:
+                end += timedelta(days=1)
+            return end
+    return start + timedelta(minutes=DEFAULT_EVENT_DURATION_MINUTES)

@@ -39,10 +39,18 @@ class CodexAppServerTimeoutError(CalendarAdapterError):
 class CodexAppServerResponseError(CalendarAdapterError):
     """Raised for a JSON-RPC or connector error returned by App Server."""
 
-    def __init__(self, code: object | None = None) -> None:
+    def __init__(
+        self,
+        code: object | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.code = code
+        self.detail = detail
         suffix = f" (code {code})" if code is not None else ""
-        super().__init__(f"Codex App Server returned an error{suffix}.")
+        message = f"Codex App Server returned an error{suffix}."
+        if detail:
+            message = f"{message} Detalle: {detail}"
+        super().__init__(message)
 
 
 CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA = ToolArgumentsSchema(

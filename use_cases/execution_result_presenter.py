@@ -215,6 +215,9 @@ class ExecutionResultPresenter:
         if result.tool_name == "calendar_list_events":
             return self._present_calendar_events(result)
 
+        if result.tool_name == "calendar_create_event":
+            return self._present_calendar_create(result)
+
         if result.tool_name == "gmail_list":
             return self._present_gmail_list(result)
 
@@ -359,6 +362,17 @@ class ExecutionResultPresenter:
             text="Eventos encontrados:\n" + "\n".join(lines),
             summary="calendar events",
             details=(f"{len(lines)} eventos",),
+        )
+
+    def _present_calendar_create(
+        self,
+        result: ToolRunResult,
+    ) -> PresentationResult:
+        created = str(result.result) if result.result is not None else "Evento creado."
+        return PresentationResult(
+            text=created,
+            summary="calendar event created",
+            details=(),
         )
 
     def _present_gmail_list(
