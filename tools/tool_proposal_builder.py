@@ -17,6 +17,7 @@ from tools.argument_schema import (
     ArgumentSchemaRegistry,
 )
 from tools.calendar.calendar_request_parser import extract_calendar_arguments
+from tools.gmail.gmail_request_parser import extract_gmail_arguments
 from tools.execution_decision import ExecutionDecision, ExecutionMode
 from tools.intent_selector import ToolIntent, ToolIntentNotSupportedError, ToolSelector
 from tools.registry import ToolNotRegisteredError, ToolRegistry
@@ -264,6 +265,14 @@ class ToolProposalBuilder:
         if intent_action == "calendar.events.list":
             return _ExtractionResult(
                 _filter_fields(extract_calendar_arguments(source_text), field_names)
+            )
+
+        if intent_action.startswith("gmail.messages."):
+            return _ExtractionResult(
+                _filter_fields(
+                    extract_gmail_arguments(source_text, intent_action),
+                    field_names,
+                )
             )
 
         if intent_action == "file.write":

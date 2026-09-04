@@ -117,6 +117,20 @@ from tools.calendar.calendar_request_parser import (
     require_calendar_max_results,
     require_rfc3339_timestamp,
 )
+from tools.gmail.gmail_request_parser import extract_gmail_arguments
+from tools.gmail.gmail_service import (
+    require_email_address,
+    require_gmail_body,
+    require_gmail_max_results,
+    require_gmail_message_id,
+    require_gmail_sender,
+    require_gmail_subject,
+)
+from tools.gmail.gmail_tools import (
+    GmailListTool,
+    GmailReadTool,
+    GmailSendTool,
+)
 from tools.desktop.desktop_tools import (
     ActivateWindowTool,
     BringWindowToFrontTool,
@@ -259,6 +273,39 @@ class Bootstrap:
             CalendarListEventsTool(),
             arguments_schema=CALENDAR_LIST_EVENTS_ARGUMENTS_SCHEMA,
         )
+        tool_registry.register(
+            GmailListTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema(
+                        "max_results",
+                        int,
+                        default=5,
+                        minimum=1,
+                        maximum=20,
+                    ),
+                ),
+            ),
+        )
+        tool_registry.register(
+            GmailReadTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("message_id", str, required=False),
+                    ToolParameterSchema("sender", str, required=False),
+                ),
+            ),
+        )
+        tool_registry.register(
+            GmailSendTool(),
+            arguments_schema=ToolArgumentsSchema(
+                parameters=(
+                    ToolParameterSchema("to", str, required=True),
+                    ToolParameterSchema("subject", str, required=True),
+                    ToolParameterSchema("body", str, required=True),
+                ),
+            ),
+        )
         tool_registry.register(OpenApplicationTool())
         tool_registry.register(ListProcessesTool())
         tool_registry.register(IsProcessRunningTool())
@@ -327,6 +374,9 @@ class Bootstrap:
             ("training.pdf.create", "training.create_pdf"),
             ("directory.list", "list_directory"),
             ("calendar.events.list", "calendar_list_events"),
+            ("gmail.messages.list", "gmail_list"),
+            ("gmail.messages.read", "gmail_read"),
+            ("gmail.messages.send", "gmail_send"),
             ("project.tree", "project_tree"),
             ("web.search", "web_search"),
             ("desktop.application.open", "desktop.open_application"),
@@ -419,6 +469,67 @@ class Bootstrap:
                         default=5,
                         description="Maximum number of events.",
                         validator=require_calendar_max_results,
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "gmail.messages.list",
+                (
+                    ArgumentField(
+                        "max_results",
+                        int,
+                        default=5,
+                        description="Maximum number of messages.",
+                        validator=require_gmail_max_results,
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "gmail.messages.read",
+                (
+                    ArgumentField(
+                        "message_id",
+                        str,
+                        description="Gmail message id (UID).",
+                        validator=require_gmail_message_id,
+                    ),
+                    ArgumentField(
+                        "sender",
+                        str,
+                        description="Sender address or name.",
+                        validator=require_gmail_sender,
+                    ),
+                ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "gmail.messages.send",
+                (
+                    ArgumentField(
+                        "to",
+                        str,
+                        required=True,
+                        description="Recipient email address.",
+                        validator=require_email_address,
+                    ),
+                    ArgumentField(
+                        "subject",
+                        str,
+                        required=True,
+                        description="Email subject.",
+                        validator=require_gmail_subject,
+                    ),
+                    ArgumentField(
+                        "body",
+                        str,
+                        required=True,
+                        description="Plain text email body.",
+                        validator=require_gmail_body,
                     ),
                 ),
             )

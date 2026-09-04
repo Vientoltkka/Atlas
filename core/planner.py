@@ -427,6 +427,9 @@ class Planner:
         "file.write": "write_file",
         "directory.list": "list_directory",
         "calendar.events.list": "calendar_list_events",
+        "gmail.messages.list": "gmail_list",
+        "gmail.messages.read": "gmail_read",
+        "gmail.messages.send": "gmail_send",
         "project.tree": "project_tree",
         "desktop.application.open": "desktop.open_application",
         "desktop.file.open": "desktop.open_file",
@@ -436,6 +439,7 @@ class Planner:
     }
     _CONFIRMATION_TOOLS = {
         "write_file",
+        "gmail_send",
         "desktop.type_text",
         "desktop.press_hotkey",
     }

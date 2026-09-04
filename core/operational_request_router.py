@@ -898,13 +898,19 @@ def _memory_operation(text: str) -> MemoryOperation | None:
 def _single_tool_action(text: str) -> str | None:
     if _is_calendar_list_request(text):
         return "calendar_list"
+    if _is_gmail_list_request(text):
+        return "gmail_list"
     if text.startswith(("abre ", "abrir ", "open ")):
         return "open"
     if text.startswith(("lee ", "leer ", "read ")):
+        if _mentions_email(text):
+            return "gmail_read"
         return "read"
     if text.startswith(("escribe ", "guarda ", "write ")):
         return "write"
     if text.startswith(("envia ", "enviame ", "manda ", "mandame ", "send ")):
+        if _mentions_email(text):
+            return "gmail_send"
         return "send"
     if text.startswith(("lista ", "listar ", "muestra carpeta")):
         return "list"
@@ -915,6 +921,32 @@ def _single_tool_action(text: str) -> str | None:
     if text in {"que hora es", "dime la hora", "hora actual"}:
         return "time"
     return None
+
+
+def _is_gmail_list_request(text: str) -> bool:
+    email_markers = ("correo", "correos", "email", "emails", "mail", "mails", "bandeja", "mensajes")
+    action_markers = (
+        "muestra ",
+        "muestrame ",
+        "lista ",
+        "listame ",
+        "ensename ",
+        "ultimos ",
+        "ultimo ",
+        "mis ",
+        "recientes ",
+        "nuevos ",
+        "show ",
+        "list ",
+    )
+    return _contains_any(text, email_markers) and _contains_any(text, action_markers)
+
+
+def _mentions_email(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in ("correo", "correos", "email", "emails", "mail", "mails", "gmail")
+    )
 
 
 def _is_calendar_list_request(text: str) -> bool:
@@ -953,6 +985,12 @@ def _tool_matches(
 ) -> bool:
     if action == "calendar_list":
         return descriptor.name == "calendar_list_events"
+    if action == "gmail_list":
+        return descriptor.name == "gmail_list"
+    if action == "gmail_read":
+        return descriptor.name == "gmail_read"
+    if action == "gmail_send":
+        return descriptor.name == "gmail_send"
     haystack = _normalize_for_matching(f"{descriptor.name} {descriptor.description}")
     action_markers = {
         "open": ("open", "abre", "abrir", "desktop", "application", "aplicacion", "vscode", "notepad"),
@@ -960,8 +998,11 @@ def _tool_matches(
         "write": ("write", "escribe", "guardar", "file", "archivo"),
         "list": ("list", "listar", "folder", "carpeta"),
         "calendar_list": ("calendar", "events", "calendario", "eventos"),
+        "gmail_list": ("gmail", "email", "correo", "mail"),
+        "gmail_read": ("gmail", "email", "correo", "mail"),
+        "gmail_send": ("gmail", "email", "correo", "mail", "send", "enviar"),
         "copy": ("clipboard", "portapapeles", "copy"),
-        "send": ("send", "enviar", "mensaje", "message", "whatsapp"),
+        "send": ("send", "enviar", "mensaje", "message", "whatsapp", "email", "correo", "mail"),
         "status": ("status", "estado", "process", "proceso"),
         "time": ("time", "hora", "date", "fecha"),
     }[action]
@@ -1005,10 +1046,17 @@ def _tool_match_score(descriptor: ToolDescriptor, text: str, action: str) -> flo
     )
     score = 0.7 + min(0.2, overlap * 0.05)
     preferred_tool = {
-        "read": "read_file",
+        "read": (
+            "gmail_read"
+            if _mentions_email(text)
+            else "read_file"
+        ),
         "write": "write_file",
         "list": "list_directory",
         "calendar_list": "calendar_list_events",
+        "gmail_list": "gmail_list",
+        "gmail_read": "gmail_read",
+        "gmail_send": "gmail_send",
     }.get(action)
     if descriptor.name == preferred_tool:
         score += 0.15

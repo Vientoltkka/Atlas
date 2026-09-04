@@ -1291,6 +1291,14 @@ class AtlasOrchestrator:
         ):
             # Windows absolute paths keep the supervised single-tool flow.
             return None
+        if (
+            route_decision is not None
+            and route_decision.target_tool_name
+            in {"gmail_list", "gmail_read", "gmail_send"}
+        ):
+            # Gmail keeps the supervised conversation flow with its own
+            # confirmation and presentation.
+            return None
         response = self._handle_structured_execution_core(
             prompt,
             request_id=request.request_id,

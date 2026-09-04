@@ -537,12 +537,26 @@ def _validation_status(reason: str) -> str:
 
 
 def _confirmation_decision(response: str) -> bool | None:
-    normalized = response.strip().lower()
+    normalized = " ".join(response.strip().lower().split())
 
-    if normalized in {"s", "si", "sí", "yes", "y"}:
+    if normalized in {
+        "s",
+        "si",
+        "sí",
+        "yes",
+        "y",
+        "confirma",
+        "confirmo",
+        "confirmar",
+        "vale",
+        "ok",
+        "adelante",
+        "continua",
+        "continuar",
+    }:
         return True
 
-    if normalized in {"n", "no"}:
+    if normalized in {"n", "no", "cancela", "cancelar", "olvidalo", "descarta", "rechaza"}:
         return False
 
     return None

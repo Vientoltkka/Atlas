@@ -280,7 +280,20 @@ def _extract_modified_arguments(
 
 
 def _is_confirm(normalized: str) -> bool:
-    return normalized in {"s", "si", "yes", "y", "confirma", "adelante", "continua", "continuar"}
+    return normalized in {
+        "s",
+        "si",
+        "yes",
+        "y",
+        "confirma",
+        "confirmo",
+        "confirmar",
+        "vale",
+        "ok",
+        "adelante",
+        "continua",
+        "continuar",
+    }
 
 
 def _is_reject(normalized: str) -> bool:

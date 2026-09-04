@@ -215,6 +215,15 @@ class ExecutionResultPresenter:
         if result.tool_name == "calendar_list_events":
             return self._present_calendar_events(result)
 
+        if result.tool_name == "gmail_list":
+            return self._present_gmail_list(result)
+
+        if result.tool_name == "gmail_read":
+            return self._present_gmail_read(result)
+
+        if result.tool_name == "gmail_send":
+            return self._present_gmail_send(result)
+
         if result.tool_name == "desktop.open_application":
             return self._present_open_application(result)
 
@@ -350,6 +359,74 @@ class ExecutionResultPresenter:
             text="Eventos encontrados:\n" + "\n".join(lines),
             summary="calendar events",
             details=(f"{len(lines)} eventos",),
+        )
+
+    def _present_gmail_list(
+        self,
+        result: ToolRunResult,
+    ) -> PresentationResult:
+        payload = result.result if isinstance(result.result, Mapping) else {}
+        messages = _as_sequence(payload.get("messages"))
+
+        if not messages:
+            return PresentationResult(
+                text="No hay correos en la bandeja de entrada.",
+                summary="gmail empty",
+            )
+
+        lines = []
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            sender = str(message.get("from") or "remitente desconocido")
+            subject = str(message.get("subject") or "Sin asunto")
+            date = str(message.get("date") or "fecha no indicada")
+            snippet = str(message.get("snippet") or "")
+            identifier = str(message.get("id") or "")
+            header = f"- [{identifier}] {subject} — {sender} — {date}"
+            lines.append(header)
+            if snippet:
+                lines.append(f"  {snippet}")
+
+        if not lines:
+            return PresentationResult(
+                text="No hay correos en la bandeja de entrada.",
+                summary="gmail empty",
+            )
+
+        return PresentationResult(
+            text="Últimos correos:\n" + "\n".join(lines),
+            summary="gmail list",
+            details=(f"{len(lines)} correos",),
+        )
+
+    def _present_gmail_read(
+        self,
+        result: ToolRunResult,
+    ) -> PresentationResult:
+        payload = result.result if isinstance(result.result, Mapping) else {}
+        sender = str(payload.get("from") or "remitente desconocido")
+        subject = str(payload.get("subject") or "Sin asunto")
+        date = str(payload.get("date") or "fecha no indicada")
+        body = str(payload.get("body") or "(sin contenido de texto)")
+        rendered = self._preview_text(body, label="contenido")
+        return PresentationResult(
+            text=f"Correo de {sender} — {subject} ({date}):\n{rendered}",
+            summary="gmail read",
+            details=(sender,),
+        )
+
+    def _present_gmail_send(
+        self,
+        result: ToolRunResult,
+    ) -> PresentationResult:
+        payload = result.result if isinstance(result.result, Mapping) else {}
+        recipient = str(payload.get("sent_to") or "destinatario desconocido")
+        subject = str(payload.get("subject") or "Sin asunto")
+        return PresentationResult(
+            text=f"Email enviado a {recipient}. Asunto: {subject}.",
+            summary="gmail sent",
+            details=(recipient,),
         )
 
     def _present_open_application(
@@ -599,6 +676,16 @@ class ExecutionResultPresenter:
             if title:
                 return f"Voy a ejecutar {keys} en {title}."
             return f"Voy a ejecutar {keys}."
+
+        if result.tool_name == "gmail_send":
+            recipient = _argument(result, "to")
+            subject = _argument(result, "subject")
+            if recipient:
+                return (
+                    f"Voy a enviar un email a {recipient} con asunto "
+                    f"{subject or 'sin asunto'}."
+                )
+            return "Voy a enviar un email."
 
         if path:
             return f"Esta operacion requiere confirmacion: {_tool_action_label(result.tool_name)} sobre {path}."
@@ -855,6 +942,10 @@ def _tool_action_label(
         "write_file": "escribir archivo",
         "list_directory": "listar directorio",
         "project_tree": "mostrar el arbol del proyecto",
+        "calendar_list_events": "listar eventos del calendario",
+        "gmail_list": "listar correos",
+        "gmail_read": "leer correo",
+        "gmail_send": "enviar email",
         "desktop.open_application": "abrir aplicacion",
         "desktop.open_file": "abrir archivo",
         "desktop.type_text": "escribir texto",

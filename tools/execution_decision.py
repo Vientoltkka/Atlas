@@ -199,6 +199,31 @@ _CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "gmail_send",
+        "gmail.messages.send",
+        (
+            r"\b(?:envia|enviame|manda|mandame|send)\b.*\b(?:correos?|emails?|mails?)\b",
+            r"\b(?:envia|enviame|manda|mandame|send)\b.*\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b",
+        ),
+    ),
+    (
+        "gmail_read",
+        "gmail.messages.read",
+        (
+            r"\blee(?:r)?\b.*\b(?:el\s+)?correos?\b",
+            r"\blee(?:r)?\b.*\b(?:el\s+)?emails?\b",
+        ),
+    ),
+    (
+        "gmail_list",
+        "gmail.messages.list",
+        (
+            r"\b(?:muestra|lista|listame|muestrame|ensename)\b.*\b(?:mis\s+)?(?:correos?|emails?|mails?|bandeja)\b",
+            r"\b(?:ultimos?|nuevos?|recientes?)\b.*\b(?:correos?|emails?|mails?|mensajes?)\b",
+            r"\bmis\s+(?:correos?|emails?|mails?)\b",
+        ),
+    ),
+    (
         "read_file",
         "file.read",
         (
