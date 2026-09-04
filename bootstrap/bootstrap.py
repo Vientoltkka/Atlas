@@ -1,4 +1,4 @@
-"""Bootstrap module for Atlas."""
+﻿"""Bootstrap module for Atlas."""
 
 import math
 import os
@@ -93,6 +93,12 @@ from tools.argument_schema import (
     require_non_empty,
 )
 from tools.execution_decision import ExecutionDecisionEngine
+
+from core.async_task_scheduler import (
+    AsyncTaskScheduler,
+    JsonGoalTaskStore,
+    ToolTaskExecutor,
+)
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 from tools.tool_chain_runner import ToolChainRunner
@@ -1552,6 +1558,12 @@ class Bootstrap:
         # Orchestrator
         # -----------------------
 
+        async_task_scheduler = AsyncTaskScheduler(
+            ToolTaskExecutor(single_tool_runner),
+            store=JsonGoalTaskStore(
+                _execution_state_path().parent / "task_scheduler"
+            ),
+        )
         orchestrator = AtlasOrchestrator(
             planner=planner,
             router=router,
@@ -1594,6 +1606,7 @@ class Bootstrap:
             structured_execution_enabled=hybrid_planning_enabled or provider_enabled,
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
+            async_task_scheduler=async_task_scheduler,
         )
         orchestrator.agent_orchestrator = AgentOrchestrator(registry)
         return orchestrator
@@ -1782,3 +1795,4 @@ def _read_float(
         return default
 
     return min(max(value, minimum), maximum)
+

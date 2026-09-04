@@ -15,6 +15,7 @@ from agents.registry import AgentRegistry
 from agents.base_agent import AgentResponse
 from agents.coding_agent import PendingCodingChangeError
 
+from core.async_task_scheduler import AsyncTaskScheduler
 from core.atlas_router import (
     AtlasRouter,
     AtlasRoutingRequest,
@@ -170,6 +171,7 @@ class AtlasOrchestrator:
         project_root: Path | None = None,
         training_pdf_output_dir: Path | None = None,
         now_provider=None,
+        async_task_scheduler: "AsyncTaskScheduler | None" = None,
     ) -> None:
 
         self._planner = planner
@@ -243,6 +245,42 @@ class AtlasOrchestrator:
         self._project_root = project_root or Path(".")
         self._self_improvement_conversation = self_improvement_conversation or SelfImprovementConversation(self._project_root)
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
+        self._async_task_scheduler = async_task_scheduler
+
+    @property
+    def async_task_scheduler(self) -> "AsyncTaskScheduler | None":
+        """Expose the optional independent-task scheduler."""
+        return self._async_task_scheduler
+
+    def run_independent_tasks(
+        self,
+        description: str,
+        tasks: list[dict[str, Any]],
+        *,
+        goal_id: str | None = None,
+    ) -> "str | None":
+        """Submit independent tasks and run every READY one without blocking."""
+        if self._async_task_scheduler is None:
+            return None
+        goal = self._async_task_scheduler.submit_goal(
+            description,
+            tasks,
+            goal_id=goal_id,
+        )
+        self._async_task_scheduler.run_ready()
+        return goal
+
+    def approve_async_task(self, confirmation_id: str) -> "str | None":
+        """Resume exactly the task bound to this single-use approval token."""
+        if self._async_task_scheduler is None:
+            return None
+        return self._async_task_scheduler.approve(confirmation_id)
+
+    def deny_async_task(self, confirmation_id: str) -> "str | None":
+        """Deny one pending approval; only its own task is affected."""
+        if self._async_task_scheduler is None:
+            return None
+        return self._async_task_scheduler.deny(confirmation_id)
 
     @property
     def execution_history(self) -> ExecutionSessionHistory | None:
