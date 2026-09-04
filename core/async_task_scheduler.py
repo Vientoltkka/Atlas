@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 import uuid
 from enum import Enum
 from typing import Any, Callable, Protocol
@@ -209,6 +210,34 @@ class PendingApproval:
 
 
 @dataclass(slots=True)
+class GoalBudget:
+    """Hard execution budget for one goal; no autonomous goal may be unbounded."""
+
+    max_duration_seconds: float | None = None
+    max_task_executions: int | None = None
+    deadline_epoch: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_duration_seconds": self.max_duration_seconds,
+            "max_task_executions": self.max_task_executions,
+            "deadline_epoch": self.deadline_epoch,
+        }
+
+    @staticmethod
+    def from_dict(payload: dict[str, Any]) -> "GoalBudget":
+        return GoalBudget(
+            max_duration_seconds=payload.get("max_duration_seconds"),
+            max_task_executions=payload.get("max_task_executions"),
+            deadline_epoch=payload.get("deadline_epoch"),
+        )
+
+
+def _wall_clock() -> float:
+    return time.time()
+
+
+@dataclass(slots=True)
 class GoalState:
     """Set of independent tasks sharing one objective."""
 
@@ -216,6 +245,10 @@ class GoalState:
     description: str
     tasks: dict[str, Task] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_utc_now)
+    budget: GoalBudget | None = None
+    executed_count: int = 0
+    budget_exhausted: bool = False
+    cancelled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -223,10 +256,15 @@ class GoalState:
             "description": self.description,
             "created_at": self.created_at.isoformat(),
             "tasks": [task.to_dict() for task in self.tasks.values()],
+            "budget": self.budget.to_dict() if self.budget else None,
+            "executed_count": self.executed_count,
+            "budget_exhausted": self.budget_exhausted,
+            "cancelled": self.cancelled,
         }
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "GoalState":
+        budget_payload = payload.get("budget")
         return GoalState(
             goal_id=payload["goal_id"],
             description=payload["description"],
@@ -235,6 +273,10 @@ class GoalState:
                 for task in payload.get("tasks", [])
             },
             created_at=datetime.fromisoformat(payload["created_at"]),
+            budget=GoalBudget.from_dict(budget_payload) if budget_payload else None,
+            executed_count=int(payload.get("executed_count", 0)),
+            budget_exhausted=bool(payload.get("budget_exhausted", False)),
+            cancelled=bool(payload.get("cancelled", False)),
         )
 
 
@@ -279,6 +321,9 @@ class JsonGoalTaskStore:
     def delete(self, goal_id: str) -> None:
         self._path(goal_id).unlink(missing_ok=True)
 
+    def goal_ids(self) -> list[str]:
+        return sorted(path.stem for path in self._directory.glob("*.json"))
+
 
 class AsyncTaskScheduler:
     """Cooperative scheduler where one WAITING_APPROVAL never blocks READY tasks."""
@@ -305,6 +350,7 @@ class AsyncTaskScheduler:
         tasks: list[dict[str, Any]],
         *,
         goal_id: str | None = None,
+        budget: GoalBudget | None = None,
     ) -> str:
         with self._lock:
             resolved_goal_id = goal_id or uuid.uuid4().hex
@@ -315,7 +361,10 @@ class AsyncTaskScheduler:
             state = GoalState(
                 goal_id=resolved_goal_id,
                 description=description,
+                budget=budget,
             )
+            if budget is not None and budget.max_duration_seconds is not None:
+                budget.deadline_epoch = _wall_clock() + budget.max_duration_seconds
             for spec in tasks:
                 task = Task(
                     task_id=spec["task_id"],
@@ -353,6 +402,7 @@ class AsyncTaskScheduler:
         with self._lock:
             for goal_id in list(self._goals):
                 state = self._goals[goal_id]
+                self._enforce_budget_locked(state)
                 for task in state.tasks.values():
                     task.status = self._initial_status(task, state)
             progressed = True
@@ -381,6 +431,66 @@ class AsyncTaskScheduler:
             self._persist_all()
         return completed_now
 
+    def run_next_ready(self) -> "str | None":
+        """Process exactly one unit (RESUMABLE first, then READY) and release.
+
+        Incremental equivalent of run_ready() for the background pump: the lock
+        is only held for a single task execution instead of the whole loop.
+        Returns the processed task id, or None when there is nothing to run.
+        """
+        with self._lock:
+            for goal_id in list(self._goals):
+                state = self._goals[goal_id]
+                self._enforce_budget_locked(state)
+                for task in state.tasks.values():
+                    task.status = self._initial_status(task, state)
+            for state in self._goals.values():
+                for task_id in list(state.tasks):
+                    task = state.tasks[task_id]
+                    if task.status is TaskStatus.RESUMABLE:
+                        self._run_task(task)
+                        self._persist(task.goal_id)
+                        return task_id
+            for state in self._goals.values():
+                for task_id in list(state.tasks):
+                    task = state.tasks[task_id]
+                    if task.status is TaskStatus.READY:
+                        self._run_task(task)
+                        self._persist(task.goal_id)
+                        return task_id
+        return None
+
+    # -- budget -----------------------------------------------------------------
+
+    def _budget_exhausted(self, state: GoalState) -> bool:
+        budget = state.budget
+        if budget is None:
+            return False
+        if (
+            budget.max_task_executions is not None
+            and state.executed_count >= budget.max_task_executions
+        ):
+            return True
+        if budget.deadline_epoch is not None and _wall_clock() >= budget.deadline_epoch:
+            return True
+        return False
+
+    def _enforce_budget_locked(self, state: GoalState) -> None:
+        if state.cancelled or state.budget is None:
+            return
+        if state.budget_exhausted or self._budget_exhausted(state):
+            state.budget_exhausted = True
+        else:
+            return
+        for task in state.tasks.values():
+            if task.status in _TERMINAL_TASK_STATES:
+                continue
+            if task.status in (TaskStatus.WAITING_APPROVAL, TaskStatus.RESUMABLE):
+                continue
+            task.status = TaskStatus.BLOCKED
+            task.error = "presupuesto agotado"
+            task.finished_at = _utc_now()
+
     def _initial_status(self, task: Task, state: GoalState) -> TaskStatus:
         if task.status is not TaskStatus.PENDING:
             return task.status
@@ -398,8 +508,20 @@ class AsyncTaskScheduler:
 
     def _run_task(self, task: Task) -> bool:
         """Execute one task; returns True when it reached DONE during this call."""
+        state = self._goals[task.goal_id]
+        if (
+            task.status is TaskStatus.READY
+            and (state.cancelled or self._budget_exhausted(state))
+        ):
+            self._enforce_budget_locked(state)
+            if state.cancelled and task.status not in _TERMINAL_TASK_STATES:
+                task.status = TaskStatus.CANCELLED
+                task.error = "objetivo cancelado por el usuario"
+                task.finished_at = _utc_now()
+            return False
         task.status = TaskStatus.RUNNING
         task.started_at = task.started_at or _utc_now()
+        state.executed_count += 1
         outcome = self._safe_execute(task)
         if outcome.needs_approval:
             approval = PendingApproval(
@@ -504,6 +626,10 @@ class AsyncTaskScheduler:
             state = self._require_goal(goal_id)
             statuses = [task.status for task in state.tasks.values()]
             if all(status in _TERMINAL_TASK_STATES for status in statuses):
+                if state.cancelled or TaskStatus.CANCELLED in statuses:
+                    return TaskStatus.CANCELLED
+                if state.budget_exhausted:
+                    return TaskStatus.BLOCKED
                 return TaskStatus.DONE
             if TaskStatus.WAITING_APPROVAL in statuses:
                 return TaskStatus.WAITING_APPROVAL
@@ -520,11 +646,81 @@ class AsyncTaskScheduler:
     def goal_finished(self, goal_id: str) -> bool:
         return self.goal_status(goal_id) is TaskStatus.DONE
 
+    # -- cancellation -----------------------------------------------------------
+
+    def cancel_goal(self, goal_id: str) -> TaskStatus:
+        """Cancel a goal: no new task runs; completed actions are not reverted."""
+        with self._lock:
+            state = self._require_goal(goal_id)
+            state.cancelled = True
+            for task in state.tasks.values():
+                if task.status in _TERMINAL_TASK_STATES:
+                    continue
+                task.status = TaskStatus.CANCELLED
+                task.error = "objetivo cancelado por el usuario"
+                task.finished_at = _utc_now()
+            self._persist(goal_id)
+            return TaskStatus.CANCELLED
+
+    # -- objective summary ------------------------------------------------------
+
+    def goal_summary(self, goal_id: str) -> dict[str, Any]:
+        with self._lock:
+            state = self._require_goal(goal_id)
+            statuses = [task.status for task in state.tasks.values()]
+            remaining_seconds = None
+            executions_left = None
+            budget = state.budget
+            if budget is not None and not state.budget_exhausted:
+                if budget.deadline_epoch is not None:
+                    remaining_seconds = max(
+                        0.0, budget.deadline_epoch - _wall_clock()
+                    )
+                if budget.max_task_executions is not None:
+                    executions_left = max(
+                        0, budget.max_task_executions - state.executed_count
+                    )
+            return {
+                "goal_id": state.goal_id,
+                "description": state.description,
+                "status": self.goal_status(goal_id).value,
+                "tasks_total": len(state.tasks),
+                "tasks_done": sum(
+                    1 for status in statuses if status is TaskStatus.DONE
+                ),
+                "tasks_failed": sum(
+                    1 for status in statuses if status is TaskStatus.FAILED
+                ),
+                "tasks_blocked": sum(
+                    1 for status in statuses if status is TaskStatus.BLOCKED
+                ),
+                "tasks_waiting_approval": sum(
+                    1
+                    for status in statuses
+                    if status is TaskStatus.WAITING_APPROVAL
+                ),
+                "executed_count": state.executed_count,
+                "budget_remaining_seconds": remaining_seconds,
+                "budget_executions_left": executions_left,
+                "cancelled": state.cancelled,
+                "budget_exhausted": state.budget_exhausted,
+            }
+
     # -- persistence ------------------------------------------------------------
 
     def persist_goal(self, goal_id: str) -> None:
         with self._lock:
             self._persist(goal_id)
+
+    def persisted_goal_ids(self) -> list[str]:
+        """List goal ids present in the persistence store, when available."""
+        with self._lock:
+            if self._store is None:
+                return []
+            goal_ids = getattr(self._store, "goal_ids", None)
+            if callable(goal_ids):
+                return list(goal_ids())
+            return []
 
     def load_goal(self, goal_id: str) -> GoalState:
         """Rebuild a pending goal from the store after a restart."""

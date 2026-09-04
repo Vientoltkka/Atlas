@@ -15,7 +15,20 @@ from agents.registry import AgentRegistry
 from agents.base_agent import AgentResponse
 from agents.coding_agent import PendingCodingChangeError
 
-from core.async_task_scheduler import AsyncTaskScheduler, TaskStatus
+from core.async_task_scheduler import (
+    AsyncTaskScheduler,
+    AsyncTaskSchedulerError,
+    GoalBudget,
+    TaskStatus,
+    UnknownGoalError,
+)
+from core.background_goal_pump import BackgroundGoalPump
+from core.conversational_autonomy import (
+    AutonomousGoalRequest,
+    detect_autonomous_goal,
+    is_background_goal_cancel_request,
+    is_background_goal_status_query,
+)
 from core.multi_task_goal import detect_multi_task_goal
 from core.atlas_router import (
     AtlasRouter,
@@ -247,6 +260,12 @@ class AtlasOrchestrator:
         self._self_improvement_conversation = self_improvement_conversation or SelfImprovementConversation(self._project_root)
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._async_task_scheduler = async_task_scheduler
+        self._background_pump = (
+            BackgroundGoalPump(async_task_scheduler)
+            if async_task_scheduler is not None
+            else None
+        )
+        self._background_goal_id: "str | None" = None
 
     @property
     def async_task_scheduler(self) -> "AsyncTaskScheduler | None":
@@ -311,7 +330,13 @@ class AtlasOrchestrator:
         normalized = _normalize_confirmation_text(prompt)
         if normalized in _ASYNC_APPROVAL_YES_TOKENS:
             approval = pending[0]
-            resumed = self.approve_async_task(approval.confirmation_id)
+            try:
+                resumed = self.approve_async_task(approval.confirmation_id)
+            except AsyncTaskSchedulerError:
+                response = "Esa operación pendiente ya no está disponible."
+                self._memory.add_user(prompt)
+                self._memory.add_assistant(response)
+                return response
             intro = (
                 "Hecho, operación completada."
                 if resumed
@@ -323,7 +348,13 @@ class AtlasOrchestrator:
             return response
         if normalized in _ASYNC_APPROVAL_NO_TOKENS:
             approval = pending[0]
-            denied = self.deny_async_task(approval.confirmation_id)
+            try:
+                denied = self.deny_async_task(approval.confirmation_id)
+            except AsyncTaskSchedulerError:
+                response = "Esa operación pendiente ya no está disponible."
+                self._memory.add_user(prompt)
+                self._memory.add_assistant(response)
+                return response
             intro = (
                 "Entendido, la operación quedó cancelada."
                 if denied
@@ -348,6 +379,8 @@ class AtlasOrchestrator:
                 label = f"fallida ({task.error or 'error'})"
             elif task.status is TaskStatus.BLOCKED:
                 label = f"bloqueada ({task.error or 'pendiente cancelada'})"
+            elif task.status is TaskStatus.CANCELLED:
+                label = "cancelada"
             else:
                 label = "en curso"
             lines.append(f"- {task.description}: {label}.")
@@ -357,6 +390,119 @@ class AtlasOrchestrator:
         ):
             lines.append("Responde sí para autorizar la operación pendiente.")
         return "\n".join(lines)
+
+    # -- prolonged autonomy (background pump) ------------------------------------
+
+    def start_background_pump(self) -> None:
+        """Start the cooperative background goal pump, if configured."""
+        if self._background_pump is not None:
+            self._background_pump.start()
+
+    def stop_background_pump(self, timeout: float = 8.0) -> None:
+        """Stop the background pump cleanly."""
+        if self._background_pump is not None:
+            self._background_pump.stop(timeout=timeout)
+
+    def close(self) -> None:
+        """Release background resources; never blocks shutdown."""
+        self.stop_background_pump()
+
+    def _handle_background_autonomy(self, prompt: str) -> "str | None":
+        """Route explicit autonomy orders, status queries and cancellations."""
+        if self._async_task_scheduler is None or self._background_pump is None:
+            return None
+        if is_background_goal_status_query(prompt):
+            return self._describe_background_goal_status(prompt)
+        if is_background_goal_cancel_request(prompt):
+            return self._cancel_background_goal(prompt)
+        request = detect_autonomous_goal(prompt)
+        if request is None:
+            return None
+        return self._start_background_goal(prompt, request)
+
+    def _start_background_goal(
+        self,
+        prompt: str,
+        request: "AutonomousGoalRequest",
+    ) -> "str | None":
+        objective = getattr(request, "objective", "")
+        if not objective:
+            return self._describe_background_goal_status(prompt)
+        goal_plan = detect_multi_task_goal(objective)
+        if goal_plan is None:
+            response = (
+                "Puedo trabajar en segundo plano, pero no supe estructurar "
+                "ese objetivo en tareas concretas y seguras. Dámelo como una "
+                "cadena clara (por ejemplo: lee X, resume Y, escribe Z)."
+            )
+            self._memory.add_user(prompt)
+            self._memory.add_assistant(response)
+            return response
+        budget = GoalBudget(
+            max_duration_seconds=request.max_duration_seconds,
+            max_task_executions=request.max_task_executions,
+        )
+        goal_id = self._async_task_scheduler.submit_goal(
+            goal_plan.description,
+            goal_plan.tasks,
+            budget=budget,
+        )
+        self._background_goal_id = goal_id
+        self.start_background_pump()
+        response = (
+            "Objetivo en segundo plano: "
+            f"{goal_plan.description}. Trabajaré de forma autónoma sin que "
+            "tengas que escribir más mensajes (límite: "
+            f"{int(request.max_duration_seconds // 60)} min). "
+            "Pregunta 'cómo va el objetivo' o di 'detén el trabajo' para parar."
+        )
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
+
+    def _describe_background_goal_status(self, prompt: str) -> "str | None":
+        goal_id = self._background_goal_id
+        if goal_id is None:
+            return None
+        try:
+            summary = self._async_task_scheduler.goal_summary(goal_id)
+        except UnknownGoalError:
+            return None
+        response = self._describe_async_goal(goal_id, intro="Estado del trabajo")
+        remaining = summary.get("budget_remaining_seconds")
+        if remaining is not None and remaining > 0:
+            response += (
+                f"\nPresupuesto: quedan unos {int(remaining // 60)} min."
+            )
+        if summary.get("cancelled"):
+            response += "\nEl trabajo fue cancelado."
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
+
+    def _cancel_background_goal(self, prompt: str) -> "str | None":
+        goal_id = self._background_goal_id
+        if goal_id is None:
+            return None
+        try:
+            status = self._async_task_scheduler.goal_status(goal_id)
+        except UnknownGoalError:
+            return None
+        description = self._async_task_scheduler.goal(goal_id).description
+        if status is TaskStatus.CANCELLED:
+            return "El trabajo en segundo plano ya estaba detenido."
+        if status is TaskStatus.DONE:
+            return (
+                f"El trabajo en segundo plano ya había terminado: {description}."
+            )
+        self._async_task_scheduler.cancel_goal(goal_id)
+        response = (
+            f"Trabajo detenido: {description}. Las acciones ya completadas "
+            "no se revierten y las confirmaciones pendientes quedan sin usar."
+        )
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
 
     @property
     def execution_history(self) -> ExecutionSessionHistory | None:
@@ -700,6 +846,10 @@ class AtlasOrchestrator:
         async_approval_response = self._handle_pending_async_approval(prompt)
         if async_approval_response is not None:
             return async_approval_response
+
+        background_response = self._handle_background_autonomy(prompt)
+        if background_response is not None:
+            return background_response
 
         multi_task_response = self._handle_multi_task_objective(prompt)
         if multi_task_response is not None:

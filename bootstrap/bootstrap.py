@@ -1636,6 +1636,7 @@ class Bootstrap:
             async_task_scheduler=async_task_scheduler,
         )
         orchestrator.agent_orchestrator = AgentOrchestrator(registry)
+        orchestrator.start_background_pump()
         return orchestrator
 
 
