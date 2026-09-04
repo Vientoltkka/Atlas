@@ -2325,6 +2325,68 @@ def test_orchestrator_routes_voice_desktop_apps_through_existing_tool() -> None:
     assert desktop.calls == ["Abre Visual Studio Code", "Abre Bloc de notas"]
 
 
+def test_orchestrator_voice_desktop_apps_accept_atlas_prefix() -> None:
+    class FakeDesktopInteraction:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(self, prompt, confirm=None):
+            self.calls.append(prompt)
+            return f"tool:{prompt}"
+
+    desktop = FakeDesktopInteraction()
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop,
+    )
+
+    response = orchestrator.process_voice_prompt(
+        "Atlas, abre VS Code",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "tool:Abre Visual Studio Code"
+    assert desktop.calls == ["Abre Visual Studio Code"]
+
+
+def test_orchestrator_voice_accepts_atlas_prefix_for_time_route() -> None:
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(
+            add_user=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("memory must not be touched for voice tools")
+            ),
+            add_assistant=lambda _response: None,
+            history=list,
+        ),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    response = orchestrator.process_voice_prompt(
+        "Atlas, que hora es",
+        confirm=lambda _prompt: "",
+    )
+
+    assert response == "Son las seis y doce de la tarde."
+
+
 def test_orchestrator_voice_fallback_uses_model_flow_exactly_as_now() -> None:
     memory_events: list[tuple[str, str]] = []
     agent_messages: list[list[dict[str, str]]] = []

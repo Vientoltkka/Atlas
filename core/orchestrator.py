@@ -1614,6 +1614,7 @@ class AtlasOrchestrator:
         on_model_fragment=None,
     ) -> str:
         """Route transcribed voice text before falling back to the model."""
+        prompt = _strip_voice_invocation_prefix(prompt)
         request = self._request_gateway.from_voice(prompt)
         routing_text = self._voice_routing_text(request.content)
         route_voice_command = getattr(self._router, "route_voice_command", None)
@@ -2362,6 +2363,18 @@ def _classify_structured_confirmation_intent(
 
 def _requested_skill_id(prompt: str, skill_system: SkillSystem) -> str | None:
     return skill_intent.requested_skill_id(prompt, skill_system)
+
+
+_VOICE_INVOCATION_PREFIX_PATTERN = re.compile(
+    r"^atlas\b[ ,.;:!?-]*",
+    re.IGNORECASE,
+)
+
+
+def _strip_voice_invocation_prefix(prompt: str) -> str:
+    """Drop one leading "Atlas, ..." invocation prefix from transcribed voice."""
+    stripped = _VOICE_INVOCATION_PREFIX_PATTERN.sub("", prompt.strip(), count=1).strip()
+    return stripped or prompt.strip()
 
 
 def _skill_inputs_from_text(prompt: str, skill) -> dict[str, object]:
