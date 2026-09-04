@@ -96,6 +96,7 @@ from tools.execution_decision import ExecutionDecisionEngine
 
 from core.async_task_scheduler import (
     AsyncTaskScheduler,
+    DeterministicTaskVerifier,
     JsonGoalTaskStore,
     ToolTaskExecutor,
 )
@@ -1589,6 +1590,7 @@ class Bootstrap:
             store=JsonGoalTaskStore(
                 _execution_state_path().parent / "task_scheduler"
             ),
+            verifier=DeterministicTaskVerifier(),
         )
         tool_task_executor.bind_result_lookup(async_task_scheduler.task)
         orchestrator = AtlasOrchestrator(

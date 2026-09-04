@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import uuid
 from enum import Enum
 from typing import Any, Callable, Protocol
+
+from core.execution_retry import RetryReason, RetryableErrorClassifier
+from core.worker_delegation import sanitize_worker_error
 
 _SCHEMA_VERSION = 1
 
@@ -89,8 +93,19 @@ class TaskOutcome:
         )
 
     @staticmethod
-    def fail(error: str) -> "TaskOutcome":
-        return TaskOutcome(completed=False, error=error)
+    def fail(
+        error: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> "TaskOutcome":
+        return TaskOutcome(completed=False, error=error, metadata=metadata)
+
+    @staticmethod
+    def wait(reason: str, resume_at: float | None = None) -> "TaskOutcome":
+        """Generalized pause (resource/backoff); approval keeps its own path."""
+        return TaskOutcome(
+            completed=False,
+            metadata={"wait_reason": reason, "resume_at": resume_at},
+        )
 
 
 TaskExecutor = Callable[[Any, dict[str, Any] | None], TaskOutcome]
@@ -116,12 +131,23 @@ class Task:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     metadata: dict[str, Any] | None = None
+    retry_count: int = 0
+    max_retries: int = 2
+    resume_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id.strip():
             raise ValueError("task_id must be a non-empty string.")
         if not self.goal_id.strip():
             raise ValueError("goal_id must be a non-empty string.")
+        if isinstance(self.max_retries, bool) or not isinstance(self.max_retries, int):
+            raise ValueError("max_retries must be an integer.")
+        if self.max_retries < 0:
+            raise ValueError("max_retries cannot be negative.")
+        if isinstance(self.retry_count, bool) or not isinstance(self.retry_count, int):
+            raise ValueError("retry_count must be an integer.")
+        if self.retry_count < 0:
+            raise ValueError("retry_count cannot be negative.")
         for dependency in self.dependencies:
             if dependency == self.task_id:
                 raise ValueError("a task cannot depend on itself.")
@@ -145,6 +171,9 @@ class Task:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "metadata": self.metadata,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "resume_at": self.resume_at.isoformat() if self.resume_at else None,
         }
 
     @staticmethod
@@ -173,6 +202,13 @@ class Task:
                 else None
             ),
             metadata=payload.get("metadata"),
+            retry_count=int(payload.get("retry_count", 0)),
+            max_retries=int(payload.get("max_retries", 2)),
+            resume_at=(
+                datetime.fromisoformat(payload["resume_at"])
+                if payload.get("resume_at")
+                else None
+            ),
         )
 
 
@@ -325,6 +361,37 @@ class JsonGoalTaskStore:
         return sorted(path.stem for path in self._directory.glob("*.json"))
 
 
+class DeterministicTaskVerifier:
+    """Deterministic, payload-aware result verification; no LLM judging.
+
+    Tool tasks keep the tool's own success decision: evidence of execution
+    (a non-None result) is enough, and confirmation-gated tools stay gated.
+    Transform tasks must return usable text, never whitespace-only output.
+    """
+
+    def __call__(self, task: Task, result: Any) -> bool:
+        if result is None:
+            return False
+        payload = task.initial_payload or {}
+        if payload.get("kind") == "transform":
+            return isinstance(result, str) and bool(result.strip())
+        return True
+
+
+_ERROR_CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _error_code_prefix(error: str | None) -> str | None:
+    """Extract a leading declarative error code such as ``TIMEOUT: ...``."""
+    if not error:
+        return None
+    head, separator, _remainder = error.partition(":")
+    if not separator:
+        return None
+    code = head.strip()
+    return code if _ERROR_CODE_PATTERN.fullmatch(code) else None
+
+
 class AsyncTaskScheduler:
     """Cooperative scheduler where one WAITING_APPROVAL never blocks READY tasks."""
 
@@ -334,10 +401,19 @@ class AsyncTaskScheduler:
         *,
         store: GoalTaskStore | None = None,
         verifier: TaskVerifier | None = None,
+        clock: Callable[[], float] | None = None,
+        retry_backoff_seconds: tuple[float, ...] = (2.0, 8.0),
     ) -> None:
         self._task_executor = task_executor
         self._store = store
-        self._verifier = verifier
+        self._verifier = verifier or DeterministicTaskVerifier()
+        self._clock = clock or _wall_clock
+        if not retry_backoff_seconds:
+            raise ValueError("retry_backoff_seconds cannot be empty.")
+        self._retry_backoff_seconds = tuple(
+            max(0.0, float(seconds)) for seconds in retry_backoff_seconds
+        )
+        self._error_classifier = RetryableErrorClassifier()
         self._goals: dict[str, GoalState] = {}
         self._approvals: dict[str, PendingApproval] = {}
         self._lock = threading.RLock()
@@ -364,7 +440,7 @@ class AsyncTaskScheduler:
                 budget=budget,
             )
             if budget is not None and budget.max_duration_seconds is not None:
-                budget.deadline_epoch = _wall_clock() + budget.max_duration_seconds
+                budget.deadline_epoch = self._clock() + budget.max_duration_seconds
             for spec in tasks:
                 task = Task(
                     task_id=spec["task_id"],
@@ -373,6 +449,7 @@ class AsyncTaskScheduler:
                     dependencies=tuple(spec.get("dependencies", ())),
                     requires_approval=bool(spec.get("requires_approval", False)),
                     initial_payload=spec.get("payload"),
+                    max_retries=int(spec.get("max_retries", 2)),
                 )
                 state.tasks[task.task_id] = task
             for task in state.tasks.values():
@@ -448,6 +525,8 @@ class AsyncTaskScheduler:
                 for task_id in list(state.tasks):
                     task = state.tasks[task_id]
                     if task.status is TaskStatus.RESUMABLE:
+                        if not self._wait_due_locked(task):
+                            continue
                         self._run_task(task)
                         self._persist(task.goal_id)
                         return task_id
@@ -471,7 +550,7 @@ class AsyncTaskScheduler:
             and state.executed_count >= budget.max_task_executions
         ):
             return True
-        if budget.deadline_epoch is not None and _wall_clock() >= budget.deadline_epoch:
+        if budget.deadline_epoch is not None and self._clock() >= budget.deadline_epoch:
             return True
         return False
 
@@ -485,7 +564,9 @@ class AsyncTaskScheduler:
         for task in state.tasks.values():
             if task.status in _TERMINAL_TASK_STATES:
                 continue
-            if task.status in (TaskStatus.WAITING_APPROVAL, TaskStatus.RESUMABLE):
+            if task.status is TaskStatus.WAITING_APPROVAL:
+                continue
+            if task.status is TaskStatus.RESUMABLE and task.resume_at is None:
                 continue
             task.status = TaskStatus.BLOCKED
             task.error = "presupuesto agotado"
@@ -506,9 +587,17 @@ class AsyncTaskScheduler:
             return TaskStatus.READY
         return TaskStatus.PENDING
 
+    def _wait_due_locked(self, task: Task) -> bool:
+        """A generalized wait (retry/backoff/resource) only resumes when due."""
+        return task.resume_at is None or self._clock() >= task.resume_at.timestamp()
+
     def _run_task(self, task: Task) -> bool:
         """Execute one task; returns True when it reached DONE during this call."""
         state = self._goals[task.goal_id]
+        if task.status is TaskStatus.RESUMABLE:
+            if not self._wait_due_locked(task):
+                return False
+            task.resume_at = None
         if (
             task.status is TaskStatus.READY
             and (state.cancelled or self._budget_exhausted(state))
@@ -534,9 +623,32 @@ class AsyncTaskScheduler:
             task.status = TaskStatus.WAITING_APPROVAL
             task.pending_confirmation_id = approval.confirmation_id
             task.resumable_payload = outcome.resumable_payload
+            task.resume_at = None
             task.error = None
             return False
+        wait_metadata = outcome.metadata if isinstance(outcome.metadata, dict) else None
+        if (
+            not outcome.completed
+            and outcome.error is None
+            and wait_metadata is not None
+            and "wait_reason" in wait_metadata
+        ):
+            return self._pause_for_wait(task, outcome)
         return self._finalize(task, outcome)
+
+    def _pause_for_wait(self, task: Task, outcome: TaskOutcome) -> bool:
+        """Generalized wait: only this task pauses; no approval token involved."""
+        metadata = dict(outcome.metadata or {})
+        resume_epoch = metadata.get("resume_at")
+        if isinstance(resume_epoch, (int, float)) and not isinstance(resume_epoch, bool):
+            task.resume_at = datetime.fromtimestamp(resume_epoch, tz=timezone.utc)
+        else:
+            task.resume_at = None
+        task.error = None
+        task.pending_confirmation_id = None
+        task.status = TaskStatus.RESUMABLE
+        task.metadata = metadata
+        return False
 
     def _safe_execute(self, task: Task) -> TaskOutcome:
         try:
@@ -546,11 +658,17 @@ class AsyncTaskScheduler:
 
     def _finalize(self, task: Task, outcome: TaskOutcome) -> bool:
         if not outcome.completed:
+            if self._should_retry_locked(task, outcome, invalid_result=False):
+                self._schedule_retry_locked(task, outcome)
+                return False
             task.status = TaskStatus.FAILED
             task.error = outcome.error
             task.finished_at = _utc_now()
             return False
         if self._verifier is not None and not self._verifier(task, outcome.result):
+            if self._should_retry_locked(task, outcome, invalid_result=True):
+                self._schedule_retry_locked(task, outcome)
+                return False
             task.status = TaskStatus.FAILED
             task.error = "verifier rejected the task result"
             task.finished_at = _utc_now()
@@ -560,8 +678,71 @@ class AsyncTaskScheduler:
         task.error = None
         task.metadata = outcome.metadata
         task.pending_confirmation_id = None
+        task.resume_at = None
         task.finished_at = _utc_now()
         return True
+
+    def _should_retry_locked(
+        self,
+        task: Task,
+        outcome: TaskOutcome,
+        *,
+        invalid_result: bool,
+    ) -> bool:
+        """Bounded retry: transient errors and invalid results only; never forever."""
+        state = self._goals[task.goal_id]
+        if state.cancelled:
+            return False
+        if task.retry_count >= task.max_retries:
+            return False
+        if invalid_result:
+            return True
+        metadata = outcome.metadata if isinstance(outcome.metadata, dict) else {}
+        explicit = metadata.get("retryable")
+        if explicit is not None:
+            return bool(explicit)
+        return (
+            self._error_classifier.classify(
+                error_code=_error_code_prefix(outcome.error),
+                metadata={
+                    key: metadata[key]
+                    for key in ("exception_type", "child_error_code")
+                    if key in metadata
+                },
+            )
+            is RetryReason.TRANSIENT_FAILURE
+        )
+
+    def _schedule_retry_locked(self, task: Task, outcome: TaskOutcome) -> None:
+        """Pause this task only, with declarative backoff, until resume_at."""
+        state = self._goals[task.goal_id]
+        if self._budget_exhausted(state):
+            state.budget_exhausted = True
+            task.status = TaskStatus.BLOCKED
+            task.error = "presupuesto agotado"
+            task.finished_at = _utc_now()
+            return
+        task.retry_count += 1
+        delay = self._retry_backoff_seconds[
+            min(task.retry_count - 1, len(self._retry_backoff_seconds) - 1)
+        ]
+        task.resume_at = datetime.fromtimestamp(
+            self._clock() + delay, tz=timezone.utc
+        )
+        task.status = TaskStatus.RESUMABLE
+        task.error = sanitize_worker_error(outcome.error or "retry scheduled")
+        task.pending_confirmation_id = None
+        metadata = dict(outcome.metadata) if isinstance(outcome.metadata, dict) else {}
+        metadata.update(
+            {
+                "wait_reason": "retry_backoff",
+                "resume_at": task.resume_at.isoformat(),
+                "retry_count": task.retry_count,
+                "max_retries": task.max_retries,
+                "last_error": task.error,
+            }
+        )
+        task.metadata = metadata
 
     # -- approval bridge --------------------------------------------------------
 
@@ -674,7 +855,7 @@ class AsyncTaskScheduler:
             if budget is not None and not state.budget_exhausted:
                 if budget.deadline_epoch is not None:
                     remaining_seconds = max(
-                        0.0, budget.deadline_epoch - _wall_clock()
+                        0.0, budget.deadline_epoch - self._clock()
                     )
                 if budget.max_task_executions is not None:
                     executions_left = max(
@@ -897,6 +1078,11 @@ class ToolTaskExecutor:
     def _from_result(self, result) -> TaskOutcome:
         if result.status == "success":
             return TaskOutcome.succeed(result.result)
+        metadata: dict[str, Any] = {"error_code": result.error_code or result.status}
+        exception_type = getattr(result, "exception_type", None)
+        if exception_type:
+            metadata["exception_type"] = exception_type
         return TaskOutcome.fail(
-            f"{result.error_code or result.status}: {result.error_message or ''}".strip()
+            f"{result.error_code or result.status}: {result.error_message or ''}".strip(),
+            metadata=metadata,
         )

@@ -151,7 +151,10 @@ def test_denied_dependency_blocks_dependent_task_without_retry():
 def test_verifier_rejects_invalid_results():
     executor = RecordingExecutor(lambda task, payload: TaskOutcome.succeed("bad"))
     scheduler = AsyncTaskScheduler(executor, verifier=lambda task, result: result == "ok")
-    scheduler.submit_goal("verificado", [{"task_id": "A", "description": "tarea"}])
+    scheduler.submit_goal(
+        "verificado",
+        [{"task_id": "A", "description": "tarea", "max_retries": 0}],
+    )
 
     scheduler.run_ready()
 
