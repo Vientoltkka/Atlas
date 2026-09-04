@@ -25,7 +25,11 @@ def _install_chat_responder(monkeypatch, orchestrator, responder):
     chat_agent = orchestrator._registry.get("chat")
     assert chat_agent is not None
     monkeypatch.setattr(chat_agent._client, "check_model_health", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(chat_agent._client, "ask", responder)
+
+    def client_ask(*_args, model, messages, **_kwargs):
+        return responder(model=model, messages=messages)
+
+    monkeypatch.setattr(chat_agent._client, "ask", client_ask)
 
 
 def test_structured_result_becomes_bounded_conversational_context(
@@ -220,7 +224,8 @@ def test_capability_questions_use_real_registry_without_execution(
         confirm=lambda _prompt: "",
     )
 
-    assert "Herramientas registradas y disponibles: 41" in overview
+    tool_count = len(orchestrator._tool_registry.list())
+    assert f"Herramientas registradas y disponibles: {tool_count}" in overview
     assert "Voz: opcional" in overview
     assert "no configurada" in voice
     assert "read_file esta disponible" in read
@@ -256,7 +261,8 @@ def test_confirmation_is_consumed_once_and_cancel_does_not_execute(
     repeated = orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
 
     assert "pendiente de confirmacion" in pending
-    assert unrelated.startswith("Herramientas disponibles (41):")
+    tool_count = len(orchestrator._tool_registry.list())
+    assert unrelated.startswith(f"Herramientas disponibles ({tool_count}):")
     assert confirmed_target.exists()
     assert confirmed_target.read_text(encoding="utf-8") == original
     assert "No hay una confirmacion pendiente" in repeated

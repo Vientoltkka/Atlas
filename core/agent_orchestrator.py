@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from unicodedata import normalize
 
 from agents.registry import AgentRegistry
@@ -142,7 +143,11 @@ class AgentOrchestrator:
         """Select available specialists while preserving deterministic priority."""
         normalized = _normalize(text)
         scores = {
-            domain: sum(marker in normalized for marker in markers)
+            domain: sum(
+                1
+                for marker in markers
+                if re.search(rf"\b{re.escape(marker)}", normalized)
+            )
             for domain, markers in self._MARKERS.items()
         }
         selected = [domain for domain, score in scores.items() if score]

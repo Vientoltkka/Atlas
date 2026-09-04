@@ -701,10 +701,20 @@ class AtlasOrchestrator:
 
 
         if self._execution_conversation is not None:
-            outcome = self._execution_conversation.handle(request.content)
+            last_conversation_result = self._execution_conversation.last_result
+            if (
+                _is_bare_confirmation_token(request.content)
+                and last_conversation_result is not None
+                and last_conversation_result.confirmation_id is not None
+                and not (
+                    self._structured_execution_coordinator is not None
+                    and self._structured_execution_coordinator.has_pending_execution()
+                )
+            ):
+                outcome = self._execution_conversation.handle(request.content)
+                if not outcome.direct_response_required:
+                    return outcome.text
 
-            if not outcome.direct_response_required:
-                return outcome.text
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
             return direct_response
@@ -717,6 +727,12 @@ class AtlasOrchestrator:
             visible = self._present_structured_execution(structured_response)
             self._remember_structured_turn(request.content, structured_response)
             return visible
+
+        if self._execution_conversation is not None:
+            outcome = self._execution_conversation.handle(request.content)
+
+            if not outcome.direct_response_required:
+                return outcome.text
 
         return self._process_prompt_without_execution(
             request.content,
@@ -1268,6 +1284,13 @@ class AtlasOrchestrator:
     ) -> StructuredExecutionResponse | None:
         request = request or self._request_gateway.from_text(prompt)
         route_decision = self._structured_route_decision(request)
+        if (
+            route_decision is not None
+            and route_decision.target_tool_name in {"read_file", "write_file"}
+            and _contains_windows_absolute_path(prompt)
+        ):
+            # Windows absolute paths keep the supervised single-tool flow.
+            return None
         response = self._handle_structured_execution_core(
             prompt,
             request_id=request.request_id,
@@ -2481,6 +2504,13 @@ def _is_tool_catalog_query(prompt: str) -> bool:
     }
 
 
+_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"\b[A-Za-z]:[\\/]\S")
+
+
+def _contains_windows_absolute_path(prompt: str) -> bool:
+    return bool(_WINDOWS_ABSOLUTE_PATH_PATTERN.search(prompt))
+
+
 def _replaces_pending_agent_followup(
     decision: RouteDecision,
     pending_agent_name: str,
@@ -2511,6 +2541,26 @@ def _normalize_confirmation_text(
     )
     without_punctuation = re.sub(r"[^\w\s]", " ", without_accents)
     return " ".join(without_punctuation.split())
+
+
+_BARE_CONFIRMATION_TOKENS = {
+    "si",
+    "s",
+    "confirmo",
+    "confirmar",
+    "vale",
+    "ok",
+    "no",
+    "n",
+    "cancela",
+    "cancelar",
+    "olvidalo",
+}
+
+
+def _is_bare_confirmation_token(prompt: str) -> bool:
+    """Recognize stray confirmation words that belong to the supervised flow."""
+    return _normalize_confirmation_text(prompt) in _BARE_CONFIRMATION_TOKENS
 
 
 def _with_message_prefix(

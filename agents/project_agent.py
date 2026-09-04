@@ -126,6 +126,14 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
             },
         ]
 
+        if user_query:
+            conversation.append(
+                {
+                    "role": "user",
+                    "content": user_query,
+                }
+            )
+
         return self._client.ask(
             model=model,
             messages=conversation,
@@ -565,6 +573,18 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
             return False
 
         lowered_query = normalized_query.lower()
+
+        conversational_markers = (
+            "has leido",
+            "has leído",
+            "acabas de",
+            "leiste",
+            "leíste",
+            "he leido",
+            "he leído",
+        )
+        if any(marker in lowered_query for marker in conversational_markers):
+            return False
 
         if ".py" in lowered_query or "/" in normalized_query or "\\" in normalized_query:
             return True

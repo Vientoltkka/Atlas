@@ -289,6 +289,11 @@ class DesktopInteractionUseCase:
                 )
 
             if normalized.startswith("escribe"):
+                if re.search(
+                    r"\ben\s+(?:la\s+)?(?:ventana\s+)?[^ ]+\.[a-z0-9]{1,8}$",
+                    normalized,
+                ):
+                    return None
                 content = self._extract_text_to_type(text)
                 return self._run(
                     "desktop.type_text",
