@@ -74,6 +74,20 @@ _AUTONOMY_PATTERNS = (
     ),
 )
 
+# Explicit, conservative structured-plan entry: an explicit order to plan
+# AND execute one objective in the background. Normal conversation never
+# triggers this; the objective text after the ':' is parsed by the planner.
+_STRUCTURED_PLAN_PATTERNS = (
+    re.compile(
+        r"\bplanific\w+\s+y\s+ejecut\w+\s+este\s+objetivo\s*[:\-]\s*(.+)$"
+    ),
+    re.compile(
+        r"\btrabaj\w+\s+en\s+este\s+objetivo\s*:\s*(.+)$"
+    ),
+)
+
+_UNTIL_DONE_PHRASE = re.compile(r"hasta\s+(?:terminar|acabar)")
+
 _STATUS_PHRASES = (
     "como va el objetivo",
     "como va el trabajo",
@@ -131,6 +145,27 @@ def detect_autonomous_goal(prompt: str) -> "AutonomousGoalRequest | None":
             max_task_executions=DEFAULT_MAX_TASK_EXECUTIONS,
             duration_requested=duration_requested,
         )
+    return None
+
+
+def detect_structured_plan_objective(prompt: str) -> "str | None":
+    """Return the objective of an explicit 'plan and execute' order, if any."""
+    normalized = _normalize(prompt)
+    if _UNTIL_DONE_PHRASE.search(normalized):
+        # "hasta terminar" keeps the existing prolonged-autonomy routing.
+        return None
+    for pattern in _STRUCTURED_PLAN_PATTERNS:
+        match = pattern.search(normalized)
+        if match is None:
+            continue
+        objective = (match.group(1) or "").strip(" :-.,")
+        if not objective:
+            return None
+        original_tail = prompt.partition(":")[2].strip()
+        if original_tail:
+            # Recover the original casing lost by accent normalization.
+            objective = original_tail
+        return objective
     return None
 
 

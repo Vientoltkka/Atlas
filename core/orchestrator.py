@@ -25,10 +25,18 @@ from core.async_task_scheduler import (
 from core.background_goal_pump import BackgroundGoalPump
 from core.conversational_autonomy import (
     AutonomousGoalRequest,
+    DEFAULT_MAX_DURATION_SECONDS,
+    DEFAULT_MAX_TASK_EXECUTIONS,
     detect_autonomous_goal,
+    detect_structured_plan_objective,
     is_background_goal_cancel_request,
     is_background_goal_status_query,
 )
+from core.execution_plan_task_adapter import (
+    ExecutionPlanTaskBridgeError,
+    execution_plan_to_task_specs,
+)
+from core.execution_plan_validator import ExecutionPlanValidator
 from core.multi_task_goal import detect_multi_task_goal
 from core.atlas_router import (
     AtlasRouter,
@@ -186,6 +194,7 @@ class AtlasOrchestrator:
         training_pdf_output_dir: Path | None = None,
         now_provider=None,
         async_task_scheduler: "AsyncTaskScheduler | None" = None,
+        background_pump_interval_seconds: "float | None" = None,
     ) -> None:
 
         self._planner = planner
@@ -261,7 +270,14 @@ class AtlasOrchestrator:
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._async_task_scheduler = async_task_scheduler
         self._background_pump = (
-            BackgroundGoalPump(async_task_scheduler)
+            BackgroundGoalPump(
+                async_task_scheduler,
+                **(
+                    {"interval_seconds": background_pump_interval_seconds}
+                    if background_pump_interval_seconds is not None
+                    else {}
+                ),
+            )
             if async_task_scheduler is not None
             else None
         )
@@ -415,10 +431,71 @@ class AtlasOrchestrator:
             return self._describe_background_goal_status(prompt)
         if is_background_goal_cancel_request(prompt):
             return self._cancel_background_goal(prompt)
+        structured_response = self._handle_structured_plan_execution(prompt)
+        if structured_response is not None:
+            return structured_response
         request = detect_autonomous_goal(prompt)
         if request is None:
             return None
         return self._start_background_goal(prompt, request)
+
+    def _handle_structured_plan_execution(self, prompt: str) -> "str | None":
+        """Explicit 'plan and execute' entry: plan → validate → convert → submit.
+
+        No ``run_ready()`` is called here: after submission the existing
+        BackgroundGoalPump keeps executing the converted tasks in background.
+        """
+        if self._async_task_scheduler is None or self._background_pump is None:
+            return None
+        objective = detect_structured_plan_objective(prompt)
+        if objective is None:
+            return None
+        generation = self._planner.generate_execution_plan(objective)
+        plan = generation.plan
+        if plan is None or not generation.success:
+            response = (
+                "No pude estructurar ese objetivo en un plan ejecutable y "
+                "seguro. Dámelo como una cadena clara (por ejemplo: lee X, "
+                "resume Y, escribe Z)."
+            )
+            self._memory.add_user(prompt)
+            self._memory.add_assistant(response)
+            return response
+        try:
+            task_specs = execution_plan_to_task_specs(
+                plan,
+                validator=ExecutionPlanValidator(self._tool_registry),
+            )
+        except ExecutionPlanTaskBridgeError as error:
+            detail = "; ".join(error.errors[:3])
+            response = (
+                "El plan no puede convertirse en tareas de fondo seguras "
+                f"({error.code}). {detail}"
+            )
+            self._memory.add_user(prompt)
+            self._memory.add_assistant(response)
+            return response
+        goal_id = self._async_task_scheduler.submit_goal(
+            plan.goal,
+            list(task_specs),
+            budget=GoalBudget(
+                max_duration_seconds=DEFAULT_MAX_DURATION_SECONDS,
+                max_task_executions=DEFAULT_MAX_TASK_EXECUTIONS,
+            ),
+        )
+        self._background_goal_id = goal_id
+        self.start_background_pump()
+        response = self._describe_async_goal(
+            goal_id,
+            intro="Plan estructurado en marcha",
+        )
+        response += (
+            "\nTrabajo en segundo plano sin que tengas que escribir más "
+            "(di 'detén el trabajo' para parar)."
+        )
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
 
     def _start_background_goal(
         self,
