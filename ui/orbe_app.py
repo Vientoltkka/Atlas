@@ -926,6 +926,14 @@ def create_transcript_panel():
             self.setWindowFlags(Qt.WindowType.Window)
             self.resize(380, 440)
             self.setMinimumSize(360, 400)
+            self.setStyleSheet(
+                "QWidget#atlasTranscriptPanel { background: #060d1a; }"
+                "QLabel { color: #9fd8ff; font-size: 12px; font-weight: 600; }"
+                "QPushButton { background: #10233c; color: #d8efff; border: 1px solid #2d4b69; "
+                "border-radius: 6px; padding: 6px 12px; font-size: 12px; }"
+                "QPushButton:hover { background: #173154; border-color: #3f6d99; }"
+                "QPushButton:pressed { background: #1d3f6b; }"
+            )
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 12, 12, 12)
             layout.setSpacing(8)
