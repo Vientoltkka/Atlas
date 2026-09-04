@@ -1558,12 +1558,20 @@ class Bootstrap:
         # Orchestrator
         # -----------------------
 
+        tool_task_executor = ToolTaskExecutor(
+            single_tool_runner,
+            model_transformer=_build_async_goal_model_transformer(
+                registry,
+                model_manager,
+            ),
+        )
         async_task_scheduler = AsyncTaskScheduler(
-            ToolTaskExecutor(single_tool_runner),
+            tool_task_executor,
             store=JsonGoalTaskStore(
                 _execution_state_path().parent / "task_scheduler"
             ),
         )
+        tool_task_executor.bind_result_lookup(async_task_scheduler.task)
         orchestrator = AtlasOrchestrator(
             planner=planner,
             router=router,
@@ -1610,6 +1618,22 @@ class Bootstrap:
         )
         orchestrator.agent_orchestrator = AgentOrchestrator(registry)
         return orchestrator
+
+
+def _build_async_goal_model_transformer(registry, model_manager):
+    """Reuse the existing chat agent and model selection for text transforms."""
+
+    def transform(instruction: str) -> str:
+        chat_agent = registry.get("chat")
+        if chat_agent is None:
+            raise RuntimeError("Agent 'chat' is not registered.")
+        model = model_manager.choose_model("chat")
+        return chat_agent.run(
+            model=model,
+            messages=[{"role": "user", "content": instruction}],
+        )
+
+    return transform
 
 
 def _read_int(

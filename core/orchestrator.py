@@ -15,7 +15,8 @@ from agents.registry import AgentRegistry
 from agents.base_agent import AgentResponse
 from agents.coding_agent import PendingCodingChangeError
 
-from core.async_task_scheduler import AsyncTaskScheduler
+from core.async_task_scheduler import AsyncTaskScheduler, TaskStatus
+from core.multi_task_goal import detect_multi_task_goal
 from core.atlas_router import (
     AtlasRouter,
     AtlasRoutingRequest,
@@ -281,6 +282,81 @@ class AtlasOrchestrator:
         if self._async_task_scheduler is None:
             return None
         return self._async_task_scheduler.deny(confirmation_id)
+
+    def _handle_multi_task_objective(self, prompt: str) -> "str | None":
+        """Route a conservative multi-task objective through the async scheduler."""
+        if self._async_task_scheduler is None:
+            return None
+        goal_plan = detect_multi_task_goal(prompt)
+        if goal_plan is None:
+            return None
+        goal_id = self.run_independent_tasks(goal_plan.description, goal_plan.tasks)
+        if goal_id is None:
+            return None
+        response = self._describe_async_goal(
+            goal_id,
+            intro="Objetivo en marcha",
+        )
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
+
+    def _handle_pending_async_approval(self, prompt: str) -> "str | None":
+        """Answer a bare confirmation bound to one pending async approval."""
+        if self._async_task_scheduler is None:
+            return None
+        pending = self._async_task_scheduler.pending_approvals()
+        if not pending:
+            return None
+        normalized = _normalize_confirmation_text(prompt)
+        if normalized in _ASYNC_APPROVAL_YES_TOKENS:
+            approval = pending[0]
+            resumed = self.approve_async_task(approval.confirmation_id)
+            intro = (
+                "Hecho, operación completada."
+                if resumed
+                else "Confirmación registrada."
+            )
+            response = self._describe_async_goal(approval.goal_id, intro=intro)
+            self._memory.add_user(prompt)
+            self._memory.add_assistant(response)
+            return response
+        if normalized in _ASYNC_APPROVAL_NO_TOKENS:
+            approval = pending[0]
+            denied = self.deny_async_task(approval.confirmation_id)
+            intro = (
+                "Entendido, la operación quedó cancelada."
+                if denied
+                else "Entendido."
+            )
+            response = self._describe_async_goal(approval.goal_id, intro=intro)
+            self._memory.add_user(prompt)
+            self._memory.add_assistant(response)
+            return response
+        return None
+
+    def _describe_async_goal(self, goal_id: str, *, intro: str) -> str:
+        """Compose a short conversational progress report for one goal."""
+        state = self._async_task_scheduler.goal(goal_id)
+        lines = [f"{intro}: {state.description}."]
+        for task in state.tasks.values():
+            if task.status is TaskStatus.DONE:
+                label = "hecho"
+            elif task.status is TaskStatus.WAITING_APPROVAL:
+                label = "pendiente de tu confirmación"
+            elif task.status is TaskStatus.FAILED:
+                label = f"fallida ({task.error or 'error'})"
+            elif task.status is TaskStatus.BLOCKED:
+                label = f"bloqueada ({task.error or 'pendiente cancelada'})"
+            else:
+                label = "en curso"
+            lines.append(f"- {task.description}: {label}.")
+        if any(
+            task.status is TaskStatus.WAITING_APPROVAL
+            for task in state.tasks.values()
+        ):
+            lines.append("Responde sí para autorizar la operación pendiente.")
+        return "\n".join(lines)
 
     @property
     def execution_history(self) -> ExecutionSessionHistory | None:
@@ -620,6 +696,14 @@ class AtlasOrchestrator:
         history_response = self._process_execution_history_request(request)
         if history_response is not None:
             return history_response
+
+        async_approval_response = self._handle_pending_async_approval(prompt)
+        if async_approval_response is not None:
+            return async_approval_response
+
+        multi_task_response = self._handle_multi_task_objective(prompt)
+        if multi_task_response is not None:
+            return multi_task_response
 
         # Specialized agents bypass the legacy execution-conversation gate
         # while reusing Atlas' existing model health/fallback pipeline.
@@ -2601,6 +2685,29 @@ _BARE_CONFIRMATION_TOKENS = {
     "cancela",
     "cancelar",
     "olvidalo",
+}
+
+
+_ASYNC_APPROVAL_YES_TOKENS = {
+    "si",
+    "s",
+    "confirmo",
+    "confirmar",
+    "vale",
+    "ok",
+    "adelante",
+    "continua",
+    "continuar",
+}
+
+_ASYNC_APPROVAL_NO_TOKENS = {
+    "no",
+    "n",
+    "cancela",
+    "cancelar",
+    "olvidalo",
+    "rechaza",
+    "descarta",
 }
 
 

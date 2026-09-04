@@ -416,7 +416,7 @@ class AsyncTaskScheduler:
         try:
             return self._task_executor(task, task.resumable_payload)
         except Exception as error:  # noqa: BLE001 - scheduler must never crash
-            return TaskOutcome.failed(f"executor error: {error}")
+            return TaskOutcome.fail(f"executor error: {error}")
 
     def _finalize(self, task: Task, outcome: TaskOutcome) -> bool:
         if not outcome.completed:
@@ -578,20 +578,36 @@ class ToolTaskExecutor:
     this exact task has been granted.
     """
 
-    def __init__(self, runner) -> None:
+    def __init__(
+        self,
+        runner,
+        *,
+        model_transformer: "Callable[[str], str] | None" = None,
+    ) -> None:
         self._runner = runner
+        self._model_transformer = model_transformer
+        self._result_lookup: "Callable[[str], Any] | None" = None
+
+    def bind_result_lookup(self, result_lookup: "Callable[[str], Any]") -> None:
+        """Attach the scheduler task lookup used to chain dependency results."""
+        self._result_lookup = result_lookup
 
     def __call__(self, task: Task, resumable_payload: dict[str, Any] | None) -> TaskOutcome:
         from tools.intent_selector import ToolIntent  # local import: adapter hook
 
         payload = resumable_payload or task.initial_payload or {}
+        runner_confirmation_id = payload.get("runner_confirmation_id")
+        if runner_confirmation_id:
+            return self._resume(runner_confirmation_id)
+        if payload.get("kind") == "transform":
+            return self._run_transform(task, payload)
         tool_name = payload.get("tool")
         if not tool_name:
             return TaskOutcome.fail("task payload is missing the tool name.")
         arguments = dict(payload.get("arguments", {}))
-        runner_confirmation_id = payload.get("runner_confirmation_id")
-        if runner_confirmation_id:
-            return self._resume(runner_confirmation_id)
+        content_task_id = payload.get("content_task")
+        if content_task_id:
+            arguments["content"] = self._dependency_result(content_task_id)
         result = self._runner.run_registered_tool(tool_name, arguments)
         if result is None:
             return TaskOutcome.fail(f"no intent mapping for tool: {tool_name}")
@@ -612,6 +628,35 @@ class ToolTaskExecutor:
         if result is None:
             return TaskOutcome.fail("runner confirmation was not available.")
         return self._from_result(result)
+
+    def _run_transform(self, task: Task, payload: dict[str, Any]) -> TaskOutcome:
+        """Run a model-only text transformation over a dependency result."""
+        if self._model_transformer is None:
+            return TaskOutcome.fail(
+                "no model transformer is available for transform tasks."
+            )
+        instruction = str(payload.get("instruction", ""))
+        input_task_id = payload.get("input_task")
+        try:
+            source_text = (
+                str(self._dependency_result(input_task_id)) if input_task_id else ""
+            )
+            return TaskOutcome.succeed(
+                self._model_transformer(instruction.replace("{input}", source_text))
+            )
+        except Exception as error:  # noqa: BLE001 - transform must not crash goal
+            return TaskOutcome.fail(f"transform task failed: {error}")
+
+    def _dependency_result(self, dependency_task_id: str) -> Any:
+        """Return the stored result of an already completed dependency."""
+        if self._result_lookup is None:
+            raise RuntimeError("no result lookup is bound for dependency chaining.")
+        dependency = self._result_lookup(dependency_task_id)
+        if dependency is None or dependency.result is None:
+            raise RuntimeError(
+                f"dependency task {dependency_task_id} has no result yet."
+            )
+        return dependency.result
 
     def _from_result(self, result) -> TaskOutcome:
         if result.status == "success":
