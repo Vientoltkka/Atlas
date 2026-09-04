@@ -636,16 +636,29 @@ class ToolTaskExecutor:
                 "no model transformer is available for transform tasks."
             )
         instruction = str(payload.get("instruction", ""))
-        input_task_id = payload.get("input_task")
         try:
-            source_text = (
-                str(self._dependency_result(input_task_id)) if input_task_id else ""
-            )
+            source_text = self._composed_transform_input(payload)
             return TaskOutcome.succeed(
                 self._model_transformer(instruction.replace("{input}", source_text))
             )
         except Exception as error:  # noqa: BLE001 - transform must not crash goal
             return TaskOutcome.fail(f"transform task failed: {error}")
+
+    def _composed_transform_input(self, payload: dict[str, Any]) -> str:
+        """Compose transform input from one or several labeled dependencies.
+
+        Multiple sources keep their order and task ids visible so the model
+        receives clearly identified sections, never a mixed blob.
+        """
+        input_tasks = payload.get("input_tasks")
+        if input_tasks:
+            sections = [
+                f"[{index}] {task_id}:\n{self._dependency_result(task_id)}"
+                for index, task_id in enumerate(input_tasks, start=1)
+            ]
+            return "\n\n".join(sections)
+        input_task_id = payload.get("input_task")
+        return str(self._dependency_result(input_task_id)) if input_task_id else ""
 
     def _dependency_result(self, dependency_task_id: str) -> Any:
         """Return the stored result of an already completed dependency."""

@@ -1,8 +1,9 @@
 """Conservative detection of multi-task objectives for the async scheduler.
 
 Detection is intentionally narrow: only well-understood read →
-(accumulate/transform) → write objectives are converted into scheduler
-tasks. Every other prompt stays on the existing conversational flow.
+(transform?) → write objectives plus fully independent safe read bundles
+are converted into scheduler tasks. Every other prompt stays on the
+existing conversational flow.
 """
 
 from __future__ import annotations
@@ -30,14 +31,20 @@ _SOURCE_PATTERN = re.compile(
 )
 
 _TARGET_PATTERN = re.compile(
-    r"\b(?:guarda(?:me|lo|la|nos|selo|sela)?|escribe(?:lo|la|me)?|"
+    r"\b(?:guarda(?:me|lo|la|los|las|nos|selo|sela)?|escribe(?:lo|la|me)?|"
     r"guardar|escribir|save|write)\s+"
     r"(?:el\s+|la\s+|los\s+|las\s+|the\s+|my\s+)?"
     r"(?:contenido\s+|resumen\s+|resultado\s+|texto\s+|informe\s+|"
-    r"reporte\s+|data\s+)?"
+    r"reporte\s+|data\s+|diferencias?\s+|puntos\s+clave\s+|sintesis\s+)?"
     r"(?:en|in|to|into|dentro\s+de)\s+"
     r"(?:el\s+|la\s+|the\s+)?(?:archivo\s+|fichero\s+|file\s+)?"
     r"(?P<path>[A-Za-z0-9_\-][\w.\-/\\]*\.\w{1,6})"
+)
+
+_BARE_PATH_PATTERN = re.compile(
+    r"(?<![\w.\-/\\])"
+    r"(?P<path>[A-Za-z0-9_\-][\w.\-/\\]*\.\w{1,6})"
+    r"(?![\w.\-/\\])"
 )
 
 _CONNECTOR_PATTERN = re.compile(
@@ -46,6 +53,46 @@ _CONNECTOR_PATTERN = re.compile(
 )
 
 _SUMMARY_PATTERN = re.compile(r"resum|summar")
+
+# Deterministic transform verbs, checked in order; the first match wins so a
+# prompt never gets two competing transform interpretations.
+_TRANSFORMATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
+    (
+        re.compile(r"\bcompara(?:r|ndo|los|las|lo|la)?\b|\bdiferencias?\b"),
+        "transform_content",
+        "Compara los siguientes contenidos y describe sus diferencias de forma "
+        "clara. Responde solo con el resultado:\n\n{input}",
+        "Comparar el contenido leído",
+    ),
+    (
+        re.compile(r"\bordena(?:r|ndo|los|las|lo|la)?\b|\bsorted?\b"),
+        "transform_content",
+        "Ordena el siguiente texto de forma coherente y legible. Responde solo "
+        "con el texto ordenado:\n\n{input}",
+        "Ordenar el contenido leído",
+    ),
+    (
+        re.compile(r"\bcorrige(?:r|ndo|los|las|lo|la)?\b|\bcorregir\b"),
+        "transform_content",
+        "Corrige la redacción del siguiente texto sin cambiar su significado. "
+        "Responde solo con el texto corregido:\n\n{input}",
+        "Corregir la redacción del contenido leído",
+    ),
+    (
+        re.compile(r"\bextrae(?:r|ndo|los|las|lo|la)?\b|\bpuntos?\s+clave\b"),
+        "transform_content",
+        "Extrae los puntos clave del siguiente contenido. Responde solo con "
+        "los puntos clave:\n\n{input}",
+        "Extraer los puntos clave del contenido leído",
+    ),
+    (
+        _SUMMARY_PATTERN,
+        "summarize_source",
+        "Resume el siguiente contenido de forma breve y fiel. "
+        "Responde solo con el resumen:\n\n{input}",
+        "Resumir el contenido leído",
+    ),
+)
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -102,11 +149,96 @@ def _tool_task(
     }
 
 
-def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
-    """Detect a conservative read → summarize? → write objective.
+def _spans_overlap(
+    span: tuple[int, int],
+    spans: list[tuple[int, int]],
+) -> bool:
+    start, end = span
+    return any(start < other_end and end > other_start for other_start, other_end in spans)
 
-    Returns ``None`` for anything else so the prompt keeps using the
-    existing conversational / single-tool / structured routing.
+
+def _collect_reads(
+    normalized: str,
+    prompt: str,
+    source_matches: list[re.Match[str]],
+    target_match: re.Match[str] | None,
+) -> list[tuple[re.Match[str], str]]:
+    """Gather verb-driven reads plus standalone path mentions, in order."""
+    excluded: list[tuple[int, int]] = [
+        (match.start(), match.end()) for match in source_matches
+    ]
+    if target_match is not None:
+        excluded.append((target_match.start(), target_match.end()))
+
+    candidates: list[tuple[re.Match[str], str]] = [
+        (match, _restore_path_case(match.group("path"), prompt))
+        for match in source_matches
+    ]
+    for match in _BARE_PATH_PATTERN.finditer(normalized):
+        if _spans_overlap((match.start(), match.end()), excluded):
+            continue
+        candidates.append((match, _restore_path_case(match.group("path"), prompt)))
+
+    target_path = (
+        _restore_path_case(target_match.group("path"), prompt)
+        if target_match is not None
+        else None
+    )
+    reads: list[tuple[re.Match[str], str]] = []
+    seen: set[str] = set()
+    for match, path in sorted(candidates, key=lambda item: item[0].start()):
+        if not _path_is_plausible(path):
+            continue
+        folded = path.casefold()
+        if folded in seen:
+            continue
+        if target_path is not None and folded == target_path.casefold():
+            continue
+        seen.add(folded)
+        reads.append((match, path))
+    return reads
+
+
+def _build_transform_task(
+    normalized: str,
+    content_tasks: list[tuple[int, str]],
+) -> dict[str, object] | None:
+    """Build one transform task over the content sources preceding the verb."""
+    if not content_tasks:
+        return None
+    for pattern, task_id, instruction, description in _TRANSFORMATION_PATTERNS:
+        match = pattern.search(normalized)
+        if match is None:
+            continue
+        input_ids = [
+            content_id for end, content_id in content_tasks if end <= match.start()
+        ]
+        if not input_ids:
+            input_ids = [content_tasks[0][1]]
+        payload: dict[str, object] = {
+            "kind": "transform",
+            "instruction": instruction,
+        }
+        if len(input_ids) == 1:
+            payload["input_task"] = input_ids[0]
+        else:
+            payload["input_tasks"] = list(input_ids)
+        return {
+            "task_id": task_id,
+            "description": description,
+            "dependencies": list(input_ids),
+            "requires_approval": False,
+            "payload": payload,
+        }
+    return None
+
+
+def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
+    """Detect a conservative read → transform? → write objective.
+
+    Also detects bundles of two or more fully independent safe reads with no
+    write target. Returns ``None`` for anything else so the prompt keeps
+    using the existing conversational / single-tool / structured routing.
     """
     normalized = normalize_prompt_text(prompt)
     if not normalized.strip() or "?" in normalized:
@@ -120,52 +252,54 @@ def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
         return None
 
     source_matches = list(_SOURCE_PATTERN.finditer(normalized))
+    if not source_matches:
+        return None
     target_match = _TARGET_PATTERN.search(normalized)
-    if not source_matches or target_match is None:
-        return None
 
-    first_source = source_matches[0]
-    if first_source.start() >= target_match.start():
+    reads = _collect_reads(normalized, prompt, source_matches, target_match)
+    if not reads:
         return None
-    between = normalized[first_source.end() : target_match.start()]
-    if not _CONNECTOR_PATTERN.search(between):
-        return None
+    first_read = reads[0][0]
 
-    source_path = _restore_path_case(first_source.group("path"), prompt)
-    target_path = _restore_path_case(target_match.group("path"), prompt)
-    if not _path_is_plausible(source_path) or not _path_is_plausible(target_path):
-        return None
-    if source_path.casefold() == target_path.casefold():
-        return None
-
-    tasks: list[dict[str, object]] = [
-        _tool_task(
-            "read_source",
-            f"Leer {source_path}",
-            "read_file",
-            {"path": source_path},
-        )
-    ]
-    content_task_id = "read_source"
-    if _SUMMARY_PATTERN.search(normalized):
+    tasks: list[dict[str, object]] = []
+    content_tasks: list[tuple[int, str]] = []
+    for index, (match, path) in enumerate(reads):
+        task_id = "read_source" if index == 0 else f"read_extra_{index}"
         tasks.append(
-            {
-                "task_id": "summarize_source",
-                "description": "Resumir el contenido leído",
-                "dependencies": ["read_source"],
-                "requires_approval": False,
-                "payload": {
-                    "kind": "transform",
-                    "instruction": (
-                        "Resume el siguiente contenido de forma breve y fiel. "
-                        "Responde solo con el resumen:\n\n{input}"
-                    ),
-                    "input_task": "read_source",
-                },
-            }
+            _tool_task(task_id, f"Leer {path}", "read_file", {"path": path})
         )
-        content_task_id = "summarize_source"
+        content_tasks.append((match.end(), task_id))
 
+    transform = _build_transform_task(normalized, content_tasks)
+
+    if target_match is None:
+        # Independent safe reads only: a transform without an output sink or a
+        # single read stays on the existing conversational flow.
+        if transform is not None or len(tasks) < 2:
+            return None
+        if not _CONNECTOR_PATTERN.search(
+            normalized[first_read.end() : reads[-1][0].start()]
+        ):
+            return None
+        return MultiTaskGoal(description=prompt.strip(), tasks=tasks)
+
+    target_path = _restore_path_case(target_match.group("path"), prompt)
+    if not _path_is_plausible(target_path):
+        return None
+    if first_read.start() >= target_match.start():
+        return None
+    if not _CONNECTOR_PATTERN.search(
+        normalized[first_read.end() : target_match.start()]
+    ):
+        return None
+    if any(path.casefold() == target_path.casefold() for _, path in reads):
+        return None
+
+    content_task_id = (
+        str(transform["task_id"]) if transform is not None else content_tasks[0][1]
+    )
+    if transform is not None:
+        tasks.append(transform)
     tasks.append(
         _tool_task(
             "write_target",
@@ -176,24 +310,5 @@ def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
             content_task=content_task_id,
         )
     )
-
-    extra_reads = 0
-    for match in source_matches[1:]:
-        extra_path = _restore_path_case(match.group("path"), prompt)
-        if (
-            not _path_is_plausible(extra_path)
-            or extra_path.casefold() == target_path.casefold()
-            or extra_path.casefold() == source_path.casefold()
-        ):
-            continue
-        extra_reads += 1
-        tasks.append(
-            _tool_task(
-                f"read_extra_{extra_reads}",
-                f"Leer {extra_path}",
-                "read_file",
-                {"path": extra_path},
-            )
-        )
 
     return MultiTaskGoal(description=prompt.strip(), tasks=tasks)
