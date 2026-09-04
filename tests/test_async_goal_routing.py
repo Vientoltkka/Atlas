@@ -20,6 +20,7 @@ from memory.conversation import ConversationMemory
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
 from tools.registry import ToolRegistry
+from tools.web_search import WebSearchTool
 
 
 CANONICAL_PROMPT = (
@@ -37,6 +38,23 @@ class CountingReadFileTool(ReadFileTool):
         return super().execute(context)
 
 
+class CountingWebSearchTool(WebSearchTool):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def execute(self, context):
+        self.calls.append(str(context.parameters.get("query")))
+        return (
+            {
+                "title": "Python",
+                "url": "https://www.python.org",
+                "snippet": "Python es un lenguaje de programación interpretado.",
+                "source": "python.org",
+            },
+        )
+
+
 class ChatAgentFake:
     name = "chat"
     description = "fake chat"
@@ -49,12 +67,15 @@ def _build_scheduler(
     tmp_path,
     *,
     summarizer=None,
+    search_tool: CountingWebSearchTool | None = None,
 ) -> tuple[AsyncTaskScheduler, CountingReadFileTool, list[str]]:
     """Real SingleToolRunner + scheduler, mirroring the production wiring."""
     tool_registry = ToolRegistry()
     read_tool = CountingReadFileTool()
     tool_registry.register(read_tool)
     tool_registry.register(WriteFileTool())
+    if search_tool is not None:
+        tool_registry.register(search_tool)
 
     transform_calls: list[str] = []
 
@@ -200,11 +221,17 @@ def test_simple_prompts_keep_the_existing_conversational_flow(
         "Lee README.md",
         confirm=lambda _p: "",
     )
+    single_search = orchestrator.process_prompt(
+        "Busca Python",
+        confirm=lambda _p: "",
+    )
 
     assert chat.startswith("respuesta de chat")
     assert single_read.startswith("respuesta de chat")
+    assert single_search.startswith("respuesta de chat")
     assert "Objetivo en marcha" not in chat
     assert "Objetivo en marcha" not in single_read
+    assert "Objetivo en marcha" not in single_search
     assert transform_calls == []
     assert scheduler.pending_approvals() == []
 
@@ -235,6 +262,14 @@ def test_confirmation_without_pending_approvals_falls_back_to_normal_flow(
         "Lee README.md y guárdalo en README.md",
         "Lee a.txt y b.txt, compáralos",
         "Compara a.txt y b.txt y guarda el resultado en comparacion.txt",
+        "¿Qué es Python?",
+        "Busca Python",
+        "Busca información sobre Python",
+        "Busca información sobre Python y guarda el resultado en python.txt",
+        "Busca información sobre Python, resúmela y guarda el resultado en "
+        "python.txt, y además lee notas.txt",
+        "Busca información sobre config.json, resúmela y guarda el resultado "
+        "en salida.txt",
     ],
 )
 def test_detector_rejects_non_multi_task_prompts(prompt: str) -> None:
@@ -314,6 +349,54 @@ def test_detector_builds_single_file_transform_chain() -> None:
     assert "ordena" in transform["payload"]["instruction"] or "Ordena" in transform["payload"]["instruction"]
     write = goal.tasks[2]
     assert write["dependencies"] == ["transform_content"]
+
+
+def test_detector_builds_search_transform_write_chain() -> None:
+    goal = detect_multi_task_goal(
+        "Busca información sobre Python, resúmela y guarda el resultado en python.txt",
+    )
+
+    assert goal is not None
+    assert [task["task_id"] for task in goal.tasks] == [
+        "web_search",
+        "summarize_source",
+        "write_target",
+    ]
+    search, summarize, write = goal.tasks
+    assert search["dependencies"] == []
+    assert search["payload"] == {
+        "kind": "tool",
+        "tool": "web_search",
+        "arguments": {"query": "Python"},
+    }
+    assert summarize["dependencies"] == ["web_search"]
+    assert summarize["payload"]["kind"] == "transform"
+    assert summarize["payload"]["input_task"] == "web_search"
+    assert write["dependencies"] == ["summarize_source"]
+    assert write["payload"]["content_task"] == "summarize_source"
+    assert all(task["requires_approval"] is False for task in goal.tasks)
+
+
+def test_detector_builds_multi_query_search_compare_chain() -> None:
+    goal = detect_multi_task_goal(
+        "Busca información sobre Python y Docker, compara los resultados y "
+        "guarda las diferencias en resultado.txt",
+    )
+
+    assert goal is not None
+    assert [task["task_id"] for task in goal.tasks] == [
+        "web_search",
+        "web_search_extra_1",
+        "transform_content",
+        "write_target",
+    ]
+    first, second, transform, write = goal.tasks
+    assert first["payload"]["arguments"] == {"query": "Python"}
+    assert second["payload"]["arguments"] == {"query": "Docker"}
+    assert second["dependencies"] == []
+    assert transform["dependencies"] == ["web_search", "web_search_extra_1"]
+    assert transform["payload"]["input_tasks"] == ["web_search", "web_search_extra_1"]
+    assert write["payload"]["content_task"] == "transform_content"
 
 
 def test_detector_builds_independent_safe_read_bundle_without_write() -> None:
@@ -471,3 +554,86 @@ def test_two_independent_safe_reads_complete_without_any_approval(
     assert transform_calls == []
     assert "Leer README.md: hecho" in response
     assert "Leer notas.txt: hecho" in response
+
+
+def test_search_transform_save_goal_executes_and_waits_only_for_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    search_tool = CountingWebSearchTool()
+    scheduler, _read_tool, transform_calls = _build_scheduler(
+        tmp_path,
+        search_tool=search_tool,
+    )
+    orchestrator = _orchestrator(scheduler)
+
+    response = orchestrator.process_prompt(
+        "Busca información sobre Python, resúmela y guarda el resultado en "
+        "resultado.txt",
+        confirm=lambda _p: "",
+    )
+
+    pending = scheduler.pending_approvals()
+    assert len(pending) == 1
+    approval = pending[0]
+    state = scheduler.goal(approval.goal_id)
+    assert state.tasks["web_search"].status is TaskStatus.DONE
+    assert state.tasks["summarize_source"].status is TaskStatus.DONE
+    assert state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+    assert search_tool.calls == ["Python"]
+    assert len(transform_calls) == 1
+    assert "Python" in transform_calls[0]
+    assert "resultado.txt" in response
+    assert not (tmp_path / "resultado.txt").exists()
+
+    orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+    assert scheduler.goal_finished(approval.goal_id)
+    assert state.tasks["write_target"].status is TaskStatus.DONE
+    assert search_tool.calls == ["Python"]
+    assert len(transform_calls) == 1
+    written = (tmp_path / "resultado.txt").read_text(encoding="utf-8")
+    assert written.startswith("Resumen breve:")
+    assert scheduler.pending_approvals() == []
+
+
+def test_multi_search_compare_goal_executes_and_waits_only_for_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    search_tool = CountingWebSearchTool()
+    scheduler, _read_tool, transform_calls = _build_scheduler(
+        tmp_path,
+        search_tool=search_tool,
+    )
+    orchestrator = _orchestrator(scheduler)
+
+    orchestrator.process_prompt(
+        "Busca información sobre Python y Docker, compara los resultados y "
+        "guarda las diferencias en resultado.txt",
+        confirm=lambda _p: "",
+    )
+
+    pending = scheduler.pending_approvals()
+    assert len(pending) == 1
+    approval = pending[0]
+    state = scheduler.goal(approval.goal_id)
+    assert state.tasks["web_search"].status is TaskStatus.DONE
+    assert state.tasks["web_search_extra_1"].status is TaskStatus.DONE
+    assert state.tasks["transform_content"].status is TaskStatus.DONE
+    assert state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+    assert search_tool.calls == ["Python", "Docker"]
+    assert len(transform_calls) == 1
+    assert "[1] web_search" in transform_calls[0]
+    assert "[2] web_search_extra_1" in transform_calls[0]
+    assert not (tmp_path / "resultado.txt").exists()
+
+    orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+    assert scheduler.goal_finished(approval.goal_id)
+    assert state.tasks["write_target"].status is TaskStatus.DONE
+    assert search_tool.calls == ["Python", "Docker"]
+    assert len(transform_calls) == 1
+    assert (tmp_path / "resultado.txt").exists()

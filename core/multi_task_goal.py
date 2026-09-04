@@ -54,6 +54,27 @@ _CONNECTOR_PATTERN = re.compile(
 
 _SUMMARY_PATTERN = re.compile(r"resum|summar")
 
+# Search sources: "busca (información) (sobre) X" with the query captured up to
+# the first transform or write verb so the rest of the goal parses as usual.
+_SEARCH_PATTERN = re.compile(
+    r"\bbusc(?:a|ar)\b\s+"
+    r"(?:en\s+(?:internet|la\s+web|la\s+red)\s+)?"
+    r"(?:informacion\s+|info\s+|noticias\s+)?"
+    r"(?:sobre\s+|acerca\s+de\s+|de\s+|del\s+)?"
+    r"(?P<query>.+?)"
+    r"(?=\s*(?:\bresum|\bsummar|\bcompar|\borden|\bcorrig|\bextrae"
+    r"|\bguarda|\bguardar|\bescribe|\bescribir|\bsave\b|\bwrite\b"
+    r"|\band\b|\bthen\b|$))"
+)
+
+# File-like tokens inside a search query mean the prompt is really about local
+# files, not the web; those stay on the existing read flows.
+_FILE_EXTENSION_PATTERN = re.compile(
+    r"\.(?:txt|md|json|csv|log|py|docx?|xlsx?|pdf|cfg|ini|ya?ml)\b"
+)
+
+_QUERY_SPLIT_PATTERN = re.compile(r"\s*(?:,|;|\by\b|\be\b)\s*")
+
 # Deterministic transform verbs, checked in order; the first match wins so a
 # prompt never gets two competing transform interpretations.
 _TRANSFORMATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
@@ -233,6 +254,84 @@ def _build_transform_task(
     return None
 
 
+def _split_search_queries(raw_query: str, prompt: str) -> list[str]:
+    """Split the captured search text into one or several clean queries."""
+    cleaned = " ".join(raw_query.strip().strip(",;").split())
+    if not cleaned or len(cleaned) > 120:
+        return []
+    queries: list[str] = []
+    for part in _QUERY_SPLIT_PATTERN.split(cleaned):
+        if _FILE_EXTENSION_PATTERN.search(part):
+            return []
+        if not part:
+            continue
+        query = _restore_path_case(part, prompt).strip()
+        if not query or ":" in query or len(query) > 120:
+            return []
+        queries.append(query)
+    return queries
+
+
+def _build_search_goal(
+    prompt: str,
+    normalized: str,
+    search_match: re.Match[str],
+) -> MultiTaskGoal | None:
+    """Build a web_search → transform → write goal from one search phrase.
+
+    Conservative by design: prompts without an explicit write target, without
+    an explicit transform verb, or that also mention local file reads stay on
+    the existing conversational / single-tool routing.
+    """
+    if _SOURCE_PATTERN.search(normalized):
+        return None
+    target_match = _TARGET_PATTERN.search(normalized)
+    if target_match is None:
+        return None
+    if not _CONNECTOR_PATTERN.search(
+        normalized[search_match.end() : target_match.start()]
+    ):
+        return None
+    queries = _split_search_queries(search_match.group("query"), prompt)
+    if not queries:
+        return None
+
+    tasks: list[dict[str, object]] = []
+    content_tasks: list[tuple[int, str]] = []
+    for index, query in enumerate(queries):
+        task_id = "web_search" if index == 0 else f"web_search_extra_{index}"
+        tasks.append(
+            _tool_task(
+                task_id,
+                f"Buscar {query}",
+                "web_search",
+                {"query": query},
+            )
+        )
+        content_tasks.append((search_match.end(), task_id))
+
+    transform = _build_transform_task(normalized, content_tasks)
+    if transform is None:
+        return None
+    tasks.append(transform)
+
+    content_task_id = str(transform["task_id"])
+    target_path = _restore_path_case(target_match.group("path"), prompt)
+    if not _path_is_plausible(target_path):
+        return None
+    tasks.append(
+        _tool_task(
+            "write_target",
+            f"Guardar el resultado en {target_path}",
+            "write_file",
+            {"path": target_path},
+            (content_task_id,),
+            content_task=content_task_id,
+        )
+    )
+    return MultiTaskGoal(description=prompt.strip(), tasks=tasks)
+
+
 def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
     """Detect a conservative read → transform? → write objective.
 
@@ -250,6 +349,10 @@ def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
     if _WINDOWS_ABSOLUTE_PATH_PATTERN.search(normalized):
         # Windows absolute paths keep the existing supervised flows.
         return None
+
+    search_match = _SEARCH_PATTERN.search(normalized)
+    if search_match is not None:
+        return _build_search_goal(prompt, normalized, search_match)
 
     source_matches = list(_SOURCE_PATTERN.finditer(normalized))
     if not source_matches:
