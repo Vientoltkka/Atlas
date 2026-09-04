@@ -99,6 +99,8 @@ from core.async_task_scheduler import (
     JsonGoalTaskStore,
     ToolTaskExecutor,
 )
+from core.worker_delegation import DynamicWorkerDelegator, ModelWorker
+from models.chat_inference import configured_provider_id
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
 from tools.registry import ToolRegistry
 from tools.tool_chain_runner import ToolChainRunner
@@ -1577,6 +1579,10 @@ class Bootstrap:
                 registry,
                 model_manager,
             ),
+            worker_delegator=_build_transform_worker_delegator(
+                registry,
+                model_manager,
+            ),
         )
         async_task_scheduler = AsyncTaskScheduler(
             tool_task_executor,
@@ -1647,6 +1653,81 @@ def _build_async_goal_model_transformer(registry, model_manager):
         )
 
     return transform
+
+
+def _build_transform_worker_delegator(registry, model_manager):
+    """Build the bounded transform delegation workers from the existing registry.
+
+    Only already-configured providers become workers: the local chat model
+    (via the registered chat agent) and, when Gemini is the selected provider,
+    the Gemini model. Descriptor resolution stays lazy so bootstrap never
+    touches the network, and with fewer than two workers delegation adds
+    nothing, so the legacy single transformer keeps handling transforms.
+    """
+    chat_agent = registry.get("chat")
+    if chat_agent is None:
+        return None
+    selected_provider = configured_provider_id()
+
+    def descriptor_for(logical_id: str):
+        try:
+            return model_manager.resolve_model(logical_id)
+        except Exception:  # noqa: BLE001 - an unreachable backend is unavailable
+            return None
+
+    def local_invoke(instruction: str) -> str:
+        descriptor = descriptor_for("chat-local")
+        if (
+            descriptor is None
+            or descriptor.provider_id != "ollama"
+            or not descriptor.available
+        ):
+            raise RuntimeError("local chat model descriptor is not available.")
+        return chat_agent.run(
+            model=descriptor.model_name,
+            messages=[{"role": "user", "content": instruction}],
+            provider_id="ollama",
+        )
+
+    def local_available() -> bool:
+        descriptor = descriptor_for("chat-local")
+        return descriptor is not None and descriptor.available
+
+    workers: list[ModelWorker] = [
+        ModelWorker(
+            worker_id="local",
+            invoke=local_invoke,
+            tier=0,
+            availability=local_available,
+        )
+    ]
+
+    if selected_provider == "gemini":
+
+        def gemini_invoke(instruction: str) -> str:
+            descriptor = descriptor_for("chat-gemini")
+            model_name = (
+                descriptor.model_name
+                if descriptor is not None and descriptor.provider_id == "gemini"
+                else ""
+            )
+            return chat_agent.run(
+                model=model_name,
+                messages=[{"role": "user", "content": instruction}],
+                provider_id="gemini",
+            )
+
+        workers.append(
+            ModelWorker(
+                worker_id="gemini",
+                invoke=gemini_invoke,
+                tier=1,
+            )
+        )
+
+    if len(workers) < 2:
+        return None
+    return DynamicWorkerDelegator(tuple(workers))
 
 
 def _read_int(

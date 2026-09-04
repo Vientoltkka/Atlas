@@ -69,10 +69,11 @@ class TaskOutcome:
     needs_approval: bool = False
     approval_prompt: str | None = None
     resumable_payload: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
 
     @staticmethod
-    def succeed(result: Any = None) -> "TaskOutcome":
-        return TaskOutcome(completed=True, result=result)
+    def succeed(result: Any = None, metadata: dict[str, Any] | None = None) -> "TaskOutcome":
+        return TaskOutcome(completed=True, result=result, metadata=metadata)
 
     @staticmethod
     def pause_for_approval(
@@ -113,6 +114,7 @@ class Task:
     created_at: datetime = field(default_factory=_utc_now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id.strip():
@@ -141,6 +143,7 @@ class Task:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "metadata": self.metadata,
         }
 
     @staticmethod
@@ -168,6 +171,7 @@ class Task:
                 if payload.get("finished_at")
                 else None
             ),
+            metadata=payload.get("metadata"),
         )
 
 
@@ -432,6 +436,7 @@ class AsyncTaskScheduler:
         task.status = TaskStatus.DONE
         task.result = outcome.result
         task.error = None
+        task.metadata = outcome.metadata
         task.pending_confirmation_id = None
         task.finished_at = _utc_now()
         return True
@@ -583,9 +588,11 @@ class ToolTaskExecutor:
         runner,
         *,
         model_transformer: "Callable[[str], str] | None" = None,
+        worker_delegator: "Any | None" = None,
     ) -> None:
         self._runner = runner
         self._model_transformer = model_transformer
+        self._worker_delegator = worker_delegator
         self._result_lookup: "Callable[[str], Any] | None" = None
 
     def bind_result_lookup(self, result_lookup: "Callable[[str], Any]") -> None:
@@ -631,11 +638,13 @@ class ToolTaskExecutor:
 
     def _run_transform(self, task: Task, payload: dict[str, Any]) -> TaskOutcome:
         """Run a model-only text transformation over a dependency result."""
+        instruction = str(payload.get("instruction", ""))
+        if self._worker_delegator is not None:
+            return self._delegate_transform(instruction, payload)
         if self._model_transformer is None:
             return TaskOutcome.fail(
                 "no model transformer is available for transform tasks."
             )
-        instruction = str(payload.get("instruction", ""))
         try:
             source_text = self._composed_transform_input(payload)
             return TaskOutcome.succeed(
@@ -643,6 +652,24 @@ class ToolTaskExecutor:
             )
         except Exception as error:  # noqa: BLE001 - transform must not crash goal
             return TaskOutcome.fail(f"transform task failed: {error}")
+
+    def _delegate_transform(self, instruction: str, payload: dict[str, Any]) -> TaskOutcome:
+        """Delegate the transform to the bounded dynamic worker delegator."""
+        from core.worker_delegation import is_synthesis_transform
+
+        try:
+            source_text = self._composed_transform_input(payload)
+            delegation = self._worker_delegator.delegate(
+                instruction.replace("{input}", source_text),
+                task_kind="transform",
+                synthesis=is_synthesis_transform(payload, instruction),
+            )
+        except Exception as error:  # noqa: BLE001 - transform must not crash goal
+            return TaskOutcome.fail(f"transform task failed: {error}")
+        if not delegation.success:
+            failure = delegation.error or "no candidate worker completed the task."
+            return TaskOutcome.fail(f"transform task failed: {failure}")
+        return TaskOutcome.succeed(delegation.output, metadata=delegation.metadata())
 
     def _composed_transform_input(self, payload: dict[str, Any]) -> str:
         """Compose transform input from one or several labeled dependencies.
