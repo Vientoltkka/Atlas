@@ -2119,6 +2119,14 @@ class AtlasOrchestrator:
         if memory_response is not None:
             return memory_response
 
+        desktop_response = (
+            self._desktop_interaction.execute(request.content, confirm=confirm)
+            if self._desktop_interaction is not None
+            else None
+        )
+        if desktop_response is not None:
+            return desktop_response
+
         direct_response = self._process_direct_conversation(
             request,
             raise_on_failure=True,
