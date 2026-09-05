@@ -997,9 +997,13 @@ class AtlasOrchestrator:
         if history_response is not None:
             return history_response
 
-        async_approval_response = self._handle_pending_async_approval(prompt)
-        if async_approval_response is not None:
-            return async_approval_response
+        if (
+            self._structured_execution_coordinator is None
+            or not self._structured_execution_coordinator.has_pending_execution()
+        ):
+            async_approval_response = self._handle_pending_async_approval(prompt)
+            if async_approval_response is not None:
+                return async_approval_response
 
         background_response = self._handle_background_autonomy(prompt)
         if background_response is not None:

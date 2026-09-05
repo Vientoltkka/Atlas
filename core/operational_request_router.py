@@ -898,7 +898,7 @@ def _memory_operation(text: str) -> MemoryOperation | None:
 def _single_tool_action(text: str) -> str | None:
     if _is_calendar_create_request(text):
         return "calendar_create"
-    if _is_calendar_list_request(text):
+    if _is_natural_calendar_list_request(text) or _is_calendar_list_request(text):
         return "calendar_list"
     if _is_gmail_list_request(text):
         return "gmail_list"
@@ -979,6 +979,15 @@ def _is_calendar_list_request(text: str) -> bool:
         "search ",
     )
     return _contains_any(text, calendar_markers) and _contains_any(text, action_markers)
+
+
+def _is_natural_calendar_list_request(text: str) -> bool:
+    """Match the natural agenda question already understood by the
+    ExecutionDecisionEngine, e.g. "Que tengo manana" (see execution_decision)."""
+    return (
+        re.search(r"\bque\s+tengo\s+(?:hoy|manana|esta\s+semana)\b", text)
+        is not None
+    )
 
 
 def _ambiguous_missing_object(text: str) -> bool:
