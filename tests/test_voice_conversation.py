@@ -1041,7 +1041,7 @@ def test_manual_voice_empty_transcription_continues_loop(
 
 
 def test_manual_voice_rejects_too_short_non_intent_transcription() -> None:
-    speech = FakeSpeechEngine([speech_result("si"), speech_result("salir")])
+    speech = FakeSpeechEngine([speech_result("eh"), speech_result("salir")])
     processed: list[str] = []
     console: list[str] = []
 

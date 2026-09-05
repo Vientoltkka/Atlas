@@ -177,6 +177,27 @@ class VoiceConversationUseCase:
         "thanks",
         "thank you",
     }
+    _CONFIRMATION_SHORT_INTENTS = {
+        "s",
+        "si",
+        "yes",
+        "y",
+        "confirma",
+        "confirmo",
+        "confirmar",
+        "vale",
+        "ok",
+        "adelante",
+        "continua",
+        "continuar",
+        "n",
+        "no",
+        "cancela",
+        "cancelar",
+        "olvidalo",
+        "descarta",
+        "rechaza",
+    }
     _EDGE_PUNCTUATION = " \t\r\n.,;:!?¿¡\"'`()[]{}"
     _SPANISH_RESPONSE_INSTRUCTION = (
         "Responde en español, de forma natural y concisa."
@@ -2237,6 +2258,7 @@ class VoiceConversationUseCase:
             "vs code",
             "vscode",
             "bloc de notas",
+            *self._CONFIRMATION_SHORT_INTENTS,
         }
 
         if (
@@ -2308,6 +2330,7 @@ class VoiceConversationUseCase:
             "vs code",
             "vscode",
             "bloc de notas",
+            *self._CONFIRMATION_SHORT_INTENTS,
         }
 
         if (

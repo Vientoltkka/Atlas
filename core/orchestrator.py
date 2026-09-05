@@ -1130,20 +1130,12 @@ class AtlasOrchestrator:
             return specialist_response.text
 
 
-        if self._execution_conversation is not None:
-            last_conversation_result = self._execution_conversation.last_result
-            if (
-                _is_bare_confirmation_token(request.content)
-                and last_conversation_result is not None
-                and last_conversation_result.confirmation_id is not None
-                and not (
-                    self._structured_execution_coordinator is not None
-                    and self._structured_execution_coordinator.has_pending_execution()
-                )
-            ):
-                outcome = self._execution_conversation.handle(request.content)
-                if not outcome.direct_response_required:
-                    return outcome.text
+        if self._execution_conversation_bare_confirmation_intercepts(
+            request.content,
+        ):
+            outcome = self._execution_conversation.handle(request.content)
+            if not outcome.direct_response_required:
+                return outcome.text
 
         direct_response = self._process_direct_conversation(request)
         if direct_response is not None:
@@ -2119,13 +2111,31 @@ class AtlasOrchestrator:
         if memory_response is not None:
             return memory_response
 
+        close_request = (
+            self._desktop_interaction.close_application_tool_request(routing_text)
+            if self._desktop_interaction is not None
+            else None
+        )
+        pending_interaction = self._execution_conversation is not None and (
+            self._execution_conversation.pending_confirmation_id is not None
+            or self._execution_conversation.pending_clarification is not None
+        )
+        if close_request is not None or pending_interaction:
+            # Close commands use the same supervised conversational
+            # confirmation routing as text; pending interactions resolve
+            # before any new desktop command executes.
+            return self.process_prompt(routing_text, confirm=confirm)
+
         desktop_response = (
-            self._desktop_interaction.execute(request.content, confirm=confirm)
+            self._desktop_interaction.execute(routing_text, confirm=confirm)
             if self._desktop_interaction is not None
             else None
         )
         if desktop_response is not None:
             return desktop_response
+
+        if self._execution_conversation_bare_confirmation_intercepts(routing_text):
+            return self.process_prompt(routing_text, confirm=confirm)
 
         direct_response = self._process_direct_conversation(
             request,
@@ -2275,6 +2285,24 @@ class AtlasOrchestrator:
         self._memory.add_user(request.content)
         self._memory.add_assistant(response)
         return response
+
+    def _execution_conversation_bare_confirmation_intercepts(
+        self,
+        content: str,
+    ) -> bool:
+        """Return whether the execution conversation owns this bare token."""
+        if self._execution_conversation is None:
+            return False
+        last_conversation_result = self._execution_conversation.last_result
+        return (
+            _is_bare_confirmation_token(content)
+            and last_conversation_result is not None
+            and last_conversation_result.confirmation_id is not None
+            and not (
+                self._structured_execution_coordinator is not None
+                and self._structured_execution_coordinator.has_pending_execution()
+            )
+        )
 
     def _process_direct_conversation(
         self,
