@@ -203,6 +203,44 @@ def test_desktop_interaction_reports_unknown_application_specifically() -> None:
     assert executor.calls[0][0] == "desktop.open_application"
 
 
+def test_desktop_interaction_voice_suffix_open_matches_text() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    voice = use_case.execute(
+        "abre calculadora\n\nResponde en español, de forma natural y concisa."
+    )
+    text = use_case.execute("abre calculadora")
+
+    assert voice == "✓ Abriendo calculadora."
+    assert text == voice
+    assert [call[1].parameters for call in executor.calls] == [
+        {"application": "calculadora"},
+        {"application": "calculadora"},
+    ]
+
+
+def test_desktop_interaction_voice_suffix_maximize_matches_text() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    voice = use_case.execute(
+        "maximiza visual studio code\n\nResponde en español, de forma natural y concisa."
+    )
+    text = use_case.execute("maximiza visual studio code")
+
+    assert voice == "✓ Ventana maximizada:\nVisual Studio Code - Atlas"
+    assert text == voice
+    assert [
+        (call[0], call[1].parameters)
+        for call in executor.calls
+        if call[0] == "desktop.maximize_window"
+    ] == [
+        ("desktop.maximize_window", {"handle": 10}),
+        ("desktop.maximize_window", {"handle": 10}),
+    ]
+
+
 class FailedApplicationExecutor(FakeToolExecutor):
     def execute(self, tool_name: str, context: ToolContext):
         self.calls.append((tool_name, context))

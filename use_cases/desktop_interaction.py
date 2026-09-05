@@ -124,7 +124,7 @@ class DesktopInteractionUseCase:
         confirm: Callable[[str], str] | None = None,
     ) -> str | None:
         """Execute a supported desktop command."""
-        text = prompt.strip()
+        text = self._strip_voice_response_instruction(prompt.strip())
         text = self._strip_wake_word_prefix(text)
         normalized = self._normalize(text)
 
@@ -2438,6 +2438,15 @@ class DesktopInteractionUseCase:
             raise ValueError("Faltan teclas para el atajo.")
 
         return keys
+
+    def _strip_voice_response_instruction(
+        self,
+        text: str,
+    ) -> str:
+        marker = "\n\nResponde en "
+        if marker in text:
+            return text.split(marker, 1)[0].strip()
+        return text
 
     def _strip_wake_word_prefix(
         self,

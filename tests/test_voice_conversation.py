@@ -25,6 +25,7 @@ from use_cases.speech_engine import (
     SpeechTranscriptionResult,
 )
 from use_cases.speech_output_engine import SpeechOutputMetrics
+from use_cases.desktop_interaction import DesktopInteractionUseCase
 from use_cases.voice_conversation import (
     VoiceConversationState,
     VoiceConversationUseCase,
@@ -2356,6 +2357,48 @@ def test_orchestrator_voice_desktop_apps_accept_atlas_prefix() -> None:
 
     assert response == "tool:Abre Visual Studio Code"
     assert desktop.calls == ["Abre Visual Studio Code"]
+
+
+def test_orchestrator_voice_transcription_open_calculator_like_text() -> None:
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, tool_name, context):
+            self.calls.append((tool_name, dict(context.parameters)))
+            return "ok"
+
+    executor = RecordingExecutor()
+    desktop = DesktopInteractionUseCase(executor)
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=desktop,
+    )
+
+    voice_response = orchestrator.process_voice_prompt(
+        "abre calculadora\n\nResponde en español, de forma natural y concisa.",
+        confirm=lambda _prompt: "",
+    )
+    text_response = orchestrator.process_prompt(
+        "abre calculadora",
+        confirm=lambda _prompt: "",
+    )
+
+    assert voice_response == text_response
+    assert voice_response == "✓ Abriendo calculadora."
+    assert [parameters for _, parameters in executor.calls] == [
+        {"application": "calculadora"},
+        {"application": "calculadora"},
+    ]
 
 
 def test_orchestrator_voice_accepts_atlas_prefix_for_time_route() -> None:
