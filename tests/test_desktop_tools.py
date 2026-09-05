@@ -1439,7 +1439,7 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0):
+    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0, timeout=None):
         calls.append(
             {
                 "args": args,
@@ -1467,6 +1467,53 @@ def test_windows_controller_list_processes_uses_tasklist_without_shell(
     assert calls[0]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def test_windows_controller_list_processes_survives_tasklist_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0, timeout=None):
+        calls.append({"args": args, "timeout": timeout})
+        if args[-1] == "/V":
+            raise subprocess.TimeoutExpired(args, timeout or 0.0)
+
+        class Completed:
+            returncode = 0
+            stdout = (
+                '"Image Name","PID","Session Name","Session#","Mem Usage"\n'
+                '"Code.exe","20","Console","1","10 K"\n'
+            )
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.run",
+        fake_run,
+    )
+    controller = WindowsDesktopController()
+    snapshot_processes = [
+        ProcessInfo(
+            pid=7,
+            name="Code.exe",
+            executable_path=None,
+            window_titles=("Atlas - Visual Studio Code",),
+            is_running=True,
+        )
+    ]
+    monkeypatch.setattr(
+        controller,
+        "_read_process_snapshot",
+        lambda: snapshot_processes,
+    )
+
+    result = controller.list_processes("Code")
+
+    assert [process.pid for process in result] == [7]
+    assert calls[0]["args"] == ["tasklist", "/FO", "CSV", "/V"]
+    assert calls[0]["timeout"] == WindowsDesktopController._TASKLIST_TIMEOUT_SECONDS
+
+
 def test_windows_controller_list_processes_falls_back_when_verbose_denied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1485,7 +1532,7 @@ def test_windows_controller_list_processes_falls_back_when_verbose_denied(
         )
         stderr = ""
 
-    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0):
+    def fake_run(args, capture_output, text, errors=None, shell=False, creationflags=0, timeout=None):
         calls.append(args)
         return Denied() if len(calls) == 1 else Completed()
 

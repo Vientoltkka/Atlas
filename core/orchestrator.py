@@ -863,10 +863,12 @@ class AtlasOrchestrator:
             return
 
         execute_manual = self._voice_conversation.execute_manual
+        # Voice/UI turns must never block on stdin; desktop actions are
+        # confirmed through the supervised conversational pending state.
         voice_kwargs = {
             "process_text": lambda text: self.process_voice_prompt(
                 text,
-                confirm=input,
+                confirm=None,
             ),
             "status_sink": status_sink or print,
             "typed_input": self._read_typed_exit_command,
@@ -883,7 +885,7 @@ class AtlasOrchestrator:
             voice_kwargs["process_text_stream"] = (
                 lambda text, fragment_sink: self.process_voice_prompt(
                     text,
-                    confirm=input,
+                    confirm=None,
                     on_model_fragment=fragment_sink,
                 )
             )
@@ -2120,10 +2122,23 @@ class AtlasOrchestrator:
             self._execution_conversation.pending_confirmation_id is not None
             or self._execution_conversation.pending_clarification is not None
         )
-        if close_request is not None or pending_interaction:
-            # Close commands use the same supervised conversational
-            # confirmation routing as text; pending interactions resolve
-            # before any new desktop command executes.
+        if pending_interaction:
+            # Pending interactions resolve before any new desktop command
+            # executes.
+            return self.process_prompt(routing_text, confirm=confirm)
+        if close_request is not None:
+            # A fresh close request issues the same supervised conversational
+            # confirmation as text. Resolving it again inside process_prompt
+            # would rescan processes and can stall the voice turn.
+            if self._execution_conversation is not None:
+                tool_name, arguments, confirmation_text = close_request
+                outcome = self._execution_conversation.handle_registered_tool(
+                    tool_name,
+                    arguments,
+                    original_text=routing_text,
+                    confirmation_text=confirmation_text,
+                )
+                return outcome.text
             return self.process_prompt(routing_text, confirm=confirm)
 
         desktop_response = (

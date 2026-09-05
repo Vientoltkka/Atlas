@@ -116,8 +116,10 @@ class FakeController:
     def __init__(self) -> None:
         self.close_requests: list[int] = []
         self.close_window_requests: list[int] = []
+        self.list_processes_calls = 0
 
     def list_processes(self, query: str) -> list[ProcessInfo]:
+        self.list_processes_calls += 1
         normalized = query.strip().lower()
         candidates = {normalized}
         if normalized in {"calculadora", "calculator"}:
@@ -176,7 +178,7 @@ def build_real_wired_orchestrator(controller: FakeController):
     return orchestrator, conversation
 
 
-def run_voice_turn(orchestrator, utterance: str) -> str:
+def run_voice_turn(orchestrator, utterance: str, confirm=None) -> str:
     """Run one manual voice session utterance through the real entrypoint."""
     output = FakeSpeechOutputEngine()
     speech = FakeSpeechEngine([utterance, "adios Atlas"])
@@ -191,7 +193,7 @@ def run_voice_turn(orchestrator, utterance: str) -> str:
     voice.execute_manual(
         process_text=lambda text: orchestrator.process_voice_prompt(
             text,
-            confirm=input,
+            confirm=confirm if confirm is not None else input,
         ),
         status_sink=lambda _message: None,
         typed_input=lambda: None,
@@ -251,3 +253,28 @@ def test_voice_close_rejected_on_no_without_closing():
     assert controller.close_window_requests == []
     assert controller.close_requests == []
     assert conversation.pending_confirmation_id is None
+
+
+def test_voice_close_scans_processes_once_and_never_prompts_interactively():
+    """Regression: the voice close turn used to route the close request twice
+    (process_voice_prompt + process_prompt) and could fall back into the
+    legacy interactive ``confirm`` prompt, which blocks the voice thread with
+    no console in --ui. The ask must scan once and never prompt interactively.
+    """
+    controller = FakeController()
+    orchestrator, conversation = build_real_wired_orchestrator(controller)
+
+    def forbidden_confirm(_prompt: str) -> str:
+        raise AssertionError("voice close must not prompt interactively")
+
+    ask = run_voice_turn(
+        orchestrator,
+        "cierra la calculadora",
+        confirm=forbidden_confirm,
+    )
+
+    assert "¿Confirmas?" in ask
+    assert controller.list_processes_calls == 1
+    assert controller.close_window_requests == []
+    assert controller.close_requests == []
+    assert conversation.pending_confirmation_id is not None

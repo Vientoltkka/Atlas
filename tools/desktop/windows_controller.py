@@ -1031,26 +1031,41 @@ class WindowsDesktopController:
 
         return normalized_query in process.name.lower()
 
-    def _read_tasklist(self) -> list[ProcessInfo]:
-        """Read process information from tasklist."""
-        completed = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/V"],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            shell=False,
-            creationflags=_SUBPROCESS_NO_WINDOW,
-        )
+    _TASKLIST_TIMEOUT_SECONDS = 2.5
 
-        if completed.returncode != 0:
+    def _read_tasklist(self) -> list[ProcessInfo]:
+        """Read process information from tasklist with a bounded runtime.
+
+        ``tasklist /V`` can hang indefinitely while querying suspended UWP
+        processes; the timeout falls back to the native Toolhelp snapshot so
+        callers can never block forever.
+        """
+        try:
             completed = subprocess.run(
-                ["tasklist", "/FO", "CSV"],
+                ["tasklist", "/FO", "CSV", "/V"],
                 capture_output=True,
                 text=True,
                 errors="replace",
                 shell=False,
                 creationflags=_SUBPROCESS_NO_WINDOW,
+                timeout=self._TASKLIST_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired:
+            return self._read_process_snapshot()
+
+        if completed.returncode != 0:
+            try:
+                completed = subprocess.run(
+                    ["tasklist", "/FO", "CSV"],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    shell=False,
+                    creationflags=_SUBPROCESS_NO_WINDOW,
+                    timeout=self._TASKLIST_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return self._read_process_snapshot()
 
             if completed.returncode != 0:
                 return self._read_process_snapshot()
