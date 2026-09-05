@@ -100,6 +100,7 @@ from core.async_task_scheduler import (
     JsonGoalTaskStore,
     ToolTaskExecutor,
 )
+from core.debug_fail_once_hook import wrap_debug_fail_once  # DEBUG/TEST-only
 from core.worker_delegation import DynamicWorkerDelegator, ModelWorker
 from models.chat_inference import configured_provider_id
 from tools.intent_selector import ToolIntentRegistry, ToolSelector
@@ -1574,16 +1575,20 @@ class Bootstrap:
         # Orchestrator
         # -----------------------
 
-        tool_task_executor = ToolTaskExecutor(
-            single_tool_runner,
-            model_transformer=_build_async_goal_model_transformer(
-                registry,
-                model_manager,
-            ),
-            worker_delegator=_build_transform_worker_delegator(
-                registry,
-                model_manager,
-            ),
+        # DEBUG/TEST-only fail-once hook: passthrough unless
+        # ATLAS_DEBUG_RETRY_ONCE=1 is set for this session only.
+        tool_task_executor = wrap_debug_fail_once(
+            ToolTaskExecutor(
+                single_tool_runner,
+                model_transformer=_build_async_goal_model_transformer(
+                    registry,
+                    model_manager,
+                ),
+                worker_delegator=_build_transform_worker_delegator(
+                    registry,
+                    model_manager,
+                ),
+            )
         )
         async_task_scheduler = AsyncTaskScheduler(
             tool_task_executor,
