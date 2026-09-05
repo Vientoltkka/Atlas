@@ -722,6 +722,133 @@ def test_finished_current_goal_keeps_status_and_never_runs_old_write(
         orchestrator.close()
 
 
+COPIA_PROMPT = "Lee README.md y guarda el contenido en copia.txt"
+
+
+def test_cancelled_current_goal_keeps_status_and_never_runs_old_write(
+    tmp_path,
+    monkeypatch,
+):
+    """Cancelling the current goal must keep it as the status goal.
+
+    An older WAITING_APPROVAL goal may still exist in the store. After
+    'detén el trabajo' cancels the current conversational goal, 'estado'
+    must keep describing that same CANCELLED goal, and a bare 'sí' must
+    never authorize the older goal's pending write.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    _stale_waiting_goal(store_dir)
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler = _build_scheduler_stack(tool_registry, runner, store_dir)
+    orchestrator = _build_orchestrator(scheduler, tool_registry)
+    try:
+        initial = orchestrator.process_prompt("estado", confirm=lambda _p: "")
+        assert "sesion anterior" in initial
+        assert scheduler.pending_approvals()
+
+        new_response = orchestrator.process_prompt(COPIA_PROMPT, confirm=lambda _p: "")
+        assert "Objetivo en marcha" in new_response
+        new_goal_id = orchestrator._background_goal_id
+        assert new_goal_id is not None
+        assert new_goal_id != "0000stale0000"
+
+        cancel_response = orchestrator.process_prompt(
+            "detén el trabajo", confirm=lambda _p: ""
+        )
+        assert "Trabajo detenido" in cancel_response
+        assert scheduler.goal_status(new_goal_id) is TaskStatus.CANCELLED
+
+        status_response = orchestrator.process_prompt("estado", confirm=lambda _p: "")
+        assert "copia.txt" in status_response
+        assert "El trabajo fue cancelado." in status_response
+        assert "sesion anterior" not in status_response
+        assert scheduler.goal_status(new_goal_id) is TaskStatus.CANCELLED
+
+        orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert scheduler.goal_status("0000stale0000") is TaskStatus.WAITING_APPROVAL
+        assert not (tmp_path / "resultado_viejo.txt").exists()
+        assert not (tmp_path / "copia.txt").exists()
+        assert len(write_tool.calls) == 0
+    finally:
+        orchestrator.stop_background_pump()
+        orchestrator.close()
+
+
+def test_restart_keeps_recent_cancelled_goal_over_stale_pending(
+    tmp_path,
+    monkeypatch,
+):
+    """Restart variant: the recent CANCELLED goal stays the status goal.
+
+    After 'detén el trabajo' cancels the current goal, a fresh runtime over
+    the same store must answer 'estado' with that cancelled goal (recency
+    wins) and a bare 'sí' must never run the older goal's pending write.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    _stale_waiting_goal(store_dir)
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    orchestrator_a = _build_orchestrator(
+        _build_scheduler_stack(
+            tool_registry,
+            Bootstrap.build_single_tool_runner(tool_registry=tool_registry),
+            store_dir,
+        ),
+        tool_registry,
+    )
+    try:
+        orchestrator_a.process_prompt(COPIA_PROMPT, confirm=lambda _p: "")
+        new_goal_id = orchestrator_a._background_goal_id
+        assert new_goal_id is not None
+        orchestrator_a.process_prompt("detén el trabajo", confirm=lambda _p: "")
+        assert (
+            orchestrator_a._async_task_scheduler.goal_status(new_goal_id)
+            is TaskStatus.CANCELLED
+        )
+    finally:
+        orchestrator_a.stop_background_pump()
+        orchestrator_a.close()
+
+    restart_read = CountingReadFileTool()
+    restart_write = CountingWriteFileTool()
+    restart_registry = ToolRegistry()
+    restart_registry.register(restart_read)
+    restart_registry.register(restart_write)
+    orchestrator_b, scheduler_b = _restart_runtime(restart_registry, store_dir, [])
+    try:
+        status_response = orchestrator_b.process_prompt("estado", confirm=lambda _p: "")
+        assert "copia.txt" in status_response
+        assert "El trabajo fue cancelado." in status_response
+        assert "sesion anterior" not in status_response
+
+        orchestrator_b.process_prompt("sí", confirm=lambda _p: "")
+
+        assert scheduler_b.goal_status("0000stale0000") is TaskStatus.WAITING_APPROVAL
+        assert not (tmp_path / "resultado_viejo.txt").exists()
+        assert not (tmp_path / "copia.txt").exists()
+        assert len(restart_write.calls) == 0
+    finally:
+        orchestrator_b.stop_background_pump()
+        orchestrator_b.close()
+
+
 def test_restart_status_prefers_recent_finished_goal_over_stale_pending(
     tmp_path,
     monkeypatch,
