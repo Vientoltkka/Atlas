@@ -26,6 +26,7 @@ from memory.conversation import ConversationMemory
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
 from tools.registry import ToolRegistry
+from use_cases.execution_conversation import ExecutionConversationController
 
 
 class CountingReadFileTool(ReadFileTool):
@@ -109,23 +110,28 @@ def test_duration_bounds_are_conservative():
 # -- conversational integration --------------------------------------------------
 
 
-def _build_harness(tmp_path):
-    tool_registry = ToolRegistry()
-    read_tool = CountingReadFileTool()
-    tool_registry.register(read_tool)
-    tool_registry.register(WriteFileTool())
+def _build_scheduler_stack(tool_registry, runner, store_dir, transform_calls=None):
+    if transform_calls is None:
+        transform_calls = []
 
-    def summarizer(text: str) -> str:
+    def summarize(text: str) -> str:
+        transform_calls.append(text)
         return f"Resumen breve: {text[:40]}"
 
-    runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
-    executor = ToolTaskExecutor(runner, model_transformer=summarizer)
+    executor = ToolTaskExecutor(runner, model_transformer=summarize)
     scheduler = AsyncTaskScheduler(
         executor,
-        store=JsonGoalTaskStore(tmp_path / "goal_store"),
+        store=JsonGoalTaskStore(store_dir),
     )
     executor.bind_result_lookup(scheduler.task)
-    orchestrator = AtlasOrchestrator(
+    return scheduler
+
+
+def _build_orchestrator(scheduler, tool_registry):
+    execution_conversation = ExecutionConversationController(
+        Bootstrap.build_execution_coordinator(tool_registry=tool_registry)
+    )
+    return AtlasOrchestrator(
         planner=SimpleNamespace(
             create_plan=lambda prompt: SimpleNamespace(task=prompt, objective=prompt),
         ),
@@ -135,8 +141,20 @@ def _build_harness(tmp_path):
         registry=SimpleNamespace(get=lambda name: None),
         write_file=SimpleNamespace(execute=lambda *_args: "written"),
         async_task_scheduler=scheduler,
+        execution_conversation=execution_conversation,
     )
-    return orchestrator, scheduler, read_tool
+
+
+def _build_harness(tmp_path):
+    tool_registry = ToolRegistry()
+    read_tool = CountingReadFileTool()
+    tool_registry.register(read_tool)
+    tool_registry.register(WriteFileTool())
+
+    runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler = _build_scheduler_stack(tool_registry, runner, tmp_path / "goal_store")
+    orchestrator = _build_orchestrator(scheduler, tool_registry)
+    return orchestrator, scheduler, read_tool, tool_registry, runner
 
 
 ORDER_PROMPT = (
@@ -151,7 +169,7 @@ def test_conversational_order_progresses_in_background_without_new_turns(
 ):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
-    orchestrator, scheduler, read_tool = _build_harness(tmp_path)
+    orchestrator, scheduler, read_tool = _build_harness(tmp_path)[:3]
     try:
         _run_background_goal_and_assert(orchestrator, scheduler, read_tool, tmp_path)
     finally:
@@ -203,7 +221,7 @@ def _run_background_goal_and_assert(orchestrator, scheduler, read_tool, tmp_path
 def test_cancellation_blocks_pending_work_and_frees_nothing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "README.md").write_text("contenido", encoding="utf-8")
-    orchestrator, scheduler, read_tool = _build_harness(tmp_path)
+    orchestrator, scheduler, read_tool = _build_harness(tmp_path)[:3]
     try:
         orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
         goal_id = orchestrator._background_goal_id
@@ -239,7 +257,7 @@ def test_order_without_structurable_objective_is_rejected_conservatively(
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    orchestrator, scheduler, read_tool = _build_harness(tmp_path)
+    orchestrator, scheduler, read_tool = _build_harness(tmp_path)[:3]
 
     response = orchestrator.process_prompt(
         "Trabaja durante 30 minutos en este objetivo: piensa sobre el sentido de la vida",
@@ -251,8 +269,53 @@ def test_order_without_structurable_objective_is_rejected_conservatively(
     assert scheduler.persisted_goal_ids() == []
 
 
+def test_persisted_goal_status_query_survives_restart(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    orchestrator, scheduler, read_tool, tool_registry, runner = _build_harness(tmp_path)
+    transform_calls = []
+    try:
+        orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        goal_id = orchestrator._background_goal_id
+        assert goal_id is not None
+        state = scheduler.goal(goal_id)
+        reached = _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        assert reached
+        assert state.tasks["read_source"].status is TaskStatus.DONE
+    finally:
+        orchestrator.stop_background_pump()
+
+    restart_scheduler = _build_scheduler_stack(
+        tool_registry,
+        runner,
+        tmp_path / "goal_store",
+        transform_calls=transform_calls,
+    )
+    restart_orchestrator = _build_orchestrator(restart_scheduler, tool_registry)
+    try:
+        restart_orchestrator.start_background_pump()
+        status_response = restart_orchestrator.process_prompt(
+            "estado", confirm=lambda _p: ""
+        )
+        assert "Estado del trabajo" in status_response
+        assert "pendiente de tu confirmación" in status_response
+
+        resumed = restart_orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert restart_scheduler.goal_finished(goal_id)
+        assert "Hecho" in resumed
+        written = (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8")
+        assert written.startswith("Resumen breve:")
+        assert len(read_tool.calls) == 1
+        assert transform_calls == []
+    finally:
+        restart_orchestrator.stop_background_pump()
+
+
 def test_background_pump_lifecycle_via_orchestrator(tmp_path):
-    orchestrator, scheduler, _read_tool = _build_harness(tmp_path)
+    orchestrator, scheduler, _read_tool = _build_harness(tmp_path)[:3]
     assert orchestrator._background_pump is not None
     orchestrator.start_background_pump()
     assert orchestrator._background_pump.running

@@ -541,7 +541,7 @@ class AtlasOrchestrator:
         return response
 
     def _describe_background_goal_status(self, prompt: str) -> "str | None":
-        goal_id = self._background_goal_id
+        goal_id = self._background_goal_id_or_recovered()
         if goal_id is None:
             return None
         try:
@@ -560,8 +560,41 @@ class AtlasOrchestrator:
         self._memory.add_assistant(response)
         return response
 
+    def _background_goal_id_or_recovered(self) -> "str | None":
+        """Return the active background goal, recovering a persisted one."""
+        if self._background_goal_id is not None:
+            return self._background_goal_id
+        goal_id = self._active_persisted_background_goal_id()
+        if goal_id is not None:
+            self._background_goal_id = goal_id
+        return goal_id
+
+    def _active_persisted_background_goal_id(self) -> "str | None":
+        """Resolve the newest non-terminal persisted goal after a restart."""
+        scheduler = self._async_task_scheduler
+        if scheduler is None:
+            return None
+        active: "list[tuple[datetime, str]]" = []
+        for persisted_goal_id in scheduler.persisted_goal_ids():
+            try:
+                try:
+                    state = scheduler.goal(persisted_goal_id)
+                    status = scheduler.goal_status(persisted_goal_id)
+                except UnknownGoalError:
+                    state = scheduler.load_goal(persisted_goal_id)
+                    status = scheduler.goal_status(persisted_goal_id)
+            except AsyncTaskSchedulerError:
+                continue
+            if status in {TaskStatus.DONE, TaskStatus.CANCELLED}:
+                continue
+            active.append((state.created_at, persisted_goal_id))
+        if not active:
+            return None
+        active.sort()
+        return active[-1][1]
+
     def _cancel_background_goal(self, prompt: str) -> "str | None":
-        goal_id = self._background_goal_id
+        goal_id = self._background_goal_id_or_recovered()
         if goal_id is None:
             return None
         try:
