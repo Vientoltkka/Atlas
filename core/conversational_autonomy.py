@@ -91,6 +91,7 @@ _STRUCTURED_PLAN_PATTERNS = (
 _UNTIL_DONE_PHRASE = re.compile(r"hasta\s+(?:terminar|acabar)")
 
 _STATUS_PHRASES = (
+    "estado",
     "como va el objetivo",
     "como va el trabajo",
     "como va el trabajo en segundo plano",

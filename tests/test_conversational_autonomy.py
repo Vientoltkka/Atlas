@@ -86,6 +86,8 @@ def test_normal_conversation_is_not_autonomy():
 
 
 def test_status_and_cancel_detection():
+    assert is_background_goal_status_query("estado")
+    assert is_background_goal_status_query("¿Estado?")
     assert is_background_goal_status_query("¿Cómo va el objetivo?")
     assert is_background_goal_status_query("estado del trabajo")
     assert is_background_goal_status_query("¿Sigues trabajando?")
@@ -181,6 +183,12 @@ def _run_background_goal_and_assert(orchestrator, scheduler, read_tool, tmp_path
     assert "Estado del trabajo" in status_response
     assert "pendiente de tu confirmación" in status_response
     assert "Presupuesto" in status_response
+
+    bare_status_response = orchestrator.process_prompt(
+        "estado", confirm=lambda _p: ""
+    )
+    assert "Estado del trabajo" in bare_status_response
+    assert "pendiente de tu confirmación" in bare_status_response
 
     resumed = orchestrator.process_prompt("sí", confirm=lambda _p: "")
 
