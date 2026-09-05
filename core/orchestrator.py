@@ -336,16 +336,35 @@ class AtlasOrchestrator:
         self._memory.add_assistant(response)
         return response
 
+    def _pending_async_approval_for_active_goal(self) -> "PendingApproval | None":
+        """Prefer the approval bound to the active background goal.
+
+        Persisted goals reuse task ids and older ones may still hold unused
+        tokens; a bare confirmation must never resume another goal's task.
+        """
+        pending = self._async_task_scheduler.pending_approvals()
+        if not pending:
+            return None
+        active_goal_id = self._background_goal_id_or_recovered()
+        if active_goal_id is not None:
+            scoped = [
+                approval
+                for approval in pending
+                if approval.goal_id == active_goal_id
+            ]
+            if scoped:
+                return scoped[0]
+        return pending[0]
+
     def _handle_pending_async_approval(self, prompt: str) -> "str | None":
         """Answer a bare confirmation bound to one pending async approval."""
         if self._async_task_scheduler is None:
             return None
-        pending = self._async_task_scheduler.pending_approvals()
-        if not pending:
+        approval = self._pending_async_approval_for_active_goal()
+        if approval is None:
             return None
         normalized = _normalize_confirmation_text(prompt)
         if normalized in _ASYNC_APPROVAL_YES_TOKENS:
-            approval = pending[0]
             try:
                 resumed = self.approve_async_task(approval.confirmation_id)
             except AsyncTaskSchedulerError:
@@ -363,7 +382,6 @@ class AtlasOrchestrator:
             self._memory.add_assistant(response)
             return response
         if normalized in _ASYNC_APPROVAL_NO_TOKENS:
-            approval = pending[0]
             try:
                 denied = self.deny_async_task(approval.confirmation_id)
             except AsyncTaskSchedulerError:

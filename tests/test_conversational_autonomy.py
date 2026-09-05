@@ -13,6 +13,7 @@ from core.async_task_scheduler import (
     JsonGoalTaskStore,
     TaskStatus,
     ToolTaskExecutor,
+    _utc_now,
 )
 from core.conversational_autonomy import (
     detect_autonomous_goal,
@@ -413,3 +414,177 @@ def test_pending_approval_survives_restart_with_fresh_confirmation_runtime(
     finally:
         post_orchestrator.stop_background_pump()
         post_orchestrator.close()
+
+
+def _seed_stale_goal(store_dir, goal_id, status, *, token=None, write_payload=None):
+    """Persist a previous-session goal reusing the same canonical task ids."""
+    discardable = ToolTaskExecutor(object())
+    scheduler = AsyncTaskScheduler(
+        discardable,
+        store=JsonGoalTaskStore(store_dir),
+    )
+    scheduler.submit_goal(
+        "objetivo de una sesion anterior",
+        [
+            {
+                "task_id": "write_target",
+                "description": "Guardar el resultado anterior",
+                "payload": write_payload
+                or {"tool": "write_file", "arguments": {"path": "viejo.txt", "content": "viejo"}},
+            }
+        ],
+        goal_id=goal_id,
+    )
+    task = scheduler.task("write_target")
+    task.status = status
+    if token is not None:
+        task.pending_confirmation_id = token
+        task.resumable_payload = dict(write_payload)
+    else:
+        task.error = "fallida en una sesion anterior"
+        task.finished_at = _utc_now()
+    scheduler.persist_goal(goal_id)
+
+
+def _restart_runtime(tool_registry, store_dir, transform_calls):
+    runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler = _build_scheduler_stack(
+        tool_registry,
+        runner,
+        store_dir,
+        transform_calls=transform_calls,
+    )
+    return _build_orchestrator(scheduler, tool_registry), scheduler
+
+
+def test_confirmation_after_restart_survives_store_with_stale_goals(
+    tmp_path,
+    monkeypatch,
+):
+    """Literal UI repro: 'si' after restart with other goals in the store.
+
+    The real store accumulates goals across sessions and every goal reuses
+    the same task ids, so the approval used to be validated against another
+    goal's task and the UI answered 'Esa operación pendiente ya no está
+    disponible.' instead of resuming the write.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    _seed_stale_goal(store_dir, "0000stale0000", TaskStatus.FAILED)
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    runner_a = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler_a = _build_scheduler_stack(tool_registry, runner_a, store_dir)
+    orchestrator_a = _build_orchestrator(scheduler_a, tool_registry)
+    try:
+        orchestrator_a.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        goal_id = orchestrator_a._background_goal_id
+        assert goal_id is not None
+        state = scheduler_a.goal(goal_id)
+        assert _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+    finally:
+        orchestrator_a.stop_background_pump()
+        orchestrator_a.close()
+
+    restart_transform_calls: list[str] = []
+    orchestrator_b, scheduler_b = _restart_runtime(
+        tool_registry,
+        store_dir,
+        restart_transform_calls,
+    )
+    try:
+        orchestrator_b.start_background_pump()
+        status_response = orchestrator_b.process_prompt("estado", confirm=lambda _p: "")
+        assert "Estado del trabajo" in status_response
+        assert "pendiente de tu confirmación" in status_response
+
+        resumed = orchestrator_b.process_prompt("si", confirm=lambda _p: "")
+
+        assert "ya no está disponible" not in resumed
+        assert "Hecho" in resumed
+        assert scheduler_b.goal_finished(goal_id)
+        written = (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8")
+        assert written.startswith("Resumen breve:")
+        assert len(read_tool.calls) == 1
+        assert len(write_tool.calls) == 1
+        assert restart_transform_calls == []
+
+        repeated = orchestrator_b.process_prompt("si", confirm=lambda _p: "")
+        assert scheduler_b.goal_finished(goal_id)
+        assert (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8") == written
+        assert len(read_tool.calls) == 1
+        assert len(write_tool.calls) == 1
+    finally:
+        orchestrator_b.stop_background_pump()
+        orchestrator_b.close()
+
+
+def test_bare_confirmation_resumes_active_goal_not_a_stale_token(
+    tmp_path,
+    monkeypatch,
+):
+    """'estado' describes the newest active goal; 'si' must resume that goal.
+
+    Older goals may still hold unused approval tokens; a bare confirmation
+    must never consume one of those and run another goal's write.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    stale_payload = {
+        "tool": "write_file",
+        "arguments": {"path": "resultado_viejo.txt", "content": "contenido viejo"},
+    }
+    _seed_stale_goal(
+        store_dir,
+        "0000stale0000",
+        TaskStatus.WAITING_APPROVAL,
+        token="stale-token-0001",
+        write_payload=stale_payload,
+    )
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    runner_a = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler_a = _build_scheduler_stack(tool_registry, runner_a, store_dir)
+    orchestrator_a = _build_orchestrator(scheduler_a, tool_registry)
+    try:
+        orchestrator_a.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        goal_id = orchestrator_a._background_goal_id
+        assert goal_id is not None
+        state = scheduler_a.goal(goal_id)
+        assert _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+    finally:
+        orchestrator_a.stop_background_pump()
+        orchestrator_a.close()
+
+    orchestrator_b, scheduler_b = _restart_runtime(tool_registry, store_dir, [])
+    try:
+        orchestrator_b.start_background_pump()
+        status_response = orchestrator_b.process_prompt("estado", confirm=lambda _p: "")
+        assert "autotest_bg.txt" in status_response
+
+        resumed = orchestrator_b.process_prompt("si", confirm=lambda _p: "")
+
+        assert scheduler_b.goal_finished(goal_id)
+        written = (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8")
+        assert written.startswith("Resumen breve:")
+        assert not (tmp_path / "resultado_viejo.txt").exists()
+        assert len(write_tool.calls) == 1
+    finally:
+        orchestrator_b.stop_background_pump()
+        orchestrator_b.close()

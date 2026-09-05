@@ -746,6 +746,18 @@ class AsyncTaskScheduler:
 
     # -- approval bridge --------------------------------------------------------
 
+    def _approval_task(self, approval: PendingApproval) -> Task:
+        """Resolve the task bound to one approval inside its own goal.
+
+        Task ids are reused across goals, so the lookup must be goal-scoped:
+        a global scan would match another goal's task with the same id.
+        """
+        state = self._goals.get(approval.goal_id)
+        task = state.tasks.get(approval.task_id) if state is not None else None
+        if task is None or task.goal_id != approval.goal_id:
+            raise InvalidApprovalError("approval does not match its task.")
+        return task
+
     def approve(self, confirmation_id: str) -> str | None:
         """Consume a single-use approval token; resumes only the bound task."""
         with self._lock:
@@ -754,9 +766,7 @@ class AsyncTaskScheduler:
                 raise InvalidApprovalError(
                     f"unknown or already consumed confirmation: {confirmation_id}"
                 )
-            task = self._require_task(approval.task_id)
-            if task.task_id != approval.task_id or task.goal_id != approval.goal_id:
-                raise InvalidApprovalError("approval does not match its task.")
+            task = self._approval_task(approval)
             if task.status is not TaskStatus.WAITING_APPROVAL:
                 raise InvalidApprovalError(
                     f"task {task.task_id} is not waiting for approval."
@@ -778,7 +788,7 @@ class AsyncTaskScheduler:
                 raise InvalidApprovalError(
                     f"unknown or already consumed confirmation: {confirmation_id}"
                 )
-            task = self._require_task(approval.task_id)
+            task = self._approval_task(approval)
             if task.status is not TaskStatus.WAITING_APPROVAL:
                 raise InvalidApprovalError(
                     f"task {task.task_id} is not waiting for approval."

@@ -192,3 +192,47 @@ def test_persistence_rebuilds_pending_state_and_resumes_without_repetition(tmp_p
     assert restored_scheduler.goal_status(goal_id) is TaskStatus.DONE
     assert executor.calls == ["A", "B", "C"], executor.calls
 
+
+
+def test_approval_is_goal_scoped_when_goals_reuse_task_ids():
+    """An approval token must resolve its task inside its own goal.
+
+    Goals reuse canonical task ids, so a global task-id lookup would bind
+    one goal's token to another goal's task and reject the approval.
+    """
+
+    class PauseThenSucceedExecutor:
+        def __init__(self):
+            self.resumed_goals: list[str] = []
+
+        def __call__(self, task, resumable_payload):
+            if resumable_payload is None:
+                return TaskOutcome.pause_for_approval(
+                    "¿Autorizas la operación?",
+                    resumable_payload={"resume": task.goal_id},
+                )
+            self.resumed_goals.append(task.goal_id)
+            return TaskOutcome.succeed("ok")
+
+    executor = PauseThenSucceedExecutor()
+    scheduler = AsyncTaskScheduler(executor)
+    first = scheduler.submit_goal(
+        "objetivo uno",
+        [{"task_id": "write_target", "description": "guardar uno"}],
+    )
+    second = scheduler.submit_goal(
+        "objetivo dos",
+        [{"task_id": "write_target", "description": "guardar dos"}],
+    )
+    scheduler.run_ready()
+    second_token = scheduler.pending_approvals(second)[0].confirmation_id
+
+    resumed = scheduler.approve(second_token)
+
+    assert resumed == "write_target"
+    assert executor.resumed_goals == [second]
+    assert scheduler.goal(second).tasks["write_target"].status is TaskStatus.DONE
+    assert (
+        scheduler.goal(first).tasks["write_target"].status
+        is TaskStatus.WAITING_APPROVAL
+    )
