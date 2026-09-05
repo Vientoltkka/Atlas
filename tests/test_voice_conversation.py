@@ -2401,6 +2401,131 @@ def test_orchestrator_voice_transcription_open_calculator_like_text() -> None:
     ]
 
 
+def test_voice_manual_pipeline_open_calculator_article_matches_text() -> None:
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, tool_name, context):
+            self.calls.append((tool_name, dict(context.parameters)))
+            if tool_name == "desktop.list_windows":
+                return [{"handle": 10, "title": "Calculadora", "rect": (0, 0, 400, 300)}]
+            if tool_name == "desktop.get_window_rect":
+                return (0, 0, 400, 300)
+            if tool_name == "desktop.get_screen_size":
+                return (1920, 1080)
+            return "ok"
+
+    executor = RecordingExecutor()
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=DesktopInteractionUseCase(executor),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    output = FakeSpeechOutputEngine()
+    speech = FakeSpeechEngine([
+        speech_result("abre la calculadora"),
+        speech_result("adios Atlas"),
+    ])
+    voice = make_use_case(speech, output=output)
+    voice.execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(
+            text,
+            confirm=lambda _prompt: "",
+        ),
+        status_sink=lambda _message: None,
+        typed_input=lambda: None,
+    )
+
+    text_response = orchestrator.process_prompt(
+        "abre la calculadora",
+        confirm=lambda _prompt: "",
+    )
+
+    open_calls = [
+        parameters
+        for name, parameters in executor.calls
+        if name == "desktop.open_application"
+    ]
+    assert text_response == "✓ Abriendo calculadora."
+    assert open_calls == [
+        {"application": "calculadora"},
+        {"application": "calculadora"},
+    ]
+    assert any("Abriendo calculadora" in spoken for spoken in output.calls)
+
+
+def test_voice_manual_pipeline_maximize_calculator_article_matches_text() -> None:
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, tool_name, context):
+            self.calls.append((tool_name, dict(context.parameters)))
+            if tool_name == "desktop.list_windows":
+                return [{"handle": 10, "title": "Calculadora", "rect": (0, 0, 400, 300)}]
+            if tool_name == "desktop.get_window_rect":
+                return (0, 0, 400, 300)
+            if tool_name == "desktop.get_screen_size":
+                return (1920, 1080)
+            return "ok"
+
+    executor = RecordingExecutor()
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("model fallback must not run")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=SimpleNamespace(add_user=lambda _prompt: None, add_assistant=lambda _response: None, history=list),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+        desktop_interaction=DesktopInteractionUseCase(executor),
+        now_provider=lambda: datetime(2026, 7, 15, 18, 12).astimezone(),
+    )
+
+    output = FakeSpeechOutputEngine()
+    speech = FakeSpeechEngine([
+        speech_result("maximiza la calculadora"),
+        speech_result("adios Atlas"),
+    ])
+    voice = make_use_case(speech, output=output)
+    voice.execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(
+            text,
+            confirm=lambda _prompt: "",
+        ),
+        status_sink=lambda _message: None,
+        typed_input=lambda: None,
+    )
+
+    text_response = orchestrator.process_prompt(
+        "maximiza la calculadora",
+        confirm=lambda _prompt: "",
+    )
+
+    maximize_calls = [
+        parameters
+        for name, parameters in executor.calls
+        if name == "desktop.maximize_window"
+    ]
+    assert text_response == "✓ Ventana maximizada:\nCalculadora"
+    assert maximize_calls == [{"handle": 10}, {"handle": 10}]
+    assert any("Ventana maximizada" in spoken for spoken in output.calls)
+
+
 def test_orchestrator_voice_accepts_atlas_prefix_for_time_route() -> None:
     orchestrator = AtlasOrchestrator(
         planner=SimpleNamespace(
