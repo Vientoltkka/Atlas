@@ -649,3 +649,140 @@ def test_status_prefers_active_goal_over_finished_older_goal(tmp_path, monkeypat
     finally:
         orchestrator.stop_background_pump()
         orchestrator.close()
+
+
+def _stale_waiting_goal(store_dir, goal_id="0000stale0000", token="stale-token-0001"):
+    stale_payload = {
+        "tool": "write_file",
+        "arguments": {"path": "resultado_viejo.txt", "content": "contenido viejo"},
+    }
+    _seed_stale_goal(
+        store_dir,
+        goal_id,
+        TaskStatus.WAITING_APPROVAL,
+        token=token,
+        write_payload=stale_payload,
+    )
+    return stale_payload
+
+
+def test_finished_current_goal_keeps_status_and_never_runs_old_write(
+    tmp_path,
+    monkeypatch,
+):
+    """Finishing the current goal must not resurface an older pending one.
+
+    The runtime may have adopted an older WAITING_APPROVAL goal before the
+    current work started. Once the current goal is DONE, 'estado' must keep
+    describing it and a bare 'sí' must never consume the older goal's
+    unused approval token.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    _stale_waiting_goal(store_dir)
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler = _build_scheduler_stack(tool_registry, runner, store_dir)
+    orchestrator = _build_orchestrator(scheduler, tool_registry)
+    try:
+        initial = orchestrator.process_prompt("estado", confirm=lambda _p: "")
+        assert "sesion anterior" in initial
+        assert scheduler.pending_approvals()
+
+        orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        new_goal_id = orchestrator._background_goal_id
+        assert new_goal_id is not None
+        new_state = scheduler.goal(new_goal_id)
+        assert _wait_until(
+            lambda: new_state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        resumed = orchestrator.process_prompt("sí", confirm=lambda _p: "")
+        assert "Hecho" in resumed
+        assert scheduler.goal_finished(new_goal_id)
+
+        status_response = orchestrator.process_prompt("estado", confirm=lambda _p: "")
+        assert "autotest_bg.txt" in status_response
+        assert "sesion anterior" not in status_response
+
+        orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert scheduler.goal_status(new_goal_id) is TaskStatus.DONE
+        assert scheduler.goal_status("0000stale0000") is TaskStatus.WAITING_APPROVAL
+        assert not (tmp_path / "resultado_viejo.txt").exists()
+        assert len(write_tool.calls) == 1
+    finally:
+        orchestrator.stop_background_pump()
+        orchestrator.close()
+
+
+def test_restart_status_prefers_recent_finished_goal_over_stale_pending(
+    tmp_path,
+    monkeypatch,
+):
+    """After restart, recency wins even when the newest goal already finished.
+
+    A store holding an older WAITING_APPROVAL goal and a newer DONE goal
+    must answer 'estado' with the recent finished goal, and a bare 'sí'
+    must not execute the older goal's pending write.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    store_dir = tmp_path / "goal_store"
+    _stale_waiting_goal(store_dir)
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    orchestrator_a = _build_orchestrator(
+        _build_scheduler_stack(
+            tool_registry,
+            Bootstrap.build_single_tool_runner(tool_registry=tool_registry),
+            store_dir,
+        ),
+        tool_registry,
+    )
+    try:
+        orchestrator_a.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        new_goal_id = orchestrator_a._background_goal_id
+        assert new_goal_id is not None
+        state = orchestrator_a._async_task_scheduler.goal(new_goal_id)
+        assert _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        orchestrator_a.process_prompt("sí", confirm=lambda _p: "")
+        assert orchestrator_a._async_task_scheduler.goal_finished(new_goal_id)
+    finally:
+        orchestrator_a.stop_background_pump()
+        orchestrator_a.close()
+
+    restart_write = CountingWriteFileTool()
+    restart_read = CountingReadFileTool()
+    restart_registry = ToolRegistry()
+    restart_registry.register(restart_read)
+    restart_registry.register(restart_write)
+    orchestrator_b, scheduler_b = _restart_runtime(restart_registry, store_dir, [])
+    try:
+        status_response = orchestrator_b.process_prompt(
+            "estado", confirm=lambda _p: ""
+        )
+        assert "autotest_bg.txt" in status_response
+        assert "sesion anterior" not in status_response
+
+        orchestrator_b.process_prompt("sí", confirm=lambda _p: "")
+
+        assert scheduler_b.goal_status("0000stale0000") is TaskStatus.WAITING_APPROVAL
+        assert not (tmp_path / "resultado_viejo.txt").exists()
+        assert len(restart_write.calls) == 0
+    finally:
+        orchestrator_b.stop_background_pump()
+        orchestrator_b.close()
