@@ -509,3 +509,69 @@ def test_planner_falls_back_when_multi_tool_pattern_not_handled() -> None:
 
     assert result.plan is not None
     assert result.plan.required_tools == ("read_file",)
+
+
+def test_read_then_transform_then_write_builds_canonical_dag() -> None:
+    _registry, selector = _registry_and_selector()
+    result = _planner().plan(
+        (
+            "lee C:/Temp/a.txt y C:/Temp/b.txt, compara su contenido y "
+            "guarda el resumen en C:/Temp/resultado.txt"
+        ),
+        _catalog(),
+        selector,
+    )
+
+    assert result.success is True
+    assert result.handled is True
+    assert result.matched_pattern == "read_then_transform_then_write"
+    assert result.plan is not None
+    steps = result.plan.ordered_steps
+    assert [step.tool for step in steps] == [
+        "read_file",
+        "read_file",
+        "direct_response",
+        "write_file",
+    ]
+    assert dict(steps[0].arguments) == {"path": "C:/Temp/a.txt"}
+    assert dict(steps[1].arguments) == {"path": "C:/Temp/b.txt"}
+    transform = steps[2]
+    assert transform.dependencies == ("step_1", "step_2")
+    assert dict(transform.arguments).keys() == {"instruction"}
+    write_step = steps[3]
+    assert write_step.dependencies == (transform.id,)
+    assert dict(write_step.arguments)["path"] == "C:/Temp/resultado.txt"
+    assert dict(write_step.arguments)["content"] == StepOutputReference(transform.id)
+    assert result.plan.requires_confirmation is True
+    assert ExecutionPlanValidator().validate(result.plan).is_valid is True
+
+
+def test_transformation_objective_is_not_hijacked_by_copy_pattern() -> None:
+    """Compare/summarize objectives must never degrade into a verbatim copy."""
+    _registry, selector = _registry_and_selector()
+    result = _planner().plan(
+        (
+            "lee C:/Temp/a.txt y C:/Temp/b.txt, compara su contenido y "
+            "guarda el resumen en C:/Temp/resultado.txt"
+        ),
+        _catalog(),
+        selector,
+    )
+
+    assert result.matched_pattern == "read_then_transform_then_write"
+
+
+def test_multi_source_copy_objective_is_not_handled_as_copy() -> None:
+    """Three paths exceed verbatim-copy semantics; no pattern may claim it."""
+    _registry, selector = _registry_and_selector()
+    result = _planner().plan(
+        (
+            "lee C:/Temp/a.txt y C:/Temp/b.txt y guarda el contenido en "
+            "C:/Temp/copia.txt"
+        ),
+        _catalog(),
+        selector,
+    )
+
+    assert result.handled is False
+    assert result.plan is None

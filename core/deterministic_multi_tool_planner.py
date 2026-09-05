@@ -13,6 +13,7 @@ from core.acceptance_criteria import (
     AcceptanceCriterionKind,
 )
 from core.execution_plan_validator import ExecutionPlanValidator
+from core.multi_task_goal import _TRANSFORMATION_PATTERNS
 from core.planner import ExecutionPlan, ExecutionStep
 from core.step_output_reference import StepOutputReference
 from tools.intent_selector import ToolSelector
@@ -99,6 +100,22 @@ class DeterministicMultiToolPlanner:
                         priority=10,
                         matcher=_matches_read_then_write,
                         builder=DeterministicMultiToolPlanner._build_read_then_write,
+                    ),
+                    MultiToolPattern(
+                        name="read_then_transform_then_write",
+                        required_capabilities=("read_file", "write_file"),
+                        required_information=("source_path", "destination_path", "transformation"),
+                        risk_implications=("write_file may create or overwrite local files",),
+                        positive_examples=(
+                            "lee nota1.txt y nota2.txt, compara su contenido "
+                            "y guarda las diferencias en resultado.txt",
+                            "lee notas.txt, resume su contenido y guardalo en "
+                            "resumen.txt",
+                        ),
+                        negative_examples=("lee un archivo y explicalo",),
+                        priority=12,
+                        matcher=_matches_read_then_transform_then_write,
+                        builder=DeterministicMultiToolPlanner._build_read_then_transform_then_write,
                     ),
                     MultiToolPattern(
                         name="list_then_read",
@@ -249,6 +266,108 @@ class DeterministicMultiToolPlanner:
             ),
         )
         return self._validated_result(objective, pattern, availability.tools, plan, selector_check.warnings, 0.92)
+
+    def _build_read_then_transform_then_write(
+        self,
+        objective: str,
+        catalog: SemanticToolCatalog,
+        selector: ToolSelector,
+        pattern: MultiToolPattern,
+    ) -> MultiToolPlanningResult:
+        """Deterministic read → transform → write ExecutionPlan.
+
+        Mirrors the legacy multi-task objective semantics (compare, sort,
+        summarize, ...) with the same bounded vocabulary, but produces a
+        validated ExecutionPlan for the structured bridge.
+        """
+        availability = _capability_tools(catalog, ("read_file", "write_file"))
+        if availability.missing:
+            return _missing_tools_result(objective, pattern, availability)
+
+        selector_check = _selector_check(objective, catalog, selector, availability.tools)
+        if selector_check.errors:
+            return _selector_blocked_result(objective, pattern, availability.tools, selector_check)
+
+        transformation = _first_transformation(_normalize(objective))
+        if transformation is None:
+            return _missing_information_result(
+                objective, pattern, availability.tools, ["transformation"]
+            )
+
+        write_target = _WRITE_TARGET_PATTERN.search(objective)
+        destination = None
+        if write_target is not None:
+            destination = next(
+                (
+                    match.group("path").strip().rstrip(".,;")
+                    for match in _find_path_spans(objective)
+                    if match.start() >= write_target.end()
+                ),
+                None,
+            )
+        if not destination:
+            return _missing_information_result(
+                objective, pattern, availability.tools, ["destination_path"]
+            )
+
+        sources: list[str] = []
+        seen: set[str] = set()
+        for match in _find_path_spans(objective):
+            path = match.group("path").strip().rstrip(".,;")
+            folded = path.casefold()
+            if folded == destination.casefold() or folded in seen:
+                continue
+            seen.add(folded)
+            sources.append(path)
+        if not sources:
+            return _missing_information_result(
+                objective, pattern, availability.tools, ["source_path"]
+            )
+
+        _transform_pattern, transform_id, instruction, transform_description = transformation
+        steps: list[ExecutionStep] = []
+        for index, source in enumerate(sources, start=1):
+            steps.append(
+                ExecutionStep(
+                    id=f"step_{index}",
+                    description=f"Read source file {source}.",
+                    tool="read_file",
+                    arguments={"path": source},
+                )
+            )
+        steps.append(
+            ExecutionStep(
+                id=transform_id,
+                description=transform_description,
+                tool="direct_response",
+                dependencies=tuple(step.id for step in steps),
+                arguments={"instruction": instruction},
+            )
+        )
+        steps.append(
+            ExecutionStep(
+                id="write_target",
+                description=f"Save the result to {destination}.",
+                tool="write_file",
+                dependencies=(transform_id,),
+                arguments={
+                    "path": destination,
+                    "content": StepOutputReference(transform_id),
+                },
+            )
+        )
+        plan = ExecutionPlan(
+            goal=objective.strip(),
+            ordered_steps=tuple(steps),
+            estimated_steps=len(steps),
+            required_tools=("read_file", "write_file"),
+            detected_risks=_plan_risks(catalog, ("read_file", "write_file"), pattern),
+            requires_confirmation=_requires_confirmation(catalog, ("read_file", "write_file")),
+            status="planned",
+        )
+        return self._validated_result(
+            objective, pattern, ("read_file", "write_file"), plan, selector_check.warnings, 0.9
+        )
 
     def _build_list_then_read(
         self,
@@ -559,6 +678,11 @@ def _requires_confirmation(
 
 
 def _matches_read_then_write(normalized: str) -> bool:
+    if _requests_content_transformation(normalized):
+        # The deterministic builder copies the source content verbatim; an
+        # objective that transforms it (compare, summarize, ...) cannot be
+        # served by this pattern and stays on the structured planner.
+        return False
     has_read = bool(re.search(r"\b(?:lee|leer|copia|copiar)\b", normalized))
     has_write = bool(re.search(r"\b(?:guarda|guardar|guardalo|guardala|escribe|copia|copiar)\b", normalized))
     has_content = (
@@ -568,7 +692,31 @@ def _matches_read_then_write(normalized: str) -> bool:
         or "guardalo" in normalized
         or "guardala" in normalized
     )
-    return has_read and has_write and has_content
+    if not (has_read and has_write and has_content):
+        return False
+    # Copy semantics require exactly one source and one destination; more
+    # file paths mean the objective exceeds a verbatim copy.
+    distinct_paths = {
+        path.casefold()
+        for path in _extract_paths(normalized).paths
+    }
+    return len(distinct_paths) <= 2
+
+
+def _requests_content_transformation(normalized: str) -> bool:
+    """Transform verbs mean the read content is not copied verbatim."""
+    return bool(
+        re.search(
+            r"\b(?:compara(?:r|ndo|los|las|lo|la)?|diferencias?|"
+            r"ordena(?:r|ndo|los|las|lo|la)?|sorted?|"
+            r"corrige(?:r|ndo|los|las|lo|la)?|corregir|"
+            r"extrae(?:r|ndo|los|las|lo|la)?|puntos?\s+clave|"
+            r"resum\w*|summar\w*|"
+            r"explic\w*|analiz\w*|revis\w*|traduc\w*|"
+            r"reescrib\w*|clasific\w*)\b",
+            normalized,
+        )
+    )
 
 
 def _requests_written_content_verification(objective: str) -> bool:
@@ -654,6 +802,14 @@ def _read_write_acceptance_criteria(
     )
 
 
+def _matches_read_then_transform_then_write(normalized: str) -> bool:
+    has_read = bool(re.search(r"\b(?:lee|leer)\b", normalized))
+    has_write = bool(
+        re.search(r"\b(?:guarda|guardar|guardalo|guardala|escribe|escribir)\b", normalized)
+    )
+    return has_read and has_write and _first_transformation(normalized) is not None
+
+
 def _matches_list_then_read(normalized: str) -> bool:
     has_list = bool(re.search(r"\b(?:lista|listar|busca|buscar)\b", normalized))
     has_read = bool(re.search(r"\b(?:lee|leer)\b", normalized))
@@ -678,10 +834,7 @@ def _extract_paths(
 ) -> _ExtractedPaths:
     paths = tuple(
         match.group("path").strip().rstrip(".,;")
-        for match in re.finditer(
-            r"(?P<path>(?:[A-Za-z]:[\\/])?(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z0-9]{1,8}|[A-Za-z]:[\\/][\w.-]+(?:[\\/][\w.-]+)*|(?:[\w.-]+[\\/])+[\w.-]+)",
-            objective,
-        )
+        for match in _find_path_spans(objective)
     )
     directory_match = re.search(
         r"\b(?:en|de|desde|directorio|carpeta|ruta)\s+(?P<directory>(?:[A-Za-z]:[\\/])?[\w./\\-]+)",
@@ -700,6 +853,35 @@ def _extract_paths(
             directory = candidate
     filename = filename_match.group("filename").strip() if filename_match else None
     return _ExtractedPaths(paths=paths, directory=directory, filename=filename)
+
+
+_PATH_SPAN_PATTERN = re.compile(
+    r"(?P<path>(?:[A-Za-z]:[\\/])?(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z0-9]{1,8}"
+    r"|[A-Za-z]:[\\/][\w.-]+(?:[\\/][\w.-]+)*|(?:[\w.-]+[\\/])+[\w.-]+)"
+)
+
+
+def _find_path_spans(objective: str) -> list[re.Match[str]]:
+    """Return path token matches with their positions, in text order."""
+    return list(_PATH_SPAN_PATTERN.finditer(objective))
+
+
+# The destination is the first path after an explicit "guarda/escribe ... en"
+# order, mirroring the legacy multi-task objective vocabulary.
+_WRITE_TARGET_PATTERN = re.compile(
+    r"\b(?:guarda\w*|escribe\w*)\b[\s\S]{0,120}?\b(?:en|in|to|into|dentro\s+de)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _first_transformation(normalized: str):
+    """Return the first deterministic transform match, mirroring the
+    legacy multi-task objective vocabulary; None when none applies."""
+    for pattern, _task_id, _instruction, _description in _TRANSFORMATION_PATTERNS:
+        match = pattern.search(normalized)
+        if match is not None:
+            return pattern, _task_id, _instruction, _description
+    return None
 
 
 def _extract_process_query(

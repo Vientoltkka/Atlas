@@ -150,7 +150,13 @@ def test_conversational_order_progresses_in_background_without_new_turns(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
     orchestrator, scheduler, read_tool = _build_harness(tmp_path)
+    try:
+        _run_background_goal_and_assert(orchestrator, scheduler, read_tool, tmp_path)
+    finally:
+        orchestrator.stop_background_pump()
 
+
+def _run_background_goal_and_assert(orchestrator, scheduler, read_tool, tmp_path):
     response = orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
 
     assert "Objetivo en segundo plano" in response
@@ -190,18 +196,20 @@ def test_cancellation_blocks_pending_work_and_frees_nothing(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     (tmp_path / "README.md").write_text("contenido", encoding="utf-8")
     orchestrator, scheduler, read_tool = _build_harness(tmp_path)
+    try:
+        orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        goal_id = orchestrator._background_goal_id
+        state = scheduler.goal(goal_id)
+        reached = _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        assert reached
 
-    orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
-    goal_id = orchestrator._background_goal_id
-    state = scheduler.goal(goal_id)
-    reached = _wait_until(
-        lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
-    )
-    assert reached
-
-    cancel_response = orchestrator.process_prompt(
-        "Detén el trabajo", confirm=lambda _p: ""
-    )
+        cancel_response = orchestrator.process_prompt(
+            "Detén el trabajo", confirm=lambda _p: ""
+        )
+    finally:
+        orchestrator.stop_background_pump()
     assert "Trabajo detenido" in cancel_response
     assert scheduler.goal_status(goal_id) is TaskStatus.CANCELLED
     assert state.tasks["read_source"].status is TaskStatus.DONE

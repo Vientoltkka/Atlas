@@ -813,11 +813,33 @@ def test_planner_uses_hybrid_provider_only_when_enabled_and_needed() -> None:
         structured_plan_provider=provider,
     )
 
-    result = planner.generate_execution_plan("lee el archivo C:/Temp/a.txt")
+    result = planner.generate_execution_plan(
+        "lee el archivo C:/Temp/a.txt",
+        structured_planning=True,
+    )
 
     assert result.success is True
     assert result.plan is not None
     assert len(provider.calls) == 1
+
+
+def test_planner_keeps_model_provider_out_of_ordinary_flow() -> None:
+    """Model planning is reserved for explicit structured orders."""
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    provider = FakeStructuredProvider(_model_json())
+    planner = Planner(
+        tool_registry=registry,
+        tool_selector=selector,
+        schema_registry=schemas,
+        semantic_tool_catalog=catalog,
+        hybrid_execution_planner=_hybrid(registry, schemas),
+        structured_plan_provider=provider,
+    )
+
+    result = planner.generate_execution_plan("lee el archivo C:/Temp/a.txt")
+
+    assert provider.calls == []
+    assert result.plan is not None
 
 
 def test_hybrid_sends_filtered_catalog_to_provider_but_validates_against_full_catalog() -> None:
@@ -1358,8 +1380,22 @@ def test_structured_parser_rejects_too_many_steps() -> None:
     assert "maximum step count" in result.errors[0]
 
 
-def test_bootstrap_provider_flags_false_by_default(monkeypatch) -> None:
+def test_bootstrap_provider_enabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", raising=False)
+    monkeypatch.delenv("ATLAS_STRUCTURED_PLAN_MODEL", raising=False)
+
+    provider = Bootstrap.build_structured_plan_provider(
+        prompt_client=PromptClientFake(_model_json()),
+        model_manager=ModelManagerFake(["planning-model"]),
+    )
+
+    # Enabled by default so explicit structured orders can use the model;
+    # building the provider must never touch the model.
+    assert provider is not None
+
+
+def test_bootstrap_provider_disabled_by_explicit_env(monkeypatch) -> None:
+    monkeypatch.setenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", "false")
     monkeypatch.delenv("ATLAS_STRUCTURED_PLAN_MODEL", raising=False)
 
     provider = Bootstrap.build_structured_plan_provider(

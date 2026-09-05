@@ -811,7 +811,7 @@ class Bootstrap:
         """Build the real PromptClient-backed provider only when explicitly enabled."""
         if config is None:
             enabled = (
-                _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
+                _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", True)
                 if structured_plan_provider_enabled is None
                 else structured_plan_provider_enabled
             )
@@ -820,7 +820,7 @@ class Bootstrap:
                 model_name=(
                     structured_plan_model
                     if structured_plan_model is not None
-                    else _read_text("ATLAS_STRUCTURED_PLAN_MODEL")
+                    else _structured_plan_model_name()
                 ),
                 max_objective_chars=_read_int(
                     "ATLAS_STRUCTURED_PLAN_MAX_OBJECTIVE_CHARS",
@@ -1060,7 +1060,7 @@ class Bootstrap:
         prompt_client = PromptClient()
         model_health_checker = OllamaModelHealthChecker(prompt_client)
         hybrid_planning_enabled = _read_bool("ATLAS_HYBRID_PLANNING_ENABLED", True)
-        provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", False)
+        provider_enabled = _read_bool("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", True)
         structured_plan_streaming_enabled = _read_bool(
             "ATLAS_STRUCTURED_PLAN_STREAMING_ENABLED",
             False,
@@ -1822,6 +1822,16 @@ def _read_text(
 ) -> str | None:
     raw = os.getenv(name, "").strip()
     return raw or None
+
+
+# The default structured planning model is the inventory's default local
+# reasoning model; when the local backend or the model is unavailable the
+# provider degrades gracefully instead of blocking startup.
+_STRUCTURED_PLAN_DEFAULT_MODEL = "coding-local"
+
+
+def _structured_plan_model_name() -> str | None:
+    return _read_text("ATLAS_STRUCTURED_PLAN_MODEL") or _STRUCTURED_PLAN_DEFAULT_MODEL
 
 
 def _execution_state_path() -> Path:

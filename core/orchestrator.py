@@ -450,7 +450,10 @@ class AtlasOrchestrator:
         objective = detect_structured_plan_objective(prompt)
         if objective is None:
             return None
-        generation = self._planner.generate_execution_plan(objective)
+        generation = self._planner.generate_execution_plan(
+            objective,
+            structured_planning=True,
+        )
         plan = generation.plan
         if plan is None or not generation.success:
             response = (

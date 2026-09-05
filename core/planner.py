@@ -587,6 +587,7 @@ class Planner:
         planning_context: Mapping[str, Any] | None = None,
         on_planning_progress: Callable[[Any], None] | None = None,
         planning_control: Any | None = None,
+        structured_planning: bool = False,
     ) -> PlanGenerationResult:
         """Create a structured execution plan with generation diagnostics."""
         if planning_context is not None and not isinstance(planning_context, Mapping):
@@ -615,6 +616,7 @@ class Planner:
             goal,
             on_planning_progress=on_planning_progress,
             planning_control=planning_control,
+            structured_planning=structured_planning,
         )
         if hybrid_result is not None:
             return hybrid_result
@@ -662,12 +664,18 @@ class Planner:
         *,
         on_planning_progress: Callable[[Any], None] | None = None,
         planning_control: Any | None = None,
+        structured_planning: bool = False,
     ) -> PlanGenerationResult | None:
         if (
             self._hybrid_execution_planner is None
             or self._semantic_tool_catalog is None
             or self._tool_selector is None
         ):
+            return None
+        if not structured_planning:
+            # Model-based structured planning is reserved for explicit
+            # "planifica y ejecuta" orders; every other objective keeps the
+            # deterministic decision-engine flow.
             return None
 
         result = self._hybrid_execution_planner.plan(

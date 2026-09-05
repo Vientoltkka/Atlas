@@ -63,12 +63,14 @@ class StructuredPlannerStub:
         self._plan = plan
         self._success = success
         self.requested_objectives: list[str] = []
+        self.requested_kwargs: list[dict] = []
 
     def create_plan(self, prompt: str) -> Plan:
         return Plan(task="chat", objective=prompt)
 
-    def generate_execution_plan(self, objective: str, **_kwargs) -> PlanGenerationResult:
+    def generate_execution_plan(self, objective: str, **kwargs) -> PlanGenerationResult:
         self.requested_objectives.append(objective)
+        self.requested_kwargs.append(dict(kwargs))
         return PlanGenerationResult(
             success=self._success,
             plan=self._plan,
@@ -140,7 +142,13 @@ def _invalid_plan() -> ExecutionPlan:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, plan: ExecutionPlan | None, success=True):
+    def __init__(
+        self,
+        tmp_path: Path,
+        plan: ExecutionPlan | None,
+        success=True,
+        planner=None,
+    ):
         self.tmp_path = tmp_path
         self.store = JsonGoalTaskStore(tmp_path / "goal_store")
         tool_registry = ToolRegistry()
@@ -157,7 +165,7 @@ class Harness:
         self.executor = ToolTaskExecutor(self.runner, model_transformer=transformer)
         self.scheduler = AsyncTaskScheduler(self.executor, store=self.store)
         self.executor.bind_result_lookup(self.scheduler.task)
-        self.planner = StructuredPlannerStub(plan, success=success)
+        self.planner = planner or StructuredPlannerStub(plan, success=success)
         self.orchestrator = AtlasOrchestrator(
             planner=self.planner,
             router=Router(),
@@ -192,6 +200,128 @@ def _wait_write_approval(harness: Harness):
     return approval, harness.scheduler.goal(approval.goal_id)
 
 
+REAL_ACCEPTANCE_PROMPT = """Planifica y ejecuta este objetivo:
+
+Lee los archivos {path_a} y
+{path_b}.
+
+Compara su contenido y crea un resumen conjunto
+explicando qué principio aporta cada archivo,
+cómo se complementan y cuáles son las tres reglas
+principales que debería seguir Atlas.
+
+Guarda el resultado en
+{path_result}.
+
+Trabaja en segundo plano y utiliza un modelo local
+cuando sea suficiente."""
+
+
+def _real_production_planner():
+    """Planner assembled exactly like production (deterministic routes)."""
+    from bootstrap.bootstrap import Bootstrap
+    from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
+    from core.planner import Planner
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(ReadFileTool())
+    tool_registry.register(WriteFileTool())
+    tool_selector = Bootstrap.build_tool_selector(tool_registry)
+    schema_registry = Bootstrap.build_argument_schema_registry()
+    return Planner(
+        tool_registry=tool_registry,
+        tool_selector=tool_selector,
+        schema_registry=schema_registry,
+        argument_validator=Bootstrap.build_argument_validator(schema_registry),
+        semantic_tool_catalog=Bootstrap.build_semantic_tool_catalog(
+            tool_registry,
+            tool_selector,
+            schema_registry,
+        ),
+        multi_tool_planner=DeterministicMultiToolPlanner(),
+    )
+
+
+def test_real_acceptance_prompt_becomes_expected_task_dag(tmp_path, monkeypatch) -> None:
+    """The literal E2E prompt must reach the bridge as the canonical DAG."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prueba_atlas_A.txt").write_text("principio A\ncomun\n", encoding="utf-8")
+    (tmp_path / "prueba_atlas_B.txt").write_text("principio B\ncomun\n", encoding="utf-8")
+    result_path = tmp_path / "resultado_prueba_autonomia.txt"
+
+    prompt = REAL_ACCEPTANCE_PROMPT.format(
+        path_a=tmp_path / "prueba_atlas_A.txt",
+        path_b=tmp_path / "prueba_atlas_B.txt",
+        path_result=result_path,
+    )
+    objective = detect_structured_plan_objective(prompt)
+    assert objective is not None, "el objetivo estructurado no fue detectado"
+
+    planner = _real_production_planner()
+    generation = planner.generate_execution_plan(objective, structured_planning=True)
+    assert generation.success, generation.errors
+    plan = generation.plan
+    assert [step.tool for step in plan.ordered_steps] == [
+        "read_file",
+        "read_file",
+        "direct_response",
+        "write_file",
+    ]
+    from core.execution_plan_task_adapter import execution_plan_to_task_specs
+    from core.execution_plan_validator import ExecutionPlanValidator
+
+    specs = execution_plan_to_task_specs(
+        plan,
+        validator=ExecutionPlanValidator(),
+    )
+    assert [spec["task_id"] for spec in specs] == [
+        "step_1",
+        "step_2",
+        "transform_content",
+        "write_target",
+    ]
+    assert specs[2]["payload"]["kind"] == "transform"
+    assert specs[2]["payload"]["input_tasks"] == ["step_1", "step_2"]
+    assert specs[3]["payload"]["content_task"] == "transform_content"
+
+    harness = Harness(tmp_path, None, planner=planner)
+    try:
+        response = harness.orchestrator.process_prompt(prompt, confirm=lambda _p: "")
+
+        assert "Plan estructurado en marcha" in response
+        assert harness.wait_until(
+            lambda: harness.scheduler.pending_approvals()
+            and harness.scheduler.pending_approvals()[0].task_id == "write_target"
+        )
+        goal = harness.scheduler.goal(
+            harness.scheduler.pending_approvals()[0].goal_id
+        )
+        assert goal.tasks["step_1"].status is TaskStatus.DONE
+        assert goal.tasks["step_2"].status is TaskStatus.DONE
+        assert goal.tasks["transform_content"].status is TaskStatus.DONE
+        assert goal.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        assert sorted(harness.read_tool.calls) == sorted(
+            [
+                str(tmp_path / "prueba_atlas_A.txt"),
+                str(tmp_path / "prueba_atlas_B.txt"),
+            ]
+        )
+        assert len(harness.transform_calls) == 1
+        assert "principio A" in harness.transform_calls[0]
+        assert "principio B" in harness.transform_calls[0]
+        assert not result_path.exists()
+
+        resumed = harness.orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert harness.scheduler.goal_finished(goal.goal_id)
+        assert goal.tasks["write_target"].status is TaskStatus.DONE
+        assert result_path.exists()
+        assert result_path.read_text(encoding="utf-8").startswith("DIFERENCIAS:")
+        assert "Hecho" in resumed
+    finally:
+        harness.stop()
+
+
 def test_structured_plan_runs_in_background_until_write_approval(
     tmp_path,
     monkeypatch,
@@ -207,6 +337,8 @@ def test_structured_plan_runs_in_background_until_write_approval(
         )
 
         assert harness.planner.requested_objectives, "el planificador no fue invocado"
+        assert harness.planner.requested_kwargs
+        assert harness.planner.requested_kwargs[0].get("structured_planning") is True
         assert "Plan estructurado en marcha" in response
 
         # No manual run_ready(): the pump drives every READY task.
@@ -430,6 +562,37 @@ def test_structured_entry_detection_is_explicit_only() -> None:
         )
         is None
     )
+
+
+def test_structured_entry_detection_captures_multiline_objective() -> None:
+    """The typed E2E objective spans several lines and ends with a trailing
+    "trabaja en segundo plano" order that must not derail the routing."""
+    prompt = (
+        "Planifica y ejecuta este objetivo:\n\n"
+        "Lee los archivos C:\\AI\\Atlas\\prueba_atlas_A.txt y\n"
+        "C:\\AI\\Atlas\\prueba_atlas_B.txt.\n\n"
+        "Compara su contenido y crea un resumen conjunto\n"
+        "explicando qué principio aporta cada archivo,\n"
+        "cómo se complementan y cuáles son las tres reglas\n"
+        "principales que debería seguir Atlas.\n\n"
+        "Guarda el resultado en\n"
+        "C:\\AI\\Atlas\\resultado_prueba_autonomia.txt.\n\n"
+        "Trabaja en segundo plano y utiliza un modelo local\n"
+        "cuando sea suficiente."
+    )
+
+    objective = detect_structured_plan_objective(prompt)
+
+    assert objective is not None
+    assert "prueba_atlas_A.txt" in objective
+    assert "prueba_atlas_B.txt" in objective
+    assert "resultado_prueba_autonomia.txt" in objective
+    assert "Compara su contenido" in objective
+    # The structured entry wins over the trailing background-work order.
+    from core.conversational_autonomy import detect_autonomous_goal
+
+    request = detect_autonomous_goal(prompt)
+    assert request is None or "Lee los archivos" in request.objective
 
 
 def test_converted_step_retries_through_scheduler_reliability() -> None:

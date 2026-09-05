@@ -77,12 +77,14 @@ _AUTONOMY_PATTERNS = (
 # Explicit, conservative structured-plan entry: an explicit order to plan
 # AND execute one objective in the background. Normal conversation never
 # triggers this; the objective text after the ':' is parsed by the planner.
+# The objective may span several typed lines, so the capture group must
+# match any character, not just one line.
 _STRUCTURED_PLAN_PATTERNS = (
     re.compile(
-        r"\bplanific\w+\s+y\s+ejecut\w+\s+este\s+objetivo\s*[:\-]\s*(.+)$"
+        r"\bplanific\w+\s+y\s+ejecut\w+\s+este\s+objetivo\s*[:\-]\s*([\s\S]+)$"
     ),
     re.compile(
-        r"\btrabaj\w+\s+en\s+este\s+objetivo\s*:\s*(.+)$"
+        r"\btrabaj\w+\s+en\s+este\s+objetivo\s*:\s*([\s\S]+)$"
     ),
 )
 
