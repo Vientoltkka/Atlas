@@ -982,7 +982,7 @@ class ToolTaskExecutor:
         payload = resumable_payload or task.initial_payload or {}
         runner_confirmation_id = payload.get("runner_confirmation_id")
         if runner_confirmation_id:
-            return self._resume(runner_confirmation_id)
+            return self._resume(runner_confirmation_id, payload)
         if payload.get("kind") == "transform":
             return self._run_transform(task, payload)
         tool_name = payload.get("tool")
@@ -1007,10 +1007,50 @@ class ToolTaskExecutor:
             )
         return self._from_result(result)
 
-    def _resume(self, runner_confirmation_id: str) -> TaskOutcome:
+    def _resume(
+        self,
+        runner_confirmation_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> TaskOutcome:
+        if self._runner.pending_confirmation(runner_confirmation_id) is None:
+            return self._resume_after_restart(runner_confirmation_id, payload)
         result = self._runner.confirm(runner_confirmation_id, "yes")
         if result is None:
             return TaskOutcome.fail("runner confirmation was not available.")
+        return self._from_result(result)
+
+    def _resume_after_restart(
+        self,
+        stale_confirmation_id: str,
+        payload: dict[str, Any] | None,
+    ) -> TaskOutcome:
+        """Rebuild the exact approved request when the runner restarted.
+
+        The scheduler-side approval token is single-use and was already
+        consumed for this exact task; only the runner-side pending
+        confirmation (in-memory) is lost across a restart. The identical
+        persisted tool and arguments go through the full policy and
+        validation path again, producing a fresh single-use runner id that
+        is consumed immediately for this same task.
+        """
+        from tools.intent_selector import ToolIntent  # local import: adapter hook
+
+        data = payload or {}
+        tool_name = data.get("tool")
+        if not tool_name:
+            return TaskOutcome.fail(
+                "runner confirmation was lost and the task payload "
+                f"is missing the tool name: {stale_confirmation_id}"
+            )
+        arguments = dict(data.get("arguments", {}))
+        content_task_id = data.get("content_task")
+        if content_task_id:
+            arguments["content"] = self._dependency_result(content_task_id)
+        result = self._runner.run_registered_tool(tool_name, arguments)
+        if result is None:
+            return TaskOutcome.fail(f"no intent mapping for tool: {tool_name}")
+        if result.status == "confirmation_required":
+            result = self._runner.confirm(result.confirmation_id, "yes")
         return self._from_result(result)
 
     def _run_transform(self, task: Task, payload: dict[str, Any]) -> TaskOutcome:

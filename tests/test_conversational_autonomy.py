@@ -9,6 +9,7 @@ from bootstrap.bootstrap import Bootstrap
 from core.async_task_scheduler import (
     AsyncTaskScheduler,
     GoalBudget,
+    InvalidApprovalError,
     JsonGoalTaskStore,
     TaskStatus,
     ToolTaskExecutor,
@@ -30,6 +31,15 @@ from use_cases.execution_conversation import ExecutionConversationController
 
 
 class CountingReadFileTool(ReadFileTool):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def execute(self, context):
+        self.calls.append(str(context.parameters.get("path")))
+        return super().execute(context)
+
+
+class CountingWriteFileTool(WriteFileTool):
     def __init__(self) -> None:
         self.calls: list[str] = []
 
@@ -321,3 +331,85 @@ def test_background_pump_lifecycle_via_orchestrator(tmp_path):
     assert orchestrator._background_pump.running
     orchestrator.close()
     assert not orchestrator._background_pump.running
+
+
+def test_pending_approval_survives_restart_with_fresh_confirmation_runtime(
+    tmp_path,
+    monkeypatch,
+):
+    """Real restart: a brand-new runner registry must still honor the approval.
+
+    The pre-restart and post-restart confirmation runtimes are distinct
+    objects, exactly as in a real process restart, so the runner-side
+    pending confirmation is genuinely lost and must be recovered from the
+    persisted exact tool and arguments.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+
+    read_tool = CountingReadFileTool()
+    write_tool = CountingWriteFileTool()
+    tool_registry = ToolRegistry()
+    tool_registry.register(read_tool)
+    tool_registry.register(write_tool)
+
+    pre_runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    scheduler = _build_scheduler_stack(tool_registry, pre_runner, tmp_path / "goal_store")
+    orchestrator = _build_orchestrator(scheduler, tool_registry)
+    try:
+        orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        goal_id = orchestrator._background_goal_id
+        assert goal_id is not None
+        state = scheduler.goal(goal_id)
+        reached = _wait_until(
+            lambda: state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        assert reached
+        assert state.tasks["read_source"].status is TaskStatus.DONE
+        assert len(write_tool.calls) == 0
+    finally:
+        orchestrator.stop_background_pump()
+        orchestrator.close()
+
+    pre_approval = scheduler.pending_approvals(goal_id)[0]
+
+    # Real restart: fresh scheduler, fresh orchestrator and, critically, a
+    # fresh SingleToolRunner with an empty confirmation registry.
+    post_runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
+    assert post_runner.pending_confirmations == ()
+    post_scheduler = _build_scheduler_stack(
+        tool_registry, post_runner, tmp_path / "goal_store"
+    )
+    post_orchestrator = _build_orchestrator(post_scheduler, tool_registry)
+    try:
+        status_response = post_orchestrator.process_prompt(
+            "estado", confirm=lambda _p: ""
+        )
+        assert "Estado del trabajo" in status_response
+        assert "pendiente de tu confirmación" in status_response
+
+        resumed = post_orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert "Hecho" in resumed
+        assert post_scheduler.goal_finished(goal_id)
+        assert post_scheduler.task("write_target").status is TaskStatus.DONE
+        assert post_scheduler.task("read_source").status is TaskStatus.DONE
+        written = (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8")
+        assert written.startswith("Resumen breve:")
+        assert len(read_tool.calls) == 1
+        assert len(write_tool.calls) == 1
+
+        stale = post_orchestrator.process_prompt("sí", confirm=lambda _p: "")
+        assert post_scheduler.goal_finished(goal_id)
+        assert post_scheduler.task("write_target").status is TaskStatus.DONE
+        assert (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8") == written
+        assert len(read_tool.calls) == 1
+        assert len(write_tool.calls) == 1
+        try:
+            post_scheduler.approve(pre_approval.confirmation_id)
+            raise AssertionError("expected InvalidApprovalError")
+        except InvalidApprovalError:
+            pass
+    finally:
+        post_orchestrator.stop_background_pump()
+        post_orchestrator.close()
