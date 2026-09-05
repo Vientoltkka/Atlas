@@ -588,3 +588,64 @@ def test_bare_confirmation_resumes_active_goal_not_a_stale_token(
     finally:
         orchestrator_b.stop_background_pump()
         orchestrator_b.close()
+
+
+ACEPTA2_PROMPT = (
+    "Lee acepta2_fuente.txt, resume el contenido y guarda el resumen "
+    "en acepta2_resumen.txt, y además lee acepta2_notas.txt"
+)
+
+
+def test_status_prefers_active_goal_over_finished_older_goal(tmp_path, monkeypatch):
+    """'estado' must describe the active WAITING_APPROVAL goal.
+
+    A fully DONE older goal that still owns the in-memory background id
+    must never hide the newest non-terminal conversational goal, and a
+    bare confirmation must keep acting on that same active goal.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("contenido para el objetivo", encoding="utf-8")
+    (tmp_path / "acepta2_fuente.txt").write_text("fuente acepta2", encoding="utf-8")
+    (tmp_path / "acepta2_notas.txt").write_text("notas acepta2", encoding="utf-8")
+    orchestrator, scheduler, read_tool = _build_harness(tmp_path)[:3]
+    try:
+        orchestrator.process_prompt(ORDER_PROMPT, confirm=lambda _p: "")
+        old_goal_id = orchestrator._background_goal_id
+        old_state = scheduler.goal(old_goal_id)
+        assert _wait_until(
+            lambda: old_state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+        orchestrator.process_prompt("sí", confirm=lambda _p: "")
+        assert scheduler.goal_finished(old_goal_id)
+        old_written = (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8")
+
+        new_response = orchestrator.process_prompt(
+            ACEPTA2_PROMPT, confirm=lambda _p: ""
+        )
+        assert "Objetivo en marcha" in new_response
+        new_goal_id = next(
+            goal_id
+            for goal_id in scheduler.persisted_goal_ids()
+            if goal_id != old_goal_id
+        )
+        new_state = scheduler.goal(new_goal_id)
+        assert _wait_until(
+            lambda: new_state.tasks["write_target"].status is TaskStatus.WAITING_APPROVAL
+        )
+
+        status_response = orchestrator.process_prompt("estado", confirm=lambda _p: "")
+        assert "acepta2_resumen.txt" in status_response
+        assert "pendiente de tu confirmación" in status_response
+
+        resumed = orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert "Hecho" in resumed
+        assert scheduler.goal_finished(new_goal_id)
+        assert scheduler.goal_status(old_goal_id) is TaskStatus.DONE
+        assert (tmp_path / "acepta2_resumen.txt").read_text(encoding="utf-8").startswith(
+            "Resumen breve:"
+        )
+        assert (tmp_path / "autotest_bg.txt").read_text(encoding="utf-8") == old_written
+    finally:
+        orchestrator.stop_background_pump()
+        orchestrator.close()

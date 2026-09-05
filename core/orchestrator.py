@@ -145,6 +145,16 @@ class PendingAgentFollowUp:
     active: bool = True
 
 
+_TERMINAL_GOAL_SELECTION_STATES = frozenset(
+    {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+)
+
+
 class AtlasOrchestrator:
     """Main orchestrator for Atlas."""
 
@@ -328,6 +338,7 @@ class AtlasOrchestrator:
         goal_id = self.run_independent_tasks(goal_plan.description, goal_plan.tasks)
         if goal_id is None:
             return None
+        self._background_goal_id = goal_id
         response = self._describe_async_goal(
             goal_id,
             intro="Objetivo en marcha",
@@ -579,13 +590,48 @@ class AtlasOrchestrator:
         return response
 
     def _background_goal_id_or_recovered(self) -> "str | None":
-        """Return the active background goal, recovering a persisted one."""
-        if self._background_goal_id is not None:
-            return self._background_goal_id
+        """Return the active background goal, recovering a persisted one.
+
+        A non-terminal goal always wins: the remembered id is dropped when
+        its goal already finished so it cannot hide a newer active one, and
+        the newest non-terminal persisted goal is recovered otherwise. Only
+        when nothing is active does the remembered (finished) goal still
+        answer status/cancel queries.
+        """
+        previous = self._background_goal_id
+        if previous is not None:
+            if self._goal_is_selectable(previous):
+                return previous
+            self._background_goal_id = None
         goal_id = self._active_persisted_background_goal_id()
         if goal_id is not None:
             self._background_goal_id = goal_id
-        return goal_id
+            return goal_id
+        if previous is not None and self._goal_is_known(previous):
+            self._background_goal_id = previous
+            return previous
+        return None
+
+    def _goal_is_selectable(self, goal_id: str) -> bool:
+        """True while the goal is known and still non-terminal."""
+        scheduler = self._async_task_scheduler
+        if scheduler is None:
+            return True
+        try:
+            status = scheduler.goal_status(goal_id)
+        except AsyncTaskSchedulerError:
+            return False
+        return status not in _TERMINAL_GOAL_SELECTION_STATES
+
+    def _goal_is_known(self, goal_id: str) -> bool:
+        scheduler = self._async_task_scheduler
+        if scheduler is None:
+            return True
+        try:
+            scheduler.goal_status(goal_id)
+        except AsyncTaskSchedulerError:
+            return False
+        return True
 
     def _active_persisted_background_goal_id(self) -> "str | None":
         """Resolve the newest non-terminal persisted goal after a restart."""
@@ -603,7 +649,7 @@ class AtlasOrchestrator:
                     status = scheduler.goal_status(persisted_goal_id)
             except AsyncTaskSchedulerError:
                 continue
-            if status in {TaskStatus.DONE, TaskStatus.CANCELLED}:
+            if status in _TERMINAL_GOAL_SELECTION_STATES:
                 continue
             active.append((state.created_at, persisted_goal_id))
         if not active:
