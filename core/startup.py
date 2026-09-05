@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 from dataclasses import dataclass
 from enum import Enum
 import importlib.util
@@ -13,6 +14,7 @@ import re
 import socket
 import sys
 import tempfile
+import threading
 from typing import Callable, Iterable
 
 
@@ -384,6 +386,79 @@ def close_operational_logging(logger: logging.Logger) -> None:
         finally:
             handler.close()
             logger.removeHandler(handler)
+
+
+_CRASH_LOG_HANDLE: object | None = None
+_PREVIOUS_THREAD_EXCEPTHOOK: object | None = None
+
+
+def install_crash_logging(
+    logger: logging.Logger,
+    project_root: Path,
+) -> None:
+    """Leave a logged cause for exits outside the main try/except.
+
+    Routes uncaught main-thread and worker-thread exceptions into the
+    operational log and records native crash backtraces (segfaults, aborts)
+    next to it, so a silent process death can be diagnosed afterwards.
+    """
+    global _CRASH_LOG_HANDLE, _PREVIOUS_THREAD_EXCEPTHOOK
+
+    previous_hook = sys.excepthook
+    _PREVIOUS_THREAD_EXCEPTHOOK = threading.excepthook
+
+    def _exception_hook(exc_type, exc_value, exc_traceback) -> None:
+        logger.error(
+            "Excepcion no capturada | tipo=%s | detalle=%s",
+            exc_type.__name__ if exc_type is not None else "unknown",
+            sanitize_log_message(exc_value),
+        )
+        previous_hook(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _exception_hook
+
+    def _thread_exception_hook(args) -> None:
+        thread_name = args.thread.name if args.thread is not None else "?"
+        logger.error(
+            "Excepcion no capturada en hilo | hilo=%s | tipo=%s | detalle=%s",
+            thread_name,
+            args.exc_type.__name__ if args.exc_type is not None else "unknown",
+            sanitize_log_message(args.exc_value),
+        )
+
+    threading.excepthook = _thread_exception_hook
+
+    try:
+        crash_path = (Path(project_root) / "logs" / "atlas_crash.log").resolve()
+        crash_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(crash_path, "a", encoding="utf-8")  # noqa: SIM115 - lives for the whole process
+        handle.write(f"=== crash log abierto | pid={os.getpid()} ===\n")
+        handle.flush()
+        faulthandler.enable(file=handle)
+        _CRASH_LOG_HANDLE = handle
+    except OSError:
+        # Without a crash file the exception hooks above still log.
+        return
+
+
+def disable_crash_logging() -> None:
+    """Release the crash-log handle and restore default exception hooks."""
+    global _CRASH_LOG_HANDLE
+    faulthandler.disable()
+    sys.excepthook = sys.__excepthook__
+    # threading.excepthook must never be left as None: creating any thread
+    # afterwards raises RuntimeError("threading.excepthook is None").
+    previous = _PREVIOUS_THREAD_EXCEPTHOOK
+    threading.excepthook = (
+        previous if previous is not None else threading.__excepthook__
+    )
+    handle = _CRASH_LOG_HANDLE
+    _CRASH_LOG_HANDLE = None
+    if handle is not None:
+        try:
+            handle.close()
+        except OSError:
+            pass
 
 
 def render_startup_failure(report: StartupReport) -> str:

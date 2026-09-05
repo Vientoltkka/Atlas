@@ -12,6 +12,7 @@ from core.startup import (
     close_operational_logging,
     configure_degraded_logging,
     configure_operational_logging,
+    install_crash_logging,
     render_startup_banner,
     render_startup_failure,
     render_startup_warnings,
@@ -94,6 +95,7 @@ def main() -> int:
         )
         print()
     logger.info("Inicio solicitado | modo=%s | start_hidden=%s", mode, args.start_hidden)
+    install_crash_logging(logger, project_root)
     atlas = None
 
     try:

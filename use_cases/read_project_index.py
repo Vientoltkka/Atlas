@@ -112,8 +112,15 @@ class ReadProjectIndexUseCase:
         return sorted(
             path
             for path in root.rglob("*.py")
-            if ".venv" not in path.parts
-            and "__pycache__" not in path.parts
+            if not self._is_generated_directory(path.parts)
+        )
+
+    @staticmethod
+    def _is_generated_directory(parts: tuple[str, ...]) -> bool:
+        """Generated/temporary trees never contain project source modules."""
+        return bool(
+            {"pytest-tmp", ".pytest_cache", ".git", ".venv", "__pycache__"}
+            & set(parts)
         )
 
     def _read_file_index(
