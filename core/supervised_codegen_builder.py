@@ -12,6 +12,7 @@ SupervisedRepairWorkflow.
 from __future__ import annotations
 
 from pathlib import Path
+import ast
 import hashlib
 import os
 import re
@@ -78,6 +79,15 @@ _FILE_END = re.compile(r"^={2,}\s*END(?:\s+FILE)?(?:\s*=+)?\s*$", re.IGNORECASE)
 _FENCE = re.compile(r"^`{3,}")
 _PASSED = re.compile(r"(\d+) passed")
 
+# Real repo contracts the model must reuse instead of inventing APIs. The
+# bootstrap file is included verbatim (capped) so the model returns the full
+# real file plus the registration, and one existing builtin manifest pins the
+# real declarative manifest schema. Both are read from the project at build
+# time; nothing here is capability specific.
+_BOOTSTRAP_CONTRACT = "bootstrap/skill_system.py"
+_MANIFEST_EXAMPLE_GLOB = "skills/builtin/*/skill.json"
+_CONTRACT_CHARS = 6000
+
 _COMPILE_SCRIPT = (
     "import sys\n"
     "for path in sys.argv[1:]:\n"
@@ -88,6 +98,9 @@ _COMPILE_SCRIPT = (
 _USER_PROMPT_TEMPLATE = """
 Objetivo del usuario:
 {prompt}
+
+Contratos reales del repositorio (autoridad maxima; no inventes APIs ni esquemas):
+{repo_contracts}
 
 Sintetiza UNA nueva capacidad local, offline y determinista para Atlas.
 
@@ -101,7 +114,9 @@ Reglas obligatorias:
 - Rutas permitidas unicamente: use_cases/, tests/, skills/builtin/ y bootstrap/skill_system.py.
 - Maximo {max_files} archivos y {max_total_chars} caracteres en total.
 - Implementa la logica en un modulo puro bajo use_cases/ (sin E/S de red, sin APIs externas, sin dependencias nuevas, sin aleatoriedad, sin reloj del sistema, sin variables de entorno).
-- Si la capacidad debe quedar registrada como skill local, anade el handler en bootstrap/skill_system.py (dentro de build_builtin_skill_handler_registry) y su manifiesto declarativo skills/builtin/<skill_id>/skill.json; si no hace falta registrarla, omitelos.
+- Si la capacidad debe quedar registrada como skill local: entregalo en bootstrap/skill_system.py SIN reescribirlo, conservando todo su contenido actual y anadiendo unicamente dentro de build_builtin_skill_handler_registry el registro del handler con registry.register(<HANDLER_ID>, <funcion>), siguiendo el patron del handler real incluido en los contratos; y anade el manifiesto declarativo skills/builtin/<skill_id>/skill.json replicando exactamente el schema del manifest real de ejemplo de los contratos (mismas claves y formatos). Si no hace falta registrarla, omite ambos.
+- El handler debe firmarse como los handlers reales: def <handler>(inputs: Mapping[str, object], *, execution_context: SkillExecutionContext) -> Mapping[str, object].
+- Las pruebas focales deben verificar exactamente el comportamiento que produce la implementacion entregada; no afirmes nada que el codigo no garantice.
 - Incluye pruebas focalizadas deterministas en tests/ (sin red, sin azar) que verifiquen la salida determinista.
 - No uses markdown ni bloques de codigo: solo los bloques de archivo, sin ningun texto adicional antes o despues.
 """
@@ -177,7 +192,7 @@ class SupervisedCodegenCapabilityBuilder:
             return RepairValidation(False, detail="No existe una medicion previa confiable.")
         if not self._scope_respected(proposal):
             return RepairValidation(False, detail="La propuesta aplicada salio del alcance permitido; no se valida.")
-        return_code, after = self._pytest_run(proposal.focused_tests)
+        return_code, after, summary = self._pytest_run(proposal.focused_tests)
         compiled = self._compile_ok([path for path in proposal.files if path.endswith(".py")])
         clean = self._git_clean()
         passed = return_code == 0 and after > before and compiled and clean
@@ -191,6 +206,8 @@ class SupervisedCodegenCapabilityBuilder:
             if not ok
         ]
         detail = "tests focales, compilacion y git diff --check correctos." if passed else "Validacion fallida: " + ", ".join(failures) + "."
+        if not passed and "tests focales" in failures and summary:
+            detail += " Detalle pytest: " + summary
         return RepairValidation(passed, {_METRIC: float(before)}, {_METRIC: float(after)}, detail)
 
     def _synthesize(self, prompt: str) -> dict[str, str] | None:
@@ -208,6 +225,9 @@ class SupervisedCodegenCapabilityBuilder:
                 return None
             files[relative] = content
         if len(files) > self._max_files or sum(len(content) for content in files.values()) > self._max_total_chars:
+            return None
+        bootstrap = files.get(_BOOTSTRAP_CONTRACT)
+        if bootstrap is not None and not self._bootstrap_api_preserved(bootstrap):
             return None
         if not any(path.startswith("use_cases/") and path.endswith(".py") for path in files):
             return None
@@ -228,8 +248,50 @@ class SupervisedCodegenCapabilityBuilder:
 
         return [
             {"role": "system", "content": CodingAgent.SYSTEM_PROMPT},
-            {"role": "user", "content": _USER_PROMPT_TEMPLATE.format(prompt=prompt, max_files=self._max_files, max_total_chars=self._max_total_chars)},
+            {
+                "role": "user",
+                "content": _USER_PROMPT_TEMPLATE.format(
+                    prompt=prompt,
+                    repo_contracts=self._repo_contracts(),
+                    max_files=self._max_files,
+                    max_total_chars=self._max_total_chars,
+                ),
+            },
         ]
+
+    def _repo_contracts(self) -> str:
+        chunks: list[str] = []
+        bootstrap = self._read_repo_file(_BOOTSTRAP_CONTRACT)
+        if bootstrap is not None:
+            chunks.append(f"[{_BOOTSTRAP_CONTRACT} real]:\n" + bootstrap)
+        manifest = next(
+            (path for path in sorted(self._root.glob(_MANIFEST_EXAMPLE_GLOB)) if path.is_file()),
+            None,
+        )
+        if manifest is not None:
+            relative = manifest.relative_to(self._root).as_posix()
+            chunks.append(f"[{relative} real (schema de manifiesto a replicar)]:\n" + manifest.read_text(encoding="utf-8"))
+        return "\n\n".join(chunks)
+
+    def _read_repo_file(self, relative: str) -> str | None:
+        candidate = self._root / relative
+        if candidate.resolve().parent != self._root and self._root not in candidate.resolve().parents:
+            return None
+        try:
+            return candidate.read_text(encoding="utf-8")[:_CONTRACT_CHARS]
+        except OSError:
+            return None
+
+    def _bootstrap_api_preserved(self, content: str) -> bool:
+        original = self._read_repo_file(_BOOTSTRAP_CONTRACT)
+        if original is None:
+            return True
+        try:
+            tree = ast.parse(original)
+        except SyntaxError:
+            return True
+        names = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        return all(re.search(rf"\b{re.escape(name)}\b", content) for name in names)
 
     @staticmethod
     def _parse_files(response: object) -> dict[str, str] | None:
@@ -290,9 +352,9 @@ class SupervisedCodegenCapabilityBuilder:
     def _pytest_passed(self, focused_tests: tuple[str, ...]) -> int:
         return self._pytest_run(focused_tests)[1]
 
-    def _pytest_run(self, focused_tests: tuple[str, ...]) -> tuple[int, int]:
+    def _pytest_run(self, focused_tests: tuple[str, ...]) -> tuple[int, int, str]:
         if not focused_tests:
-            return 1, 0
+            return 1, 0, ""
         basetemp = Path(tempfile.gettempdir()) / "atlas-supervised-codegen"
         result = self._run(
             sys.executable,
@@ -306,7 +368,15 @@ class SupervisedCodegenCapabilityBuilder:
             *focused_tests,
         )
         match = _PASSED.search(result.stdout)
-        return result.returncode, int(match.group(1)) if match else 0
+        return result.returncode, int(match.group(1)) if match else 0, self._failure_summary(result.stdout)
+
+    @staticmethod
+    def _failure_summary(stdout: str) -> str:
+        lines = stdout.splitlines()
+        picked = [line.strip() for line in lines if line.startswith(("FAILED", "ERROR"))]
+        if not picked:
+            picked = [line.strip() for line in lines if line.strip()][-3:]
+        return " | ".join(picked)[-400:]
 
     def _compile_ok(self, paths: list[str]) -> bool:
         if not paths:

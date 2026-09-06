@@ -275,6 +275,66 @@ def test_unparsable_model_response_yields_no_proposal(tmp_path: Path) -> None:
     assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
 
 
+def test_synthesis_prompt_carries_the_real_repo_contracts(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    manifest_dir = root / "skills" / "builtin" / "text_uppercase"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "skill.json").write_text(_MANIFEST, encoding="utf-8")
+    builder, client = _builder(root)
+
+    builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    user_prompt = client.last_messages[1]["content"]
+    assert "Contratos reales del repositorio" in user_prompt
+    assert "def build_builtin_skill_handler_registry" in user_prompt
+    assert '"skill_id": "skill.text-report"' in user_prompt
+    assert "SIN reescribirlo" in user_prompt
+    assert "execution_context: SkillExecutionContext" in user_prompt
+
+
+def test_synthesis_prompt_without_real_repo_files_still_proposes(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    builder, client = _builder(root)
+
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    user_prompt = client.last_messages[1]["content"]
+    assert "Contratos reales del repositorio" in user_prompt
+    assert "def build_builtin_skill_handler_registry" not in user_prompt
+
+
+def test_bootstrap_rewrites_dropping_the_real_api_are_rejected(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    invented_bootstrap = "def build_builtin_skill_handler_registry():\n    return {}\n"
+    response = (
+        _block(_USE_CASE_PATH, _USE_CASE)
+        + _block(_TESTS_PATH, _TESTS)
+        + _block(_BOOTSTRAP_PATH, invented_bootstrap)
+    )
+    builder, _ = _builder(root, response)
+    before = _snapshot(root)
+
+    assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
+    assert _snapshot(root) == before
+
+
+def test_failed_focal_tests_report_the_pytest_summary(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    builder, _ = _builder(root, _RESPONSE.replace(_TESTS, _TESTS_BROKEN))
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+    workflow = SupervisedRepairWorkflow(root, validator=builder.validator)
+    workflow.propose(proposal)
+    workflow.authorize_and_apply(proposal.authorization)
+
+    validation = workflow.validate()
+
+    assert not validation.passed
+    assert "tests focales" in validation.detail
+    assert "FAILED tests/test_text_report.py" in validation.detail
+
+
 def test_failing_model_call_yields_no_proposal_and_no_writes(tmp_path: Path) -> None:
     root = _project_root(tmp_path)
 
