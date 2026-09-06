@@ -38,7 +38,7 @@ class Router:
         if self._is_project_file_lookup(plan.objective):
             return "project"
 
-        return self._TASK_ROUTES.get(plan.task, "chat")
+        return self._TASK_ROUTES.get(plan.task.casefold(), "chat")
 
     def route_request(
         self,
