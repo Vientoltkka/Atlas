@@ -436,6 +436,10 @@ def test_synthesis_prompt_carries_the_determinism_contract(tmp_path: Path) -> No
     assert "prohibido importar o usar random, uuid, time, datetime o locale" in user_prompt
     assert "ordena siempre con sorted" in user_prompt
     assert "ejemplo concreto entrada -> salida" in user_prompt
+    assert "PROHIBIDO hardcodear valores derivables mecanicamente de la entrada" in user_prompt
+    assert 'assert resultado["total"] == len(lineas)' in user_prompt
+    assert "no es aceptable" in user_prompt
+    assert "matematicamente verificable" in user_prompt
 
 
 def test_failed_focal_tests_report_the_pytest_summary(tmp_path: Path) -> None:
