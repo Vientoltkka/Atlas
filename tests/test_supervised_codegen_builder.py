@@ -381,6 +381,72 @@ def test_failed_focal_tests_report_the_pytest_summary(tmp_path: Path) -> None:
     assert "FAILED tests/test_text_report.py" in validation.detail
 
 
+def test_failure_summary_includes_node_assertion_and_expected_actual() -> None:
+    stdout = "\n".join(
+        [
+            "================================= FAILURES ================================",
+            "_________________________________ test_x _________________________________",
+            "",
+            "    def test_x():",
+            ">       assert report == {'expected': 'X'}, 'expected X, got Y'",
+            "E       AssertionError: expected X, got Y",
+            "E       assert {'expected': 'X'} == {'actual': 'Y'}",
+            "",
+            "tests/test_x.py:5: AssertionError",
+            "========================= short summary info ============================",
+            "FAILED tests/test_x.py::test_x - AssertionError: expected X, got Y",
+            "========================= 1 failed in 0.02s =============================",
+        ]
+    )
+
+    summary = SupervisedCodegenCapabilityBuilder._failure_summary(stdout)
+
+    assert "tests/test_x.py::test_x" in summary
+    assert "AssertionError" in summary
+    assert "expected X, got Y" in summary
+    assert "assert {'expected': 'X'} == {'actual': 'Y'}" in summary
+    assert "FAILURES" not in summary
+    assert "1 failed" not in summary
+
+
+def test_failure_summary_is_bounded_to_a_small_excerpt() -> None:
+    stdout = "\n".join(
+        [
+            "PASSED line that should never be picked " + "y" * 100,
+        ]
+        + [f"E   noisy line {index} " + "z" * 100 for index in range(40)]
+        + ["FAILED tests/test_x.py::test_x - boom"]
+    )
+
+    summary = SupervisedCodegenCapabilityBuilder._failure_summary(stdout)
+
+    assert summary.startswith("FAILED tests/test_x.py::test_x")
+    assert len(summary) <= 3000
+    assert len(summary.splitlines()) <= 18
+    assert "PASSED line" not in summary
+
+
+def test_failure_summary_falls_back_to_stderr_when_stdout_has_no_failure() -> None:
+    summary = SupervisedCodegenCapabilityBuilder._failure_summary("", "Traceback (most recent call last):\nRuntimeError: crashed")
+
+    assert "RuntimeError: crashed" in summary
+
+
+def test_successful_pytest_detail_stays_free_of_pytest_excerpt(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    builder, _ = _builder(root)
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+    workflow = SupervisedRepairWorkflow(root, validator=builder.validator)
+    workflow.propose(proposal)
+    workflow.authorize_and_apply(proposal.authorization)
+
+    validation = workflow.validate()
+
+    assert validation.passed
+    assert validation.detail == "tests focales, compilacion y git diff --check correctos."
+    assert "Detalle pytest" not in validation.detail
+
+
 def test_failing_model_call_yields_no_proposal_and_no_writes(tmp_path: Path) -> None:
     root = _project_root(tmp_path)
 

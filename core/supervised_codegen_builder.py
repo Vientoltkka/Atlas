@@ -78,6 +78,11 @@ _FILE_HEADER = re.compile(r"^={2,}\s*FILE:\s*(?P<path>\S+?)(?:\s*=+)?\s*$", re.I
 _FILE_END = re.compile(r"^={2,}\s*END(?:\s+FILE)?(?:\s*=+)?\s*$", re.IGNORECASE)
 _FENCE = re.compile(r"^`{3,}")
 _PASSED = re.compile(r"(\d+) passed")
+_E_LINE = re.compile(r"^E\s{2,}\S")
+_SUMMARY_SEPARATOR = re.compile(r"^\s*[=_.]{4,}")
+_SUMMARY_SOURCE = re.compile(r"^(?:\s{2,}\S|\s*>\s)")
+_SUMMARY_MAX_LINES = 18
+_SUMMARY_MAX_CHARS = 3000
 
 # Real repo contracts the model must reuse instead of inventing APIs. The
 # bootstrap file is included verbatim (capped) so the model returns the full
@@ -393,15 +398,56 @@ class SupervisedCodegenCapabilityBuilder:
             *focused_tests,
         )
         match = _PASSED.search(result.stdout)
-        return result.returncode, int(match.group(1)) if match else 0, self._failure_summary(result.stdout)
+        return result.returncode, int(match.group(1)) if match else 0, self._failure_summary(result.stdout, result.stderr)
 
     @staticmethod
-    def _failure_summary(stdout: str) -> str:
+    def _failure_summary(stdout: str, stderr: str = "") -> str:
         lines = stdout.splitlines()
-        picked = [line.strip() for line in lines if line.startswith(("FAILED", "ERROR"))]
+        picked = [line.strip() for line in lines if line.startswith(("FAILED", "ERROR")) and "::" in line]
+        picked.extend(SupervisedCodegenCapabilityBuilder._failure_excerpt(lines))
         if not picked:
-            picked = [line.strip() for line in lines if line.strip()][-3:]
-        return " | ".join(picked)[-400:]
+            source = lines if lines else stderr.splitlines()
+            picked = [line.strip() for line in source[-3:] if line.strip()]
+        summary = "\n".join(picked[:_SUMMARY_MAX_LINES])
+        if len(summary) > _SUMMARY_MAX_CHARS:
+            return "..." + summary[-_SUMMARY_MAX_CHARS + 3 :]
+        return summary
+
+    @staticmethod
+    def _failure_excerpt(lines: list[str]) -> list[str]:
+        end = None
+        for index in range(len(lines) - 1, -1, -1):
+            if _E_LINE.match(lines[index]):
+                end = index
+                break
+        if end is None:
+            return []
+        start = end
+        while start > 0 and _E_LINE.match(lines[start - 1]):
+            start -= 1
+        context = 0
+        while start > 0 and context < 3:
+            previous = lines[start - 1]
+            if not previous.strip() or not _SUMMARY_SOURCE.match(previous) or _SUMMARY_SEPARATOR.match(previous):
+                break
+            start -= 1
+            context += 1
+        stop = end + 1
+        skipped_blank = False
+        context = 0
+        while stop < len(lines) and context < 2:
+            following = lines[stop]
+            if not following.strip():
+                if not skipped_blank:
+                    skipped_blank = True
+                    stop += 1
+                    continue
+                break
+            if _SUMMARY_SEPARATOR.match(following):
+                break
+            stop += 1
+            context += 1
+        return lines[start:stop]
 
     def _compile_ok(self, paths: list[str]) -> bool:
         if not paths:
