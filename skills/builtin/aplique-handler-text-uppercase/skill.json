@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.aplique-handler-text-uppercase",
+  "name": "Aplique Mayusculas Al Texto Usando Handler.Text-Uppercase",
+  "version": "1.0",
+  "description": "aplique mayusculas al texto usando handler.text-uppercase",
+  "enabled": true,
+  "input_fields": [
+    {
+      "name": "text",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "output_fields": [
+    {
+      "name": "result",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "execution_target": "handler.text-uppercase",
+  "execution_target_type": "handler",
+  "handler_id": "handler.text-uppercase"
+}
