@@ -21,7 +21,7 @@ from core.supervised_repair import (
 _AFFIRMATIVE = frozenset({"si", "s", "vale", "ok", "de acuerdo", "adelante"})
 _NEGATIVE = frozenset({"no", "n", "cancelar", "cancela"})
 _IMPROVEMENT = re.compile(
-    r"\b(?:mejora|mejorar|corrige|corregir|repara|reparar|optimiza|optimizar|haz que puedas|crea la capacidad para)\b",
+    r"\b(?:mejora|mejorar|corrige|corregir|repara|reparar|optimiza|optimizar|haz que puedas|crea (?:la|una) capacidad(?:es)? para)\b",
     re.IGNORECASE,
 )
 
@@ -128,11 +128,15 @@ class SelfImprovementConversation:
         elif proposal_builder is not None:
             registry = SupervisedRepairBuilderRegistry((_CallableRepairBuilder(proposal_builder, validator_factory),))
         else:
-            # Built-in deterministic repairs and improvements only; no model output and no discovery.
+            # Built-in deterministic repairs and improvements; the last builder is the
+            # single generic codegen producer: the model only synthesizes a bounded
+            # proposal (zero writes, whitelisted scope, mandatory focused tests) that
+            # the host validates before anything is conserved.
             from core.voice_repair_builder import VoiceCodeRepairBuilder
             from core.routing_repair_builder import RoutingRepairBuilder
             from core.file_read_capability_builder import FileReadCapabilityImprovementBuilder
             from core.desktop_capability_builder import DesktopCapabilityImprovementBuilder
+            from core.supervised_codegen_builder import SupervisedCodegenCapabilityBuilder
 
             registry = SupervisedRepairBuilderRegistry(
                 (
@@ -140,6 +144,7 @@ class SelfImprovementConversation:
                     RoutingRepairBuilder(project_root),
                     FileReadCapabilityImprovementBuilder(project_root),
                     DesktopCapabilityImprovementBuilder(project_root),
+                    SupervisedCodegenCapabilityBuilder(project_root),
                 )
             )
         self._builders = registry
