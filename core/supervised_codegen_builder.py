@@ -87,6 +87,9 @@ _PASSED = re.compile(r"(\d+) passed")
 _BOOTSTRAP_CONTRACT = "bootstrap/skill_system.py"
 _MANIFEST_EXAMPLE_GLOB = "skills/builtin/*/skill.json"
 _CONTRACT_CHARS = 6000
+# Modules whose use makes an output depend on chance, the wall clock or the
+# environment. A capability declared deterministic must not import them.
+_NONDETERMINISTIC_MODULES = frozenset({"random", "uuid", "time", "datetime", "locale"})
 
 _COMPILE_SCRIPT = (
     "import sys\n"
@@ -113,7 +116,9 @@ Reglas obligatorias:
 
 - Rutas permitidas unicamente: use_cases/, tests/, skills/builtin/ y bootstrap/skill_system.py.
 - Maximo {max_files} archivos y {max_total_chars} caracteres en total.
-- Implementa la logica en un modulo puro bajo use_cases/ (sin E/S de red, sin APIs externas, sin dependencias nuevas, sin aleatoriedad, sin reloj del sistema, sin variables de entorno).
+- Implementa la logica en un modulo puro bajo use_cases/ (sin E/S de red, sin APIs externas, sin dependencias nuevas, sin variables de entorno).
+- El modulo bajo use_cases/ debe ser estrictamente determinista: prohibido importar o usar random, uuid, time, datetime o locale, prohibido el reloj del sistema y prohibido depender del orden de iteracion de sets o dicts (ordena siempre con sorted antes de producir ninguna salida).
+- Antes de escribir codigo, fija el contrato observable con al menos un ejemplo concreto entrada -> salida; la implementacion y las pruebas deben satisfacer exactamente esos ejemplos.
 - Si la capacidad debe quedar registrada como skill local: entregalo en bootstrap/skill_system.py SIN reescribirlo, conservando todo su contenido actual y anadiendo unicamente dentro de build_builtin_skill_handler_registry el registro del handler con registry.register(<HANDLER_ID>, <funcion>), siguiendo el patron del handler real incluido en los contratos; y anade el manifiesto declarativo skills/builtin/<skill_id>/skill.json replicando exactamente el schema del manifest real de ejemplo de los contratos (mismas claves y formatos). Si no hace falta registrarla, omite ambos.
 - El handler debe firmarse como los handlers reales: def <handler>(inputs: Mapping[str, object], *, execution_context: SkillExecutionContext) -> Mapping[str, object].
 - Las pruebas focales deben verificar exactamente el comportamiento que produce la implementacion entregada; no afirmes nada que el codigo no garantice.
@@ -229,6 +234,9 @@ class SupervisedCodegenCapabilityBuilder:
         bootstrap = files.get(_BOOTSTRAP_CONTRACT)
         if bootstrap is not None and not self._bootstrap_api_preserved(bootstrap):
             return None
+        for path, content in files.items():
+            if path.startswith("use_cases/") and path.endswith(".py") and not self._deterministic_imports_ok(content):
+                return None
         if not any(path.startswith("use_cases/") and path.endswith(".py") for path in files):
             return None
         if not any(path.startswith("tests/") and path.endswith(".py") for path in files):
@@ -292,6 +300,23 @@ class SupervisedCodegenCapabilityBuilder:
             return True
         names = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
         return all(re.search(rf"\b{re.escape(name)}\b", content) for name in names)
+
+    @staticmethod
+    def _deterministic_imports_ok(content: str) -> bool:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return True
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                names = {node.module.split(".")[0]} if node.module else set()
+            else:
+                continue
+            if names & _NONDETERMINISTIC_MODULES:
+                return False
+        return True
 
     @staticmethod
     def _parse_files(response: object) -> dict[str, str] | None:

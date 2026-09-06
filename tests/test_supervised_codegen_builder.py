@@ -320,6 +320,52 @@ def test_bootstrap_rewrites_dropping_the_real_api_are_rejected(tmp_path: Path) -
     assert _snapshot(root) == before
 
 
+@pytest.mark.parametrize("module", ["random", "uuid", "time", "datetime", "locale"])
+@pytest.mark.parametrize("placement", ["top_level", "nested"])
+def test_nondeterministic_imports_in_the_capability_module_are_rejected_without_writes(
+    tmp_path: Path, module: str, placement: str
+) -> None:
+    root = _project_root(tmp_path)
+    if placement == "top_level":
+        use_case = f"import {module}\n\n" + _USE_CASE
+    else:
+        use_case = _USE_CASE.replace("    return {", f"    import {module}\n    return {{")
+    response = (
+        _block(_USE_CASE_PATH, use_case)
+        + _block(_TESTS_PATH, _TESTS)
+        + _block(_BOOTSTRAP_PATH, _BOOTSTRAP_PROPOSED)
+        + _block(_MANIFEST_PATH, _MANIFEST)
+    )
+    builder, _ = _builder(root, response)
+    before = _snapshot(root)
+
+    assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
+    assert _snapshot(root) == before
+
+
+def test_deterministic_capability_module_without_banned_imports_is_still_proposed(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    builder, _ = _builder(root)
+
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    assert _USE_CASE_PATH in proposal.files
+
+
+def test_synthesis_prompt_carries_the_determinism_contract(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    _, client = _builder(root)
+
+    builder = SupervisedCodegenCapabilityBuilder(root, client, model="test-model")
+    builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    user_prompt = client.last_messages[1]["content"]
+    assert "prohibido importar o usar random, uuid, time, datetime o locale" in user_prompt
+    assert "ordena siempre con sorted" in user_prompt
+    assert "ejemplo concreto entrada -> salida" in user_prompt
+
+
 def test_failed_focal_tests_report_the_pytest_summary(tmp_path: Path) -> None:
     root = _project_root(tmp_path)
     builder, _ = _builder(root, _RESPONSE.replace(_TESTS, _TESTS_BROKEN))
