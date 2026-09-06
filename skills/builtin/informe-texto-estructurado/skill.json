@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "skill_id": "skill.informe-texto-estructurado",
+  "name": "Generar Informe Estructurado De Texto Local",
+  "version": "1.0",
+  "description": "Genera un informe estructurado y estadisticas de un texto local de forma determinista.",
+  "enabled": true,
+  "input_fields": [
+    {
+      "name": "text",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "output_fields": [
+    {
+      "name": "report",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "char_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "word_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "line_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "paragraph_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "unique_word_count",
+      "type": "integer",
+      "required": true
+    }
+  ],
+  "execution_target": "handler.informe-texto-estructurado",
+  "execution_target_type": "handler",
+  "handler_id": "handler.informe-texto-estructurado"
+}

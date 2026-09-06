@@ -24,6 +24,7 @@ from core.skill_resolver import SkillResolver
 from core.skill_system import SkillSystem, build_skill_system
 from tools.executor import ToolExecutor
 from use_cases.desktop_layout_skills import WindowLayoutSkills
+from use_cases.structured_text_report import generate_structured_text_report
 
 
 BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills" / "builtin"
@@ -33,6 +34,7 @@ MODO_TRABAJO_HANDLER_ID = "handler.modo-trabajo"
 MODO_ESCRITURA_HANDLER_ID = "handler.modo-escritura"
 MODO_INVESTIGACION_HANDLER_ID = "handler.modo-investigacion"
 PREPARAR_VENTANA_HANDLER_ID = "handler.preparar-ventana"
+INFORME_TEXTO_ESTRUCTURADO_HANDLER_ID = "handler.informe-texto-estructurado"
 
 
 def build_core_skill_system(
@@ -74,6 +76,9 @@ def build_builtin_skill_handler_registry(
     registry.register(MODO_ESCRITURA_HANDLER_ID, layout_skills.modo_escritura)
     registry.register(MODO_INVESTIGACION_HANDLER_ID, layout_skills.modo_investigacion)
     registry.register(PREPARAR_VENTANA_HANDLER_ID, layout_skills.preparar_ventana)
+    registry.register(
+        INFORME_TEXTO_ESTRUCTURADO_HANDLER_ID, _informe_texto_estructurado_handler
+    )
     return registry
 
 
@@ -120,3 +125,16 @@ def _text_uppercase_handler(
     if not isinstance(text, str):
         raise ValueError("text must be a string")
     return {"result": text.upper()}
+
+
+def _informe_texto_estructurado_handler(
+    inputs: Mapping[str, object],
+    *,
+    execution_context: SkillExecutionContext,
+) -> Mapping[str, object]:
+    if execution_context.is_cancelled or execution_context.remaining_seconds is None:
+        raise RuntimeError("informe texto estructurado execution context is unavailable")
+    text = inputs.get("text")
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+    return generate_structured_text_report(text)
