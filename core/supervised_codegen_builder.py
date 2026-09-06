@@ -91,6 +91,14 @@ _SUMMARY_MAX_CHARS = 3000
 # time; nothing here is capability specific.
 _BOOTSTRAP_CONTRACT = "bootstrap/skill_system.py"
 _MANIFEST_EXAMPLE_GLOB = "skills/builtin/*/skill.json"
+_EXECUTION_CONTEXT_CONTRACT = "core/skill_execution_context.py"
+_RUNTIME_CONTEXT_CONSTRUCTION = "core/skill_executor.py"
+_RUNTIME_CONTEXT_NEEDLE = "context = SkillExecutionContext(deadline=deadline)"
+_RUNTIME_CONTEXT_TEST = "tests/test_skill_runtime_limits.py"
+_RUNTIME_CONTEXT_TEST_NEEDLE = "context = SkillExecutionContext(deadline=time.monotonic() + 1.0)"
+# The runtime exposes exactly one real execution context: handlers and focused
+# tests must import and construct it, never redefine or fake it.
+_INVENTED_CONTEXT_CLASS = re.compile(r"\bclass\s+\w*ExecutionContext\b")
 _CONTRACT_CHARS = 6000
 # Modules whose use makes an output depend on chance, the wall clock or the
 # environment. A capability declared deterministic must not import them.
@@ -126,6 +134,7 @@ Reglas obligatorias:
 - Antes de escribir codigo, fija el contrato observable con al menos un ejemplo concreto entrada -> salida; la implementacion y las pruebas deben satisfacer exactamente esos ejemplos.
 - Si la capacidad debe quedar registrada como skill local: entregalo en bootstrap/skill_system.py SIN reescribirlo, conservando todo su contenido actual y anadiendo unicamente dentro de build_builtin_skill_handler_registry el registro del handler con registry.register(<HANDLER_ID>, <funcion>), siguiendo el patron del handler real incluido en los contratos; y anade el manifiesto declarativo skills/builtin/<skill_id>/skill.json replicando exactamente el schema del manifest real de ejemplo de los contratos (mismas claves y formatos). Si no hace falta registrarla, omite ambos.
 - El handler debe firmarse como los handlers reales: def <handler>(inputs: Mapping[str, object], *, execution_context: SkillExecutionContext) -> Mapping[str, object].
+- execution_context SIEMPRE es la clase real SkillExecutionContext incluida en los contratos (core/skill_execution_context.py, importada desde core.skill_execution_context). En las pruebas focalizadas construila exactamente como el runtime real: SkillExecutionContext(deadline=time.monotonic() + 1.0). PROHIBIDO inventar, redefinir o simular ninguna clase Dummy/Fake/Stub de ExecutionContext y prohibido pasar None donde el handler exige el contexto real: el host ejecuta esas pruebas y fallaran con TypeError. Reutiliza las clases y fixtures reales del repositorio.
 - Las pruebas focales deben verificar exactamente el comportamiento que produce la implementacion entregada; no afirmes nada que el codigo no garantice.
 - Incluye pruebas focalizadas deterministas en tests/ (sin red, sin azar) que verifiquen la salida determinista.
 - No uses markdown ni bloques de codigo: solo los bloques de archivo, sin ningun texto adicional antes o despues.
@@ -240,6 +249,8 @@ class SupervisedCodegenCapabilityBuilder:
         if bootstrap is not None and not self._bootstrap_api_preserved(bootstrap):
             return None
         for path, content in files.items():
+            if path.endswith(".py") and _INVENTED_CONTEXT_CLASS.search(content):
+                return None
             if path.startswith("use_cases/") and path.endswith(".py") and not self._deterministic_imports_ok(content):
                 return None
         if not any(path.startswith("use_cases/") and path.endswith(".py") for path in files):
@@ -284,16 +295,40 @@ class SupervisedCodegenCapabilityBuilder:
         if manifest is not None:
             relative = manifest.relative_to(self._root).as_posix()
             chunks.append(f"[{relative} real (schema de manifiesto a replicar)]:\n" + manifest.read_text(encoding="utf-8"))
+        execution_context = self._read_repo_file(_EXECUTION_CONTEXT_CONTRACT)
+        if execution_context is not None:
+            chunks.append(
+                f"[{_EXECUTION_CONTEXT_CONTRACT} real (contrato del execution_context; importalo desde "
+                "core.skill_execution_context, nunca lo redefinas ni lo simules)]:\n" + execution_context
+            )
+        runtime_construction = self._excerpt(_RUNTIME_CONTEXT_CONSTRUCTION, _RUNTIME_CONTEXT_NEEDLE, before=1, after=1)
+        if runtime_construction is not None:
+            chunks.append(
+                f"[{_RUNTIME_CONTEXT_CONSTRUCTION} real (como el runtime real construye el contexto)]:\n" + runtime_construction
+            )
+        test_example = self._excerpt(_RUNTIME_CONTEXT_TEST, _RUNTIME_CONTEXT_TEST_NEEDLE, before=1, after=9)
+        if test_example is not None:
+            chunks.append(
+                f"[{_RUNTIME_CONTEXT_TEST} real (como una prueba real construye el contexto)]:\n" + test_example
+            )
         return "\n\n".join(chunks)
 
-    def _read_repo_file(self, relative: str) -> str | None:
+    def _read_repo_file(self, relative: str, cap: int | None = _CONTRACT_CHARS) -> str | None:
         candidate = self._root / relative
         if candidate.resolve().parent != self._root and self._root not in candidate.resolve().parents:
             return None
         try:
-            return candidate.read_text(encoding="utf-8")[:_CONTRACT_CHARS]
+            text = candidate.read_text(encoding="utf-8")
         except OSError:
             return None
+        return text if cap is None else text[:cap]
+
+    def _excerpt(self, relative: str, needle: str, *, before: int, after: int) -> str | None:
+        lines = (self._read_repo_file(relative, cap=None) or "").splitlines()
+        index = next((i for i, line in enumerate(lines) if needle in line), None)
+        if index is None:
+            return None
+        return "\n".join(lines[max(0, index - before) : index + after + 1])[:_CONTRACT_CHARS]
 
     def _bootstrap_api_preserved(self, content: str) -> bool:
         original = self._read_repo_file(_BOOTSTRAP_CONTRACT)

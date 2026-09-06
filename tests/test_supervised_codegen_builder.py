@@ -97,6 +97,22 @@ def test_skill_handler_exposes_the_capability():
     assert report == {"lines": 1, "words": 3, "characters": 5, "unique_words": 2, "top_words": [("b", 2)]}
 '''
 
+_TESTS_DUMMY_CONTEXT = _TESTS.replace(
+    "def test_skill_handler_exposes_the_capability():",
+    "class DummyExecutionContext:\n    is_cancelled = False\n    remaining_seconds = 1.0\n\n\ndef test_skill_handler_exposes_the_capability():",
+).replace(
+    "execution_context=None",
+    "execution_context=DummyExecutionContext()",
+)
+
+_TESTS_REAL_CONTEXT = _TESTS.replace(
+    "from bootstrap.skill_system import build_builtin_skill_handler_registry",
+    "import time\n\nfrom bootstrap.skill_system import build_builtin_skill_handler_registry\nfrom core.skill_execution_context import SkillExecutionContext",
+).replace(
+    "execution_context=None",
+    "execution_context=SkillExecutionContext(deadline=time.monotonic() + 1.0)",
+)
+
 _TESTS_BROKEN = _TESTS.replace('report["words"] == 5', 'report["words"] == 4')
 
 _MANIFEST = """{
@@ -290,6 +306,62 @@ def test_synthesis_prompt_carries_the_real_repo_contracts(tmp_path: Path) -> Non
     assert '"skill_id": "skill.text-report"' in user_prompt
     assert "SIN reescribirlo" in user_prompt
     assert "execution_context: SkillExecutionContext" in user_prompt
+
+
+def test_synthesis_prompt_carries_the_real_execution_context_contract(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    core_dir = root / "core"
+    core_dir.mkdir()
+    (core_dir / "skill_execution_context.py").write_text(
+        (_ROOT / "core" / "skill_execution_context.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (core_dir / "skill_executor.py").write_text(
+        (_ROOT / "core" / "skill_executor.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    tests_dir = root / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_skill_runtime_limits.py").write_text(
+        (_ROOT / "tests" / "test_skill_runtime_limits.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    builder, client = _builder(root)
+
+    builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    user_prompt = client.last_messages[1]["content"]
+    assert "[core/skill_execution_context.py real" in user_prompt
+    assert "@dataclass(frozen=True, slots=True)" in user_prompt
+    assert "context = SkillExecutionContext(deadline=deadline)" in user_prompt
+    assert "context = SkillExecutionContext(deadline=time.monotonic() + 1.0)" in user_prompt
+    assert "PROHIBIDO inventar, redefinir o simular" in user_prompt
+
+
+def test_invented_execution_context_classes_are_rejected_without_writes(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    response = "".join(
+        _block(path, _TESTS_DUMMY_CONTEXT if path == _TESTS_PATH else content)
+        for path, content in _PROPOSAL_FILES.items()
+    )
+    builder, _ = _builder(root, response)
+    before = _snapshot(root)
+
+    assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
+    assert _snapshot(root) == before
+
+
+def test_proposal_using_the_real_execution_context_stays_acceptable(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    response = "".join(
+        _block(path, _TESTS_REAL_CONTEXT if path == _TESTS_PATH else content)
+        for path, content in _PROPOSAL_FILES.items()
+    )
+    builder, _ = _builder(root, response)
+    before = _snapshot(root)
+
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    assert proposal.focused_tests == (_TESTS_PATH,)
+    assert _snapshot(root) == before
 
 
 def test_synthesis_prompt_without_real_repo_files_still_proposes(tmp_path: Path) -> None:
