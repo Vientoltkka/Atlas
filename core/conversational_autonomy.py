@@ -83,8 +83,14 @@ _STRUCTURED_PLAN_PATTERNS = (
     re.compile(
         r"\bplanific\w+\s+y\s+ejecut\w+\s+este\s+objetivo\s*[:\-]\s*([\s\S]+)$"
     ),
+    # "trabaja en segundo plano con este objetivo:" (with or without the
+    # background interlude and the "con/sobre/para" connector) is the same
+    # explicit entry: the objective may span several typed lines and use
+    # absolute paths, so it must reach the structured planner that supports
+    # them instead of falling out of the conservative autonomy routing.
     re.compile(
-        r"\btrabaj\w+\s+en\s+este\s+objetivo\s*:\s*([\s\S]+)$"
+        r"\btrabaj\w+\s+(?:(?:en\s+)?(?:(?:segundo\s+plano|background)\s+)?)?"
+        r"(?:con\s+|sobre\s+|para\s+|en\s+)?este\s+objetivo\s*:\s*([\s\S]+)$"
     ),
 )
 

@@ -595,6 +595,116 @@ def test_structured_entry_detection_captures_multiline_objective() -> None:
     assert request is None or "Lee los archivos" in request.objective
 
 
+def test_background_order_with_este_objetivo_phrase_is_structured_entry() -> None:
+    """The literal E2E order 'trabaja en segundo plano con este objetivo:'
+    over a multi-line numbered objective with absolute paths must reach the
+    structured planner (the only entry that supports them) instead of
+    falling out of autonomy and losing the new objective."""
+    from core.conversational_autonomy import detect_autonomous_goal
+
+    prompt = (
+        "Atlas, trabaja en segundo plano con este objetivo:\n\n"
+        "1. Lee C:\\AI\\Atlas-tests\\A.txt.\n"
+        "2. Lee C:\\AI\\Atlas-tests\\B.txt.\n"
+        "3. Compara ambos documentos y prepara un resumen con sus "
+        "principios comunes y diferencias.\n"
+        "4. Guarda el resultado en C:\\AI\\Atlas-tests\\resultado.txt.\n"
+        "5. Verifica al final que el resultado se haya guardado "
+        "correctamente.\n"
+    )
+
+    objective = detect_structured_plan_objective(prompt)
+
+    assert objective is not None
+    assert "Atlas-tests\\A.txt" in objective
+    assert "Atlas-tests\\B.txt" in objective
+    assert "Atlas-tests\\resultado.txt" in objective
+    assert "Compara ambos documentos" in objective
+    assert detect_autonomous_goal(prompt) is None
+
+
+def test_estado_reports_new_goal_not_historical_cancelled_goal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """'estado' must describe the newly accepted background goal only.
+
+    A store holding an older CANCELLED goal ("Lee README.md y guarda el
+    contenido en copia.txt") must never resurface as the status answer once
+    a new multi-line objective with absolute paths was accepted in this
+    session: the new goal becomes CURRENT and 'estado' shows its completed
+    tasks plus the pending approval, never the historical cancelled goal.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "nota1.txt").write_text("alpha\ncomun\n", encoding="utf-8")
+    (tmp_path / "nota2.txt").write_text("beta\ncomun\n", encoding="utf-8")
+
+    store_dir = tmp_path / "goal_store"
+    seed_executor = ToolTaskExecutor(object())
+    seed_scheduler = AsyncTaskScheduler(seed_executor, store=JsonGoalTaskStore(store_dir))
+    old_goal_id = seed_scheduler.submit_goal(
+        "Lee README.md y guarda el contenido en copia.txt",
+        [
+            {
+                "task_id": "write_target",
+                "description": "Guardar el resultado en copia.txt",
+                "payload": {
+                    "tool": "write_file",
+                    "arguments": {"path": "copia.txt", "content": "viejo"},
+                },
+            }
+        ],
+    )
+    seed_scheduler.cancel_goal(old_goal_id)
+    seed_scheduler.persist_goal(old_goal_id)
+
+    harness = Harness(tmp_path, _compare_plan())
+    try:
+        prompt = (
+            "Atlas, trabaja en segundo plano con este objetivo:\n\n"
+            "1. Lee nota1.txt.\n"
+            "2. Lee nota2.txt.\n"
+            "3. Compara ambos documentos y guarda las diferencias en "
+            "resultado.txt.\n"
+        )
+        response = harness.orchestrator.process_prompt(prompt, confirm=lambda _p: "")
+
+        assert "Plan estructurado en marcha" in response
+        new_goal_id = harness.orchestrator._background_goal_id
+        assert new_goal_id is not None
+        assert new_goal_id != old_goal_id
+        approval, state = _wait_write_approval(harness)
+        assert approval.goal_id == new_goal_id
+        assert state.tasks["read_first"].status is TaskStatus.DONE
+        assert state.tasks["write_result"].status is TaskStatus.WAITING_APPROVAL
+
+        status_response = harness.orchestrator.process_prompt(
+            "estado", confirm=lambda _p: ""
+        )
+
+        assert "Estado del trabajo" in status_response
+        assert "pendiente de tu confirmación" in status_response
+        assert "copia.txt" not in status_response
+        assert "El trabajo fue cancelado." not in status_response
+
+        resumed = harness.orchestrator.process_prompt("sí", confirm=lambda _p: "")
+
+        assert "Hecho" in resumed
+        assert harness.scheduler.goal_finished(new_goal_id)
+        assert (tmp_path / "resultado.txt").exists()
+
+        final_status = harness.orchestrator.process_prompt(
+            "estado", confirm=lambda _p: ""
+        )
+
+        assert "Estado del trabajo" in final_status
+        assert "hecho" in final_status
+        assert "copia.txt" not in final_status
+        assert "El trabajo fue cancelado." not in final_status
+    finally:
+        harness.stop()
+
+
 def test_converted_step_retries_through_scheduler_reliability() -> None:
     from core.execution_plan_task_adapter import execution_plan_to_task_specs
     from core.execution_retry import RetryPolicy
