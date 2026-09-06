@@ -73,12 +73,13 @@ def test_atlas_emblem_is_a_centered_open_chevron_with_detached_lower_triangle(or
 
     components = emblem.toSubpathPolygons()
     assert len(components) == 3  # left arm, right arm, independent lower triangle
-    assert emblem.contains(QPointF(size * 0.42, size * 0.55))
-    assert emblem.contains(QPointF(size * 0.58, size * 0.55))
-    assert emblem.contains(QPointF(size * 0.50, size * 0.62))
+    assert emblem.contains(QPointF(size * 0.44, size * 0.55))
+    assert emblem.contains(QPointF(size * 0.56, size * 0.55))
+    assert emblem.contains(QPointF(size * 0.50, size * 0.605))
     # The open interior and the separation rule out a conventional A crossbar.
-    assert not emblem.contains(QPointF(size * 0.50, size * 0.54))
-    assert not emblem.contains(QPointF(size * 0.50, size * 0.58))
+    assert not emblem.contains(QPointF(size * 0.50, size * 0.50))
+    # The compact emblem leaves energy space inside the sphere below the arms.
+    assert not emblem.contains(QPointF(size * 0.50, size * 0.72))
 
 
 def test_five_primary_visual_profiles_have_distinct_activity_controls() -> None:
@@ -336,7 +337,7 @@ def test_context_menu_voice_label_reflects_real_controller_state(orb) -> None:
 
 
 def test_fixed_orb_size(orb) -> None:
-    assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.275)
+    assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.29)
     assert orb.width() == orbe_app.ORB_SIZE
     assert 350 <= orbe_app.ORB_SIZE <= 370
     assert orb.height() == orbe_app.ORB_SIZE
