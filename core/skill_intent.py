@@ -34,10 +34,16 @@ def skill_inputs_from_text(prompt: str, skill) -> dict[str, object]:
             return {"text": quoted[-1]}
 
         match = re.search(
-            r"(?:con\s+el\s+texto|texto)\s*[:=]?\s*(.+)$",
+            r"con\s+el\s+texto\s*[:=]?\s*(.+)$",
             prompt,
             re.IGNORECASE,
         )
+        if match is None:
+            match = re.search(
+                r"(?:^|\s)texto\s*[:=]\s*(.+)$",
+                prompt,
+                re.IGNORECASE,
+            )
         return {"text": match.group(1).strip()} if match else {}
 
     return _layout_inputs_from_text(prompt, input_names)

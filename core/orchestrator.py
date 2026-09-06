@@ -925,6 +925,11 @@ class AtlasOrchestrator:
         confirm,
     ) -> str:
         """Process text through the normal Atlas flow."""
+        # A registered Skill named explicitly must resolve before the
+        # self-improvement diagnosis can classify the turn as SKILL_GAP.
+        explicit_skill_response = self._explicit_skill_use_response(prompt)
+        if explicit_skill_response is not None:
+            return explicit_skill_response
         self_improvement_response = self._self_improvement_conversation.handle(prompt)
         if self_improvement_response is not None:
             return self_improvement_response
@@ -1666,6 +1671,18 @@ class AtlasOrchestrator:
         self._memory.add_assistant(response)
 
         return response
+
+    def _explicit_skill_use_response(self, prompt: str) -> str | None:
+        """Resolve an explicit use of an already registered Skill, or None.
+
+        Only explicit execution orders ("usa la skill <id>") qualify; open
+        skill requests ("crea una skill ...") keep the self-improvement gate.
+        """
+        if self._skill_system is None or not _EXPLICIT_SKILL_USE_PATTERN.search(prompt):
+            return None
+        if _requested_skill_id(prompt, self._skill_system) is None:
+            return None
+        return self._process_skill_request(self._request_gateway.from_text(prompt))
 
     def _process_skill_request(self, request: AtlasRequest) -> str | None:
         """Resolve and execute an explicitly requested registered Skill."""
@@ -2875,6 +2892,12 @@ def _classify_structured_confirmation_intent(
 
 def _requested_skill_id(prompt: str, skill_system: SkillSystem) -> str | None:
     return skill_intent.requested_skill_id(prompt, skill_system)
+
+
+_EXPLICIT_SKILL_USE_PATTERN = re.compile(
+    r"\b(?:usa|usar|ejecuta|ejecutar|run|use)\s+(?:la\s+|el\s+)?skill\b",
+    re.IGNORECASE,
+)
 
 
 _VOICE_INVOCATION_PREFIX_PATTERN = re.compile(
