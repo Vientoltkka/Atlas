@@ -275,6 +275,66 @@ def test_unparsable_model_response_yields_no_proposal(tmp_path: Path) -> None:
     assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
 
 
+def test_failing_model_call_yields_no_proposal_and_no_writes(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+
+    class _BrokenClient:
+        def ask(self, model: str, messages: list[dict[str, str]]) -> str:
+            raise RuntimeError("404 model not found")
+
+    builder = SupervisedCodegenCapabilityBuilder(root, _BrokenClient(), model="test-model")
+    before = _snapshot(root)
+
+    assert builder.build(builder.diagnose(_PROMPT), _PROMPT) is None
+    assert _snapshot(root) == before
+
+
+def test_default_model_delegates_to_the_configured_provider_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _project_root(tmp_path)
+    monkeypatch.delenv("ATLAS_CODEGEN_MODEL", raising=False)
+    default_client = _FakeClient(_RESPONSE)
+    default_builder = SupervisedCodegenCapabilityBuilder(root, default_client)
+    pinned_client = _FakeClient(_RESPONSE)
+    pinned_builder = SupervisedCodegenCapabilityBuilder(root, pinned_client, model="pinned-model")
+    monkeypatch.setenv("ATLAS_CODEGEN_MODEL", "env-model")
+    env_builder = SupervisedCodegenCapabilityBuilder(root, _FakeClient(_RESPONSE))
+
+    default_builder.build(default_builder.diagnose(_PROMPT), _PROMPT)
+    pinned_builder.build(pinned_builder.diagnose(_PROMPT), _PROMPT)
+    env_builder.build(env_builder.diagnose(_PROMPT), _PROMPT)
+
+    assert default_client.last_model == ""
+    assert pinned_client.last_model == "pinned-model"
+    assert env_builder._model == "env-model"
+
+
+def test_file_headers_with_trailing_equal_signs_are_parsed(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    response = "".join(f"=== FILE: {path} ===\n{content}=== END FILE ===\n" for path, content in _PROPOSAL_FILES.items())
+    builder, _ = _builder(root, response)
+
+    proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
+
+    assert proposal is not None
+    assert set(proposal.files) == set(_PROPOSAL_FILES)
+
+
+def test_acceptance_prompt_with_a_valid_proposal_is_not_a_clarification(tmp_path: Path) -> None:
+    root = _project_root(tmp_path)
+    _, client = _builder(root)
+    conversation = SelfImprovementConversation(root, builders=(SupervisedCodegenCapabilityBuilder(root, client, model="test-model"),))
+    before = _snapshot(root)
+
+    response = conversation.handle(_PROMPT)
+
+    assert response is not None
+    assert not response.startswith("CLARIFICATION_REQUIRED")
+    assert "proposal_id: improvement.codegen." in response
+    assert client.calls == 1
+    assert client.last_model == "test-model"
+    assert _snapshot(root) == before
+
+
 def test_host_validator_runs_focal_tests_and_the_model_is_not_consulted(tmp_path: Path) -> None:
     root = _project_root(tmp_path)
     builder, client = _builder(root)

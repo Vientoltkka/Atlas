@@ -42,7 +42,9 @@ _DEFAULT_MAX_FILES = 4
 _DEFAULT_MAX_TOTAL_CHARS = 40_000
 _METRIC = "pruebas_focales_superadas"
 _CODEGEN_MODEL_ENV = "ATLAS_CODEGEN_MODEL"
-_DEFAULT_CODEGEN_MODEL = "qwen3.6:latest"
+# Empty model delegates the choice to the configured provider's own default
+# model via PromptClient, so no local model name is hardcoded here.
+_DEFAULT_CODEGEN_MODEL = ""
 
 _TRIGGER = re.compile(r"\bcrea (?:la|una) capacidad(?:es)? para (?P<description>\S.*)$")
 _UNSAFE = re.compile(
@@ -71,8 +73,8 @@ _SPECIFIC_DOMAIN_TERMS = (
     "fahrenheit",
 )
 
-_FILE_HEADER = re.compile(r"^={2,}\s*FILE:\s*(?P<path>\S+)\s*$", re.IGNORECASE)
-_FILE_END = re.compile(r"^={2,}\s*END(?:\s+FILE)?\s*={0,2}\s*$", re.IGNORECASE)
+_FILE_HEADER = re.compile(r"^={2,}\s*FILE:\s*(?P<path>\S+?)(?:\s*=+)?\s*$", re.IGNORECASE)
+_FILE_END = re.compile(r"^={2,}\s*END(?:\s+FILE)?(?:\s*=+)?\s*$", re.IGNORECASE)
 _FENCE = re.compile(r"^`{3,}")
 _PASSED = re.compile(r"(\d+) passed")
 
@@ -98,10 +100,10 @@ Reglas obligatorias:
 
 - Rutas permitidas unicamente: use_cases/, tests/, skills/builtin/ y bootstrap/skill_system.py.
 - Maximo {max_files} archivos y {max_total_chars} caracteres en total.
-- Implementa la logica en un modulo puro bajo use_cases/ (sin E/S de red, sin dependencias nuevas, sin aleatoriedad, sin reloj del sistema, sin variables de entorno).
-- Registra la capacidad como handler en bootstrap/skill_system.py (anade una funcion handler y su registro dentro de build_builtin_skill_handler_registry) y anade un manifiesto declarativo skills/builtin/<skill_id>/skill.json conectado a ese handler.
-- Incluye pruebas focalizadas en tests/ que verifiquen la salida determinista.
-- Devuelve archivos completos, listos para escribirse tal cual, sin texto adicional.
+- Implementa la logica en un modulo puro bajo use_cases/ (sin E/S de red, sin APIs externas, sin dependencias nuevas, sin aleatoriedad, sin reloj del sistema, sin variables de entorno).
+- Si la capacidad debe quedar registrada como skill local, anade el handler en bootstrap/skill_system.py (dentro de build_builtin_skill_handler_registry) y su manifiesto declarativo skills/builtin/<skill_id>/skill.json; si no hace falta registrarla, omitelos.
+- Incluye pruebas focalizadas deterministas en tests/ (sin red, sin azar) que verifiquen la salida determinista.
+- No uses markdown ni bloques de codigo: solo los bloques de archivo, sin ningun texto adicional antes o despues.
 """
 
 
