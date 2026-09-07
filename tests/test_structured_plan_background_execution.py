@@ -8,6 +8,7 @@ BackgroundGoalPump drives it until the write step asks for approval.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,10 +24,12 @@ from core.async_task_scheduler import (
 from core.background_goal_pump import BackgroundGoalPump  # noqa: F401 - pump contract
 from core.conversational_autonomy import detect_structured_plan_objective
 from core.execution_plan_validator import ExecutionPlanValidator
+from core.hybrid_execution_planner import StructuredPlanProviderResult
 from core.orchestrator import AtlasOrchestrator
-from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Plan
+from core.planner import ExecutionPlan, ExecutionStep, PlanGenerationResult, Plan, Planner
 from core.router import Router
 from core.step_output_reference import StepOutputReference
+from core.worker_delegation import DynamicWorkerDelegator
 from memory.conversation import ConversationMemory
 from tools.filesystem.read_file_tool import ReadFileTool
 from tools.filesystem.write_file_tool import WriteFileTool
@@ -148,6 +151,7 @@ class Harness:
         plan: ExecutionPlan | None,
         success=True,
         planner=None,
+        worker_delegator=None,
     ):
         self.tmp_path = tmp_path
         self.store = JsonGoalTaskStore(tmp_path / "goal_store")
@@ -162,7 +166,11 @@ class Harness:
             return f"DIFERENCIAS: {text[:80]}"
 
         self.runner = Bootstrap.build_single_tool_runner(tool_registry=tool_registry)
-        self.executor = ToolTaskExecutor(self.runner, model_transformer=transformer)
+        self.executor = ToolTaskExecutor(
+            self.runner,
+            model_transformer=transformer,
+            worker_delegator=worker_delegator,
+        )
         self.scheduler = AsyncTaskScheduler(self.executor, store=self.store)
         self.executor.bind_result_lookup(self.scheduler.task)
         self.planner = planner or StructuredPlannerStub(plan, success=success)
@@ -762,3 +770,202 @@ def test_converted_step_retries_through_scheduler_reliability() -> None:
 
     assert calls == ["flaky", "flaky", "flaky"]
     assert scheduler.task("flaky").status is TaskStatus.DONE
+
+
+class RecordingWorker:
+    """Deterministic worker double with an explicit invocation log."""
+
+    def __init__(self, worker_id: str, tier: int) -> None:
+        self.worker_id = worker_id
+        self.tier = tier
+        self.calls: list[str] = []
+
+    def available(self) -> bool:
+        return True
+
+    def supports(self, task_kind: str) -> bool:
+        return task_kind == "transform"
+
+    def execute(self, instruction: str) -> str:
+        self.calls.append(instruction)
+        return f"{self.worker_id}: {instruction[:60]}"
+
+
+class FixedPlanProvider:
+    """Structured provider stub returning one fixed raw model response."""
+
+    def __init__(self, response_text: str) -> None:
+        self._response_text = response_text
+        self.calls: list[str] = []
+
+    def generate_plan(self, objective: str, catalog_json: str) -> StructuredPlanProviderResult:
+        self.calls.append(objective)
+        return StructuredPlanProviderResult(
+            success=True,
+            response_text=self._response_text,
+        )
+
+
+def _delegation_objective_plan(source_path: Path) -> str:
+    return json.dumps(
+        {
+            "status": "plan",
+            "goal": "politica de delegacion entre modelos",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "description": "Leer A.txt.",
+                    "tool": "read_file",
+                    "arguments": {"path": str(source_path)},
+                    "dependencies": [],
+                },
+                {
+                    "id": "step_2",
+                    "description": "Extraer las dos ideas principales.",
+                    "tool": "direct_response",
+                    "arguments": {
+                        "instruction": "Extrae en una frase las dos ideas principales: {input}"
+                    },
+                    "dependencies": ["step_1"],
+                },
+                {
+                    "id": "step_3",
+                    "description": "Proponer una politica de 5 puntos.",
+                    "tool": "direct_response",
+                    "arguments": {
+                        "instruction": "Propón una politica practica de 5 puntos para decidir cuándo usar un modelo local y cuándo escalar a uno más potente: {input}"
+                    },
+                    "dependencies": ["step_2"],
+                },
+                {
+                    "id": "step_4",
+                    "description": "Verificar que la politica no contradiga A.txt.",
+                    "tool": "direct_response",
+                    "arguments": {
+                        "instruction": "Verifica que la politica final no contradiga el contenido original: {input}"
+                    },
+                    "dependencies": ["step_1", "step_3"],
+                },
+                {
+                    "id": "step_5",
+                    "description": "Reunir la respuesta final.",
+                    "tool": "direct_response",
+                    "arguments": {
+                        "instruction": "Reune las ideas y la politica verificada en una respuesta final: {input}"
+                    },
+                    "dependencies": ["step_3", "step_4"],
+                },
+            ],
+            "risks": [],
+            "requires_confirmation": False,
+            "missing_information": [],
+            "warnings": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _real_structured_planner(response_text: str) -> Planner:
+    """Planner with the production structured-planning wiring and a fixed provider."""
+    from core.deterministic_multi_tool_planner import DeterministicMultiToolPlanner
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(ReadFileTool())
+    tool_registry.register(WriteFileTool())
+    tool_selector = Bootstrap.build_tool_selector(tool_registry)
+    schema_registry = Bootstrap.build_argument_schema_registry()
+    return Planner(
+        tool_registry=tool_registry,
+        tool_selector=tool_selector,
+        schema_registry=schema_registry,
+        argument_validator=Bootstrap.build_argument_validator(schema_registry),
+        semantic_tool_catalog=Bootstrap.build_semantic_tool_catalog(
+            tool_registry,
+            tool_selector,
+            schema_registry,
+        ),
+        multi_tool_planner=DeterministicMultiToolPlanner(),
+        hybrid_execution_planner=Bootstrap.build_hybrid_execution_planner(
+            tool_registry,
+            schema_registry,
+            hybrid_planning_enabled=True,
+        ),
+        structured_plan_provider=FixedPlanProvider(response_text),
+    )
+
+
+def test_delegation_objective_plans_executes_and_reports_real_workers(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The exact E2E objective becomes a valid plan (read_file + dependent
+    transforms), every transform is delegated by DynamicWorkerDelegator, and
+    the final report surfaces the real persisted final_worker metadata."""
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "A.txt"
+    source.write_text("idea uno\nidea dos\n", encoding="utf-8")
+
+    prompt = (
+        "Atlas, trabaja en segundo plano con este objetivo:\n\n"
+        f"1. Lee {source} y extrae en una frase sus dos ideas principales.\n"
+        "2. Analiza esas ideas y propón una política práctica de 5 puntos "
+        "para decidir cuándo usar un modelo local y cuándo escalar a un "
+        "modelo más potente.\n"
+        "3. Usa para cada tarea el recurso/modelo que consideres más eficiente.\n"
+        "4. Reúne ambos resultados en una respuesta final.\n"
+        "5. Indica qué worker/modelo ejecutó cada parte y por qué.\n"
+        "6. Verifica que la política final no contradiga el contenido de A.txt.\n"
+    )
+    objective = detect_structured_plan_objective(prompt)
+    assert objective is not None, "el objetivo E2E no fue detectado"
+
+    planner = _real_structured_planner(_delegation_objective_plan(source))
+    generation = planner.generate_execution_plan(objective, structured_planning=True)
+    assert generation.success, generation.errors
+    plan = generation.plan
+    assert plan is not None
+    assert [step.tool for step in plan.ordered_steps] == [
+        "read_file",
+        "direct_response",
+        "direct_response",
+        "direct_response",
+        "direct_response",
+    ]
+    assert "model selection" not in {step.tool for step in plan.ordered_steps}
+
+    local = RecordingWorker("local", tier=0)
+    gemini = RecordingWorker("gemini", tier=1)
+    delegator = DynamicWorkerDelegator((local, gemini))
+    harness = Harness(tmp_path, None, planner=planner, worker_delegator=delegator)
+    try:
+        response = harness.orchestrator.process_prompt(prompt, confirm=lambda _p: "")
+
+        assert "Plan estructurado en marcha" in response
+        goal_id = harness.orchestrator._background_goal_id
+        assert goal_id is not None
+        assert harness.wait_until(lambda: harness.scheduler.goal_finished(goal_id))
+
+        state = harness.scheduler.goal(goal_id)
+        assert state.tasks["step_1"].status is TaskStatus.DONE
+        for transform_id in ("step_2", "step_3", "step_4", "step_5"):
+            assert state.tasks[transform_id].status is TaskStatus.DONE
+        assert sorted(harness.read_tool.calls) == [str(source)]
+
+        # Light transforms stay cheap-first; multi-source transforms are
+        # synthesis and go most-capable-first (deterministic policy).
+        assert local.calls and gemini.calls
+        assert len(local.calls) == 2
+        assert len(gemini.calls) == 2
+        assert state.tasks["step_2"].metadata["final_worker"] == "local"
+        assert state.tasks["step_4"].metadata["final_worker"] == "gemini"
+
+        report = harness.orchestrator._describe_async_goal(
+            goal_id,
+            intro="Estado del trabajo",
+        )
+        assert "worker: local" in report
+        assert "worker: gemini" in report
+        assert "selección: light_transform_policy_cheapest_first" in report
+        assert "selección: synthesis_policy_most_capable_first" in report
+    finally:
+        harness.stop()

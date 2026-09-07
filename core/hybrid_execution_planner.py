@@ -1243,6 +1243,8 @@ class StructuredPlanParser:
         self,
         tool: str,
     ) -> Any | None:
+        if tool == "direct_response":
+            return None
         if not self._tool_registry.exists(tool):
             return lambda raw_response, provider_result: _unknown_tool_response(tool, raw_response, provider_result)
 
@@ -1270,7 +1272,7 @@ class StructuredPlanParser:
             if reference_error is not None:
                 return _invalid_model_response(reference_error, raw_response, provider_result)
 
-        if tool is None or self._schema_registry is None:
+        if tool is None or tool == "direct_response" or self._schema_registry is None:
             return None
 
         intent = _intent_for_tool(self._schema_registry, tool, self._catalog)
@@ -1517,6 +1519,11 @@ def build_structured_planning_prompt(
         "Use step ids exactly as step_1, step_2, step_3 in order. "
         "Include every required field and every required tool argument. "
         "Do not use tool null unless the step is purely logical and has no arguments. "
+        "Express reasoning, synthesis or verification steps as tool \"direct_response\" "
+        "with exactly one string argument named instruction. "
+        "The dependencies of a direct_response step are its inputs; Atlas chooses "
+        "the worker or model for each step automatically. "
+        "Never create steps to select models, workers or resources. "
         "If critical information is missing, return status clarification. "
         "If Atlas lacks a required tool or schema, return status unsupported. "
         "Do not create fictional steps to obtain data the user did not provide. "

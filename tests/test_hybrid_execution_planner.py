@@ -653,6 +653,69 @@ def test_duplicate_id_is_rejected() -> None:
     assert "Step id must be exactly 'step_2'." in result.errors[0]
 
 
+def test_structured_plan_represents_delegation_objective_with_direct_response_transforms() -> None:
+    """The E2E delegation objective is representable end to end: one read_file
+    plus dependent direct_response transforms that the bridge converts into
+    scheduler transform tasks (light and synthesis) without invented tools."""
+    registry, selector, schemas, catalog = _registry_selector_schema_catalog()
+    response = _model_json(
+        goal="politica de delegacion entre modelos",
+        steps=[
+            {"id": "step_1", "description": "Leer A.txt.", "tool": "read_file", "arguments": {"path": "C:/Atlas-tests/A.txt"}, "dependencies": []},
+            {"id": "step_2", "description": "Extraer las dos ideas principales.", "tool": "direct_response", "arguments": {"instruction": "Extrae en una frase las dos ideas principales: {input}"}, "dependencies": ["step_1"]},
+            {"id": "step_3", "description": "Proponer una politica de 5 puntos.", "tool": "direct_response", "arguments": {"instruction": "Propón una politica de 5 puntos a partir de: {input}"}, "dependencies": ["step_2"]},
+            {"id": "step_4", "description": "Verificar contradicciones con A.txt.", "tool": "direct_response", "arguments": {"instruction": "Verifica que la politica no contradiga el contenido original: {input}"}, "dependencies": ["step_1", "step_3"]},
+            {"id": "step_5", "description": "Reunir la respuesta final.", "tool": "direct_response", "arguments": {"instruction": "Reune las ideas y la politica verificada en una respuesta final: {input}"}, "dependencies": ["step_3", "step_4"]},
+        ],
+    )
+
+    result = _hybrid(registry, schemas).plan(
+        "lee A.txt, extrae sus ideas, propone una politica y verifica que no contradiga el archivo",
+        deterministic_planner=None,
+        catalog=catalog,
+        selector=selector,
+        plan_provider=FakeStructuredProvider(response),
+    )
+
+    assert result.success is True, result.errors
+    assert result.plan is not None
+    assert [step.tool for step in result.plan.ordered_steps] == [
+        "read_file",
+        "direct_response",
+        "direct_response",
+        "direct_response",
+        "direct_response",
+    ]
+    assert result.plan.required_tools == ("read_file",)
+
+    from core.execution_plan_task_adapter import execution_plan_to_task_specs
+
+    specs = execution_plan_to_task_specs(
+        result.plan,
+        validator=ExecutionPlanValidator(registry),
+    )
+    assert [spec["payload"]["kind"] for spec in specs] == [
+        "tool",
+        "transform",
+        "transform",
+        "transform",
+        "transform",
+    ]
+    assert specs[1]["payload"]["input_task"] == "step_1"
+    assert specs[3]["payload"]["input_tasks"] == ["step_1", "step_3"]
+    assert specs[4]["payload"]["input_tasks"] == ["step_3", "step_4"]
+
+
+def test_structured_planning_prompt_documents_direct_response_contract() -> None:
+    prompt = build_structured_planning_prompt("objetivo", "{}")
+    system = prompt.messages[0]["content"]
+
+    assert '"direct_response"' in system
+    assert "instruction" in system
+    assert "Atlas chooses" in system
+    assert "Never create steps to select models, workers or resources." in system
+
+
 def test_step_zero_style_id_is_rejected() -> None:
     registry, selector, schemas, catalog = _registry_selector_schema_catalog()
     response = _model_json(

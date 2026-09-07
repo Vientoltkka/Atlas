@@ -419,7 +419,16 @@ class AtlasOrchestrator:
                 label = "cancelada"
             else:
                 label = "en curso"
-            lines.append(f"- {task.description}: {label}.")
+            line = f"- {task.description}: {label}."
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            final_worker = metadata.get("final_worker")
+            if task.status is TaskStatus.DONE and isinstance(final_worker, str) and final_worker:
+                detail = f"worker: {final_worker}"
+                reason = metadata.get("selection_reason")
+                if isinstance(reason, str) and reason:
+                    detail += f"; selección: {reason}"
+                line = f"- {task.description}: {label} ({detail})."
+            lines.append(line)
         if any(
             task.status is TaskStatus.WAITING_APPROVAL
             for task in state.tasks.values()

@@ -79,6 +79,7 @@ def test_synthesis_transform_prefers_the_capable_worker() -> None:
 
     assert result.success
     assert result.final_worker == "GEMINI"
+    assert result.metadata()["selection_reason"] == "synthesis_policy_most_capable_first"
     assert local.calls == []
     assert is_synthesis_transform({"input_tasks": ["a", "b"]}, "resume")
     assert not is_synthesis_transform({"input_task": "a"}, "resume el texto")
@@ -98,6 +99,7 @@ def test_failed_primary_falls_back_once_to_gemini() -> None:
     assert [record.worker_id for record in result.attempted] == ["LOCAL", "GEMINI"]
     assert result.attempted[0].error == "ollama no responde"
     assert result.attempted[1].error is None
+    assert result.metadata()["selection_reason"] == "fallback_after_preferred_worker_failed"
     assert len(local.calls) == 1
     assert len(gemini.calls) == 1
 
@@ -200,6 +202,7 @@ def test_transform_task_records_worker_metadata_and_persists_it(tmp_path) -> Non
         "preferred_worker": "LOCAL",
         "attempted_workers": [{"worker_id": "LOCAL", "error": None}],
         "final_worker": "LOCAL",
+        "selection_reason": "light_transform_policy_cheapest_first",
     }
     assert gemini.calls == []
 

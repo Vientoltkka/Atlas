@@ -63,10 +63,21 @@ class DelegationResult:
     preferred_worker: str | None
     attempted: tuple[AttemptRecord, ...]
     error: str | None = None
+    synthesis: bool = False
 
     @property
     def success(self) -> bool:
         return self.output is not None and self.final_worker is not None
+
+    def selection_reason(self) -> str | None:
+        """Deterministic reason derived from the existing delegation policy."""
+        if self.final_worker is None:
+            return None
+        if self.preferred_worker is not None and self.final_worker != self.preferred_worker:
+            return "fallback_after_preferred_worker_failed"
+        if self.synthesis:
+            return "synthesis_policy_most_capable_first"
+        return "light_transform_policy_cheapest_first"
 
     def metadata(self) -> dict[str, Any]:
         """Minimal worker metadata safe to persist with the task."""
@@ -80,6 +91,9 @@ class DelegationResult:
             payload["preferred_worker"] = self.preferred_worker
         if self.final_worker is not None:
             payload["final_worker"] = self.final_worker
+            reason = self.selection_reason()
+            if reason is not None:
+                payload["selection_reason"] = reason
         return payload
 
 
@@ -183,6 +197,7 @@ class DynamicWorkerDelegator:
                 final_worker=worker.worker_id,
                 preferred_worker=preferred,
                 attempted=tuple(attempted),
+                synthesis=synthesis,
             )
         return DelegationResult(
             output=None,
@@ -190,6 +205,7 @@ class DynamicWorkerDelegator:
             preferred_worker=preferred,
             attempted=tuple(attempted),
             error="no candidate worker completed the task.",
+            synthesis=synthesis,
         )
 
 
