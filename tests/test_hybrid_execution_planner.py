@@ -1443,6 +1443,69 @@ def test_structured_parser_rejects_too_many_steps() -> None:
     assert "maximum step count" in result.errors[0]
 
 
+def _parser() -> StructuredPlanParser:
+    registry, _selector, schemas, catalog = _registry_selector_schema_catalog()
+    return StructuredPlanParser(
+        tool_registry=registry,
+        catalog=catalog,
+        schema_registry=schemas,
+    )
+
+
+def test_structured_parser_accepts_payload_without_warnings() -> None:
+    payload = json.loads(_model_json())
+    payload.pop("warnings")
+
+    result = _parser().parse("lee", StructuredPlanProviderResult(success=True, response_text=json.dumps(payload, separators=(",", ":"), sort_keys=True)))
+
+    assert result.success is True
+    assert result.status == "plan"
+    assert result.warnings == ()
+
+
+def test_structured_parser_accepts_payload_without_missing_information() -> None:
+    payload = json.loads(_model_json())
+    payload.pop("missing_information")
+
+    result = _parser().parse("lee", StructuredPlanProviderResult(success=True, response_text=json.dumps(payload, separators=(",", ":"), sort_keys=True)))
+
+    assert result.success is True
+    assert result.status == "plan"
+
+
+def test_structured_parser_accepts_payload_without_optional_fields() -> None:
+    payload = json.loads(_model_json())
+    payload.pop("missing_information")
+    payload.pop("warnings")
+
+    result = _parser().parse("lee", StructuredPlanProviderResult(success=True, response_text=json.dumps(payload, separators=(",", ":"), sort_keys=True)))
+
+    assert result.success is True
+    assert result.status == "plan"
+    assert result.missing_information == ()
+    assert result.warnings == ()
+
+
+def test_structured_parser_rejects_non_list_warnings() -> None:
+    payload = _model_json(warnings="no es una lista")
+
+    result = _parser().parse("lee", StructuredPlanProviderResult(success=True, response_text=payload))
+
+    assert result.success is False
+    assert result.error_code == "INVALID_MODEL_RESPONSE"
+    assert "missing_information and warnings must be string lists." in result.errors[0]
+
+
+def test_structured_parser_rejects_non_list_missing_information() -> None:
+    payload = _model_json(missing_information={"falta": "dato"})
+
+    result = _parser().parse("lee", StructuredPlanProviderResult(success=True, response_text=payload))
+
+    assert result.success is False
+    assert result.error_code == "INVALID_MODEL_RESPONSE"
+    assert "missing_information and warnings must be string lists." in result.errors[0]
+
+
 def test_bootstrap_provider_enabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("ATLAS_STRUCTURED_PLAN_PROVIDER_ENABLED", raising=False)
     monkeypatch.delenv("ATLAS_STRUCTURED_PLAN_MODEL", raising=False)

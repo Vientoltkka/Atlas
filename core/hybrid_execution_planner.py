@@ -1078,8 +1078,8 @@ class StructuredPlanParser:
         if status not in self._VALID_STATUS:
             return _invalid_model_response("Model response status is invalid.", raw_response, provider_result)
 
-        missing_information = _string_tuple(payload.get("missing_information", ()))
-        warnings = _string_tuple(payload.get("warnings", ()))
+        missing_information = _string_tuple(payload.get("missing_information", []))
+        warnings = _string_tuple(payload.get("warnings", []))
         if missing_information is None or warnings is None:
             return _invalid_model_response("missing_information and warnings must be string lists.", raw_response, provider_result)
 
@@ -1150,7 +1150,7 @@ class StructuredPlanParser:
                 provider_result,
             )
 
-        risks = _string_tuple(payload.get("risks", ()))
+        risks = _string_tuple(payload.get("risks", []))
         if risks is None:
             return _invalid_model_response("risks must be a string list.", raw_response, provider_result)
 
