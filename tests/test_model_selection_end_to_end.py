@@ -59,15 +59,29 @@ class RecordingPromptClient:
         self.response = response
         self.failing_models = set(failing_models)
         self.models: list[str] = []
+        self.provider_ids: list[str | None] = []
 
-    def ask(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ask(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.models.append(model)
+        self.provider_ids.append(provider_id)
         if model in self.failing_models:
             raise InferenceBackendError(model, "simulated inference failure")
         return self.response
 
-    def ask_messages(self, model: str, messages: list[dict[str, str]]) -> str:
-        return self.ask(model, messages)
+    def ask_messages(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
+        return self.ask(model, messages, provider_id=provider_id)
 
 
 class PromptBackedAgent:
@@ -261,6 +275,60 @@ def test_structured_reasoning_uses_common_selector_policy_and_physical_model() -
     assert "reasoning" in selection.descriptor.capabilities
 
 
+def test_structured_planning_routes_ask_messages_to_the_selected_local_provider() -> None:
+    manager = RecordingModelManager(["qwen3.6:latest"])
+    prompt_client = RecordingPromptClient(response=json.dumps({"steps": []}))
+    policy = ModelSelectionPolicy(
+        preferred_provider="ollama",
+        prefer_local=True,
+        allow_fallback=False,
+    )
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="coding-local",
+        model_manager=manager,
+        model_selection_policy=policy,
+    )
+
+    result = provider.generate_plan("analiza el proyecto", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert result.model_name == "qwen3.6:latest"
+    assert prompt_client.models == ["qwen3.6:latest"]
+    assert prompt_client.provider_ids == ["ollama"]
+
+
+def test_structured_planning_routes_ask_messages_to_gemini_when_selected() -> None:
+    manager = _manager(
+        _descriptor(
+            "reasoning-remote",
+            "gemini-3.6-flash",
+            "reasoning",
+            provider="gemini",
+            local=False,
+        ),
+    )
+    prompt_client = RecordingPromptClient(response=json.dumps({"steps": []}))
+    policy = ModelSelectionPolicy(
+        preferred_provider="gemini",
+        prefer_local=False,
+        allow_fallback=False,
+    )
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="reasoning-remote",
+        model_manager=manager,
+        model_selection_policy=policy,
+    )
+
+    result = provider.generate_plan("analiza el proyecto", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert result.model_name == "gemini-3.6-flash"
+    assert prompt_client.models == ["gemini-3.6-flash"]
+    assert prompt_client.provider_ids == ["gemini"]
+
+
 def test_runtime_policy_prefers_local_and_requested_provider_with_safe_degradation() -> None:
     local_manager = _manager(
         _descriptor(
@@ -350,7 +418,7 @@ def test_fallback_disabled_attempts_only_primary_and_returns_structured_error() 
                 task="chat",
                 preferred_model_id="primary",
             ),
-            lambda model: prompt_client.ask(model, []),
+            lambda model, _provider_id: prompt_client.ask(model, [], provider_id=_provider_id),
         )
 
     assert prompt_client.models == ["primary:latest"]
@@ -377,7 +445,7 @@ def test_unhealthy_primary_uses_declared_healthy_fallback_before_inference() -> 
             task="chat",
             preferred_model_id="primary",
         ),
-        lambda model: prompt_client.ask(model, []),
+        lambda model, _provider_id: prompt_client.ask(model, [], provider_id=_provider_id),
     )
 
     assert response == "healthy fallback"
@@ -411,7 +479,7 @@ def test_primary_inference_failure_uses_declared_fallback_and_final_physical_mod
             task="chat",
             preferred_model_id="primary",
         ),
-        lambda model: prompt_client.ask(model, []),
+        lambda model, _provider_id: prompt_client.ask(model, [], provider_id=_provider_id),
     )
 
     assert response == "runtime fallback"
@@ -436,7 +504,7 @@ def test_streaming_partial_output_never_starts_or_mixes_a_fallback_model() -> No
     )
     attempted_models: list[str] = []
 
-    def stream(model: str):
+    def stream(model: str, _provider_id: str | None = None):
         attempted_models.append(model)
         if model == "primary:latest":
             yield "partial"
@@ -472,7 +540,7 @@ def test_cyclic_fallback_chain_attempts_each_model_once_and_terminates() -> None
                 task="chat",
                 preferred_model_id="cycle-a",
             ),
-            lambda model: prompt_client.ask(model, []),
+            lambda model, _provider_id: prompt_client.ask(model, [], provider_id=_provider_id),
         )
 
     assert prompt_client.models == ["cycle-a:latest", "cycle-b:latest"]

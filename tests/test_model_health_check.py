@@ -107,7 +107,7 @@ def test_healthy_inventory_model_is_used() -> None:
     inferred: list[str] = []
 
     result = ModelInferenceRunner(manager, health_checker=health).run(
-        _request(), lambda model: inferred.append(model) or "ok"
+        _request(), lambda model, _provider_id: inferred.append(model) or "ok"
     )
 
     assert result == "ok"
@@ -130,7 +130,7 @@ def test_unhealthy_gemini_uses_local_chat_fallback() -> None:
 
     result = ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
         _gemini_chat_request(),
-        lambda model: inferred.append(model) or "respuesta local",
+        lambda model, _provider_id: inferred.append(model) or "respuesta local",
     )
 
     assert result == "respuesta local"
@@ -144,7 +144,7 @@ def test_healthy_gemini_does_not_use_local_chat_fallback() -> None:
 
     result = ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
         _gemini_chat_request(),
-        lambda model: inferred.append(model) or "respuesta Gemini",
+        lambda model, _provider_id: inferred.append(model) or "respuesta Gemini",
     )
 
     assert result == "respuesta Gemini"
@@ -164,7 +164,7 @@ def test_unhealthy_gemini_and_local_chat_preserve_final_health_error() -> None:
     with pytest.raises(ModelHealthCheckError) as captured:
         ModelInferenceRunner(_gemini_chat_manager(), health_checker=health).run(
             _gemini_chat_request(),
-            lambda model: inferred.append(model) or "unused",
+            lambda model, _provider_id: inferred.append(model) or "unused",
         )
 
     assert health.checked == ["chat-gemini", "chat-local"]
@@ -180,7 +180,7 @@ def test_unhealthy_inventory_model_is_not_used_without_fallback() -> None:
 
     with pytest.raises(ModelHealthCheckError) as captured:
         ModelInferenceRunner(manager, health_checker=health).run(
-            _request(allow_fallback=False), lambda model: inferred.append(model)
+            _request(allow_fallback=False), lambda model, _provider_id: inferred.append(model)
         )
 
     assert inferred == []
@@ -194,7 +194,7 @@ def test_unhealthy_primary_uses_next_declared_healthy_fallback() -> None:
     inferred: list[str] = []
 
     result = ModelInferenceRunner(manager, health_checker=health).run(
-        _request(), lambda model: inferred.append(model) or "fallback response"
+        _request(), lambda model, _provider_id: inferred.append(model) or "fallback response"
     )
 
     assert result == "fallback response"
@@ -217,7 +217,7 @@ def test_unhealthy_fallback_chain_advances_once_and_ignores_irrelevant_models() 
     inferred: list[str] = []
 
     result = ModelInferenceRunner(manager, health_checker=health).run(
-        _request(), lambda model: inferred.append(model) or "ok"
+        _request(), lambda model, _provider_id: inferred.append(model) or "ok"
     )
 
     assert result == "ok"
@@ -230,7 +230,7 @@ def test_health_timeout_is_a_controlled_failure() -> None:
     health = RecordingHealthChecker({"primary": _health("primary", False, ModelHealthErrorCode.TIMEOUT)})
 
     with pytest.raises(ModelHealthCheckError) as captured:
-        ModelInferenceRunner(manager, health_checker=health).run(_request(), lambda _model: "unused")
+        ModelInferenceRunner(manager, health_checker=health).run(_request(), lambda _model, _provider_id: "unused")
 
     assert captured.value.last_result.error_code is ModelHealthErrorCode.TIMEOUT
 
@@ -240,7 +240,7 @@ def test_runtime_fallback_remains_active_after_healthy_probe() -> None:
     health = RecordingHealthChecker({"primary": _health("primary", True), "fallback": _health("fallback", True)})
     inferred: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         inferred.append(model)
         if model == "primary:latest":
             raise InferenceBackendError(model, "runtime failed")

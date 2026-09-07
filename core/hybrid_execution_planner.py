@@ -329,15 +329,20 @@ class PromptClientStructuredPlanProvider:
                         task="reasoning",
                         preferred_model_id=initial_selection.logical_model_id,
                     ),
-                    lambda selected_model: self._ask_explicit_messages(
+                    lambda selected_model, selected_provider_id: self._ask_explicit_messages(
                         selected_model,
                         list(prompt.messages),
+                        selected_provider_id,
                     ),
                     initial_selection=initial_selection,
                 )
                 model_name = inference_runner.last_result.final_physical_model_name
             else:
-                response = self._ask_explicit_messages(model_name, list(prompt.messages))
+                response = self._ask_explicit_messages(
+                    model_name,
+                    list(prompt.messages),
+                    initial_selection.provider_id if initial_selection is not None else None,
+                )
         except TimeoutError as error:
             return StructuredPlanProviderResult(
                 success=False,
@@ -618,9 +623,10 @@ class PromptClientStructuredPlanProvider:
                     task="reasoning",
                     preferred_model_id=initial_selection.logical_model_id,
                 ),
-                lambda selected_model: self._stream_explicit_messages(
+                lambda selected_model, selected_provider_id: self._stream_explicit_messages(
                     selected_model,
                     list(prompt.messages),
+                    selected_provider_id,
                 ),
                 initial_selection=initial_selection,
             )
@@ -628,6 +634,7 @@ class PromptClientStructuredPlanProvider:
             stream_iterator = self._stream_explicit_messages(
                 model_name,
                 list(prompt.messages),
+                initial_selection.provider_id if initial_selection is not None else None,
             )
         try:
             for chunk in stream_iterator:
@@ -842,21 +849,23 @@ class PromptClientStructuredPlanProvider:
         self,
         model_name: str,
         messages: list[dict[str, str]],
+        provider_id: str | None = None,
     ) -> str:
         ask_messages = getattr(self._prompt_client, "ask_messages", None)
         if callable(ask_messages):
-            return ask_messages(model=model_name, messages=messages)
-        return self._prompt_client.ask(model=model_name, messages=messages)
+            return ask_messages(model=model_name, messages=messages, provider_id=provider_id)
+        return self._prompt_client.ask(model=model_name, messages=messages, provider_id=provider_id)
 
     def _stream_explicit_messages(
         self,
         model_name: str,
         messages: list[dict[str, str]],
+        provider_id: str | None = None,
     ):
         stream_messages = getattr(self._prompt_client, "stream_messages", None)
         if not callable(stream_messages):
             raise RuntimeError("Prompt client does not support streaming messages.")
-        return stream_messages(model=model_name, messages=messages)
+        return stream_messages(model=model_name, messages=messages, provider_id=provider_id)
 
     def _resolve_model_name(
         self,

@@ -133,9 +133,17 @@ class StaticModelSource:
 class StructuredPromptClient:
     def __init__(self) -> None:
         self.models: list[str] = []
+        self.provider_ids: list[str | None] = []
 
-    def ask_messages(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ask_messages(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.models.append(model)
+        self.provider_ids.append(provider_id)
         return json.dumps({"steps": []})
 
 

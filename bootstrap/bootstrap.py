@@ -1493,7 +1493,7 @@ class Bootstrap:
             try:
                 return direct_inference_runner.run(
                     direct_selection_request,
-                    lambda selected_model: chat_agent.run(
+                    lambda selected_model, _selected_provider_id: chat_agent.run(
                         model=selected_model,
                         messages=messages,
                         provider_id=direct_provider_id(selected_model),
@@ -1523,7 +1523,7 @@ class Bootstrap:
             try:
                 yield from direct_inference_runner.stream(
                     direct_selection_request,
-                    lambda selected_model: stream(
+                    lambda selected_model, _selected_provider_id: stream(
                         model=selected_model,
                         messages=messages,
                         provider_id=direct_provider_id(selected_model),

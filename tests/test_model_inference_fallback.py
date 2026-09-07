@@ -51,7 +51,7 @@ def test_primary_failure_uses_exactly_one_authorized_fallback() -> None:
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         attempts.append(model)
         if model == "primary:latest":
             raise InferenceBackendError(model, "backend failed")
@@ -90,7 +90,7 @@ def test_fallback_is_never_attempted_when_not_authorized() -> None:
                 preferred_model_id="primary",
                 allow_fallback=False,
             ),
-            lambda model: attempts.append(model)
+            lambda model, _provider_id: attempts.append(model)
             or (_ for _ in ()).throw(InferenceBackendError(model, "failed")),
         )
 
@@ -113,7 +113,7 @@ def test_declared_transitive_chain_is_attempted_once_in_order() -> None:
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         attempts.append(model)
         if model != "fallback-2:latest":
             raise InferenceBackendError(model, "failed")
@@ -142,7 +142,7 @@ def test_exhausted_chain_raises_structured_error_without_global_model() -> None:
             ModelSelectionRequest(
                 task="chat", preferred_model_id="primary", allow_fallback=True
             ),
-            lambda model: attempts.append(model)
+            lambda model, _provider_id: attempts.append(model)
             or (_ for _ in ()).throw(InferenceBackendError(model, "failed")),
         )
 
@@ -167,7 +167,7 @@ def test_incompatible_unknown_and_unavailable_fallbacks_are_not_executed() -> No
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         attempts.append(model)
         if model == "primary:latest":
             raise InferenceBackendError(model, "failed")
@@ -190,7 +190,7 @@ def test_streaming_falls_back_only_before_any_fragment_is_observable() -> None:
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def stream(model: str):
+    def stream(model: str, _provider_id: str | None = None):
         attempts.append(model)
         if model == "primary:latest":
             raise InferenceBackendError(model, "failed before output")
@@ -216,7 +216,7 @@ def test_streaming_never_mixes_fallback_after_partial_output() -> None:
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def stream(model: str):
+    def stream(model: str, _provider_id: str | None = None):
         attempts.append(model)
         if model == "primary:latest":
             yield "partial"
@@ -242,7 +242,7 @@ def test_programming_errors_are_not_classified_as_inference_failures() -> None:
     with pytest.raises(ValueError, match="programming error"):
         runner.run(
             ModelSelectionRequest(task="chat", preferred_model_id="primary"),
-            lambda _model: (_ for _ in ()).throw(ValueError("programming error")),
+            lambda _model, _provider_id: (_ for _ in ()).throw(ValueError("programming error")),
         )
 
 
@@ -270,7 +270,7 @@ def test_gemini_content_error_does_not_use_local_fallback() -> None:
                 preferred_model_id="chat-gemini",
                 allow_fallback=True,
             ),
-            lambda model: attempts.append(model)
+            lambda model, _provider_id: attempts.append(model)
             or (_ for _ in ()).throw(
                 InferenceBackendError(model, "empty response")
             ),
@@ -296,7 +296,7 @@ def test_gemini_provider_error_uses_local_fallback() -> None:
     )
     attempts: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         attempts.append(model)
         if model == "gemini-3.6-flash":
             error = ChatInferenceError("gemini", model, "quota exhausted")
@@ -341,7 +341,7 @@ def test_same_physical_model_is_not_retried_through_an_alias() -> None:
     runner = ModelInferenceRunner(manager)
     attempts: list[str] = []
 
-    def infer(model: str) -> str:
+    def infer(model: str, _provider_id: str | None = None) -> str:
         attempts.append(model)
         if model == "shared:latest":
             raise InferenceBackendError(model, "failed")

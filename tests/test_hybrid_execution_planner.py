@@ -17,7 +17,7 @@ from core.hybrid_execution_planner import (
     StructuredPlanProviderResult,
     build_structured_planning_prompt,
 )
-from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
+from core.model_manager import ModelDescriptor, ModelManager, ModelSelectionRequest, ModelSelectionResult
 from core.model_selection_policy import ModelSelectionPolicy
 from core.planner import Planner
 from tools.argument_schema import ArgumentField, ArgumentSchema, ArgumentSchemaRegistry
@@ -100,17 +100,34 @@ class PromptClientFake:
         self.ask_calls: list[tuple[str, list[dict[str, str]]]] = []
         self.ask_messages_calls: list[tuple[str, list[dict[str, str]]]] = []
         self.stream_messages_calls: list[tuple[str, list[dict[str, str]]]] = []
+        self.ask_provider_ids: list[str | None] = []
+        self.ask_messages_provider_ids: list[str | None] = []
+        self.stream_messages_provider_ids: list[str | None] = []
 
-    def ask(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ask(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.calls.append((model, messages))
         self.ask_calls.append((model, messages))
+        self.ask_provider_ids.append(provider_id)
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
 
-    def stream_messages(self, model: str, messages: list[dict[str, str]]):
+    def stream_messages(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ):
         self.calls.append((model, messages))
         self.stream_messages_calls.append((model, messages))
+        self.stream_messages_provider_ids.append(provider_id)
         if isinstance(self.stream_chunks, Exception):
             raise self.stream_chunks
         chunks = self.stream_chunks if self.stream_chunks is not None else [self.response]
@@ -119,9 +136,16 @@ class PromptClientFake:
                 raise chunk
             yield chunk
 
-    def ask_messages(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ask_messages(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.calls.append((model, messages))
         self.ask_messages_calls.append((model, messages))
+        self.ask_messages_provider_ids.append(provider_id)
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
@@ -1173,6 +1197,29 @@ def test_streaming_provider_accumulates_chunks_and_returns_complete_response_onl
     assert progress[-1].phase == "completed"
     assert progress[2].first_token_received is True
     assert result.progress_events == tuple(progress)
+
+
+def test_streaming_provider_routes_stream_messages_to_the_selected_provider() -> None:
+    response = _model_json()
+    prompt_client = PromptClientFake("", stream_chunks=[response])
+    model_manager = RecordingSelectionModelManager(["glm-5.2-local:latest"])
+    provider = PromptClientStructuredPlanProvider(
+        prompt_client,
+        model_name="project-local",
+        model_manager=model_manager,
+        model_selection_policy=ModelSelectionPolicy(
+            preferred_provider="ollama",
+            prefer_local=True,
+            allow_fallback=False,
+        ),
+    )
+
+    result = provider.generate_plan_streaming("lee", json.dumps({"tools": []}))
+
+    assert result.success is True
+    assert prompt_client.stream_messages_calls[0][0] == "glm-5.2-local:latest"
+    assert prompt_client.stream_messages_provider_ids == ["ollama"]
+    assert prompt_client.ask_messages_calls == []
 
 
 def test_streaming_provider_and_non_streaming_provider_return_same_fake_response() -> None:

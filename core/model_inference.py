@@ -108,7 +108,7 @@ class ModelInferenceRunner:
     def run(
         self,
         request: ModelSelectionRequest,
-        infer: Callable[[str], T],
+        infer: Callable[[str, str | None], T],
         *,
         initial_selection: ModelSelectionResult | None = None,
     ) -> T:
@@ -136,7 +136,7 @@ class ModelInferenceRunner:
                 )
                 continue
             try:
-                value = infer(physical_name)
+                value = infer(physical_name, current.provider_id)
             except InferenceBackendError as error:
                 if (
                     current.provider_id == "gemini"
@@ -170,7 +170,7 @@ class ModelInferenceRunner:
     def stream(
         self,
         request: ModelSelectionRequest,
-        infer: Callable[[str], Iterator[str]],
+        infer: Callable[[str, str | None], Iterator[str]],
         *,
         initial_selection: ModelSelectionResult | None = None,
     ) -> Iterator[str]:
@@ -199,7 +199,7 @@ class ModelInferenceRunner:
                 continue
             emitted = False
             try:
-                for fragment in infer(physical_name):
+                for fragment in infer(physical_name, current.provider_id):
                     emitted = True
                     yield fragment
             except InferenceBackendError as error:
