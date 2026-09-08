@@ -429,7 +429,7 @@ def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_follo
     nutrition = orchestrator._registry.get("nutrition")
     assert isinstance(nutrition, NutritionAgent)
 
-    def health_check_must_not_run(_model: str) -> None:
+    def health_check_must_not_run(_model: str, *, provider_id: str | None = None) -> None:
         raise AssertionError("El preflight no debe ejecutar el health-check del modelo.")
 
     monkeypatch.setattr(nutrition._client, "check_model_health", health_check_must_not_run)
@@ -451,7 +451,7 @@ def test_text_chat_nutrition_preflight_bypasses_model_health_and_completes_follo
     monkeypatch.setattr(
         nutrition._client,
         "check_model_health",
-        lambda model: (_ for _ in ()).throw(
+        lambda model, provider_id=None: (_ for _ in ()).throw(
             InferenceBackendError(model, "backend unavailable")
         ),
     )
@@ -488,7 +488,7 @@ def test_text_chat_legal_contract_clause_falls_back_when_provider_is_unavailable
     monkeypatch.setattr(
         legal._client,
         "check_model_health",
-        lambda model: (_ for _ in ()).throw(
+        lambda model, provider_id=None: (_ for _ in ()).throw(
             InferenceBackendError(model, "backend unavailable")
         ),
     )
@@ -936,8 +936,15 @@ def test_orb_context_actions_reuse_chat_and_voice_controller_paths(qapp) -> None
     controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
     panel.hide()
 
-    orb.move(200, 160)
-    panel.move(200, 160)
+    # The hero-sized orb plus the chat panel do not fit the tiny offscreen
+    # screen; a larger virtual screen keeps the geometry contract testable.
+    from PySide6.QtCore import QRect
+
+    fake_screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1600, 900))
+    orb.screen = lambda: fake_screen  # type: ignore[method-assign]
+    panel.screen = lambda: fake_screen  # type: ignore[method-assign]
+    orb.move(600, 160)
+    panel.move(600, 160)
     orb.chat_requested.emit()
     _drain_events(qapp)
     assert panel.isVisible()
@@ -961,8 +968,15 @@ def test_show_chat_repositions_an_overlapping_panel_once(qapp) -> None:
 
     orb = create_orb_window()
     panel = create_transcript_panel()
-    orb.move(200, 160)
-    panel.move(200, 160)
+    # The hero-sized orb plus the chat panel do not fit the tiny offscreen
+    # screen; a larger virtual screen keeps the geometry contract testable.
+    from PySide6.QtCore import QRect
+
+    fake_screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1600, 900))
+    orb.screen = lambda: fake_screen  # type: ignore[method-assign]
+    panel.screen = lambda: fake_screen  # type: ignore[method-assign]
+    orb.move(600, 160)
+    panel.move(600, 160)
     controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
 
     controller.start(start_voice=False)
@@ -977,5 +991,31 @@ def test_show_chat_repositions_an_overlapping_panel_once(qapp) -> None:
 
     controller.show_chat()
     assert panel.frameGeometry() == first_panel_geometry
+    orb.close()
+    panel.close()
+
+
+def test_capability_menu_option_opens_chat_and_prefills_the_domain(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from ui.orbe_app import _CAPABILITY_OPTIONS
+
+    class FakeAtlas:
+        pass
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+    controller.start(start_voice=False)
+
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+    for capability_id, label in _CAPABILITY_OPTIONS:
+        orb.context_menu.capability_selected.emit(capability_id)
+        _drain_events(qapp)
+        assert panel.isVisible()
+        assert panel._input.text() == f"{label}: "
+        assert sent == []  # routing stays with the existing chat pipeline
+        panel._input.clear()
     orb.close()
     panel.close()

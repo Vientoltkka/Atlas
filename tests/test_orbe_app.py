@@ -11,7 +11,7 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from use_cases.ui_state_mapper import OrbVisualState
-from ui import orbe_app
+from ui import orb_assets, orbe_app
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +37,7 @@ def test_color_mapping_is_deterministic_and_complete() -> None:
 
 def test_primary_visual_states_use_the_fixed_semantic_palette() -> None:
     assert orbe_app.color_for_state(OrbVisualState.IDLE)[:3] == (56, 185, 255)
-    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (168, 102, 255)
+    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (0, 132, 255)
     assert orbe_app.color_for_state(OrbVisualState.SPEAKING)[:3] == (72, 238, 148)
     assert orbe_app.color_for_state(OrbVisualState.AUTOMATION)[:3] == (255, 72, 72)
     assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 174, 52)
@@ -93,7 +93,7 @@ def test_five_primary_visual_profiles_have_distinct_activity_controls() -> None:
     profiles = {state: orbe_app.visual_profile(state) for state in states}
 
     assert orbe_app.color_for_state(OrbVisualState.IDLE)[:3] == (56, 185, 255)
-    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (168, 102, 255)
+    assert orbe_app.color_for_state(OrbVisualState.PROCESSING)[:3] == (0, 132, 255)
     assert orbe_app.color_for_state(OrbVisualState.SPEAKING)[:3] == (72, 238, 148)
     assert orbe_app.color_for_state(OrbVisualState.AUTOMATION)[:3] == (255, 72, 72)
     assert orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)[:3] == (255, 174, 52)
@@ -292,19 +292,37 @@ def test_orb_click_toggles_the_custom_context_menu(qapp, orb) -> None:
     assert not orb.context_menu.isVisible()
 
 
-def test_context_menu_stays_on_screen_and_moves_left_at_right_edge(qapp, orb) -> None:
+def test_context_menu_grows_around_the_orb_and_stays_on_screen(qapp, orb) -> None:
+    from PySide6.QtCore import QPoint
+
     bounds = orb.screen().availableGeometry()
-    orb.move(bounds.right() - orb.width() + 1, bounds.center().y() - orb.height() // 2)
+    orb.move(bounds.center().x() - orb.width() // 2, bounds.center().y() - orb.height() // 2)
 
     orb.toggle_context_menu()
 
     menu = orb.context_menu
-    geometry = menu.frameGeometry()
+    geometry = menu.geometry()
     assert geometry.left() >= bounds.left()
     assert geometry.right() <= bounds.right()
     assert geometry.top() >= bounds.top()
     assert geometry.bottom() <= bounds.bottom()
-    assert geometry.right() < orb.frameGeometry().left()
+    # The HUD is born around the sphere: both lateral panels leave the orb
+    # centre inside a transparent, click-through gap.
+    assert geometry.center().x() == orb.frameGeometry().center().x()
+    orb_centre_local = orb.frameGeometry().center() - geometry.topLeft()
+    assert not menu.mask().contains(orb_centre_local)
+    panel_point = QPoint(8, geometry.height() // 2)
+    assert menu.mask().contains(panel_point)
+    menu.hide()
+
+    # Clamped at the right edge, every part of the menu remains on screen.
+    orb.move(bounds.right() - orb.width() + 1, bounds.center().y() - orb.height() // 2)
+    orb.toggle_context_menu()
+    geometry = menu.geometry()
+    assert geometry.left() >= bounds.left()
+    assert geometry.right() <= bounds.right()
+    assert geometry.top() >= bounds.top()
+    assert geometry.bottom() <= bounds.bottom()
     menu.hide()
 
 
@@ -336,19 +354,72 @@ def test_context_menu_voice_label_reflects_real_controller_state(orb) -> None:
     assert "#758496" in orb.context_menu._voice_indicator.styleSheet()
 
 
+def test_clickable_zone_is_a_central_disc_within_the_window(qapp, orb) -> None:
+    from PySide6.QtCore import QPoint
+
+    centre = orb.frameGeometry().center()
+    radius = orb.width() * orbe_app.CLICKABLE_RADIUS_FACTOR
+
+    assert orbe_app.CLICKABLE_RADIUS_FACTOR == pytest.approx(0.50)
+    assert orb.clickable_at(centre)
+    assert orb.clickable_at(centre + QPoint(int(radius * 0.8), 0))
+    # Corners of the square window stay outside the disc: clicks pass to desktop.
+    assert not orb.clickable_at(orb.frameGeometry().topLeft())
+    assert not orb.clickable_at(orb.frameGeometry().topRight())
+
+
+def test_holo_menu_lists_every_capability_and_emits_selection(qapp, orb) -> None:
+    from ui.orbe_app import _CAPABILITY_OPTIONS
+    expected_ids = {
+        "coding", "proyectos", "entrenamiento", "nutricion", "salud",
+        "calendario", "control_pc", "automatizacion", "investigacion",
+        "legal", "finanzas", "agentes", "mas_herramientas",
+    }
+    menu = orb.context_menu
+    assert set(menu._capability_buttons) == expected_ids
+    assert {option_id for option_id, _label in _CAPABILITY_OPTIONS} == expected_ids
+
+    selections: list[str] = []
+    menu.capability_selected.connect(selections.append)
+    orb.toggle_context_menu()
+    assert menu.isVisible()
+    for capability_id, button in menu._capability_buttons.items():
+        button.click()
+        assert selections[-1] == capability_id
+        assert not menu.isVisible()
+        orb.toggle_context_menu()
+    assert len(selections) == len(expected_ids)
+
+
+def test_prefill_input_prepares_chat_without_sending(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+
+    panel.prefill_input("Control PC: ")
+
+    assert panel._input.text() == "Control PC: "
+    assert sent == []
+    panel.close()
+
+
 def test_fixed_orb_size(orb) -> None:
     assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.29)
-    assert orb.width() == orbe_app.ORB_SIZE
-    assert 350 <= orbe_app.ORB_SIZE <= 370
-    assert orb.height() == orbe_app.ORB_SIZE
+    assert orb.width() == orb.height() == orbe_app.size_for_state(OrbVisualState.IDLE)
+    if orb_assets.hero_available():
+        # The approved hero composition keeps the sphere in the target band.
+        sphere = orb.width() * orbe_app.HERO_ASSET_FIT * orbe_app.HERO_SPHERE_FRACTION
+        assert 380 <= sphere <= 480
+    else:
+        assert 350 <= orbe_app.ORB_SIZE <= 370
 
 
 def test_orb_repositions_beside_an_overlapping_transcript_panel(qapp, orb) -> None:
     from PySide6.QtCore import Qt
 
     panel = orbe_app.create_transcript_panel()
-    panel.move(400, 100)
-    orb.move(420, 100)
+    panel.move(576, 100)
+    orb.move(600, 100)
     panel.show()
 
     orb.reposition_beside(panel)
@@ -383,7 +454,7 @@ def test_animation_rate_is_capped_for_the_desktop_widget() -> None:
 
 def test_degraded_stays_compact_and_visually_separate_from_authorization(orb) -> None:
     orb.apply_state(OrbVisualState.DEGRADED)
-    assert orb.width() == orbe_app.ORB_SIZE
+    assert orb.width() == orbe_app.size_for_state(OrbVisualState.DEGRADED)
     assert orbe_app.color_for_state(OrbVisualState.DEGRADED) != orbe_app.color_for_state(OrbVisualState.AUTHORIZATION)
 
 
@@ -393,11 +464,12 @@ def test_orb_owns_only_its_existing_animation_timer() -> None:
 
 
 def test_idle_is_compact_and_active_states_are_much_larger(qapp, orb) -> None:
-    assert orbe_app.size_for_state(OrbVisualState.IDLE) == 360
+    idle = orbe_app.size_for_state(OrbVisualState.IDLE)
+    assert idle == (orbe_app.HERO_ORB_SIZE if orb_assets.hero_available() else 360)
     for state in (OrbVisualState.LISTENING, OrbVisualState.PROCESSING, OrbVisualState.SPEAKING, OrbVisualState.AUTHORIZATION, OrbVisualState.AUTOMATION):
         orb.apply_state(state)
         assert orb.width() == orb.height() == orbe_app.size_for_state(state)
-        assert orb.width() >= 430
+        assert orb.width() > idle
 
 
 def test_initial_position_centers_orb_on_available_screen(orb) -> None:
@@ -437,7 +509,7 @@ def test_active_resize_repositions_beside_visible_transcript(qapp, orb) -> None:
 
     class Panel:
         def frameGeometry(self):  # noqa: N802 (Qt API shape)
-            return QRect(100, 100, 100, 100)
+            return QRect(616, 100, 100, 100)
 
         def screen(self):
             return orb.screen()

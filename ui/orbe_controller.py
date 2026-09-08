@@ -83,6 +83,7 @@ class OrbeController:
         self._orb.quit_requested.connect(self.request_quit)
         self._orb.chat_requested.connect(self.show_chat)
         self._orb.voice_requested.connect(self.toggle_voice)
+        self._orb.context_menu.capability_selected.connect(self.open_capability)
         self._transcript_panel.send_requested.connect(self.submit_text)
         self._transcript_panel.attachment_send_requested.connect(self.submit_attachment_notice)
         self._transcript_panel.close_requested.connect(self.hide_chat)
@@ -120,6 +121,32 @@ class OrbeController:
     def show_chat(self) -> None:
         """Show and focus the existing chat windows without starting voice."""
         self._show_chat_without_overlap()
+
+    # Capability menu options reuse the existing chat routing: the option only
+    # opens the chat and pre-fills the domain prefix; the real router in
+    # core.operational_request_router / agents resolves the request.
+    _CAPABILITY_PREFIXES = {
+        "coding": "Coding: ",
+        "proyectos": "Proyectos: ",
+        "entrenamiento": "Entrenamiento: ",
+        "nutricion": "Nutrición: ",
+        "salud": "Salud: ",
+        "calendario": "Calendario: ",
+        "control_pc": "Control PC: ",
+        "automatizacion": "Automatización: ",
+        "investigacion": "Investigación: ",
+        "legal": "Legal: ",
+        "finanzas": "Finanzas: ",
+        "agentes": "Agentes: ",
+        "mas_herramientas": "Más herramientas: ",
+    }
+
+    def open_capability(self, capability_id: str) -> None:
+        """Open the chat prepared for one existing Atlas capability domain."""
+        self.show_chat()
+        prefix = self._CAPABILITY_PREFIXES.get(str(capability_id))
+        if prefix is not None:
+            self._transcript_panel.prefill_input(prefix)
 
     def show_orb(self) -> None:
         """Restore only the orb; the global hotkey must never reveal chat."""

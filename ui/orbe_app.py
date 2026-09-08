@@ -21,10 +21,61 @@ import uuid
 from typing import Sequence
 
 from use_cases.ui_state_mapper import OrbVisualState
+from ui import orb_assets
 
 
 ORB_SIZE = 360
 CORE_RADIUS_FACTOR = 0.29
+# Hero asset (APPROVED single composition): sphere diameter is ~0.80 of the
+# image width and the frame fits inside the window with a small margin.
+# Idle window 560 -> sphere ~439 px (target band 380-480 at 1080p).
+HERO_ASSET_FIT = 0.98
+HERO_SPHERE_FRACTION = 0.80
+HERO_ORB_SIZE = 560
+# Fraction of the window occupied by the asset-built holo sphere (the device
+# body is now a layered composition; the procedural core radius stays for the
+# orbit module occlusion test). Sized so the sphere clears the platform base.
+DEVICE_RADIUS_FACTOR = 0.335
+# Platform base line, lowered to welcome the larger asset sphere.
+PLATFORM_BASE_FACTOR = 0.88
+# Clickable zone of the orb window: a central disc covering the sphere and its
+# orbits. Everything outside this disc is transparent and must pass clicks to
+# the desktop (selective hit-testing).
+CLICKABLE_RADIUS_FACTOR = 0.50
+# Protagonism of the Atlas chevron: the path geometry is scaled around the
+# centre by this factor (1.0 = the old compact emblem).
+EMBLEM_SCALE = 1.42
+# Holographic HUD menu geometry: two lateral fan panels with a transparent
+# central gap where the sphere keeps breathing (and stays clickable).
+MENU_PANEL_WIDTH = 178
+MENU_BUTTON_HEIGHT = 27
+MENU_CENTRE_FACTOR = 0.62  # transparent gap width as a fraction of the orb size
+MENU_WEDGE_EXTENT = 24     # connector wedge drawn from each panel toward the orb
+_MENU_OPEN_MS = 200        # HUD open: fade + lateral slide from the núcleo
+_MENU_CLOSE_MS = 150       # HUD close: fade + slide back into the núcleo
+_HIT_POLL_MS = 50
+_GWL_EXSTYLE = -20
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_LAYERED = 0x00080000
+
+# Holographic capability menu: every option reuses existing Atlas routing.
+# Selecting one opens the chat with a routing prefix; the real router
+# (core.operational_request_router / agents) resolves the domain.
+_CAPABILITY_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("coding", "Coding"),
+    ("proyectos", "Proyectos"),
+    ("entrenamiento", "Entrenamiento"),
+    ("nutricion", "Nutrición"),
+    ("salud", "Salud"),
+    ("calendario", "Calendario"),
+    ("control_pc", "Control PC"),
+    ("automatizacion", "Automatización"),
+    ("investigacion", "Investigación"),
+    ("legal", "Legal"),
+    ("finanzas", "Finanzas"),
+    ("agentes", "Agentes"),
+    ("mas_herramientas", "Más herramientas"),
+)
 _ACTIVE_ORB_SIZES: dict[OrbVisualState, int] = {
     OrbVisualState.LISTENING: 460,
     OrbVisualState.PROCESSING: 480,
@@ -33,11 +84,21 @@ _ACTIVE_ORB_SIZES: dict[OrbVisualState, int] = {
     OrbVisualState.AUTOMATION: 490,
 }
 
+# With the hero asset the sphere already fills the window band (380-480 px),
+# so active states only grow subtly; the sphere must never leave that band.
+_HERO_ORB_SIZES: dict[OrbVisualState, int] = {
+    OrbVisualState.LISTENING: 590,
+    OrbVisualState.PROCESSING: 600,
+    OrbVisualState.SPEAKING: 600,
+    OrbVisualState.AUTHORIZATION: 600,
+    OrbVisualState.AUTOMATION: 600,
+}
+
 _STATE_COLORS: dict[OrbVisualState, tuple[int, int, int, int]] = {
     OrbVisualState.IDLE: (56, 185, 255, 230),
     OrbVisualState.STARTING: (105, 225, 255, 235),
     OrbVisualState.LISTENING: (80, 225, 255, 245),
-    OrbVisualState.PROCESSING: (168, 102, 255, 245),
+    OrbVisualState.PROCESSING: (0, 132, 255, 248),
     OrbVisualState.SPEAKING: (72, 238, 148, 250),
     OrbVisualState.AUTHORIZATION: (255, 174, 52, 250),
     OrbVisualState.AUTOMATION: (255, 72, 72, 250),
@@ -84,6 +145,13 @@ _VISUAL_PROFILES: dict[OrbVisualState, dict[str, float]] = {
         "segment_activity": 0.45, "base_intensity": 0.60,
         "wave_activity": 0.0, "ping_intensity": 0.0, "node_energy": 0.35, "spark_intensity": 0.0,
     },
+    OrbVisualState.LISTENING: {
+        "ring_activity": 0.30, "ring_speed": 0.55, "ring_angle": 0.90, "ring_amplitude": 0.95,
+        "pulse_strength": 0.55, "halo_intensity": 1.05, "halo_strength": 1.05,
+        "core_intensity": 1.00, "core_pulse": 0.70, "particle_intensity": 0.75,
+        "segment_activity": 0.60, "base_intensity": 0.75,
+        "wave_activity": 0.0, "ping_intensity": 0.0, "node_energy": 0.55, "spark_intensity": 0.45,
+    },
     OrbVisualState.PROCESSING: {
         "ring_activity": 1.00, "ring_speed": 1.00, "ring_angle": 1.20, "ring_amplitude": 1.08,
         "pulse_strength": 0.66, "halo_intensity": 1.12, "halo_strength": 1.12,
@@ -120,6 +188,38 @@ def color_for_state(state: OrbVisualState) -> tuple[int, int, int, int]:
     return _STATE_COLORS[state]
 
 
+def atlas_emblem_path(size: float, scale: float = EMBLEM_SCALE) -> QPainterPath:
+    """Build the compact Atlas chevron plus its detached lower triangle.
+
+    The geometry is scaled around the centre so the emblem keeps clear
+    protagonism while staying perfectly centred. Shared with the asset
+    generator so the logo layer matches this exact silhouette.
+    """
+    from PySide6.QtGui import QPainterPath
+
+    def px(fraction: float) -> float:
+        return size * (0.5 + (fraction - 0.5) * scale)
+
+    path = QPainterPath()
+    # Two diagonal arms form an open chevron; no horizontal A crossbar is used.
+    path.moveTo(px(0.5000), px(0.4418))
+    path.lineTo(px(0.4269), px(0.5531))
+    path.lineTo(px(0.4567), px(0.5625))
+    path.lineTo(px(0.5000), px(0.4868))
+    path.closeSubpath()
+    path.moveTo(px(0.5000), px(0.4418))
+    path.lineTo(px(0.5731), px(0.5531))
+    path.lineTo(px(0.5433), px(0.5625))
+    path.lineTo(px(0.5000), px(0.4868))
+    path.closeSubpath()
+    # The isolated lower triangle keeps generous negative space inside the core.
+    path.moveTo(px(0.5000), px(0.5701))
+    path.lineTo(px(0.4745), px(0.6092))
+    path.lineTo(px(0.5255), px(0.6092))
+    path.closeSubpath()
+    return path
+
+
 def animation_period(state: OrbVisualState) -> float | None:
     """Animation period in seconds, or None when the state is static."""
     return _ANIMATION_PERIODS[state]
@@ -131,8 +231,16 @@ def visual_profile(state: OrbVisualState) -> dict[str, float]:
 
 
 def size_for_state(state: OrbVisualState) -> int:
-    """Return the compact idle size or the deliberately larger active size."""
-    return _ACTIVE_ORB_SIZES.get(OrbVisualState(state), ORB_SIZE)
+    """Return the compact idle size or the deliberately larger active size.
+
+    When the approved hero asset is available the window grows so the
+    rendered sphere lands in the 380-480 px band; the compact legacy sizes
+    remain as the fallback path.
+    """
+    state = OrbVisualState(state)
+    if orb_assets.hero_available():
+        return _HERO_ORB_SIZES.get(state, HERO_ORB_SIZE)
+    return _ACTIVE_ORB_SIZES.get(state, ORB_SIZE)
 
 
 def animation_frame(
@@ -206,16 +314,18 @@ def create_orb_window(settings=None):
     ``settings`` is an optional QSettings-like object used to persist
     the window position (keys ``pos_x`` / ``pos_y``).
     """
-    from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QTimer
+    from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
     from PySide6.QtGui import (
         QConicalGradient,
         QColor,
+        QCursor,
         QIcon,
         QLinearGradient,
         QPainter,
         QPainterPath,
         QPen,
         QPixmap,
+        QRegion,
         QRadialGradient,
     )
     from PySide6.QtWidgets import (
@@ -230,53 +340,195 @@ def create_orb_window(settings=None):
     )
 
     class OrbContextMenu(QWidget):
-        """Small translucent popup for actions already owned by the controller."""
+        """HUD popup that grows around the sphere instead of beside it.
+
+        Two translucent lateral panels (núcleo / sistemas) flank a fully
+        transparent central gap so the orb stays visible and clickable; the
+        window mask keeps click-through alive everywhere else.
+        """
 
         chat_requested = Signal()
         voice_requested = Signal()
         quit_requested = Signal()
+        capability_selected = Signal(str)
+
+        _LEFT_TITLE = "ATLAS · NÚCLEO"
+        _RIGHT_TITLE = "ATLAS · SISTEMAS"
 
         def __init__(self, parent=None) -> None:
             super().__init__(parent)
             self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setFixedWidth(224)
             self._voice_active = False
+            self._capability_buttons: dict[str, QPushButton] = {}
+            self._menu_animating = False
+            self._menu_progress = 1.0
 
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 11, 12, 11)
-            layout.setSpacing(4)
-            self._title = QLabel("MENU ATLAS", self)
-            self._title.setStyleSheet("color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;")
-            layout.addWidget(self._title)
-            self._add_separator(layout)
-            self._chat_button = self._add_action(layout, "Abrir Chat", self.chat_requested, "chat")
-            self._voice_button = self._add_action(layout, "Modo Voz", self.voice_requested, "voice", voice_status=True)
-            self._add_separator(layout)
-            self._quit_button = self._add_action(layout, "Salir", self.quit_requested, "quit", danger=True)
+            self._left_panel = QWidget(self)
+            self._right_panel = QWidget(self)
+            self._left_panel.setFixedWidth(MENU_PANEL_WIDTH)
+            self._right_panel.setFixedWidth(MENU_PANEL_WIDTH)
+
+            left_layout = QVBoxLayout(self._left_panel)
+            left_layout.setContentsMargins(14, 12, 10, 12)
+            left_layout.setSpacing(4)
+            self._title = QLabel(self._LEFT_TITLE, self)
+            self._title.setStyleSheet(
+                "color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;"
+            )
+            left_layout.addWidget(self._title)
+            self._add_separator(left_layout)
+            self._chat_button = self._add_action(left_layout, "Abrir Chat", self.chat_requested, "chat")
+            left_layout.addSpacing(2)
+            self._capability_title = QLabel("CAPACIDADES", self)
+            self._capability_title.setStyleSheet(
+                "color: #bdeeff; font-size: 9px; font-weight: 700; letter-spacing: 1.2px;"
+            )
+            left_layout.addWidget(self._capability_title)
+            for capability_id, label in _CAPABILITY_OPTIONS[:6]:
+                left_layout.addWidget(self._add_capability_button(label, capability_id))
+            left_layout.addStretch(1)
+            self._voice_button = self._add_action(
+                left_layout, "Modo Voz", self.voice_requested, "voice", voice_status=True
+            )
+
+            right_layout = QVBoxLayout(self._right_panel)
+            right_layout.setContentsMargins(10, 12, 14, 12)
+            right_layout.setSpacing(4)
+            self._systems_title = QLabel(self._RIGHT_TITLE, self)
+            self._systems_title.setStyleSheet(
+                "color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;"
+            )
+            right_layout.addWidget(self._systems_title)
+            self._add_separator(right_layout)
+            for capability_id, label in _CAPABILITY_OPTIONS[6:]:
+                right_layout.addWidget(self._add_capability_button(label, capability_id))
+            right_layout.addStretch(1)
+            self._quit_button = self._add_action(right_layout, "Salir", self.quit_requested, "quit", danger=True)
+
+            # Manual HUD layout: both modules slide out from the núcleo.
+            self._left_panel.adjustSize()
+            self._right_panel.adjustSize()
+            panel_height = max(self._left_panel.height(), self._right_panel.height(), 120)
+            self._panel_height = panel_height
+            self._left_panel.setFixedHeight(panel_height)
+            self._right_panel.setFixedHeight(panel_height)
+            self.setFixedSize(self._menu_window_width(int(HERO_ORB_SIZE * MENU_CENTRE_FACTOR)), panel_height)
+            self._layout_panels(1.0)
+
+        def _menu_window_width(self, gap: int) -> int:
+            return MENU_PANEL_WIDTH * 2 + max(24, gap)
+
+        def _layout_panels(self, progress: float) -> None:
+            """Place both panels: progress 0 = collapsed at the núcleo, 1 = open."""
+            progress = max(0.0, min(1.0, progress))
+            self._menu_progress = progress
+            mid = self.width() / 2.0
+            left_start = mid - MENU_PANEL_WIDTH
+            left_x = left_start * (1.0 - progress)
+            right_final = self.width() - MENU_PANEL_WIDTH
+            right_x = mid + (right_final - mid) * progress
+            self._left_panel.move(int(round(left_x)), 0)
+            self._right_panel.move(int(round(right_x)), 0)
+            self._apply_hud_mask()
+
+        def _set_menu_progress(self, progress: float) -> None:
+            progress = max(0.0, min(1.0, progress))
+            self._layout_panels(progress)
+            self.setWindowOpacity(progress)
+
+        def _run_menu_animation(self, *, opening: bool) -> None:
+            """Short 150-250 ms fade + lateral slide driven synchronously.
+
+            The loop processes Qt events so the animation really paints, while
+            staying transparent to callers/tests (the widget ends hidden when
+            closing, exactly as the previous instant ``hide()`` did).
+            """
+            if self._menu_animating:
+                return
+            self._menu_animating = True
+            try:
+                from PySide6.QtCore import QElapsedTimer
+                from PySide6.QtWidgets import QApplication
+
+                duration = _MENU_OPEN_MS if opening else _MENU_CLOSE_MS
+                app = QApplication.instance()
+                clock = QElapsedTimer()
+                clock.start()
+                while True:
+                    t = clock.elapsed() / duration
+                    if t >= 1.0:
+                        break
+                    eased = 1.0 - (1.0 - t) * (1.0 - t) if opening else (1.0 - t) * (1.0 - t)
+                    self._set_menu_progress(eased)
+                    if app is not None:
+                        app.processEvents()
+                if opening:
+                    self._set_menu_progress(1.0)
+                else:
+                    self._set_menu_progress(0.0)
+                    self.hide()
+            finally:
+                self._menu_animating = False
+
+        def close_animated(self) -> None:
+            """Fade the HUD back into the núcleo and hide it."""
+            if not self.isVisible():
+                return
+            self._run_menu_animation(opening=False)
+
+        def hide(self) -> None:  # noqa: N802 (Qt API)
+            super().hide()
+            self._menu_animating = False
+            self.setWindowOpacity(1.0)
+            self._menu_progress = 1.0
+
+        def _add_capability_button(self, text: str, capability_id: str) -> QPushButton:
+            button = QPushButton(text, self)
+            button.setFixedHeight(MENU_BUTTON_HEIGHT)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                "QPushButton {"
+                "color: #cdeeff; background: rgba(8, 30, 60, 46);"
+                "border: 1px solid rgba(96, 202, 255, 64); border-left: 2px solid rgba(110, 220, 255, 150);"
+                "border-radius: 4px; padding: 4px 8px; text-align: left; font-size: 11px;"
+                "}"
+                "QPushButton:hover { background: rgba(52, 173, 255, 46); border-color: rgba(130, 225, 255, 180);"
+                "border-left: 2px solid rgba(190, 245, 255, 230); }"
+            )
+            button.clicked.connect(lambda checked=False, cid=capability_id: self._select_capability(cid))
+            self._capability_buttons[capability_id] = button
+            return button
+
+        def _select_capability(self, capability_id: str) -> None:
+            self.close_animated()
+            self.capability_selected.emit(capability_id)
 
         def _add_separator(self, layout) -> None:
             separator = QFrame(self)
             separator.setFrameShape(QFrame.Shape.HLine)
-            separator.setStyleSheet("color: rgba(85, 185, 255, 105);")
+            separator.setStyleSheet("color: rgba(85, 185, 255, 70);")
             layout.addWidget(separator)
 
         def _add_action(self, layout, text: str, signal, icon_name: str, *, danger: bool = False, voice_status: bool = False):
             button = QPushButton(text, self)
+            button.setFixedHeight(MENU_BUTTON_HEIGHT)
             color = "#ffb6b6" if danger else "#e7f8ff"
-            hover = "rgba(255, 78, 78, 50)" if danger else "rgba(52, 173, 255, 52)"
+            accent = "rgba(255, 96, 96, 200)" if danger else "rgba(110, 220, 255, 150)"
+            hover = "rgba(255, 78, 78, 40)" if danger else "rgba(52, 173, 255, 42)"
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setIcon(QIcon(self._action_icon(icon_name, "#ff9c9c" if danger else "#84d8ff")))
             button.setIconSize(QSize(18, 18))
             button.setStyleSheet(
                 "QPushButton {"
-                f"color: {color}; background: transparent; border: 1px solid transparent;"
-                "border-radius: 7px; padding: 8px 9px; text-align: left; font-size: 12px;"
+                f"color: {color}; background: rgba(8, 30, 60, 40);"
+                "border: 1px solid rgba(96, 202, 255, 52); border-left: 2px solid " + accent + ";"
+                "border-radius: 4px; padding: 4px 8px; text-align: left; font-size: 11px;"
                 "}"
-                f"QPushButton:hover {{ background: {hover}; border-color: rgba(96, 202, 255, 130); }}"
+                f"QPushButton:hover {{ background: {hover}; border-color: rgba(130, 225, 255, 160); }}"
             )
             button.clicked.connect(signal.emit)
-            button.clicked.connect(self.hide)
+            button.clicked.connect(self.close_animated)
             if voice_status:
                 row = QFrame(self)
                 row_layout = QHBoxLayout(row)
@@ -327,33 +579,88 @@ def create_orb_window(settings=None):
             self._set_voice_indicator(active)
 
         def show_beside(self, orb) -> None:
-            self.adjustSize()
+            """Grow the HUD panels around the orb centre and clamp to screen."""
+            self.setFixedSize(
+                self._menu_window_width(int(MENU_CENTRE_FACTOR * orb.width())),
+                self._panel_height,
+            )
             screen = orb.screen()
             if screen is None:
+                self.show()
                 return
             bounds = screen.availableGeometry()
-            gap = 12
-            right_x = orb.frameGeometry().right() + gap + 1
-            left_x = orb.frameGeometry().left() - gap - self.width()
-            x = right_x if right_x + self.width() <= bounds.right() + 1 else left_x
+            centre = orb.frameGeometry().center()
+            x = centre.x() - self.width() // 2
+            y = centre.y() - self.height() // 2
             x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
-            y = orb.frameGeometry().center().y() - self.height() // 2
             y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
             self.move(x, y)
+            self._set_menu_progress(0.0)
             self.show()
             self.raise_()
+            self._run_menu_animation(opening=True)
+
+        def _apply_hud_mask(self) -> None:
+            """Only the two panels (plus wedges) receive clicks; the gap does not."""
+            w, h = self.width(), self.height()
+            left_x = int(self._left_panel.x())
+            right_x = int(self._right_panel.x()) - MENU_WEDGE_EXTENT
+            left = QRect(left_x, 0, MENU_PANEL_WIDTH + MENU_WEDGE_EXTENT, h)
+            right = QRect(right_x, 0, MENU_PANEL_WIDTH + MENU_WEDGE_EXTENT, h)
+            self.setMask(QRegion(left) | QRegion(right))
 
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            path = QPainterPath()
-            path.addRoundedRect(self.rect().adjusted(2, 2, -2, -2), 10, 10)
-            painter.setPen(QPen(QColor(87, 204, 255, 205), 1.0))
-            painter.setBrush(QColor(3, 15, 36, 242))
-            painter.drawPath(path)
-            painter.setPen(QPen(QColor(80, 195, 255, 46), 5.0))
-            painter.drawPath(path)
+            for panel, side in ((self._left_panel, "left"), (self._right_panel, "right")):
+                if not panel.isVisible():
+                    continue
+                self._draw_hud_panel(painter, panel.geometry(), side)
             painter.end()
+
+        def _draw_hud_panel(self, painter, rect, side: str) -> None:
+            """One translucent fan panel with cian HUD border and corner ticks."""
+            inner = rect.adjusted(5, 5, -5, -5)
+            fill = QLinearGradient(inner.topLeft(), inner.bottomLeft())
+            fill.setColorAt(0.0, QColor(5, 24, 48, 52))
+            fill.setColorAt(0.55, QColor(3, 14, 32, 40))
+            fill.setColorAt(1.0, QColor(2, 9, 22, 30))
+            path = QPainterPath()
+            path.addRoundedRect(inner, 8, 8)
+            # Inner edge angles toward the sphere: the HUD is born from the orb.
+            wedge = QPainterPath()
+            wedge_extent = MENU_WEDGE_EXTENT - 6
+            if side == "left":
+                wedge.moveTo(inner.right() - 1, inner.top() + inner.height() * 0.16)
+                wedge.lineTo(inner.right() + wedge_extent, inner.center().y())
+                wedge.lineTo(inner.right() - 1, inner.top() + inner.height() * 0.84)
+            else:
+                wedge.moveTo(inner.left() + 1, inner.top() + inner.height() * 0.16)
+                wedge.lineTo(inner.left() - wedge_extent, inner.center().y())
+                wedge.lineTo(inner.left() + 1, inner.top() + inner.height() * 0.84)
+            wedge.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawPath(path)
+            painter.setBrush(QColor(4, 18, 40, 36))
+            painter.drawPath(wedge)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # Soft outer glow, then the crisp cian border of the HUD module.
+            painter.setPen(QPen(QColor(96, 202, 255, 34), 5.0))
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(96, 202, 255, 150), 1.3))
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(120, 220, 255, 100), 1.0))
+            painter.drawPath(wedge)
+            # Corner ticks: small tech brackets on the outer corners.
+            tick = 9
+            painter.setPen(QPen(QColor(190, 245, 255, 200), 2.0))
+            if side == "left":
+                painter.drawLine(inner.topLeft() + QPointF(0, tick), inner.topLeft() + QPointF(0, 0) + QPointF(tick, 0))
+                painter.drawLine(inner.bottomLeft() + QPointF(0, -tick), inner.bottomLeft() + QPointF(tick, 0))
+            else:
+                painter.drawLine(inner.topRight() + QPointF(0, tick), inner.topRight() + QPointF(-tick, 0))
+                painter.drawLine(inner.bottomRight() + QPointF(0, -tick), inner.bottomRight() + QPointF(-tick, 0))
 
     class OrbWindow(QWidget):
         """Frameless translucent always-on-top circular state indicator."""
@@ -366,7 +673,7 @@ def create_orb_window(settings=None):
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Atlas")
-            initial_size = self._bounded_size(ORB_SIZE)
+            initial_size = self._bounded_size(size_for_state(OrbVisualState.IDLE))
             self.setFixedSize(initial_size, initial_size)
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint
@@ -389,6 +696,13 @@ def create_orb_window(settings=None):
 
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._on_animation_tick)
+
+            # Selective hit-testing: while the cursor stays outside the
+            # clickable disc the whole window forwards clicks to the desktop
+            # (WS_EX_TRANSPARENT); inside the disc the window receives them.
+            self._hit_timer = QTimer(self)
+            self._hit_timer.setInterval(_HIT_POLL_MS)
+            self._hit_timer.timeout.connect(self._update_click_through)
 
             self._tray = None
             if QSystemTrayIcon.isSystemTrayAvailable():
@@ -423,11 +737,14 @@ def create_orb_window(settings=None):
             self._context_menu.set_voice_active(active)
 
         def toggle_context_menu(self) -> None:
-            if self._context_menu.isVisible():
-                self._context_menu.hide()
+            menu = self._context_menu
+            if menu._menu_animating:
+                return
+            if menu.isVisible():
+                menu.close_animated()
             else:
-                self._context_menu.set_voice_active(self._voice_active)
-                self._context_menu.show_beside(self)
+                menu.set_voice_active(self._voice_active)
+                menu.show_beside(self)
 
         def _resize_for_state(self) -> None:
             """Resize around the current centre while keeping it on screen."""
@@ -601,6 +918,61 @@ def create_orb_window(settings=None):
             self.toggle_context_menu()
             event.accept()
 
+        def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            super().showEvent(event)
+            if self._hit_timer is not None and not self._hit_timer.isActive():
+                self._hit_timer.start()
+
+        def hideEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            if self._hit_timer is not None:
+                self._hit_timer.stop()
+            super().hideEvent(event)
+
+        # -- selective hit-testing --------------------------------------
+
+        def clickable_at(self, global_point) -> bool:
+            """True when a global point falls inside the clickable orb disc."""
+            centre = self.frameGeometry().center()
+            dx = global_point.x() - centre.x()
+            dy = global_point.y() - centre.y()
+            return math.hypot(dx, dy) <= self.width() * CLICKABLE_RADIUS_FACTOR
+
+        def _update_click_through(self) -> None:
+            """Toggle WS_EX_TRANSPARENT so only the orb disc catches clicks."""
+            if not self.isVisible() or sys.platform != "win32":
+                return
+            try:
+                from PySide6.QtGui import QGuiApplication
+
+                if QGuiApplication.platformName() == "offscreen":
+                    return  # tests/headless: never touch the real window styles
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.windll.user32
+                get_style = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+                get_style.argtypes = [wintypes.HWND, ctypes.c_int]
+                get_style.restype = ctypes.c_ssize_t
+                set_style = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+                set_style.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+                set_style.restype = ctypes.c_ssize_t
+                hwnd = wintypes.HWND(int(self.winId()))
+                if not hwnd:
+                    return
+                current = get_style(hwnd, _GWL_EXSTYLE)
+                if current in (0, None):
+                    return
+                if self.clickable_at(QCursor.pos()):
+                    updated = current & ~_WS_EX_TRANSPARENT
+                else:
+                    updated = current | _WS_EX_TRANSPARENT | _WS_EX_LAYERED
+                if updated != current:
+                    set_style(hwnd, _GWL_EXSTYLE, updated)
+            except Exception:
+                # A failed hit-test toggle degrades to Qt default behavior
+                # (whole window clickable); the orb must never crash over it.
+                pass
+
         def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
             self.save_position()
             super().closeEvent(event)
@@ -608,43 +980,22 @@ def create_orb_window(settings=None):
         # -- painting ---------------------------------------------------
 
         def _build_atlas_emblem(self) -> QPainterPath:
-            """Create the compact Atlas chevron and its detached lower triangle."""
-            size = self.width()
-            path = QPainterPath()
-            # Two diagonal arms form an open chevron; no horizontal A crossbar is used.
-            path.moveTo(size * 0.5000, size * 0.4418)
-            path.lineTo(size * 0.4269, size * 0.5531)
-            path.lineTo(size * 0.4567, size * 0.5625)
-            path.lineTo(size * 0.5000, size * 0.4868)
-            path.closeSubpath()
-            path.moveTo(size * 0.5000, size * 0.4418)
-            path.lineTo(size * 0.5731, size * 0.5531)
-            path.lineTo(size * 0.5433, size * 0.5625)
-            path.lineTo(size * 0.5000, size * 0.4868)
-            path.closeSubpath()
-            # The isolated lower triangle keeps generous negative space inside the core.
-            path.moveTo(size * 0.5000, size * 0.5701)
-            path.lineTo(size * 0.4745, size * 0.6092)
-            path.lineTo(size * 0.5255, size * 0.6092)
-            path.closeSubpath()
-            return path
+            """Compact Atlas chevron; the shared geometry lives at module level."""
+            return atlas_emblem_path(self.width())
 
         # -- painting ---------------------------------------------------
 
         _ORBIT_SPECS = (
             # (tilt_deg, squash, radius_factor, speed, front segments (start_deg, span_deg))
-            # Compact factors: the sphere is the protagonist; orbits stay clearly outside
-            # the ring stack but leave transparent breathing room to the window edge.
-            (-26.0, 0.44, 0.392, 1.00, ((196.0, 74.0), (282.0, 50.0), (340.0, 16.0))),
-            (36.0, 0.26, 0.418, -0.58, ((188.0, 88.0), (292.0, 62.0))),
-            (-58.0, 0.56, 0.400, 0.76, ((182.0, 60.0), (254.0, 30.0), (296.0, 58.0))),
-            (10.0, 0.20, 0.430, -0.40, ((200.0, 96.0), (308.0, 44.0))),
+            # Only three orbital rings now: the sphere is the protagonist and each
+            # ring keeps a different inclination; the first passes in front of the
+            # sphere, the other two read behind it through the back segments.
+            (-26.0, 0.42, 0.404, 1.00, ((196.0, 70.0), (300.0, 44.0))),
+            (38.0, 0.30, 0.436, -0.55, ((186.0, 86.0),)),
+            (-55.0, 0.54, 0.386, 0.72, ((248.0, 66.0), (322.0, 26.0))),
         )
         _ORBIT_BACK_SEGMENTS = ((22.0, 66.0), (112.0, 58.0))
-        _ORBIT_MODULES = ((226.0, 318.0), (240.0,), (300.0, 208.0), (264.0,))
-        _SHELL_PLATES = ((12.0, 46.0), (74.0, 30.0), (118.0, 52.0), (188.0, 24.0), (226.0, 58.0), (300.0, 34.0))
-        _BAND_SEGMENTS = ((18.0, 58.0), (94.0, 24.0), (136.0, 46.0), (200.0, 16.0), (238.0, 64.0), (322.0, 26.0))
-        _BAND_NODES = (80.0, 122.0, 190.0, 268.0, 348.0)
+        _ORBIT_MODULES = ((226.0,), (306.0,), (204.0,))
         _STATE_ORBIT_SPEEDS = {
             OrbVisualState.AUTOMATION: (1.34, 2.10, -1.15, 1.72),
             OrbVisualState.PROCESSING: (1.18, 1.82, -0.95, 1.42),
@@ -676,9 +1027,15 @@ def create_orb_window(settings=None):
             center = size // 2
             profile = visual_profile(self._state)
             core_scale = 1.0 + (frame["scale"] - 1.0) * profile["core_pulse"]
+            bundle = orb_assets.state_bundle(self._state)
+            hero = bundle.get("hero")
+            # Hero mode: the sphere is the asset itself; activity overlays
+            # (waves, pings, sparks) hug the rendered sphere edge instead of
+            # the legacy procedural core.
             core_radius = max(20.0, size * CORE_RADIUS_FACTOR * core_scale)
+            if hero is not None:
+                core_radius = size * HERO_ASSET_FIT * HERO_SPHERE_FRACTION / 2.0
             palette = {
-                OrbVisualState.PROCESSING: ((187, 116, 255), (75, 38, 132), (215, 175, 255), (165, 94, 255), (245, 232, 255), (16, 5, 44)),
                 OrbVisualState.SPEAKING: ((80, 235, 157), (20, 111, 69), (152, 255, 205), (57, 220, 128), (222, 255, 237), (4, 42, 27)),
                 OrbVisualState.AUTHORIZATION: ((255, 181, 60), (166, 95, 15), (255, 224, 142), (255, 194, 70), (255, 245, 204), (46, 22, 2)),
                 OrbVisualState.AUTOMATION: ((255, 78, 78), (145, 26, 35), (255, 163, 163), (242, 62, 69), (255, 232, 232), (44, 5, 10)),
@@ -708,18 +1065,280 @@ def create_orb_window(settings=None):
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            # Order: ambient -> orbit backs -> beam/base -> device -> nucleus -> orbit fronts -> activity.
+            # Order: ambient -> orbit backs -> beam/base -> asset device ->
+            # asset particles -> orbit fronts -> activity. When any asset is
+            # missing the procedural device renders instead (never crash).
+            # With the approved hero asset present it IS the whole visual:
+            # sphere, logo, glow, orbits, particles and platform in one
+            # composition; the provisional layers stay as fallback only.
+            if hero is not None:
+                self._draw_hero_halo(painter, c)
+                self._draw_hero_device(painter, c, hero)
+                self._draw_hero_overlays(painter, c)
+                self._draw_state_activity(painter, c)
+                painter.end()
+                return
             self._draw_ambient(painter, c)
             self._draw_orbits(painter, c, front=False)
             self._draw_beam_and_base(painter, c)
-            self._draw_device(painter, c)
-            self._draw_core_particles(painter, c)
-            self._draw_emblem(painter, c)
+            if orb_assets.missing_assets():
+                self._draw_device(painter, c)
+                self._draw_core_particles(painter, c)
+                self._draw_emblem(painter, c)
+            else:
+                self._draw_asset_device(painter, c, bundle)
+                self._draw_asset_particles(painter, c, bundle)
             self._draw_orbits(painter, c, front=True)
             self._draw_state_activity(painter, c)
             self._draw_starfield(painter, c)
             painter.end()
+
+        # -- asset composition -------------------------------------------
+
+        def _draw_hero_device(self, painter, c, hero) -> None:
+            """Render the approved asset as the single orb composition.
+
+            No rotation is applied: the image already contains the orbits,
+            particles and platform, and tilting the whole frame would make
+            the pedestal wobble. Only the shared breathing pulse and the
+            state alpha factor modulate it.
+            """
+            size = c["size"]
+            frame = c["frame"]
+            pulse = 1.0 + (frame["scale"] - 1.0) * c["profile"]["core_pulse"]
+            painter.save()
+            painter.translate(c["center"], c["center"])
+            painter.scale(pulse, pulse)
+            painter.setOpacity(min(1.0, frame["alpha_factor"]))
+            width = size * HERO_ASSET_FIT
+            height = width * hero.height() / hero.width()
+            if height > size * HERO_ASSET_FIT:
+                height = size * HERO_ASSET_FIT
+                width = height * hero.width() / hero.height()
+            painter.drawPixmap(
+                QRectF(-width / 2.0, -height / 2.0, width, height),
+                hero,
+                QRectF(0.0, 0.0, hero.width(), hero.height()),
+            )
+            painter.restore()
+
+        # -- hero holographic overlays (approved asset stays untouched) ------
+
+        # (phase0_deg, squash, tilt_deg, speed_multiplier) for 3 orbital nodes.
+        _HERO_NODES = ((10.0, 0.46, -24.0, 1.00), (62.0, 0.32, 36.0, -0.74), (161.0, 0.56, 10.0, 0.55))
+        # (phase0_rad, radius_factor, speed_rad_s, dot_px, blink_speed, blink_phase).
+        _HERO_PARTICLES = (
+            (0.00, 1.06, 0.42, 1.5, 1.3, 0.0), (0.55, 1.13, -0.31, 1.1, 1.7, 1.1),
+            (1.05, 1.09, 0.27, 1.4, 1.1, 2.4), (1.60, 1.17, -0.38, 1.2, 1.5, 3.2),
+            (2.10, 1.05, 0.33, 1.0, 1.9, 0.7), (2.60, 1.21, -0.24, 1.6, 1.2, 1.9),
+            (3.15, 1.10, 0.36, 1.1, 1.6, 2.9), (3.60, 1.16, -0.29, 1.3, 1.4, 4.1),
+            (4.10, 1.07, 0.30, 1.0, 1.8, 0.4), (4.65, 1.19, -0.34, 1.5, 1.2, 2.2),
+            (5.15, 1.12, 0.26, 1.2, 1.5, 3.6), (5.70, 1.08, -0.27, 1.1, 1.7, 1.6),
+        )
+        # Orbital speed gain per state (deg/s base factor); DEGRADED stays static.
+        _HERO_NODE_SPEEDS = {
+            OrbVisualState.IDLE: 0.35, OrbVisualState.STARTING: 0.70,
+            OrbVisualState.LISTENING: 0.80, OrbVisualState.PROCESSING: 1.80,
+            OrbVisualState.SPEAKING: 0.90, OrbVisualState.AUTHORIZATION: 0.50,
+            OrbVisualState.AUTOMATION: 2.20, OrbVisualState.RECOVERING: 1.10,
+            OrbVisualState.DEGRADED: 0.0, OrbVisualState.STOPPING: 0.45,
+        }
+        # Seconds between energy sweeps per state (shorter = more frequent).
+        _HERO_SWEEP_PERIODS = {
+            OrbVisualState.IDLE: 9.0, OrbVisualState.STARTING: 5.0,
+            OrbVisualState.LISTENING: 6.0, OrbVisualState.PROCESSING: 3.0,
+            OrbVisualState.SPEAKING: 5.0, OrbVisualState.AUTHORIZATION: 7.0,
+            OrbVisualState.AUTOMATION: 2.4, OrbVisualState.RECOVERING: 4.0,
+            OrbVisualState.DEGRADED: 12.0, OrbVisualState.STOPPING: 8.0,
+        }
+
+        def _hero_sphere_radius(self, size: int) -> float:
+            return size * HERO_ASSET_FIT * HERO_SPHERE_FRACTION / 2.0
+
+        def _draw_hero_halo(self, painter, c) -> None:
+            """Pulsating outer glow behind the approved sphere (never whitens it)."""
+            profile, period = c["profile"], c["period"] or 3.0
+            breath = 0.5 + 0.5 * math.sin(c["elapsed"] * math.tau / max(0.4, period))
+            intensity = profile["halo_strength"] * (0.55 + 0.45 * breath)
+            halo = c["halo"]
+            r = self._hero_sphere_radius(c["size"])
+            gradient = QRadialGradient(0.0, 0.0, r * 1.24)
+            gradient.setColorAt(0.70, QColor(*halo, 0))
+            gradient.setColorAt(0.80, QColor(*halo, int(26 * intensity)))
+            gradient.setColorAt(0.86, QColor(*halo, int(58 * intensity)))
+            gradient.setColorAt(0.95, QColor(*halo, int(12 * intensity)))
+            gradient.setColorAt(1.0, QColor(*halo, 0))
+            painter.save()
+            painter.translate(c["center"], c["center"])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(gradient)
+            painter.drawEllipse(self._arc_rect(r * 1.24))
+            painter.restore()
+
+        def _draw_hero_overlays(self, painter, c) -> None:
+            """Living holographic layers over the approved composition.
+
+            Cierre provisional: solo overlays mínimos que no duplican el
+            asset. Los nodos orbitales y partículas procedurales quedan
+            desactivados (el asset aprobado ya trae órbitas y partículas).
+            """
+            painter.save()
+            painter.translate(c["center"], c["center"])
+            r = self._hero_sphere_radius(c["size"])
+            self._draw_energy_sweep(painter, c, r)
+            self._draw_hero_sparks(painter, c, r)
+            painter.restore()
+
+        def _draw_hero_nodes(self, painter, c, r: float) -> None:
+            """2-3 luminous nodes on elliptical tracks around the sphere."""
+            state_gain = self._HERO_NODE_SPEEDS.get(c["state"], 0.5)
+            if state_gain <= 0.0:
+                return
+            alpha, peak, light = c["alpha"], c["peak"], c["light"]
+            energy = c["profile"]["node_energy"]
+            painter.setPen(Qt.PenStyle.NoPen)
+            for phase0, squash, tilt, speed in self._HERO_NODES:
+                angle_deg = phase0 + c["elapsed"] * 57.6 * state_gain * speed
+                x, y = self._orbit_point(r * 1.10, squash, tilt, angle_deg)
+                flicker = 0.70 + 0.30 * math.sin(c["elapsed"] * 6.0 + phase0 * 4.0)
+                a = alpha * (0.45 + 0.40 * energy) * flicker
+                painter.setBrush(QColor(*peak, int(a * 0.30)))
+                painter.drawEllipse(QPointF(x, y), 5.2, 5.2)
+                painter.setBrush(QColor(*light, int(a)))
+                painter.drawEllipse(QPointF(x, y), 2.3, 2.3)
+                painter.setBrush(QColor(255, 255, 255, int(a * 0.50)))
+                painter.drawEllipse(QPointF(x - 0.6, y - 0.6), 0.9, 0.9)
+
+        def _draw_hero_particles(self, painter, c, r: float) -> None:
+            """Sparse data motes fading in/out along the sphere perimeter."""
+            state_gain = self._HERO_NODE_SPEEDS.get(c["state"], 0.5)
+            alpha, halo = c["alpha"], c["halo"]
+            intensity = c["profile"]["particle_intensity"]
+            painter.setPen(Qt.PenStyle.NoPen)
+            for phase0, rf, speed, dot, blink, bphase in self._HERO_PARTICLES:
+                angle = phase0 + c["elapsed"] * speed * (0.45 + 0.90 * state_gain)
+                fade = 0.5 + 0.5 * math.sin(c["elapsed"] * blink + bphase)
+                fade *= fade
+                a = alpha * 0.60 * intensity * (0.25 + 0.75 * fade)
+                x = math.cos(angle) * r * rf
+                y = math.sin(angle) * r * rf * 0.94
+                painter.setBrush(QColor(*halo, int(a)))
+                painter.drawEllipse(QPointF(x, y), dot, dot)
+                painter.setBrush(QColor(255, 255, 255, int(a * 0.45)))
+                painter.drawEllipse(QPointF(x - dot * 0.3, y - dot * 0.3), dot * 0.45, dot * 0.45)
+
+        def _draw_energy_sweep(self, painter, c, r: float) -> None:
+            """Thin light reflection crossing the sphere occasionally."""
+            period = self._HERO_SWEEP_PERIODS.get(c["state"], 8.0)
+            if period <= 0:
+                return
+            window = 0.32
+            cycle = (c["elapsed"] % period) / period
+            if cycle >= window:
+                return
+            t = cycle / window
+            env = math.sin(math.pi * t)
+            direction = -1.0 if c["state"] is OrbVisualState.AUTOMATION else 1.0
+            angle = t * 360.0 * direction
+            alpha = c["alpha"] * 0.14 * env * (1.0 + c["profile"]["spark_intensity"])
+            peak = c["peak"]
+            band = 0.07
+            soft = band * 0.35
+            gradient = QConicalGradient(-r * 0.06, -r * 0.06, angle)
+            gradient.setColorAt(0.0, QColor(*peak, int(alpha * 0.90)))
+            gradient.setColorAt(soft, QColor(*peak, int(alpha * 0.35)))
+            gradient.setColorAt(band, QColor(*peak, 0))
+            gradient.setColorAt(1.0 - band, QColor(*peak, 0))
+            gradient.setColorAt(1.0 - soft, QColor(*peak, int(alpha * 0.35)))
+            gradient.setColorAt(1.0, QColor(*peak, int(alpha * 0.90)))
+            painter.save()
+            clip = QPainterPath()
+            clip.addEllipse(self._arc_rect(r * 0.985))
+            painter.setClipPath(clip)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(gradient)
+            painter.drawEllipse(self._arc_rect(r * 0.985))
+            painter.restore()
+
+        def _draw_hero_sparks(self, painter, c, r: float) -> None:
+            """Internal flashes: thinking/listening sparkle inside the sphere."""
+            spark = c["profile"]["spark_intensity"]
+            if spark <= 0.03:
+                return
+            alpha, peak = c["alpha"], c["peak"]
+            painter.save()
+            clip = QPainterPath()
+            clip.addEllipse(self._arc_rect(r * 0.96))
+            painter.setClipPath(clip)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for index in range(5):
+                angle = index * 1.256 + c["elapsed"] * (0.5 + 0.3 * index)
+                radius = r * (0.32 + 0.14 * (index % 3))
+                x = math.cos(angle) * radius
+                y = math.sin(angle) * radius * 0.90
+                twinkle = max(0.0, math.sin(c["elapsed"] * 5.2 + index * 2.1))
+                a = alpha * 0.55 * spark * twinkle
+                painter.setBrush(QColor(*peak, int(a)))
+                painter.drawEllipse(QPointF(x, y), 1.4, 1.4)
+                painter.setBrush(QColor(255, 255, 255, int(a * 0.60)))
+                painter.drawEllipse(QPointF(x, y), 0.6, 0.6)
+            painter.restore()
+
+        def _draw_asset_layer(self, painter, pixmap, diameter: float) -> None:
+            """Centered square layer of the given diameter (SmoothPixmap)."""
+            if pixmap is None:
+                return
+            half = diameter / 2.0
+            painter.drawPixmap(
+                QRectF(-half, -half, diameter, diameter),
+                pixmap,
+                QRectF(0.0, 0.0, pixmap.width(), pixmap.height()),
+            )
+
+        def _draw_asset_device(self, painter, c, bundle) -> None:
+            """Layered asset sphere: body -> rotating grid -> glow -> logo."""
+            size = c["size"]
+            frame, profile, alpha = c["frame"], c["profile"], c["alpha"]
+            device_r = size * DEVICE_RADIUS_FACTOR
+            pulse = 1.0 + (frame["scale"] - 1.0) * profile["core_pulse"]
+            painter.save()
+            painter.translate(c["center"], c["center"])
+            painter.scale(pulse, pulse)
+            # 1. Core / orb base.
+            self._draw_asset_layer(painter, bundle.get("globe_body"), device_r * 2.0)
+            # 2. Digital globe texture rotating slowly (state-aware speed).
+            painter.save()
+            painter.rotate(frame["rotation_deg"] * 0.55 * (0.4 + profile["ring_speed"]))
+            painter.setOpacity(min(1.0, 0.90 * frame["alpha_factor"]))
+            self._draw_asset_layer(painter, bundle.get("globe_grid"), device_r * 2.0)
+            painter.restore()
+            # 3. Inner glow breathing with the core energy.
+            painter.setOpacity(min(1.0, (0.34 + 0.42 * profile["core_intensity"]) * frame["alpha_factor"]))
+            glow_diameter = device_r * (1.10 + 0.06 * profile["core_pulse"])
+            self._draw_asset_layer(painter, bundle.get("inner_glow"), glow_diameter)
+            painter.setOpacity(min(1.0, frame["alpha_factor"]))
+            # 4. Atlas logo: big, integrated, gently pulsing.
+            painter.save()
+            logo_scale = 1.0 + 0.05 * profile["core_pulse"] * (frame["scale"] - 1.0) * 12.0
+            painter.scale(logo_scale, logo_scale)
+            self._draw_asset_layer(painter, bundle.get("atlas_logo"), device_r * 1.34)
+            painter.restore()
+            painter.restore()
+
+        def _draw_asset_particles(self, painter, c, bundle) -> None:
+            """Asset particle field drifting/rotating around the device."""
+            pixmap = bundle.get("particles")
+            if pixmap is None:
+                return self._draw_core_particles(painter, c)
+            profile = c["profile"]
+            painter.save()
+            painter.translate(c["center"], c["center"])
+            painter.rotate(c["frame"]["rotation_deg"] * 0.32 * (0.5 + profile["particle_intensity"]))
+            painter.setOpacity(min(1.0, (0.42 + 0.58 * profile["particle_intensity"]) * c["frame"]["alpha_factor"]))
+            self._draw_asset_layer(painter, pixmap, c["size"] * DEVICE_RADIUS_FACTOR * 2.5)
+            painter.restore()
 
         def _draw_ambient(self, painter, c) -> None:
             """Dark atmospheric halo that fades to fully transparent over the desktop."""
@@ -741,6 +1360,7 @@ def create_orb_window(settings=None):
             center, size = c["center"], c["size"]
             alpha, profile, frame = c["alpha"], c["profile"], c["frame"]
             halo, dim, light, bright, peak = c["halo"], c["dim"], c["light"], c["bright"], c["peak"]
+            device_r = size * DEVICE_RADIUS_FACTOR
             speeds = self._STATE_ORBIT_SPEEDS.get(c["state"], (0.16, -0.10, 0.07, 0.12))
             gain = profile["ring_activity"] * profile["ring_speed"]
             widths = (5.6, 4.4, 3.4)
@@ -788,7 +1408,7 @@ def create_orb_window(settings=None):
                 # Small technology modules ride the front arc of each orbit.
                 for module_angle in self._ORBIT_MODULES[index]:
                     mx, my = self._orbit_point(radius, squash, tilt + rotation, module_angle)
-                    if my < -c["r"] * 0.15 or math.hypot(mx, my) < c["r"] * 1.18:
+                    if my < -device_r * 0.15 or math.hypot(mx, my) < device_r * 1.12:
                         continue  # the module would read as being behind the device
                     px, py = center + mx, center + my
                     painter.setPen(Qt.PenStyle.NoPen)
@@ -814,10 +1434,11 @@ def create_orb_window(settings=None):
             """Projection beam, segmented holographic platform and reflection pool."""
             size, center = c["size"], c["center"]
             alpha, projection, peak = c["base_alpha"], c["bright"], c["peak"]
-            base_y = size * 0.805
-            beam_top = center + c["r"] * 0.72
-            half_top = max(6.0, c["r"] * 0.30)
-            half_bottom = max(12.0, c["r"] * 0.74)
+            device_r = size * DEVICE_RADIUS_FACTOR
+            base_y = size * PLATFORM_BASE_FACTOR
+            beam_top = center + device_r * 0.96
+            half_top = max(6.0, device_r * 0.30)
+            half_bottom = max(12.0, device_r * 0.74)
             beam = QPainterPath()
             beam.moveTo(center - half_top, beam_top)
             beam.lineTo(center + half_top, beam_top)
@@ -847,16 +1468,16 @@ def create_orb_window(settings=None):
             painter.drawEllipse(self._arc_rect(size * 0.24))
             painter.restore()
 
-            # Layered platform sized to the sphere, not to the orbits:
+            # Layered platform sized to the asset sphere, not to the core:
             # segmented outer ring, sparse outer segments, mid rings, luminous centre.
             painter.save()
             painter.translate(center, base_y)
             painter.scale(1.0, 0.30)
-            outer = c["r"] * 0.94
+            outer = device_r * 0.94
             sparse_pen = QPen(QColor(*projection, int(alpha * 0.50)), 2.0, Qt.PenStyle.CustomDashLine)
             sparse_pen.setDashPattern((0.020, 0.055))
             painter.setPen(sparse_pen)
-            painter.drawEllipse(self._arc_rect(c["r"] * 1.04))
+            painter.drawEllipse(self._arc_rect(device_r * 1.04))
             dash_pen = QPen(QColor(*projection, int(alpha * 0.78)), 3.4, Qt.PenStyle.CustomDashLine)
             dash_pen.setDashPattern((0.40, 0.10))
             painter.setPen(dash_pen)
@@ -864,9 +1485,6 @@ def create_orb_window(settings=None):
             mid = size * 0.185
             painter.setPen(QPen(QColor(*projection, int(alpha * 0.66)), 2.2))
             painter.drawEllipse(self._arc_rect(mid))
-            inner = size * 0.128
-            painter.setPen(QPen(QColor(*projection, int(alpha * 0.52)), 1.4))
-            painter.drawEllipse(self._arc_rect(inner))
             hot = size * 0.078
             hot_gradient = QRadialGradient(0, 0, hot)
             hot_gradient.setColorAt(0.0, QColor(240, 252, 255, min(255, int(alpha * 0.98))))
@@ -878,7 +1496,7 @@ def create_orb_window(settings=None):
             painter.restore()
 
         def _draw_device(self, painter, c) -> None:
-            """The device body: shell plates, tech rings, segment band, glass sphere, inner glow."""
+            """Volumetric holographic sphere: body, digital grid, light pockets, glow."""
             center, size = c["center"], c["size"]
             r = c["r"]
             alpha = c["alpha"]
@@ -887,96 +1505,61 @@ def create_orb_window(settings=None):
             painter.save()
             painter.translate(center, center)
 
-            # A. Outer shell: dark faceted band with metallic plates and edge glints.
-            band_outer = r * 1.12
-            band_inner = r * 1.005
-            band = QPainterPath()
-            band.addEllipse(self._arc_rect(band_outer))
-            hole = QPainterPath()
-            hole.addEllipse(self._arc_rect(band_inner))
-            shell_gradient = QRadialGradient(0, -r * 0.30, band_outer)
-            shell_gradient.setColorAt(0.0, QColor(min(255, depth[0] + 20), min(255, depth[1] + 20), min(255, depth[2] + 26), int(alpha * 0.94)))
-            shell_gradient.setColorAt(0.55, QColor(*depth, int(alpha * 0.97)))
-            shell_gradient.setColorAt(1.0, QColor(min(255, depth[0] + 12), min(255, depth[1] + 12), min(255, depth[2] + 16), int(alpha * 0.92)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(shell_gradient)
-            painter.drawPath(band.subtracted(hole))
-            plate_r = r * 1.056
-            top_r = r * 1.104
-            for start, span in self._SHELL_PLATES:
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(QColor(*halo, int(alpha * 0.30)), r * 0.105))
-                painter.drawArc(self._arc_rect(plate_r), int(start * 16), int(span * 16))
-                painter.setPen(QPen(QColor(*light, int(alpha * 0.26)), 1.3))
-                painter.drawArc(self._arc_rect(top_r), int((start + 1) * 16), int((span - 2) * 16))
-                painter.setPen(QPen(QColor(255, 255, 255, int(alpha * 0.42)), 1.0))
-                painter.drawArc(self._arc_rect(top_r), int((start + span - 5) * 16), int(5 * 16))
-
-            # B. Compact concentric technology rings hugging the shell (solid, dashed, bright segments).
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            ring_r = r * 1.140
-            painter.setPen(QPen(QColor(*halo, int(alpha * 0.26)), 1.0))
-            painter.drawEllipse(self._arc_rect(ring_r))
-            dash_pen = QPen(QColor(*light, int(alpha * 0.44)), 1.5, Qt.PenStyle.CustomDashLine)
-            dash_pen.setDashPattern((0.045, 0.030))
-            painter.setPen(dash_pen)
-            painter.drawEllipse(self._arc_rect(r * 1.172))
-            for start, span in ((30.0, 40.0), (142.0, 24.0), (252.0, 56.0)):
-                painter.setPen(QPen(QColor(*bright, int(alpha * 0.55)), 1.1))
-                painter.drawArc(self._arc_rect(ring_r), int(start * 16), int(span * 16))
-
-            # C. Discontinuous equatorial segment band, tight to the shell.
-            seg_r = r * 1.196
-            for start, span in self._BAND_SEGMENTS:
-                painter.setPen(QPen(QColor(*dim, int(alpha * 0.82)), max(3.0, r * 0.070)))
-                painter.drawArc(self._arc_rect(seg_r), int(start * 16), int(span * 16))
-                painter.setPen(QPen(QColor(*bright, int(alpha * 0.85)), max(1.2, r * 0.040)))
-                painter.drawArc(self._arc_rect(seg_r - 1.5), int((start + 1.5) * 16), int((span - 3) * 16))
-                painter.setPen(QPen(QColor(255, 255, 255, int(alpha * 0.72)), 1.1))
-                painter.drawArc(self._arc_rect(seg_r), int(start * 16), int(5 * 16))
-
-            # D. Luminous nodes sitting in the gaps of the band.
-            node_energy = profile["node_energy"]
-            for node_index, angle in enumerate(self._BAND_NODES):
-                rad = math.radians(angle)
-                nx, ny = seg_r * math.cos(rad), -seg_r * math.sin(rad)
-                flash = 1.0
-                if node_energy >= 0.6:
-                    flash = 0.50 + 0.50 * (math.sin(c["elapsed"] * 11.0 + node_index * 2.1) * 0.5 + 0.5)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(*peak, int(alpha * 0.26 * node_energy * flash)))
-                painter.drawEllipse(QPointF(nx, ny), 5.5, 5.5)
-                painter.setBrush(QColor(*bright, int(alpha * 0.90 * (0.55 + 0.45 * node_energy) * flash)))
-                painter.drawEllipse(QPointF(nx, ny), 2.2, 2.2)
-
-            # E. Glass/energy sphere: offset light, dark rim, faceted conical sheen.
-            sphere_gradient = QRadialGradient(-r * 0.24, -r * 0.30, r * 1.28)
+            # A. Volumetric sphere body: dark translucent core with offset light
+            # and a brighter rim, so the window reads as a 3D holographic
+            # sphere instead of a stack of flat concentric circles.
+            sphere_gradient = QRadialGradient(-r * 0.26, -r * 0.32, r * 1.30)
             state = c["state"]
             state_rgb = c["rgb"]
             if state is OrbVisualState.AUTHORIZATION:
-                sphere_gradient.setColorAt(0.0, QColor(26, 13, 2, min(255, alpha + 14)))
-                sphere_gradient.setColorAt(0.50, QColor(64, 32, 4, int(alpha * 0.96)))
-                sphere_gradient.setColorAt(0.82, QColor(150, 84, 10, int(alpha * 0.70)))
+                core, mid, rim = (24, 12, 2), (58, 28, 4), (140, 78, 10)
             elif state is OrbVisualState.AUTOMATION:
-                sphere_gradient.setColorAt(0.0, QColor(30, 3, 9, min(255, alpha + 14)))
-                sphere_gradient.setColorAt(0.50, QColor(66, 7, 16, int(alpha * 0.96)))
-                sphere_gradient.setColorAt(0.82, QColor(140, 28, 33, int(alpha * 0.72)))
+                core, mid, rim = (16, 2, 7), (42, 6, 13), (124, 20, 26)
             elif state is OrbVisualState.PROCESSING:
-                sphere_gradient.setColorAt(0.0, QColor(16, 4, 38, min(255, alpha + 14)))
-                sphere_gradient.setColorAt(0.50, QColor(36, 10, 74, int(alpha * 0.96)))
-                sphere_gradient.setColorAt(0.82, QColor(96, 42, 158, int(alpha * 0.70)))
+                core, mid, rim = (2, 10, 34), (4, 36, 96), (9, 98, 182)
             elif state is OrbVisualState.SPEAKING:
-                sphere_gradient.setColorAt(0.0, QColor(2, 26, 20, min(255, alpha + 14)))
-                sphere_gradient.setColorAt(0.50, QColor(4, 60, 38, int(alpha * 0.96)))
-                sphere_gradient.setColorAt(0.82, QColor(16, 116, 68, int(alpha * 0.70)))
+                core, mid, rim = (2, 22, 16), (4, 52, 32), (15, 108, 62)
             else:
-                sphere_gradient.setColorAt(0.0, QColor(2, 9, 26, min(255, alpha + 14)))
-                sphere_gradient.setColorAt(0.50, QColor(5, 28, 68, int(alpha * 0.96)))
-                sphere_gradient.setColorAt(0.82, QColor(14, 84, 150, int(alpha * 0.70)))
+                core, mid, rim = (2, 8, 24), (5, 26, 64), (12, 76, 138)
+            sphere_gradient.setColorAt(0.0, QColor(*core, min(255, alpha + 16)))
+            sphere_gradient.setColorAt(0.42, QColor(*mid, int(alpha * 0.94)))
+            sphere_gradient.setColorAt(0.80, QColor(*rim, int(alpha * 0.66)))
+            sphere_gradient.setColorAt(0.94, QColor(*halo, int(alpha * 0.30)))
             sphere_gradient.setColorAt(1.0, QColor(*state_rgb, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(sphere_gradient)
-            painter.setPen(QPen(QColor(*halo, int(alpha * 0.50)), 2.0))
             painter.drawEllipse(self._arc_rect(r))
+
+            # B. Digital surface grid clipped to the sphere: latitude parallels
+            # plus longitude meridians replace the old flat ring stack.
+            painter.save()
+            clip = QPainterPath()
+            clip.addEllipse(self._arc_rect(r * 0.995))
+            painter.setClipPath(clip)
+            grid_pen = QPen(QColor(*light, int(alpha * 0.20)), 1.0)
+            for latitude in (-0.66, -0.33, 0.0, 0.33, 0.66):
+                span = math.sqrt(max(0.05, 1.0 - latitude * latitude))
+                lat_rect = QRectF(
+                    -span * r,
+                    latitude * r - span * r * 0.24,
+                    span * r * 2.0,
+                    span * r * 0.48,
+                )
+                if latitude == 0.0:
+                    equator_pen = QPen(QColor(*peak, int(alpha * 0.34)), 1.2, Qt.PenStyle.CustomDashLine)
+                    equator_pen.setDashPattern((0.05, 0.035))
+                    painter.setPen(equator_pen)
+                else:
+                    painter.setPen(grid_pen)
+                painter.drawEllipse(lat_rect)
+            painter.setPen(QPen(QColor(*light, int(alpha * 0.13)), 1.0))
+            for meridian in (0.28, 0.60, 0.88):
+                painter.drawEllipse(QRectF(-meridian * r, -r, meridian * r * 2.0, r * 2.0))
+            # Inner illumination along the upper-left limb (light inside the volume).
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(*peak, int(alpha * 0.34)), 1.8))
+            painter.drawArc(self._arc_rect(r * 0.97), int(115 * 16), int(58 * 16))
+            painter.restore()
 
             vignette = QRadialGradient(0, r * 0.08, r)
             vignette.setColorAt(0.0, QColor(*depth, 0))
@@ -996,38 +1579,22 @@ def create_orb_window(settings=None):
             painter.setBrush(sheen)
             painter.drawEllipse(self._arc_rect(r))
 
+            # C. Specular highlight: one compact light pocket near the offset
+            # light source sells the glass curvature.
+            highlight = QRadialGradient(-r * 0.42, -r * 0.44, r * 0.30)
+            highlight.setColorAt(0.0, QColor(255, 255, 255, int(alpha * 0.16 * profile["halo_strength"])))
+            highlight.setColorAt(0.45, QColor(255, 255, 255, int(alpha * 0.05)))
+            highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setBrush(highlight)
+            painter.drawEllipse(self._arc_rect(r * 0.30).translated(QPointF(-r * 0.42, -r * 0.44)))
+
+            # D. Rim treatment: one luminous border plus a single inner echo
+            # ring (the two thin inner circles and arc fragments are gone).
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(*peak, int(alpha * 0.42)), 1.2))
             painter.drawEllipse(QRectF(-r + 1, -r + 1, (r - 1) * 2, (r - 1) * 2))
-            for inner_factor, opacity, width in ((0.84, 0.22, 1.2), (0.66, 0.30, 1.0)):
-                painter.setPen(QPen(QColor(*bright, int(alpha * opacity)), width))
-                painter.drawEllipse(self._arc_rect(r * inner_factor))
-            for start, span in ((24.0, 30.0), (150.0, 20.0), (262.0, 36.0)):
-                painter.setPen(QPen(QColor(*peak, int(alpha * 0.45)), 1.0))
-                painter.drawArc(self._arc_rect(r * 0.84), int(start * 16), int(span * 16))
-
-            # D2. Dense inner instrumentation: fine rings, micro dashes, nodes, glints.
-            inner_dash = QPen(QColor(*light, int(alpha * 0.42)), 1.0, Qt.PenStyle.CustomDashLine)
-            inner_dash.setDashPattern((0.030, 0.052))
-            painter.setPen(inner_dash)
-            painter.drawEllipse(self._arc_rect(r * 0.52))
-            painter.setPen(QPen(QColor(*halo, int(alpha * 0.30)), 0.9))
-            painter.drawEllipse(self._arc_rect(r * 0.38))
-            painter.setPen(QPen(QColor(*bright, int(alpha * 0.34)), 1.0))
-            painter.drawEllipse(self._arc_rect(r * 0.74))
-            for start, span in ((58.0, 14.0), (118.0, 9.0), (206.0, 16.0), (292.0, 11.0), (338.0, 7.0)):
-                painter.setPen(QPen(QColor(*peak, int(alpha * 0.50)), 1.1))
-                painter.drawArc(self._arc_rect(r * 0.66), int(start * 16), int(span * 16))
-                painter.setPen(QPen(QColor(*light, int(alpha * 0.36)), 0.9))
-                painter.drawArc(self._arc_rect(r * 0.44), int((start + 24.0) * 16), int(span * 0.8 * 16))
-            for micro_angle, micro_r in ((41.0, 0.60), (97.0, 0.74), (164.0, 0.52), (243.0, 0.68), (311.0, 0.46)):
-                rad = math.radians(micro_angle)
-                mx, my = micro_r * r * math.cos(rad), -micro_r * r * math.sin(rad)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(*peak, int(alpha * 0.70)))
-                painter.drawEllipse(QPointF(mx, my), 1.6, 1.6)
-                painter.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
-                painter.drawEllipse(QPointF(mx - 0.5, my - 0.5), 0.7, 0.7)
+            painter.setPen(QPen(QColor(*bright, int(alpha * 0.22)), 1.0))
+            painter.drawEllipse(self._arc_rect(r * 0.84))
 
             gloss = QRadialGradient(-r * 0.34, -r * 0.38, r * 0.62)
             gloss.setColorAt(0.0, QColor(*peak, int(alpha * 0.14)))
@@ -1103,7 +1670,7 @@ def create_orb_window(settings=None):
                 painter.drawEllipse(QPointF(px - dot * 0.3, py - dot * 0.3), dot * 0.42, dot * 0.42)
 
         def _draw_emblem(self, painter, c) -> None:
-            """The compact Atlas chevron shares the light of the nucleus."""
+            """The Atlas chevron shares the light of the nucleus."""
             center, size, alpha = c["center"], c["size"], c["alpha"]
             emblem = self._emblem_path
             painter.setPen(Qt.PenStyle.NoPen)
@@ -1113,14 +1680,14 @@ def create_orb_window(settings=None):
             painter.drawPath(emblem)
             painter.restore()
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(*c["halo"], int(alpha * 0.46)), 4.0))
+            painter.setPen(QPen(QColor(*c["halo"], int(alpha * 0.55)), 5.2))
             painter.drawPath(emblem)
-            painter.setPen(QPen(QColor(*c["peak"], min(255, alpha + 4)), 1.1))
+            painter.setPen(QPen(QColor(*c["peak"], min(255, alpha + 6)), 1.1))
             painter.drawPath(emblem)
-            emblem_gradient = QRadialGradient(center, center - size * 0.02, size * 0.20)
-            emblem_gradient.setColorAt(0.0, QColor(244, 252, 255, min(255, alpha + 16)))
-            emblem_gradient.setColorAt(0.52, QColor(*c["peak"], min(255, alpha + 10)))
-            emblem_gradient.setColorAt(1.0, QColor(*c["light"], min(255, int(alpha * 0.90))))
+            emblem_gradient = QRadialGradient(center, center - size * 0.02, size * 0.24)
+            emblem_gradient.setColorAt(0.0, QColor(250, 253, 255, min(255, alpha + 18)))
+            emblem_gradient.setColorAt(0.52, QColor(*c["peak"], min(255, alpha + 12)))
+            emblem_gradient.setColorAt(1.0, QColor(*c["light"], min(255, int(alpha * 0.92))))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(emblem_gradient)
             painter.drawPath(emblem)
@@ -1133,7 +1700,7 @@ def create_orb_window(settings=None):
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
             if state is OrbVisualState.PROCESSING and period:
-                # Violet energy waves circling the nucleus (no lateral bars).
+                # Intense blue-cyan energy waves circling the nucleus (no lateral bars).
                 for index in range(4):
                     angle = (elapsed * 84.0 * (1.0 if index % 2 == 0 else -0.8) + index * 87.0) % 360.0
                     radius = r * (1.02 + 0.055 * (index % 3))
@@ -1417,6 +1984,15 @@ def create_transcript_panel():
         def set_hide_on_close(self, enabled: bool) -> None:
             """Configure the chat-only close behavior without changing voice UI."""
             self._hide_on_close = bool(enabled)
+
+        def prefill_input(self, text: str) -> None:
+            """Place routing text in the input without submitting it.
+
+            Capability menu options reuse the existing chat routing: the user
+            completes the prompt and the real router resolves the domain.
+            """
+            self._input.setText(str(text))
+            self._input.setFocus()
 
         def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
             if self._hide_on_close:
