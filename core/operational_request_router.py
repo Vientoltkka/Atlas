@@ -925,6 +925,30 @@ def _single_tool_action(text: str) -> str | None:
     return None
 
 
+_TRAINING_SESSION_MARKERS = (
+    "crossfit",
+    "hyrox",
+    "wod",
+    "amrap",
+    "emom",
+    "halterofilia",
+    "weightlifting",
+    "powerlifting",
+    "gimnasio",
+    "gimnasia",
+    "fuerza",
+    "hipertrofia",
+    "movilidad",
+    "acondicionamiento",
+    "cardio",
+    "skierg",
+    "ski erg",
+    "calistenia",
+    "atletas",
+    "series",
+)
+
+
 def _is_calendar_create_request(text: str) -> bool:
     create_markers = ("crea ", "crear ", "apunta ", "apuntar ", "agenda ", "agendar ", "programa ", "programar ", "create ")
     object_markers = (
@@ -935,7 +959,13 @@ def _is_calendar_create_request(text: str) -> bool:
         "recordatorio",
         "calendario",
     )
-    return _contains_any(text, create_markers) and _contains_any(text, object_markers)
+    if not _contains_any(text, create_markers) or not _contains_any(text, object_markers):
+        return False
+    if _contains_any(text, ("reunion", "evento", "cita", "recordatorio", "calendario")):
+        return True
+    # "entrenamiento" describes the workout content itself when the request is
+    # a training programming request; it is not a calendar entry then.
+    return not _contains_any(text, _TRAINING_SESSION_MARKERS)
 
 
 def _is_gmail_list_request(text: str) -> bool:
