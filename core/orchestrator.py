@@ -120,6 +120,7 @@ from core.supervised_capability_gap import (
     SkillCreationResponse,
     SupervisedCapabilityGapDetector,
 )
+from core.dev_worker_route import DevWorkerRoute
 from core.self_improvement_conversation import SelfImprovementConversation
 
 from memory.conversation import ConversationMemory
@@ -186,6 +187,7 @@ class AtlasOrchestrator:
         skill_system: SkillSystem | None = None,
         capability_gap_detector: SupervisedCapabilityGapDetector | None = None,
         self_improvement_conversation: SelfImprovementConversation | None = None,
+        dev_worker_route: DevWorkerRoute | None = None,
         structured_execution_enabled: bool = False,
         structured_plan_streaming_enabled: bool = False,
         structured_plan_execution_enabled: bool = False,
@@ -267,6 +269,7 @@ class AtlasOrchestrator:
         )
         self._project_root = project_root or Path(".")
         self._self_improvement_conversation = self_improvement_conversation or SelfImprovementConversation(self._project_root)
+        self._dev_worker_route = dev_worker_route or DevWorkerRoute(self._project_root)
         self._now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._async_task_scheduler = async_task_scheduler
         self._background_pump = (
@@ -939,6 +942,12 @@ class AtlasOrchestrator:
         explicit_skill_response = self._explicit_skill_use_response(prompt)
         if explicit_skill_response is not None:
             return explicit_skill_response
+        # The bounded Computer Worker goal is checked before the
+        # self-improvement gate, whose "corrige" detector would otherwise stop
+        # this dev-worker request with a clarification.
+        dev_worker_response = self._dev_worker_route.handle(prompt)
+        if dev_worker_response is not None:
+            return dev_worker_response
         self_improvement_response = self._self_improvement_conversation.handle(prompt)
         if self_improvement_response is not None:
             return self_improvement_response
