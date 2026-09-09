@@ -48,6 +48,11 @@ def main() -> int:
         help="Inicia el webhook de WhatsApp (FastAPI + uvicorn, workers=1).",
     )
     parser.add_argument(
+        "--twilio-whatsapp-webhook",
+        action="store_true",
+        help="Inicia el webhook de WhatsApp para Twilio Sandbox (solo texto).",
+    )
+    parser.add_argument(
         "--chat",
         action="store_true",
         help="Inicia el Orbe de Atlas en modo chat textual sin voz.",
@@ -109,6 +114,9 @@ def main() -> int:
 
         if args.whatsapp_webhook:
             return _run_whatsapp_webhook(logger)
+
+        if getattr(args, "twilio_whatsapp_webhook", False):
+            return _run_twilio_whatsapp_webhook(logger)
 
         if getattr(args, "chat", False):
             return _run_desktop_ui(
@@ -223,6 +231,8 @@ def _requested_mode(args: argparse.Namespace) -> str:
         return "microphone"
     if getattr(args, "whatsapp_webhook", False):
         return "whatsapp"
+    if getattr(args, "twilio_whatsapp_webhook", False):
+        return "twilio"
     if getattr(args, "chat", False):
         return "chat"
     if getattr(args, "ui", False):
@@ -322,6 +332,46 @@ def _run_whatsapp_webhook(logger: logging.Logger) -> int:
 
     port = int(os.environ.get("ATLAS_WHATSAPP_WEBHOOK_PORT", "8000"))
     print(f"Atlas WhatsApp webhook escuchando en puerto {port} (workers=1)")
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
+    return 0
+
+
+def _run_twilio_whatsapp_webhook(logger: logging.Logger) -> int:
+    """Start the Twilio-only WhatsApp webhook (MVP text-only, workers=1)."""
+    import os
+
+    from channels.app import create_twilio_webhook_app
+    from bootstrap.agent_system import build_core_agent_system
+
+    required = [
+        "ATLAS_TWILIO_ACCOUNT_SID",
+        "ATLAS_TWILIO_AUTH_TOKEN",
+        "ATLAS_TWILIO_WHATSAPP_FROM",
+        "ATLAS_TWILIO_ALLOWED_NUMBERS",
+    ]
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
+        logger.error("Twilio webhook requiere variables | faltan=%s", ",".join(missing))
+        print(
+            "Faltan variables para el webhook Twilio: "
+            + ", ".join(missing)
+            + ". Configuralas en .env (sin valores de ejemplo)."
+        )
+        return 1
+
+    result = build_core_agent_system()
+    if result.system is None:
+        logger.error("No se pudo construir el sistema de agentes de Atlas")
+        print("Atlas no pudo inicializar el sistema de agentes. Revisa logs\\atlas.log.")
+        return 1
+    executor = result.system.agent_executor
+
+    app = create_twilio_webhook_app(executor_fn=executor.execute)
+
+    import uvicorn
+
+    port = int(os.environ.get("ATLAS_TWILIO_WEBHOOK_PORT", "8000"))
+    print(f"Atlas Twilio WhatsApp webhook escuchando en puerto {port} (workers=1, solo texto)")
     uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
     return 0
 

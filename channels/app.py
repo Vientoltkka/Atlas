@@ -28,6 +28,8 @@ from channels.whatsapp_metrics import WhatsAppMetricsRecorder
 from channels.whatsapp_metrics_persistence import WhatsAppMetricsPersistence
 from channels.whatsapp_rate_limit import WhatsAppRateLimiter
 from channels.whatsapp_webhook import build_webhook_router
+from channels.twilio_webhook import build_twilio_webhook_router, normalize_twilio_number
+from channels.twilio_sender import TwilioWhatsAppSender
 from core.agent_executor import AgentExecutionRequest, AgentExecutionResult
 
 
@@ -281,6 +283,73 @@ def _build_audio_transcriber() -> Any:
 
 # Backwards-compatible alias used by earlier phases.
 create_webhook_app = build_webhook_app
+
+
+def build_twilio_webhook_app(
+    *,
+    channel: WhatsAppChannel | None = None,
+    executor_fn: Callable[[AgentExecutionRequest], AgentExecutionResult] | None = None,
+    store: IdempotencyStore | SqliteIdempotencyStore | None = None,
+    sender: Any = None,
+    auth_token: str | None = None,
+    from_number: str | None = None,
+    allowed_numbers: Any = None,
+) -> FastAPI:
+    """Build the isolated Twilio WhatsApp webhook application (MVP text-only).
+
+    Reuses the same idempotency store contract as the Meta webhook; the
+    MessageSid event ids never collide with Meta message ids.
+    """
+    if channel is None:
+        channel = WhatsAppChannel()
+    if auth_token is None:
+        auth_token = os.environ.get("ATLAS_TWILIO_AUTH_TOKEN", "")
+    if not auth_token:
+        raise ValueError("auth_token is required (set ATLAS_TWILIO_AUTH_TOKEN).")
+    if from_number is None:
+        from_number = os.environ.get("ATLAS_TWILIO_WHATSAPP_FROM", "")
+    if not from_number:
+        raise ValueError("from_number is required (set ATLAS_TWILIO_WHATSAPP_FROM).")
+    if allowed_numbers is None:
+        raw = os.environ.get("ATLAS_TWILIO_ALLOWED_NUMBERS", "")
+        allowed_numbers = frozenset(
+            normalize_twilio_number(entry)
+            for entry in raw.split(",")
+            if entry.strip()
+        )
+    if store is None:
+        store = _build_store()
+    if sender is None:
+        account_sid = os.environ.get("ATLAS_TWILIO_ACCOUNT_SID", "")
+        if not account_sid:
+            raise ValueError("account_sid is required (set ATLAS_TWILIO_ACCOUNT_SID).")
+        # ATLAS_TWILIO_TRIAL_CONTENT_SID is optional compatibility for Twilio
+        # Trial restrictions (outbound restricted to approved Content
+        # templates). Without it, the normal body/free-form mode is used.
+        sender = TwilioWhatsAppSender(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            from_number=from_number,
+            content_sid=os.environ.get("ATLAS_TWILIO_TRIAL_CONTENT_SID") or None,
+        )
+    if executor_fn is None:
+        raise ValueError("executor_fn is required.")
+
+    app = FastAPI(title="Atlas Twilio WhatsApp Webhook")
+    app.include_router(
+        build_twilio_webhook_router(
+            channel=channel,
+            executor_fn=executor_fn,
+            sender=sender,
+            auth_token=auth_token,
+            store=store,
+            allowed_numbers=allowed_numbers,
+        )
+    )
+    return app
+
+
+create_twilio_webhook_app = build_twilio_webhook_app
 
 
 def _build_voice_renderer() -> Any:

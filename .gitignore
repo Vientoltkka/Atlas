@@ -39,3 +39,7 @@ dist/
 *.tmp
 *.temp
 pytest-*/
+
+# Runtime SQLite idempotency store
+data/*.db
+data/*.db-*
