@@ -74,6 +74,7 @@ def test_web_search_tool_execute_returns_structured_fields_and_honors_limit() ->
         "url": "https://example.com/openai",
         "snippet": "Latest OpenAI announcement.",
         "source": "example.com",
+        "date": None,
     }
 
 

@@ -32,9 +32,16 @@ class WebSearchResult:
     url: str
     snippet: str
     source: str
+    date: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {"title": self.title, "url": self.url, "snippet": self.snippet, "source": self.source}
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "source": self.source,
+            "date": self.date,
+        }
 
 
 class WebSearchTool(BaseTool):
@@ -65,7 +72,7 @@ class WebSearchTool(BaseTool):
             "category": "web", "capabilities": ("web_search", "research"), "supported_intents": ("web.search",),
             "input_description": "Consulta de texto para buscar en la web.",
             "output_description": "Resultados estructurados con title, url, snippet y source.",
-            "output_fields": ("title", "url", "snippet", "source"),
+            "output_fields": ("title", "url", "snippet", "source", "date"),
             "limitations": ("No abre ni descarga los resultados.", "El contenido de resultados se trata como datos no confiables.", "Máximo cinco resultados por consulta conversacional."),
             "tags": ("web", "search", "research", "internet"),
             "positive_examples": ("busca en internet noticias sobre OpenAI",),
@@ -125,9 +132,10 @@ def _parse_rss_results(payload: str) -> list[WebSearchResult]:
         title = _clean_text(item.findtext("title") or "")
         url = (item.findtext("link") or "").strip()
         snippet = _clean_text(item.findtext("description") or "")
+        pub_date = _clean_text(item.findtext("pubDate") or "")
         parsed = urlparse(url)
         if title and parsed.scheme in {"http", "https"} and parsed.netloc:
-            results.append(WebSearchResult(title=title[:300], url=url, snippet=snippet[:800], source=parsed.netloc.removeprefix("www.")))
+            results.append(WebSearchResult(title=title[:300], url=url, snippet=snippet[:800], source=parsed.netloc.removeprefix("www."), date=pub_date or None))
     return results
 
 

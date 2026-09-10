@@ -41,11 +41,12 @@ def test_finance_agent_defines_v1_personal_finance_and_safety_contract() -> None
         "compara opciones financieras",
         "interes o rentabilidad",
         "una sola aclaracion",
-        "datos actuales de mercado",
+        "no puedes verificar un dato actual",
+        "contexto de evidencia web",
     ):
         assert capability in prompt
-    assert "no prometas ni garantices rentabilidad" in prompt
-    assert "no inventes precios" in prompt
+    assert "no prometas rentabilidad" in prompt
+    assert "jamas inventes precios, noticias, metricas ni fuentes" in prompt
     assert "no ejecutes compras" in prompt
     assert "no des por hecho tolerancia al riesgo" in prompt
     assert "legalagent" in prompt
