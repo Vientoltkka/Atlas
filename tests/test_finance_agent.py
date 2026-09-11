@@ -73,7 +73,12 @@ def test_conversation_executes_finance_agent_with_mocked_model(monkeypatch) -> N
 
     monkeypatch.setattr(finance._client, "check_model_health", lambda *_args, **_kwargs: None)
 
-    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+    def respond(
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        provider_id: str | None = None,
+    ) -> str:
         calls.append((model, messages))
         return "Orientacion financiera generada."
 

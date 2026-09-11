@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +19,18 @@ class AgentResponse:
             raise ValueError("AgentResponse text must be a non-empty string.")
         if not isinstance(self.requires_follow_up, bool):
             raise ValueError("AgentResponse requires_follow_up must be a bool.")
+
+
+def ask_prompt_client(
+    client: Any,
+    model: str,
+    messages: list[dict[str, str]],
+    provider_id: str | None,
+) -> str:
+    """Forward the selected provider only when the selection chain provided one."""
+    if provider_id is None:
+        return client.ask(model=model, messages=messages)
+    return client.ask(model=model, messages=messages, provider_id=provider_id)
 
 
 class BaseAgent(ABC):
@@ -40,6 +53,8 @@ class BaseAgent(ABC):
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str | AgentResponse:
         """Execute the agent."""
         ...

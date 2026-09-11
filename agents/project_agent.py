@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, ask_prompt_client
 
 from models.prompt_client import PromptClient
 
@@ -78,6 +78,8 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str:
         user_query = self._last_user_query(messages)
         agent_selection_query = self._answer_agent_selection_files_query(
@@ -134,9 +136,11 @@ Responde siempre en espanol, con lenguaje tecnico, claro y estructurado.
                 }
             )
 
-        return self._client.ask(
-            model=model,
-            messages=conversation,
+        return ask_prompt_client(
+            self._client,
+            model,
+            conversation,
+            provider_id,
         )
 
     def _last_user_query(

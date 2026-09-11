@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.base_agent import AgentResponse, BaseAgent
+from agents.base_agent import AgentResponse, BaseAgent, ask_prompt_client
 from models.prompt_client import PromptClient
 
 
@@ -45,11 +45,17 @@ class LegalAgent(BaseAgent):
     def description(self) -> str:
         return "Cautious legal information, document analysis, and risk guidance."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         """Generate legal guidance without mutating memory or runtime state."""
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
-        return self._client.ask(model=model, messages=conversation)
+        return ask_prompt_client(self._client, model, conversation, provider_id)
 
     def local_calculation_fallback(
         self, messages: list[dict[str, str]]

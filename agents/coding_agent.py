@@ -10,7 +10,7 @@ import secrets
 import subprocess
 import sys
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, ask_prompt_client
 from models.prompt_client import PromptClient
 from use_cases.read_file import ReadFileUseCase
 from use_cases.write_file import WriteFileUseCase
@@ -94,7 +94,13 @@ Tu trabajo es:
     def description(self) -> str:
         return "Programming assistant."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         """Execute a coding request."""
         if not messages:
             return "No hay mensajes."
@@ -128,7 +134,7 @@ Código:
 {content}
 """},
             ]
-            generated = self._client.ask(model=model, messages=conversation)
+            generated = ask_prompt_client(self._client, model, conversation, provider_id)
             relative_path = target_path.relative_to(self._project_root).as_posix()
             pending = PendingCodingChange(
                 token=secrets.token_urlsafe(24),
@@ -142,7 +148,7 @@ Código:
             return self._render_pending_change(pending)
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
-        return self._client.ask(model=model, messages=conversation)
+        return ask_prompt_client(self._client, model, conversation, provider_id)
 
     @property
     def generated_path(self) -> str | None:

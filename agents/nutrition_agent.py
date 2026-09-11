@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from agents.base_agent import AgentResponse, BaseAgent
+from agents.base_agent import AgentResponse, BaseAgent, ask_prompt_client
 from models.prompt_client import PromptClient
 
 
@@ -69,14 +69,25 @@ class NutritionAgent(BaseAgent):
     def description(self) -> str:
         return "Evidence-informed sports nutrition and dietary guidance."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str | AgentResponse:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str | AgentResponse:
         """Generate nutrition guidance without mutating memory or runtime state."""
         preflight_response = self.preflight(messages)
         if preflight_response is not None:
             return preflight_response
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
-        response = self._client.ask(model=model, messages=conversation)
+        response = ask_prompt_client(
+            self._client,
+            model,
+            conversation,
+            provider_id,
+        )
         try:
             payload = json.loads(_structured_response_content(response))
         except (TypeError, json.JSONDecodeError):

@@ -1258,9 +1258,10 @@ class AtlasOrchestrator:
             try:
                 raw_response = self._model_inference_runner.run(
                     self._model_selection_policy.create_request(task=model_task),
-                    lambda selected_model, _selected_provider_id: specialist_agent.run(
+                    lambda selected_model, selected_provider_id: specialist_agent.run(
                         model=selected_model,
                         messages=messages,
+                        provider_id=selected_provider_id,
                     ),
                 )
             except (ModelHealthCheckError, InferenceFallbackExhaustedError) as error:
@@ -1696,9 +1697,10 @@ class AtlasOrchestrator:
             try:
                 response = self._model_inference_runner.run(
                     self._model_selection_policy.create_request(task=agent_name),
-                    lambda selected_model, _selected_provider_id: agent.run(
+                    lambda selected_model, selected_provider_id: agent.run(
                         model=selected_model,
                         messages=messages,
+                        provider_id=selected_provider_id,
                     ),
                 )
             except ModelSelectionError as error:

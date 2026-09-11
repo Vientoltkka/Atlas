@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, ask_prompt_client
 from models.prompt_client import PromptClient
 
 
@@ -37,8 +37,14 @@ automaticamente.
     def description(self) -> str:
         return "Software and application development planning and assistance."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         """Generate code guidance without mutating memory or runtime state."""
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
-        return self._client.ask(model=model, messages=conversation)
+        return ask_prompt_client(self._client, model, conversation, provider_id)

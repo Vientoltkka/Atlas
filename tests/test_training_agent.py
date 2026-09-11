@@ -246,7 +246,12 @@ def test_conversation_executes_existing_training_agent_with_mocked_model(
 
     monkeypatch.setattr(training._client, "check_model_health", lambda *_args, **_kwargs: None)
 
-    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+    def respond(
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        provider_id: str | None = None,
+    ) -> str:
         calls.append((model, messages))
         return "Plan de entrenamiento generado."
 

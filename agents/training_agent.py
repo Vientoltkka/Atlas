@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, ask_prompt_client
 from core.model_manager import ModelManager, ModelSelectionRequest
 from models.prompt_client import InferenceBackendError, PromptClient
 
@@ -115,13 +115,19 @@ class TrainingAgent(BaseAgent):
     def description(self) -> str:
         return "Evidence-informed training, periodization, and session planning."
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         """Generate training guidance without mutating memory or runtime state."""
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
         if self._model_manager is not None:
             return self._run_with_model_policy(conversation)
-        return self._client.ask(model=model, messages=conversation)
+        return ask_prompt_client(self._client, model, conversation, provider_id)
 
     def _run_with_model_policy(self, conversation: list[dict[str, str]]) -> str:
         primary = self._select_primary_model()

@@ -76,9 +76,17 @@ class Registry:
 class RecordingAgent:
     def __init__(self) -> None:
         self.models: list[str] = []
+        self.provider_ids: list[str | None] = []
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.models.append(model)
+        self.provider_ids.append(provider_id)
         return "ok"
 
 
@@ -86,7 +94,13 @@ class RecordingPromptClient:
     def __init__(self) -> None:
         self.models: list[str] = []
 
-    def ask(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ask(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
         self.models.append(model)
         return "respuesta"
 
@@ -219,7 +233,13 @@ def test_inference_failure_reaches_authorized_fallback_response() -> None:
         def __init__(self) -> None:
             self.models: list[str] = []
 
-        def run(self, model: str, messages: list[dict[str, str]]) -> str:
+        def run(
+            self,
+            model: str,
+            messages: list[dict[str, str]],
+            *,
+            provider_id: str | None = None,
+        ) -> str:
             self.models.append(model)
             if model == "primary:latest":
                 raise InferenceBackendError(model, "simulated backend failure")
@@ -303,7 +323,13 @@ def test_runtime_policy_can_forbid_inference_fallback() -> None:
         def __init__(self) -> None:
             self.models: list[str] = []
 
-        def run(self, model: str, messages: list[dict[str, str]]) -> str:
+        def run(
+            self,
+            model: str,
+            messages: list[dict[str, str]],
+            *,
+            provider_id: str | None = None,
+        ) -> str:
             self.models.append(model)
             raise InferenceBackendError(model, "simulated backend failure")
 

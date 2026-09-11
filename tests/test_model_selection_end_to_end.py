@@ -88,8 +88,14 @@ class PromptBackedAgent:
     def __init__(self, prompt_client: RecordingPromptClient) -> None:
         self._prompt_client = prompt_client
 
-    def run(self, model: str, messages: list[dict[str, str]]) -> str:
-        return self._prompt_client.ask(model, messages)
+    def run(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
+    ) -> str:
+        return self._prompt_client.ask(model, messages, provider_id=provider_id)
 
 
 class FixedPlanner:

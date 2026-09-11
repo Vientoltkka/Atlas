@@ -170,7 +170,12 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
 
     monkeypatch.setattr(nutrition._client, "check_model_health", lambda *_args, **_kwargs: None)
 
-    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+    def respond(
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        provider_id: str | None = None,
+    ) -> str:
         calls.append((model, messages))
         return "Orientacion nutricional generada."
 
