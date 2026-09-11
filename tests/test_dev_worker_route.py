@@ -16,6 +16,10 @@ _E2E_PROMPT = (
     "Atlas, revisa el archivo de prueba controlado del Computer Worker, "
     "corrige el valor incorrecto y ejecuta su test focal para verificarlo."
 )
+_STT_VARIANT_PROMPT = (
+    "Atlas, revisa el archivo de prueba controlado del Computeer World "
+    "y verifica que su test focal funciona."
+)
 
 
 def _tmp_project(tmp_path: Path, *, correct: bool) -> Path:
@@ -35,6 +39,22 @@ def test_route_accepts_only_the_bounded_computer_worker_request() -> None:
     assert DevWorkerRoute.accepts(_E2E_PROMPT)
     assert not DevWorkerRoute.accepts("corrige el valor incorrecto de greeter.py")
     assert not DevWorkerRoute.accepts("revisa el archivo de prueba controlado del Router")
+
+
+def test_route_accepts_the_real_stt_variant_of_the_bounded_request() -> None:
+    assert DevWorkerRoute.accepts(_STT_VARIANT_PROMPT)
+    assert DevWorkerRoute.accepts(
+        "revisa el archivo de prueba controlado del Computer World"
+    )
+    assert not DevWorkerRoute.accepts(
+        "revisa el archivo de prueba controlado del Computer Workstation"
+    )
+    assert not DevWorkerRoute.accepts(
+        "revisa el archivo de prueba controlado del Router"
+    )
+    assert not DevWorkerRoute.accepts(
+        "revisa el archivo de prueba del Computer Worker"
+    )
 
 
 def test_route_reports_done_and_edits_the_control_file(tmp_path: Path) -> None:
@@ -177,3 +197,27 @@ def test_process_prompt_routes_the_bounded_goal_through_dev_worker(
     assert "PASS" in response
     control = project / CONTROL_FILE_RELATIVE
     assert 'CONTROL_VALUE = "valor-correcto"' in control.read_text(encoding="utf-8")
+
+
+def test_process_prompt_routes_the_real_voice_variant_through_dev_worker(
+    tmp_path: Path,
+) -> None:
+    project = _tmp_project(tmp_path, correct=True)
+    orchestrator = AtlasOrchestrator(
+        planner=_Planner(),
+        router=_Router(),
+        model_manager=_ModelManager(),
+        memory=_Memory(),
+        registry=_Registry(),
+        write_file=_WriteFile(),
+        project_root=project,
+        dev_worker_route=DevWorkerRoute(project),
+    )
+
+    response = orchestrator.process_prompt(_STT_VARIANT_PROMPT, confirm=lambda _prompt: "")
+
+    assert "STATUS: DONE" in response
+    assert "PASS" in response
+    steps = orchestrator._dev_worker_route.plan(_STT_VARIANT_PROMPT)
+    assert steps is not None
+    assert [step.action for step in steps] == [DevWorkerAction.READ, DevWorkerAction.TEST]

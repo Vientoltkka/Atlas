@@ -28,7 +28,13 @@ BOUND_GOAL = (
     "y verificar con su test focal"
 )
 
-_ROUTE_MARKERS = ("computer worker", "archivo de prueba controlado")
+_ROUTE_EXACT_MARKERS = ("archivo de prueba controlado",)
+# Real STT transcriptions mangle the equipment name ("Computeer World"):
+# accept the computer/worker pair with close phonetic variants while the
+# exact control-file marker keeps the route bounded.
+_COMPUTER_WORKER_MARKER = re.compile(
+    r"comput\w*\s+wor(?:kers?|lds?|ds?|ks?)\b"
+)
 
 _VALUE_LINE = re.compile(r"^\s*CONTROL_VALUE\s*=.*$", re.MULTILINE)
 _QUOTED_VALUE = re.compile(r"[\"'](.+?)[\"']")
@@ -77,7 +83,9 @@ class DevWorkerRoute:
         if not isinstance(prompt, str):
             return False
         text = normalize_request(prompt)
-        return all(marker in text for marker in _ROUTE_MARKERS)
+        if not all(marker in text for marker in _ROUTE_EXACT_MARKERS):
+            return False
+        return _COMPUTER_WORKER_MARKER.search(text) is not None
 
     def plan(self, prompt: str) -> tuple[DevStep, ...] | None:
         """Derive the minimal DevSteps, or None when the route must decline."""
