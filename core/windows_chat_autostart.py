@@ -30,10 +30,20 @@ def launcher_path(*, appdata: str | None = None) -> Path:
 
 
 def build_launcher_contents(*, python_executable: str, project_root: Path) -> str:
-    """Render a hidden VBS launcher using absolute paths only."""
+    """Render a hidden VBS launcher using absolute paths only.
+
+    The working directory is pinned to the project root because Windows
+    runs Startup items with ``C:\\Windows\\System32`` as the CWD, which
+    breaks Atlas's relative ``.atlas`` state paths.
+    """
     main_script = project_root / "main.py"
     command = f'{_quote(python_executable)} -B {_quote(str(main_script))} {CHAT_ARGUMENTS}'
-    return 'CreateObject("WScript.Shell").Run "' + command.replace('"', '""') + '", 0, False\n'
+    return (
+        'CreateObject("WScript.Shell").CurrentDirectory = "'
+        + str(project_root).replace('"', '""')
+        + '"\n'
+        'CreateObject("WScript.Shell").Run "' + command.replace('"', '""') + '", 0, False\n'
+    )
 
 
 def install(

@@ -40,6 +40,7 @@ def test_launcher_uses_absolute_pythonw_main_and_hidden_chat() -> None:
     assert "main.py" in launcher
     assert "--chat --start-hidden" in launcher
     assert ", 0, False" in launcher
+    assert 'CurrentDirectory = "C:\\AI\\Atlas"' in launcher
 
 
 def test_install_and_status_use_only_the_given_current_user_launcher(capsys) -> None:
