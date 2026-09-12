@@ -16,11 +16,19 @@ _WM_QUIT = 0x0012
 
 
 class WindowsGlobalHotkey:
-    """Register Ctrl+Space and invoke a callback from a native message loop."""
+    """Register one global hotkey (default Ctrl+Space) and run a callback."""
 
-    def __init__(self, callback: Callable[[], None], logger=None) -> None:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        logger=None,
+        virtual_key: int = _VK_SPACE,
+        modifiers: int = _MOD_CONTROL,
+    ) -> None:
         self._callback = callback
         self._logger = logger or logging.getLogger(__name__)
+        self._virtual_key = virtual_key
+        self._modifiers = modifiers
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._ready = threading.Event()
@@ -52,13 +60,19 @@ class WindowsGlobalHotkey:
     def _listen(self) -> None:
         user32 = ctypes.windll.user32
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        if not user32.RegisterHotKey(None, _HOTKEY_ID, _MOD_CONTROL, _VK_SPACE):
-            self._logger.warning("No se pudo registrar el atajo global Ctrl+Espacio.")
+        if not user32.RegisterHotKey(None, _HOTKEY_ID, self._modifiers, self._virtual_key):
+            self._logger.warning(
+                "No se pudo registrar el atajo global (vk=%s mod=%s).",
+                self._virtual_key,
+                self._modifiers,
+            )
             self._ready.set()
             return
 
         self._registered = True
-        self._logger.info("Atajo global Ctrl+Espacio registrado")
+        self._logger.info(
+            "Atajo global registrado (vk=%s mod=%s)", self._virtual_key, self._modifiers
+        )
         self._ready.set()
         message = wintypes.MSG()
         try:

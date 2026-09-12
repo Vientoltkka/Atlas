@@ -669,6 +669,13 @@ def create_orb_window(settings=None):
         quit_requested = Signal()
         chat_requested = Signal()
         voice_requested = Signal()
+        # Safety exits wired by the controller: tray show/hide and Alt+F4.
+        show_requested = Signal()
+        hide_requested = Signal()
+        close_requested = Signal()
+        # Emitted whenever the real visual state changes, so external layers
+        # (e.g. the fullscreen stage) can mirror the same state.
+        visual_state_changed = Signal(object)
 
         def __init__(self) -> None:
             super().__init__()
@@ -697,13 +704,11 @@ def create_orb_window(settings=None):
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._on_animation_tick)
 
-            # Selective hit-testing: while the cursor stays outside the
-            # clickable disc the whole window forwards clicks to the desktop
-            # (WS_EX_TRANSPARENT); inside the disc the window receives them.
-            self._hit_timer = QTimer(self)
-            self._hit_timer.setInterval(_HIT_POLL_MS)
-            self._hit_timer.timeout.connect(self._update_click_through)
-
+            # Selective hit-testing at the OS level: WM_NCHITTEST answers
+            # HTTRANSPARENT for every point outside the clickable orb disc,
+            # so clicks pass to the desktop with zero polling race (the
+            # legacy WS_EX_TRANSPARENT polling could capture a click that
+            # arrived before the 50ms timer reacted).
             self._tray = None
             if QSystemTrayIcon.isSystemTrayAvailable():
                 self._build_tray()
@@ -726,6 +731,7 @@ def create_orb_window(settings=None):
             self._animation_started_at = time.monotonic()
             self._update_tray_icon()
             self._update_timer()
+            self.visual_state_changed.emit(self._state)
             self.update()
 
         @property
@@ -796,6 +802,9 @@ def create_orb_window(settings=None):
 
         def _build_tray(self) -> None:
             menu = QMenu()
+            menu.addAction("Mostrar Atlas", self.show_requested.emit)
+            menu.addAction("Ocultar Atlas", self.hide_requested.emit)
+            menu.addSeparator()
             menu.addAction("Detener", self.stop_requested.emit)
             menu.addAction("Salir", self.quit_requested.emit)
             tray = QSystemTrayIcon(self._render_state_icon(), self)
@@ -918,14 +927,17 @@ def create_orb_window(settings=None):
             self.toggle_context_menu()
             event.accept()
 
+        def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            if event.key() == Qt.Key.Key_Escape:
+                self.hide_requested.emit()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
         def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
             super().showEvent(event)
-            if self._hit_timer is not None and not self._hit_timer.isActive():
-                self._hit_timer.start()
 
         def hideEvent(self, event) -> None:  # noqa: N802 (Qt API)
-            if self._hit_timer is not None:
-                self._hit_timer.stop()
             super().hideEvent(event)
 
         # -- selective hit-testing --------------------------------------
@@ -937,44 +949,28 @@ def create_orb_window(settings=None):
             dy = global_point.y() - centre.y()
             return math.hypot(dx, dy) <= self.width() * CLICKABLE_RADIUS_FACTOR
 
-        def _update_click_through(self) -> None:
-            """Toggle WS_EX_TRANSPARENT so only the orb disc catches clicks."""
-            if not self.isVisible() or sys.platform != "win32":
-                return
-            try:
-                from PySide6.QtGui import QGuiApplication
+        def nativeEvent(self, event_type, message):  # noqa: N802 (Qt API)
+            """Forward clicks outside the orb disc to Windows (HTTRANSPARENT).
 
-                if QGuiApplication.platformName() == "offscreen":
-                    return  # tests/headless: never touch the real window styles
-                import ctypes
-                from ctypes import wintypes
+            WM_NCHITTEST is answered synchronously by Windows at click
+            time, so there is no polling race: a click outside the disc
+            NEVER reaches this window, even when the cursor just moved.
+            """
+            if sys.platform == "win32" and event_type == b"windows_generic_MSG":
+                try:
+                    from ctypes import wintypes
 
-                user32 = ctypes.windll.user32
-                get_style = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
-                get_style.argtypes = [wintypes.HWND, ctypes.c_int]
-                get_style.restype = ctypes.c_ssize_t
-                set_style = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
-                set_style.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
-                set_style.restype = ctypes.c_ssize_t
-                hwnd = wintypes.HWND(int(self.winId()))
-                if not hwnd:
-                    return
-                current = get_style(hwnd, _GWL_EXSTYLE)
-                if current in (0, None):
-                    return
-                if self.clickable_at(QCursor.pos()):
-                    updated = current & ~_WS_EX_TRANSPARENT
-                else:
-                    updated = current | _WS_EX_TRANSPARENT | _WS_EX_LAYERED
-                if updated != current:
-                    set_style(hwnd, _GWL_EXSTYLE, updated)
-            except Exception:
-                # A failed hit-test toggle degrades to Qt default behavior
-                # (whole window clickable); the orb must never crash over it.
-                pass
+                    msg = wintypes.MSG.from_address(int(message))
+                    if msg.message == 0x0084 and not self.clickable_at(QCursor.pos()):
+                        return True, -1  # HTTRANSPARENT
+                except Exception:
+                    pass
+            return super().nativeEvent(event_type, message)
 
         def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
             self.save_position()
+            # Alt+F4 must never leave a zombie fullscreen overlay behind.
+            self.close_requested.emit()
             super().closeEvent(event)
 
         # -- painting ---------------------------------------------------

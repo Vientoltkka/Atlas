@@ -812,7 +812,7 @@ def test_voice_statuses_are_distinguishable_through_bridge_signals(qapp) -> None
     assert panel._voice_status.text() == "Desconectado"
     panel.close()
 
-def test_chat_close_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> None:
+def test_chat_close_and_hotkey_toggle_the_whole_interface(qapp) -> None:
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel
 
@@ -857,16 +857,16 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> Non
     assert panel.isVisible() is False
     assert orb.frameGeometry().center() == orb.screen().availableGeometry().center()
     orb.move(40, 40)
-    panel.move(40, 40)
     position_before_hotkey = orb.frameGeometry().topLeft()
 
+    # Ctrl+Espacio #1: visible -> hides EVERYTHING (toggle contract).
     hotkey_thread = threading.Thread(target=hotkeys[0].trigger)
     hotkey_thread.start()
     hotkey_thread.join(timeout=1)
     _drain_events(qapp)
-    assert orb.isVisible() is True
+    assert orb.isVisible() is False
     assert panel.isVisible() is False
-    assert orb.frameGeometry().topLeft() == position_before_hotkey
+    assert controller.stage is not None and not controller.stage.isVisible()
 
     panel.close()
     _drain_events(qapp)
@@ -874,6 +874,8 @@ def test_chat_close_hides_both_windows_and_hotkey_restores_only_orb(qapp) -> Non
     assert panel.isVisible() is False
     assert hotkeys[0].stopped is False
 
+    # Ctrl+Espacio #2: hidden -> shows the overlay; chat stays hidden and
+    # the persisted orb position is preserved.
     hotkey_thread = threading.Thread(target=hotkeys[0].trigger)
     hotkey_thread.start()
     hotkey_thread.join(timeout=1)
