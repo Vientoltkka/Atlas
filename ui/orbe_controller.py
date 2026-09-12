@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -60,6 +61,11 @@ class _VoiceSessionBridge(QObject):
     message_received = Signal(int, object)
 
 
+def _stage_v2_requested() -> bool:
+    """Feature flag ATLAS_STAGE_V2: truthy values route Ctrl+Espacio to V2."""
+    return os.environ.get("ATLAS_STAGE_V2", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class OrbeController:
     """Own UI lifecycle; workers emit signals and never touch widgets."""
 
@@ -73,6 +79,7 @@ class OrbeController:
         logger=None,
         hotkey_factory=None,
         fullscreen_factory=None,
+        stage_v2_factory=None,
     ):
         self._atlas = atlas
         self._application = application
@@ -112,6 +119,24 @@ class OrbeController:
             overlay.capability_selected.connect(self.open_capability)
             if hasattr(overlay, "hide_requested"):
                 overlay.hide_requested.connect(self.hide_interface)
+        # Stage V2 (experimental): when ATLAS_STAGE_V2 is truthy, Ctrl+Espacio
+        # shows ONLY AtlasStageV2; the legacy orb/stage/controls stay hidden.
+        self._stage_v2 = None
+        if _stage_v2_requested():
+            factory = stage_v2_factory
+
+            if factory is None:
+                def factory():
+                    from ui.stage_v2.renderer import AtlasStageV2
+
+                    return AtlasStageV2()
+            try:
+                self._stage_v2 = factory()
+            except Exception:
+                self._stage_v2 = None
+                self._logger.warning("Stage V2 no disponible; se usa el overlay legacy")
+            if self._stage_v2 is not None and hasattr(self._stage_v2, "chat_requested"):
+                self._stage_v2.chat_requested.connect(self._show_chat_from_stage_v2)
         self._bridge = AtlasUiBridge()
         self._stop_event = threading.Event()
         self._session_thread = None
@@ -184,6 +209,11 @@ class OrbeController:
         """Interactive layer of the stage (None when unavailable)."""
         return self._controls
 
+    @property
+    def stage_v2(self):
+        """Experimental Stage V2 (None unless ATLAS_STAGE_V2 is enabled)."""
+        return self._stage_v2
+
     def start(
         self,
         *,
@@ -214,6 +244,39 @@ class OrbeController:
         """Show and focus the existing chat windows without starting voice."""
         self._show_chat_without_overlap()
 
+    def _show_chat_from_stage_v2(self) -> None:
+        """Open the real chat from Stage V2, reusing the legacy show_chat flow.
+
+        Stage V2 is fullscreen and stays on top, so it MUST hide first:
+        otherwise the chat would open BEHIND it and look like a dead button.
+        On failure Stage V2 is restored and a brief in-stage error is shown.
+        """
+        stage = self._stage_v2
+        was_visible = stage is not None and stage.isVisible()
+        if was_visible:
+            stage.hide()
+        try:
+            self.show_chat()
+        except Exception as error:
+            self._logger.error("Fallo al abrir el chat desde Stage V2: %s", error)
+            if was_visible and stage is not None and not stage.isVisible():
+                stage.show()
+                restore_on_top = getattr(stage, "raise_", None)
+                if callable(restore_on_top):
+                    restore_on_top()
+            set_error = getattr(stage, "set_status_error", None)
+            if callable(set_error):
+                set_error("CHAT: error al abrir el chat")
+            return
+        # Chat visible: bring it to front and give it focus when the
+        # existing panel exposes those APIs.
+        bring_to_front = getattr(self._transcript_panel, "raise_", None)
+        if callable(bring_to_front):
+            bring_to_front()
+        set_focus_window = getattr(self._transcript_panel, "activateWindow", None)
+        if callable(set_focus_window):
+            set_focus_window()
+
     # Capability menu options reuse the existing chat routing: the option only
     # opens the chat and pre-fills the domain prefix; the real router in
     # core.operational_request_router / agents resolves the request.
@@ -242,6 +305,13 @@ class OrbeController:
 
     def show_orb(self) -> None:
         """Muestra el overlay Atlas completo: orbe + stage + controles."""
+        if self._stage_v2 is not None:
+            if not self._stage_v2.isVisible():
+                self._stage_v2.show()
+                self._stage_v2.raise_()
+            self._set_escape_hotkey(True)
+            self._logger.info("Overlay Atlas mostrado (Stage V2)")
+            return
         self._orb.show()
         self._orb.raise_()
         self._show_stage()
@@ -269,6 +339,8 @@ class OrbeController:
             self.show_orb()
 
     def _overlay_visible(self) -> bool:
+        if self._stage_v2 is not None and self._stage_v2.isVisible():
+            return True
         if self._orb.isVisible() or self._transcript_panel.isVisible():
             return True
         stage_visible = self._stage is not None and self._stage.isVisible()
@@ -513,6 +585,8 @@ class OrbeController:
         self._orb.raise_()
 
     def _hide_stage(self) -> None:
+        if self._stage_v2 is not None and self._stage_v2.isVisible():
+            self._stage_v2.hide()
         self._hide_controls()
         if self._stage is not None and self._stage.isVisible():
             self._stage.hide()
