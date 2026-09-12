@@ -128,7 +128,15 @@ class ReadProjectIndexUseCase:
         path: Path,
     ) -> _ProjectIndexVisitor:
         """Parse one file and collect its structural metadata."""
-        source = path.read_text(encoding="utf-8-sig")
+        raw = path.read_bytes()
+
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            # Archivos fuente guardados como UTF-16 (p. ej. por Out-File de
+            # PowerShell): su BOM es legitimo y se decodifica como utf-16.
+            source = raw.decode("utf-16")
+        else:
+            source = raw.decode("utf-8-sig")
+
         tree = ast.parse(source, filename=str(path))
         visitor = _ProjectIndexVisitor()
         visitor.visit(tree)

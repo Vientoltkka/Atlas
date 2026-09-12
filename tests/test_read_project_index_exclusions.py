@@ -25,3 +25,18 @@ def test_generated_directories_are_excluded_from_the_index(tmp_path: Path) -> No
 
     indexed = {entry["path"] for entry in index}
     assert indexed == {str(tmp_path / "app.py")}
+
+
+def test_utf16_bom_source_file_is_indexed_without_unicode_error(tmp_path: Path) -> None:
+    """Un .py legitimo con BOM UTF-16 (0xFF 0xFE) no debe romper el indice."""
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    utf16_source = "VALUE_16 = 2\n"
+    (tmp_path / "tmp-scratch.py").write_text(
+        utf16_source, encoding="utf-16"
+    )
+
+    index = ReadProjectIndexUseCase().execute(str(tmp_path))
+
+    indexed = {Path(entry["path"]).name: entry for entry in index}
+    assert indexed["app.py"]["functions"] == []
+    assert indexed["tmp-scratch.py"]["functions"] == []
