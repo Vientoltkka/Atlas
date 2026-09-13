@@ -140,6 +140,10 @@ from use_cases.market_analysis_chat import (
     handles_market_analysis_prompt,
 )
 from use_cases.watchlist_chat import WatchlistChat, handles_watchlist_prompt
+from use_cases.tactical_backtest_chat import (
+    TacticalBacktestChat,
+    handles_tactical_backtest_prompt,
+)
 from finance.watchlist.store import WatchlistStore
 from tools.alpha_vantage import AlphaVantageClient
 from tools.registry import ToolRegistry
@@ -213,6 +217,7 @@ class AtlasOrchestrator:
         self._market_data_chat_handler = None
         self._market_analysis_chat_handler = None
         self._watchlist_chat_handler = None
+        self._tactical_backtest_chat_handler = None
         self._alpha_vantage_client_instance = None
         self._router = router
         self._model_manager = model_manager
@@ -1036,6 +1041,10 @@ class AtlasOrchestrator:
         if watchlist_response is not None:
             return watchlist_response
 
+        tactical_backtest_response = self._handle_tactical_backtest(prompt)
+        if tactical_backtest_response is not None:
+            return tactical_backtest_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1362,6 +1371,33 @@ class AtlasOrchestrator:
         if not handles_market_analysis_prompt(prompt):
             return None
         response_text = self._market_analysis_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
+    def _tactical_backtest_chat(self):
+        """Resolve lazily the read-only tactical backtest chat (V2.9)."""
+        if self._tactical_backtest_chat_handler is None:
+            self._tactical_backtest_chat_handler = TacticalBacktestChat(
+                self._alpha_vantage_client(),
+                now_provider=self._now_provider,
+            )
+        return self._tactical_backtest_chat_handler
+
+    def _handle_tactical_backtest(self, prompt: str) -> "str | None":
+        """Intercept explicit tactical backtest requests deterministically (V2.9).
+
+        Only the explicit command "backtest tactical <symbol>" reaches Alpha
+        Vantage, with a single daily-series query. The backtest is a pure
+        deterministic simulation with a fixed rule and fixed virtual capital:
+        it never registers MarketEvents, never mutates the paper portfolio or
+        the watchlist, never proposes orders and never answers paper
+        confirmations.
+        """
+        if not handles_tactical_backtest_prompt(prompt):
+            return None
+        response_text = self._tactical_backtest_chat().handle(prompt)
         self._memory.add_user(prompt)
         self._memory.add_assistant(response_text)
         self._pending_agent_followup = None
