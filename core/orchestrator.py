@@ -135,6 +135,10 @@ from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 from use_cases.finance_research import FinanceResearchChat, handles_research_prompt
 from use_cases.market_data_chat import MarketDataChat, handles_market_data_prompt
+from use_cases.market_analysis_chat import (
+    MarketAnalysisChat,
+    handles_market_analysis_prompt,
+)
 from tools.alpha_vantage import AlphaVantageClient
 from tools.registry import ToolRegistry
 from tools.web_search import WebSearchError, WebSearchTimeoutError, WebSearchTool
@@ -205,6 +209,8 @@ class AtlasOrchestrator:
         self._planner = planner
         self._web_search_tool = web_search_tool
         self._market_data_chat_handler = None
+        self._market_analysis_chat_handler = None
+        self._alpha_vantage_client_instance = None
         self._router = router
         self._model_manager = model_manager
         self._model_selection_policy = (
@@ -1019,6 +1025,10 @@ class AtlasOrchestrator:
         if market_data_response is not None:
             return market_data_response
 
+        market_analysis_response = self._handle_market_analysis(prompt)
+        if market_analysis_response is not None:
+            return market_analysis_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1267,11 +1277,17 @@ class AtlasOrchestrator:
         self._pending_agent_followup = None
         return response_text
 
+    def _alpha_vantage_client(self):
+        """Share one lazily-created read-only Alpha Vantage client (V2.4/V2.5)."""
+        if self._alpha_vantage_client_instance is None:
+            self._alpha_vantage_client_instance = AlphaVantageClient.from_env()
+        return self._alpha_vantage_client_instance
+
     def _market_data_chat(self):
         """Resolve lazily the read-only Alpha Vantage market data chat (V2.4)."""
         if self._market_data_chat_handler is None:
             self._market_data_chat_handler = MarketDataChat(
-                AlphaVantageClient.from_env(),
+                self._alpha_vantage_client(),
                 now_provider=self._now_provider,
             )
         return self._market_data_chat_handler
@@ -1287,6 +1303,32 @@ class AtlasOrchestrator:
         if not handles_market_data_prompt(prompt):
             return None
         response_text = self._market_data_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
+    def _market_analysis_chat(self):
+        """Resolve lazily the read-only Alpha Vantage market analysis chat (V2.5)."""
+        if self._market_analysis_chat_handler is None:
+            self._market_analysis_chat_handler = MarketAnalysisChat(
+                self._alpha_vantage_client(),
+                now_provider=self._now_provider,
+            )
+        return self._market_analysis_chat_handler
+
+    def _handle_market_analysis(self, prompt: str) -> "str | None":
+        """Intercept explicit market analysis requests deterministically (V2.5).
+
+        Only the explicit command "analiza mercado <symbol>" reaches Alpha
+        Vantage, with a single daily-series query. Responses are read-only
+        quantitative snapshots computed deterministically: they never register
+        MarketEvents, never mutate the paper portfolio, never propose orders
+        and never answer paper confirmations.
+        """
+        if not handles_market_analysis_prompt(prompt):
+            return None
+        response_text = self._market_analysis_chat().handle(prompt)
         self._memory.add_user(prompt)
         self._memory.add_assistant(response_text)
         self._pending_agent_followup = None
@@ -1388,6 +1430,13 @@ class AtlasOrchestrator:
             if market_data_chat.handles(prompt):
                 self._memory.add_user(prompt)
                 response_text = market_data_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+            market_analysis_chat = self._market_analysis_chat()
+            if market_analysis_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = market_analysis_chat.handle(prompt)
                 self._memory.add_assistant(response_text)
                 self._pending_agent_followup = None
                 return AgentResponse(text=response_text)
