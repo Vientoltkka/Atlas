@@ -133,6 +133,7 @@ from use_cases.speech_engine import SpeechInteractionUseCase
 from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
+from use_cases.finance_research import FinanceResearchChat, handles_research_prompt
 from tools.registry import ToolRegistry
 from tools.web_search import WebSearchError, WebSearchTimeoutError, WebSearchTool
 
@@ -1007,6 +1008,10 @@ class AtlasOrchestrator:
         if paper_command_response is not None:
             return paper_command_response
 
+        finance_research_response = self._handle_finance_research(prompt)
+        if finance_research_response is not None:
+            return finance_research_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1221,6 +1226,39 @@ class AtlasOrchestrator:
             confirm,
             request=request,
         )
+
+    def _handle_finance_research(self, prompt: str) -> "str | None":
+        """Intercept explicit finance research requests deterministically (V2.3).
+
+        Uses the existing web_search tool (no new providers, no duplicate web
+        calls) to produce a traceable [RESEARCH] report. Research evidence is
+        read-only: it never registers MarketEvents, never mutates the paper
+        portfolio, never proposes orders and never answers paper confirmations.
+        """
+        if not handles_research_prompt(prompt):
+            return None
+        tool = self._web_search_tool
+        if tool is None and self._tool_registry is not None and self._tool_registry.exists("web_search"):
+            candidate = self._tool_registry.get("web_search")
+            tool = candidate if isinstance(candidate, WebSearchTool) else None
+        if tool is None:
+            response_text = (
+                "[RESEARCH] La búsqueda web no está disponible en esta "
+                "instalación; no se puede generar evidencia verificable y no se "
+                "inventan cotizaciones, noticias ni fundamentales."
+            )
+        else:
+            research_chat = FinanceResearchChat(tool, now_provider=self._now_provider)
+            response_text = research_chat.handle(prompt)
+            self._last_finance_evidence = {
+                "kind": "research",
+                "queries": research_chat.last_queries,
+                "evidence": response_text,
+            }
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
 
     def _finance_paper_chat(self):
         """Resolve the optional paper chat handler injected into FinanceAgent."""
