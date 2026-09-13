@@ -1335,11 +1335,20 @@ class AtlasOrchestrator:
         return response_text
 
     def _finance_paper_chat(self):
-        """Resolve the optional paper chat handler injected into FinanceAgent."""
+        """Resolve the optional paper chat handler injected into FinanceAgent.
+
+        Lazily shares the read-only Alpha Vantage client (V2.4) with the
+        paper chat so the explicit V2.6 import command can reach the
+        provider through the same isolated adapter; the factory is only
+        invoked when an import command actually needs it.
+        """
         finance_agent = self._registry.get("finance")
         if finance_agent is None:
             return None
-        return getattr(finance_agent, "paper_chat", None)
+        paper_chat = getattr(finance_agent, "paper_chat", None)
+        if paper_chat is not None and not paper_chat.has_market_client:
+            paper_chat.set_market_client_factory(self._alpha_vantage_client)
+        return paper_chat
 
     def _handle_paper_finance_command(self, prompt: str) -> "str | None":
         """Intercept explicit paper commands deterministically before any LLM.
@@ -1419,7 +1428,7 @@ class AtlasOrchestrator:
             self._pending_agent_followup = None
             raise RuntimeError(f"Agent '{agent_name}' is not registered.")
         if agent_name == "finance":
-            paper_chat = getattr(specialist_agent, "paper_chat", None)
+            paper_chat = self._finance_paper_chat()
             if paper_chat is not None and paper_chat.handles(prompt):
                 self._memory.add_user(prompt)
                 response_text = paper_chat.handle(prompt)

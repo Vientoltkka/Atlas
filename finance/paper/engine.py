@@ -141,6 +141,12 @@ class PaperEngine:
                 "symbol": event.symbol,
                 "price": str(event.price),
                 "event_type": event.event_type.value,
+                "source": event.source,
+                "provider_date": (
+                    event.provider_date.isoformat()
+                    if event.provider_date is not None
+                    else None
+                ),
             },
             "evento de mercado",
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Mapping
@@ -87,6 +87,8 @@ class MarketEvent:
     price: Decimal = Decimal("0")
     timestamp: datetime = field(default_factory=utc_now)
     event_type: EventType = EventType.TICK
+    source: str = "user_declared"
+    provider_date: date | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_id", _ensure_id(self.event_id, "event_id"))
@@ -98,6 +100,14 @@ class MarketEvent:
         object.__setattr__(self, "timestamp", _ensure_utc(self.timestamp))
         if not isinstance(self.event_type, EventType):
             raise ValueError("event_type invalido")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("source vacio")
+        object.__setattr__(self, "source", self.source.strip())
+        if self.provider_date is not None:
+            if isinstance(self.provider_date, datetime) or not isinstance(
+                self.provider_date, date
+            ):
+                raise ValueError("provider_date invalida")
 
 
 @dataclass(frozen=True)
