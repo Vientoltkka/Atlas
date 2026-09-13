@@ -22,6 +22,7 @@ from finance.paper.models import (
     PaperPortfolio,
     PaperPosition,
     Side,
+    utc_now,
 )
 
 
@@ -46,8 +47,11 @@ LEDGER_EVENT = "EVENT"
 LEDGER_DECISION = "DECISION"
 LEDGER_ORDER = "ORDER"
 LEDGER_FILL = "FILL"
+LEDGER_CAPITAL = "CAPITAL"
 
 STATE_VERSION = 1
+
+SUPPORTED_VERSIONS = (1, 2)
 
 
 def _q_money(value: Decimal) -> Decimal:
@@ -126,6 +130,34 @@ class PaperEngine:
                 "reason": reason,
             }
         )
+
+    def transfer_cash(
+        self, delta: Decimal, reason: str, timestamp: datetime | None = None
+    ) -> PaperPortfolio:
+        """Ajusta el efectivo paper por una transferencia explicita.
+
+        Solo la invoca PaperFinanceService para asignaciones de capital
+        paper entre modos. La operacion queda registrada en el ledger con
+        kind CAPITAL. delta puede ser negativo, pero el efectivo resultante
+        nunca puede ser negativo y las posiciones no se tocan.
+        """
+        amount = Decimal(delta)
+        new_cash = _q_money(self._portfolio.cash + amount)
+        if new_cash < 0:
+            raise ValueError(
+                f"la transferencia dejaria el efectivo paper negativo: "
+                f"{self._portfolio.cash} {amount:+}"
+            )
+        self._portfolio = PaperPortfolio(
+            cash=new_cash, positions=self._portfolio.positions
+        )
+        self._append(
+            LEDGER_CAPITAL,
+            timestamp or utc_now(),
+            {"delta": str(amount), "cash_after": str(new_cash)},
+            reason,
+        )
+        return self._portfolio
 
     def process_event(self, event: MarketEvent) -> bool:
         """Ingesta un MarketEvent. Devuelve False si ya fue procesado."""
@@ -422,7 +454,7 @@ class PaperEngine:
     @classmethod
     def from_snapshot(cls, data: Mapping[str, object]) -> "PaperEngine":
         version = data.get("schema_version")
-        if version != STATE_VERSION:
+        if version not in SUPPORTED_VERSIONS:
             raise ValueError(f"version de estado no soportada: {version!r}")
         portfolio_data = data["portfolio"]
         assert isinstance(portfolio_data, Mapping)

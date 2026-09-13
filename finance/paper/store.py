@@ -1,8 +1,11 @@
 """Persistencia JSON atomica y versionada del estado paper.
 
-Almacena en .atlas/finance_paper/. La escritura es atomica (temporal +
-os.replace) y la lectura es segura: corrupcion o version invalida producen
-un error controlado sin sobrescribir ni modificar el fichero existente.
+Almacena en .atlas/finance_paper/. Desde V2.7 el estado es version 2 e
+incluye los modos paper (CORE/TACTICAL) con su InvestmentPolicy; los
+estados version 1 (V2.1-V2.6, cartera unica) siguen siendo legibles para
+migracion. La escritura es atomica (temporal + os.replace) y la lectura
+es segura: corrupcion o version invalida producen un error controlado sin
+sobrescribir ni modificar el fichero existente.
 """
 
 from __future__ import annotations
@@ -13,7 +16,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-STATE_VERSION = 1
+STATE_VERSION = 2
+
+SUPPORTED_VERSIONS = (1, 2)
 
 STATE_FILE = "state.json"
 
@@ -62,7 +67,7 @@ class PaperStore:
         if not isinstance(data, dict):
             raise StoreError("estado paper corrupto: raiz no es un objeto")
         version = data.get("schema_version")
-        if version != STATE_VERSION:
+        if version not in SUPPORTED_VERSIONS:
             raise StoreError(f"version de estado no soportada: {version!r}")
         return data
 
