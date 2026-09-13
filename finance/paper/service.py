@@ -83,6 +83,10 @@ class PaperFinanceService:
     def pending_orders(self) -> tuple[PaperOrder, ...]:
         return self._engine.pending_orders()
 
+    def execution_defaults(self) -> dict[str, Decimal]:
+        """Read-only commission and slippage defaults for order estimates."""
+        return self._engine.defaults()
+
     def ledger(self) -> tuple[dict[str, object], ...]:
         return self._engine.ledger
 

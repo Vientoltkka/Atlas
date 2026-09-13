@@ -15,6 +15,9 @@ from agents.nutrition_agent import NutritionAgent
 from agents.project_agent import ProjectAgent
 from agents.training_agent import TrainingAgent
 from agents.registry import AgentRegistry
+from finance.paper.service import PaperFinanceService
+from finance.paper.store import StoreError
+from use_cases.paper_finance_chat import PaperFinanceChat
 
 from bootstrap.atlas_request_classifier import build_core_atlas_request_classifier
 from bootstrap.atlas_request_adapter import build_core_atlas_request_adapter
@@ -1432,9 +1435,18 @@ class Bootstrap:
                 prompt_client,
             )
         )
+        try:
+            paper_finance_service = PaperFinanceService()
+        except StoreError:
+            paper_finance_service = None
         registry.register(
             FinanceAgent(
                 prompt_client,
+                paper_chat=(
+                    None
+                    if paper_finance_service is None
+                    else PaperFinanceChat(paper_finance_service)
+                ),
             )
         )
         registry.register(

@@ -99,6 +99,13 @@ class PaperEngine:
     def last_prices(self) -> dict[str, Decimal]:
         return dict(self._last_prices)
 
+    def defaults(self) -> dict[str, Decimal]:
+        """Read-only execution defaults used to estimate order costs."""
+        return {
+            "commission": self._default_commission,
+            "slippage_bps": self._default_slippage_bps,
+        }
+
     def nav(self) -> Decimal:
         return _q_money(self._portfolio.nav(self._last_prices))
 

@@ -1003,6 +1003,10 @@ class AtlasOrchestrator:
         if pending_response is not None:
             return pending_response
 
+        paper_command_response = self._handle_paper_finance_command(prompt)
+        if paper_command_response is not None:
+            return paper_command_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1056,6 +1060,10 @@ class AtlasOrchestrator:
             async_approval_response = self._handle_pending_async_approval(prompt)
             if async_approval_response is not None:
                 return async_approval_response
+
+        paper_order_response = self._handle_pending_paper_order(prompt)
+        if paper_order_response is not None:
+            return paper_order_response
 
         background_response = self._handle_background_autonomy(prompt)
         if background_response is not None:
@@ -1214,6 +1222,58 @@ class AtlasOrchestrator:
             request=request,
         )
 
+    def _finance_paper_chat(self):
+        """Resolve the optional paper chat handler injected into FinanceAgent."""
+        finance_agent = self._registry.get("finance")
+        if finance_agent is None:
+            return None
+        return getattr(finance_agent, "paper_chat", None)
+
+    def _handle_paper_finance_command(self, prompt: str) -> "str | None":
+        """Intercept explicit paper commands deterministically before any LLM.
+
+        The graphical chat reaches this orchestrator through
+        Atlas.process_prompt; every paper command must produce a deterministic
+        [PAPER] response from PaperFinanceChat, never a simulated LLM answer.
+        """
+        paper_chat = self._finance_paper_chat()
+        if paper_chat is None or not paper_chat.handles(prompt):
+            return None
+        self._memory.add_user(prompt)
+        response_text = paper_chat.handle(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
+    def _handle_pending_paper_order(self, prompt: str) -> "str | None":
+        """Answer a pending paper-order proposal with the shared confirmation intents.
+
+        Reuses the conversational confirmation classification already used by
+        the structured-plan and async-approval pending states: only an explicit
+        affirmative executes the order; rejection, cancellation or expiry leave
+        the paper portfolio untouched.
+        """
+        paper_chat = self._finance_paper_chat()
+        if paper_chat is None or not paper_chat.has_pending:
+            return None
+        if (
+            self._structured_execution_coordinator is not None
+            and self._structured_execution_coordinator.has_pending_execution()
+        ):
+            return None
+        intent = _classify_structured_confirmation_intent(prompt)
+        if intent == "confirm":
+            response = paper_chat.execute_pending()
+        elif intent == "cancel":
+            response = paper_chat.cancel_pending()
+        elif intent == "show":
+            response = paper_chat.describe_pending()
+        else:
+            return None
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response)
+        return response
+
     def _process_pending_agent_followup(self, request: AtlasRequest) -> str | None:
         """Continue one explicitly requested agent follow-up before normal routing."""
         pending = self._pending_agent_followup
@@ -1246,6 +1306,14 @@ class AtlasOrchestrator:
         if specialist_agent is None:
             self._pending_agent_followup = None
             raise RuntimeError(f"Agent '{agent_name}' is not registered.")
+        if agent_name == "finance":
+            paper_chat = getattr(specialist_agent, "paper_chat", None)
+            if paper_chat is not None and paper_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = paper_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
         model_task = "coding" if agent_name in {"code", "coding"} else "chat"
         self._memory.add_user(prompt)
         messages = self._memory.history()

@@ -54,10 +54,20 @@ class FinanceAgent(BaseAgent):
     legal o profesional cualificado cuando sea necesario.
     Distingue recomendaciones de acciones reales: no afirmes resultados, no escribas
     recuerdos ni persistas datos automaticamente.
+
+    OPERACIONES PAPER (SIMULACION, SIN DINERO REAL): Atlas mantiene ademas una
+    cartera paper separada. Las consultas de cartera paper, los precios paper
+    declarados explicitamente por el usuario (origen user_declared) y las
+    propuestas de orden paper se gestionan de forma determinista fuera de este
+    prompt, sin precios en vivo ni datos externos. No propongas ordenes paper ni
+    reales por tu cuenta y no des recomendaciones personalizadas; la ejecucion de
+    una orden paper exige confirmacion explicita del usuario y los ticks paper
+    solo existen si el usuario los declara.
     """.strip()
 
-    def __init__(self, prompt_client: PromptClient) -> None:
+    def __init__(self, prompt_client: PromptClient, paper_chat=None) -> None:
         self._client = prompt_client
+        self.paper_chat = paper_chat
 
     @property
     def name(self) -> str:
