@@ -139,6 +139,8 @@ from use_cases.market_analysis_chat import (
     MarketAnalysisChat,
     handles_market_analysis_prompt,
 )
+from use_cases.watchlist_chat import WatchlistChat, handles_watchlist_prompt
+from finance.watchlist.store import WatchlistStore
 from tools.alpha_vantage import AlphaVantageClient
 from tools.registry import ToolRegistry
 from tools.web_search import WebSearchError, WebSearchTimeoutError, WebSearchTool
@@ -210,6 +212,7 @@ class AtlasOrchestrator:
         self._web_search_tool = web_search_tool
         self._market_data_chat_handler = None
         self._market_analysis_chat_handler = None
+        self._watchlist_chat_handler = None
         self._alpha_vantage_client_instance = None
         self._router = router
         self._model_manager = model_manager
@@ -1029,6 +1032,10 @@ class AtlasOrchestrator:
         if market_analysis_response is not None:
             return market_analysis_response
 
+        watchlist_response = self._handle_watchlist(prompt)
+        if watchlist_response is not None:
+            return watchlist_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1317,6 +1324,32 @@ class AtlasOrchestrator:
             )
         return self._market_analysis_chat_handler
 
+    def _watchlist_chat(self):
+        """Resolve lazily the watchlist chat with its own isolated store (V2.8)."""
+        if self._watchlist_chat_handler is None:
+            self._watchlist_chat_handler = WatchlistChat(
+                WatchlistStore(),
+                self._alpha_vantage_client(),
+                now_provider=self._now_provider,
+            )
+        return self._watchlist_chat_handler
+
+    def _handle_watchlist(self, prompt: str) -> "str | None":
+        """Intercept explicit watchlist commands deterministically (V2.8).
+
+        Only explicit user commands touch the watchlist store; the review
+        performs at most 5 daily-series queries, one per asset, and stays
+        read-only: no recommendations, no orders, no MarketEvents, no fills
+        and no paper portfolio mutation.
+        """
+        if not handles_watchlist_prompt(prompt):
+            return None
+        response_text = self._watchlist_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
     def _handle_market_analysis(self, prompt: str) -> "str | None":
         """Intercept explicit market analysis requests deterministically (V2.5).
 
@@ -1446,6 +1479,13 @@ class AtlasOrchestrator:
             if market_analysis_chat.handles(prompt):
                 self._memory.add_user(prompt)
                 response_text = market_analysis_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+            watchlist_chat = self._watchlist_chat()
+            if watchlist_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = watchlist_chat.handle(prompt)
                 self._memory.add_assistant(response_text)
                 self._pending_agent_followup = None
                 return AgentResponse(text=response_text)
