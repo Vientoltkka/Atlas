@@ -134,6 +134,8 @@ from use_cases.voice_conversation import VoiceConversationUseCase
 from use_cases.wake_word_engine import WakeWordInteractionUseCase
 from use_cases.write_file import WriteFileUseCase
 from use_cases.finance_research import FinanceResearchChat, handles_research_prompt
+from use_cases.market_data_chat import MarketDataChat, handles_market_data_prompt
+from tools.alpha_vantage import AlphaVantageClient
 from tools.registry import ToolRegistry
 from tools.web_search import WebSearchError, WebSearchTimeoutError, WebSearchTool
 
@@ -202,6 +204,7 @@ class AtlasOrchestrator:
 
         self._planner = planner
         self._web_search_tool = web_search_tool
+        self._market_data_chat_handler = None
         self._router = router
         self._model_manager = model_manager
         self._model_selection_policy = (
@@ -1012,6 +1015,10 @@ class AtlasOrchestrator:
         if finance_research_response is not None:
             return finance_research_response
 
+        market_data_response = self._handle_market_data(prompt)
+        if market_data_response is not None:
+            return market_data_response
+
         if self._capability_gap_detector is not None:
             skill_creation = self._capability_gap_detector.skill_creation_response_for(prompt)
             if skill_creation is not None:
@@ -1260,6 +1267,31 @@ class AtlasOrchestrator:
         self._pending_agent_followup = None
         return response_text
 
+    def _market_data_chat(self):
+        """Resolve lazily the read-only Alpha Vantage market data chat (V2.4)."""
+        if self._market_data_chat_handler is None:
+            self._market_data_chat_handler = MarketDataChat(
+                AlphaVantageClient.from_env(),
+                now_provider=self._now_provider,
+            )
+        return self._market_data_chat_handler
+
+    def _handle_market_data(self, prompt: str) -> "str | None":
+        """Intercept explicit market data requests deterministically (V2.4).
+
+        Only explicit user commands reach Alpha Vantage: no scheduler, no
+        polling, no alerts and no automatic calls. Responses are read-only:
+        they never register MarketEvents, never mutate the paper portfolio,
+        never propose orders and never answer paper confirmations.
+        """
+        if not handles_market_data_prompt(prompt):
+            return None
+        response_text = self._market_data_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
     def _finance_paper_chat(self):
         """Resolve the optional paper chat handler injected into FinanceAgent."""
         finance_agent = self._registry.get("finance")
@@ -1349,6 +1381,13 @@ class AtlasOrchestrator:
             if paper_chat is not None and paper_chat.handles(prompt):
                 self._memory.add_user(prompt)
                 response_text = paper_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+            market_data_chat = self._market_data_chat()
+            if market_data_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = market_data_chat.handle(prompt)
                 self._memory.add_assistant(response_text)
                 self._pending_agent_followup = None
                 return AgentResponse(text=response_text)
