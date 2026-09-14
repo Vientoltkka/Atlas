@@ -43,6 +43,7 @@ from core.model_manager import ModelManager
 from core.model_registry import load_model_descriptors_from_environment
 from core.model_selection_policy import ModelSelectionPolicy
 from core.multi_capability_planner import MultiCapabilityPlanner
+from core.swarm_coordinator import SwarmCoordinator
 from core.agent_orchestrator import AgentOrchestrator
 from core.orchestrator import AtlasOrchestrator
 from core.operational_request_router import OperationalRequestRouter
@@ -1653,6 +1654,12 @@ class Bootstrap:
             structured_plan_streaming_enabled=structured_plan_streaming_enabled,
             structured_plan_execution_enabled=structured_plan_execution_enabled,
             async_task_scheduler=async_task_scheduler,
+            swarm_coordinator=SwarmCoordinator(
+                registry,
+                model_manager,
+                model_selection_policy=model_selection_policy,
+                health_checker=model_health_checker,
+            ),
         )
         orchestrator.agent_orchestrator = AgentOrchestrator(registry)
         orchestrator.start_background_pump()

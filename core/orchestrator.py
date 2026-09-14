@@ -113,6 +113,7 @@ from core.structured_execution import (
 from core.skill_executor import SkillExecutionRequest
 from core.skill_resolver import SkillResolutionRequest, SkillResolutionStatus
 from core.skill_system import SkillSystem
+from core.swarm_coordinator import SwarmCoordinator, SwarmResult, SwarmTask
 from tools.tool_context import ToolContext
 
 from core.supervised_capability_gap import (
@@ -210,6 +211,7 @@ class AtlasOrchestrator:
         now_provider=None,
         async_task_scheduler: "AsyncTaskScheduler | None" = None,
         background_pump_interval_seconds: "float | None" = None,
+        swarm_coordinator: "SwarmCoordinator | None" = None,
     ) -> None:
 
         self._planner = planner
@@ -304,6 +306,7 @@ class AtlasOrchestrator:
         )
         self._background_goal_id: "str | None" = None
         self._last_finance_evidence: "dict[str, object] | None" = None
+        self._swarm_coordinator = swarm_coordinator
 
     @property
     def last_finance_evidence(self) -> "dict[str, object] | None":
@@ -335,6 +338,18 @@ class AtlasOrchestrator:
     def async_task_scheduler(self) -> "AsyncTaskScheduler | None":
         """Expose the optional independent-task scheduler."""
         return self._async_task_scheduler
+
+    def execute_swarm(self, task: "SwarmTask") -> "SwarmResult":
+        """Explicit controlled swarm entry point subordinated to the Orchestrator.
+
+        The coordinator must have been injected via ``swarm_coordinator``;
+        without it the swarm stays unavailable and normal behavior is
+        untouched. The result is returned to the caller (the Orchestrator),
+        never presented directly to the user.
+        """
+        if self._swarm_coordinator is None:
+            raise RuntimeError("SwarmCoordinator is not configured.")
+        return self._swarm_coordinator.execute(task)
 
     def run_independent_tasks(
         self,
