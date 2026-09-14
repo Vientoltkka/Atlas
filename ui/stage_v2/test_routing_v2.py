@@ -3,10 +3,10 @@
 
 Ejecutar:  python -m pytest ui/stage_v2/test_routing_v2.py -q
 
-Contrato:
-- ATLAS_STAGE_V2=1  -> Ctrl+Espacio muestra SOLO AtlasStageV2;
-  segundo Ctrl+Espacio la oculta; el orbe legacy NO aparece.
-- ATLAS_STAGE_V2=0/ausente -> comportamiento legacy intacto.
+Contrato (V5):
+- Ctrl+Espacio SIEMPRE muestra/oculta el orbe flotante V5, con o sin
+  ATLAS_STAGE_V2; Stage V2 ya no secuestra el hotkey.
+- ATLAS_STAGE=1 restaura el overlay legacy fullscreen opt-in.
 """
 from __future__ import annotations
 
@@ -59,18 +59,30 @@ def _controller(qapp, stage_v2_factory=None):
     return controller, orb, panel
 
 
-def test_flag_on_routes_ctrl_space_to_stage_v2_only(qapp, monkeypatch):
+def _atlas_visible(controller) -> bool:
+    """Atlas interface visible: MASTER HUD (default) or legacy floating orb."""
+    hud = controller.master_hud
+    if hud is not None and hud.isVisible():
+        return True
+    return controller._orb.isVisible()
+
+
+def test_flag_on_keeps_ctrl_space_on_v5_orb(qapp, monkeypatch):
+    """V5 regression guard: ATLAS_STAGE_V2=1 must NOT hijack Ctrl+Espacio.
+
+    The V2 demo window has no stay-on-top hint; when it kept the hotkey
+    routing it opened BEHIND the foreground app and Atlas seemed to not
+    appear at all. The V5 orb is always the hotkey's target.
+    """
     monkeypatch.setenv("ATLAS_STAGE_V2", "1")
     controller, orb, panel = _controller(qapp, stage_v2_factory=FakeStageV2)
     try:
         assert controller.stage_v2 is not None
         controller.toggle_interface()  # Ctrl+Espacio #1
-        assert controller.stage_v2.isVisible()
-        assert not orb.isVisible()
-        assert not panel.isVisible()
-        assert controller._stage is None or not controller._stage.isVisible()
-        controller.toggle_interface()  # Ctrl+Espacio #2
+        assert _atlas_visible(controller)
         assert not controller.stage_v2.isVisible()
+        controller.toggle_interface()  # Ctrl+Espacio #2
+        assert not _atlas_visible(controller)
     finally:
         controller.hide_interface()
         orb.close()
@@ -79,14 +91,34 @@ def test_flag_on_routes_ctrl_space_to_stage_v2_only(qapp, monkeypatch):
 
 def test_flag_off_keeps_legacy_routing(qapp, monkeypatch):
     monkeypatch.delenv("ATLAS_STAGE_V2", raising=False)
+    monkeypatch.delenv("ATLAS_STAGE", raising=False)
     controller, orb, panel = _controller(qapp)
     try:
         assert controller.stage_v2 is None
         controller.toggle_interface()  # Ctrl+Espacio #1
+        assert _atlas_visible(controller)
+        # V5 identity default: MASTER HUD (or floating orb fallback); the
+        # legacy fullscreen stage stays dormant unless ATLAS_STAGE is enabled.
+        assert controller._stage is None or not controller._stage.isVisible()
+        controller.toggle_interface()  # Ctrl+Espacio #2
+        assert not _atlas_visible(controller)
+    finally:
+        controller.hide_interface()
+        orb.close()
+        panel.close()
+
+
+def test_atlas_stage_flag_restores_legacy_fullscreen_overlay(qapp, monkeypatch):
+    monkeypatch.delenv("ATLAS_STAGE_V2", raising=False)
+    monkeypatch.setenv("ATLAS_STAGE", "1")
+    controller, orb, panel = _controller(qapp)
+    try:
+        controller.toggle_interface()  # Ctrl+Espacio #1
         assert orb.isVisible()
-        assert controller._stage is None or controller._stage.isVisible()
+        assert controller._stage is not None and controller._stage.isVisible()
         controller.toggle_interface()  # Ctrl+Espacio #2
         assert not orb.isVisible()
+        assert controller._stage is None or not controller._stage.isVisible()
     finally:
         controller.hide_interface()
         orb.close()

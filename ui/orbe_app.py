@@ -1,13 +1,14 @@
-"""Atlas Orbe shell (V4.3-I2/I3/I4): frameless translucent state window.
+"""Atlas Orbe shell (V5): radial cinematic identity.
 
 Pure visual layer over the core: the orb only renders an
 ``OrbVisualState`` produced by ``use_cases.ui_state_mapper``. No audio,
 STT, TTS or orchestrator access happens here. The Qt import is local to
 this GUI module so the rest of Atlas never depends on PySide6.
 
-I4 adds per-state fine animation, a tray icon with Detener/Salir and
-window position preferences. States, colors/alpha and the existing
-signals are unchanged.
+V5 replaces the lateral HUD popup with the radial menu identity: ten
+real glass categories orbiting the approved sphere, ATLAS wordmark, a
+brand quote and a voice/exit bar. States, colors/alpha and every
+existing signal are unchanged.
 """
 
 from __future__ import annotations
@@ -27,11 +28,15 @@ from ui import orb_assets
 ORB_SIZE = 360
 CORE_RADIUS_FACTOR = 0.29
 # Hero asset (APPROVED single composition): sphere diameter is ~0.80 of the
-# image width and the frame fits inside the window with a small margin.
-# Idle window 560 -> sphere ~439 px (target band 380-480 at 1080p).
+# image width. V5.1 composition fix: the HUD must live WITH the desktop, so
+# the idle window keeps the sphere in a compact 290-360 px band (1080p) and
+# the active states only grow subtly inside that same proportion.
 HERO_ASSET_FIT = 0.98
 HERO_SPHERE_FRACTION = 0.80
-HERO_ORB_SIZE = 560
+HERO_ORB_SIZE = 400
+# Radial menu window: ~2x the orb window, clamped to the screen. The
+# categories orbit with air around the sphere instead of flooding it.
+MENU_SIZE_FACTOR = 2.0
 # Fraction of the window occupied by the asset-built holo sphere (the device
 # body is now a layered composition; the procedural core radius stays for the
 # orbit module occlusion test). Sized so the sphere clears the platform base.
@@ -45,14 +50,14 @@ CLICKABLE_RADIUS_FACTOR = 0.50
 # Protagonism of the Atlas chevron: the path geometry is scaled around the
 # centre by this factor (1.0 = the old compact emblem).
 EMBLEM_SCALE = 1.42
-# Holographic HUD menu geometry: two lateral fan panels with a transparent
-# central gap where the sphere keeps breathing (and stays clickable).
-MENU_PANEL_WIDTH = 178
-MENU_BUTTON_HEIGHT = 27
-MENU_CENTRE_FACTOR = 0.62  # transparent gap width as a fraction of the orb size
-MENU_WEDGE_EXTENT = 24     # connector wedge drawn from each panel toward the orb
-_MENU_OPEN_MS = 200        # HUD open: fade + lateral slide from the núcleo
-_MENU_CLOSE_MS = 150       # HUD close: fade + slide back into the núcleo
+# Radial menu geometry: glass category icons orbit the sphere on an
+# ellipse; the central disc stays click-through so the sphere keeps
+# breathing (and stays clickable) with the menu open.
+_RADIAL_BUTTON_SIZE = 44
+_RADIAL_ITEM_WIDTH = 148
+_RADIAL_ITEM_HEIGHT = 96
+_MENU_OPEN_MS = 200        # radial open: fade + slide out from the núcleo
+_MENU_CLOSE_MS = 150       # radial close: fade + slide back into the núcleo
 _HIT_POLL_MS = 50
 _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x00000020
@@ -76,6 +81,24 @@ _CAPABILITY_OPTIONS: tuple[tuple[str, str], ...] = (
     ("agentes", "Agentes"),
     ("mas_herramientas", "Más herramientas"),
 )
+
+# Radial menu (V5 identity): ten categories orbiting the sphere, clockwise
+# from the top, exactly as in the approved master visual. Every id maps to
+# an EXISTING Atlas routing prefix in OrbeController._CAPABILITY_PREFIXES;
+# nothing new is invented here.
+_RADIAL_ITEMS: tuple[tuple[str, str, str, str], ...] = (
+    # (capability_id, título, subtítulo, icono) — horario desde arriba.
+    ("chat", "CHAT", "Habla o escribe", "chat"),
+    ("nutricion", "NUTRICIÓN", "Energía y salud", "nutricion"),
+    ("calendario", "AGENDA", "Tu tiempo", "agenda"),
+    ("salud", "SALUD", "Bienestar primero", "salud"),
+    ("agentes", "AGENTES", "Multiplica tu potencial", "agentes"),
+    ("proyectos", "PROYECTOS", "De ideas a realidad", "proyectos"),
+    ("coding", "DESARROLLO", "Crea sin límites", "desarrollo"),
+    ("finanzas", "FINANZAS", "Tu futuro", "finanzas"),
+    ("control_pc", "CONTROL PC", "Tu entorno", "control_pc"),
+    ("entrenamiento", "ENTRENAMIENTO", "Tu mejor versión", "entrenamiento"),
+)
 _ACTIVE_ORB_SIZES: dict[OrbVisualState, int] = {
     OrbVisualState.LISTENING: 460,
     OrbVisualState.PROCESSING: 480,
@@ -84,14 +107,14 @@ _ACTIVE_ORB_SIZES: dict[OrbVisualState, int] = {
     OrbVisualState.AUTOMATION: 490,
 }
 
-# With the hero asset the sphere already fills the window band (380-480 px),
-# so active states only grow subtly; the sphere must never leave that band.
+# With the compact hero sphere the active states only breathe a little:
+# the whole HUD must stay contained and never dominate the screen.
 _HERO_ORB_SIZES: dict[OrbVisualState, int] = {
-    OrbVisualState.LISTENING: 590,
-    OrbVisualState.PROCESSING: 600,
-    OrbVisualState.SPEAKING: 600,
-    OrbVisualState.AUTHORIZATION: 600,
-    OrbVisualState.AUTOMATION: 600,
+    OrbVisualState.LISTENING: 420,
+    OrbVisualState.PROCESSING: 430,
+    OrbVisualState.SPEAKING: 430,
+    OrbVisualState.AUTHORIZATION: 430,
+    OrbVisualState.AUTOMATION: 430,
 }
 
 _STATE_COLORS: dict[OrbVisualState, tuple[int, int, int, int]] = {
@@ -140,9 +163,9 @@ _VISUAL_PROFILES: dict[OrbVisualState, dict[str, float]] = {
     # One procedural renderer; these controls give every primary state its own motion language.
     OrbVisualState.IDLE: {
         "ring_activity": 0.16, "ring_speed": 0.34, "ring_angle": 0.86, "ring_amplitude": 0.88,
-        "pulse_strength": 0.34, "halo_intensity": 0.72, "halo_strength": 0.72,
-        "core_intensity": 0.85, "core_pulse": 0.54, "particle_intensity": 0.62,
-        "segment_activity": 0.45, "base_intensity": 0.60,
+        "pulse_strength": 0.30, "halo_intensity": 0.52, "halo_strength": 0.52,
+        "core_intensity": 0.72, "core_pulse": 0.54, "particle_intensity": 0.50,
+        "segment_activity": 0.45, "base_intensity": 0.55,
         "wave_activity": 0.0, "ping_intensity": 0.0, "node_energy": 0.35, "spark_intensity": 0.0,
     },
     OrbVisualState.LISTENING: {
@@ -223,6 +246,93 @@ def atlas_emblem_path(size: float, scale: float = EMBLEM_SCALE) -> QPainterPath:
 def animation_period(state: OrbVisualState) -> float | None:
     """Animation period in seconds, or None when the state is static."""
     return _ANIMATION_PERIODS[state]
+
+
+def radial_icon_pixmap(icon_name: str, color: str = "#9fdcff", size: int = 24):
+    """Crisp line-art glyph for one radial category (real UI asset)."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), 2.0)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if icon_name == "chat":
+        painter.drawRoundedRect(QRectF(4, 6, 24, 16), 6, 6)
+        painter.drawLine(12, 22, 10, 27)
+        painter.drawLine(10, 27, 16, 22)
+    elif icon_name == "entrenamiento":
+        painter.drawLine(6, 16, 26, 16)
+        painter.drawRect(3, 10, 4, 12)
+        painter.drawRect(25, 10, 4, 12)
+        painter.drawRect(8, 12, 3, 8)
+        painter.drawRect(21, 12, 3, 8)
+    elif icon_name == "nutricion":
+        painter.drawLine(11, 4, 11, 14)
+        painter.drawLine(8, 4, 8, 14)
+        painter.drawLine(8, 14, 11, 14)
+        painter.drawLine(11, 14, 11, 28)
+        painter.drawEllipse(QRectF(17, 6, 12, 12))
+        painter.drawLine(23, 18, 23, 28)
+    elif icon_name == "control_pc":
+        painter.drawRoundedRect(QRectF(4, 6, 24, 16), 3, 3)
+        painter.drawLine(16, 22, 16, 26)
+        painter.drawLine(10, 27, 22, 27)
+    elif icon_name == "finanzas":
+        painter.drawLine(6, 26, 6, 20)
+        painter.drawLine(12, 26, 12, 14)
+        painter.drawLine(18, 26, 18, 18)
+        painter.drawLine(24, 26, 24, 10)
+        painter.drawLine(6, 14, 13, 9)
+        painter.drawLine(13, 9, 19, 11)
+        painter.drawLine(19, 11, 25, 5)
+    elif icon_name == "desarrollo":
+        painter.drawLine(11, 10, 5, 16)
+        painter.drawLine(5, 16, 11, 22)
+        painter.drawLine(21, 10, 27, 16)
+        painter.drawLine(27, 16, 21, 22)
+        painter.drawLine(18, 7, 14, 25)
+    elif icon_name == "proyectos":
+        painter.drawRoundedRect(QRectF(7, 4, 18, 24), 3, 3)
+        painter.drawLine(11, 10, 21, 10)
+        painter.drawLine(11, 16, 21, 16)
+        painter.drawLine(11, 22, 17, 22)
+    elif icon_name == "agentes":
+        painter.drawEllipse(QRectF(10, 10, 12, 12))
+        painter.drawLine(16, 4, 16, 8)
+        painter.drawLine(16, 24, 16, 28)
+        painter.drawLine(4, 16, 8, 16)
+        painter.drawLine(24, 16, 28, 16)
+        painter.drawLine(7, 7, 10, 10)
+        painter.drawLine(25, 7, 22, 10)
+        painter.drawLine(7, 25, 10, 22)
+        painter.drawLine(25, 25, 22, 22)
+    elif icon_name == "salud":
+        path = QPainterPath()
+        path.moveTo(4, 13)
+        path.cubicTo(4, 6, 13, 6, 16, 13)
+        path.cubicTo(19, 6, 28, 6, 28, 13)
+        path.cubicTo(28, 21, 16, 27, 16, 27)
+        path.cubicTo(16, 27, 4, 21, 4, 13)
+        painter.drawPath(path)
+        painter.drawLine(9, 15, 13, 15)
+        painter.drawLine(13, 15, 15, 10)
+        painter.drawLine(15, 10, 18, 19)
+        painter.drawLine(18, 19, 20, 15)
+        painter.drawLine(20, 15, 24, 15)
+    else:  # agenda
+        painter.drawRoundedRect(QRectF(4, 6, 24, 22), 3, 3)
+        painter.drawLine(4, 12, 28, 12)
+        painter.drawLine(10, 3, 10, 8)
+        painter.drawLine(22, 3, 22, 8)
+        for row in (17, 22):
+            for column in (9, 15, 21):
+                painter.drawPoint(column, row)
+    painter.end()
+    return pixmap
 
 
 def visual_profile(state: OrbVisualState) -> dict[str, float]:
@@ -340,11 +450,14 @@ def create_orb_window(settings=None):
     )
 
     class OrbContextMenu(QWidget):
-        """HUD popup that grows around the sphere instead of beside it.
+        """Radial cinematic menu orbiting the sphere (V5 master visual).
 
-        Two translucent lateral panels (núcleo / sistemas) flank a fully
-        transparent central gap so the orb stays visible and clickable; the
-        window mask keeps click-through alive everywhere else.
+        Ten real glass categories (CHAT ... ENTRENAMIENTO) sit on an
+        ellipse around the sphere, plus the ATLAS wordmark, the brand
+        quote and a voice/exit bar. The central disc answers
+        WM_NCHITTEST with HTTRANSPARENT, so the sphere keeps receiving
+        clicks and can close the menu; nothing outside the glass items
+        is interactive-only decoration.
         """
 
         chat_requested = Signal()
@@ -352,97 +465,236 @@ def create_orb_window(settings=None):
         quit_requested = Signal()
         capability_selected = Signal(str)
 
-        _LEFT_TITLE = "ATLAS · NÚCLEO"
-        _RIGHT_TITLE = "ATLAS · SISTEMAS"
+        _BRAND_TITLE = "A T L A S"
+        _BRAND_TAGLINE = "TU IA. TU VIDA. MÁS LEJOS."
+        _QUOTE = "\"  UN SISTEMA\n   DISEÑADO PARA\n   HACER MÁS DE TI  \""
+        _FOOTER = "INTELIGENCIA\nEN ACCIÓN"
 
         def __init__(self, parent=None) -> None:
             super().__init__(parent)
             self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self._voice_active = False
-            self._capability_buttons: dict[str, QPushButton] = {}
             self._menu_animating = False
             self._menu_progress = 1.0
+            self._hole_radius = 190.0
+            self._ellipse_radii = (280.0, 260.0)
+            self._capability_buttons: dict[str, QPushButton] = {}
+            self._items: list[QWidget] = []
+            self._chat_button = None
 
-            self._left_panel = QWidget(self)
-            self._right_panel = QWidget(self)
-            self._left_panel.setFixedWidth(MENU_PANEL_WIDTH)
-            self._right_panel.setFixedWidth(MENU_PANEL_WIDTH)
+            for capability_id, title, subtitle, icon_name in _RADIAL_ITEMS:
+                self._items.append(
+                    self._build_item(capability_id, title, subtitle, icon_name)
+                )
 
-            left_layout = QVBoxLayout(self._left_panel)
-            left_layout.setContentsMargins(14, 12, 10, 12)
-            left_layout.setSpacing(4)
-            self._title = QLabel(self._LEFT_TITLE, self)
-            self._title.setStyleSheet(
-                "color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;"
+            # Brand chrome: real labels, crisp text, never bitmaps.
+            self._brand_title = QLabel(self._BRAND_TITLE, self)
+            self._brand_title.setStyleSheet(
+                "color: #f2faff; font-size: 22px; font-weight: 300; letter-spacing: 9px;"
             )
-            left_layout.addWidget(self._title)
-            self._add_separator(left_layout)
-            self._chat_button = self._add_action(left_layout, "Abrir Chat", self.chat_requested, "chat")
-            left_layout.addSpacing(2)
-            self._capability_title = QLabel("CAPACIDADES", self)
-            self._capability_title.setStyleSheet(
-                "color: #bdeeff; font-size: 9px; font-weight: 700; letter-spacing: 1.2px;"
+            self._brand_tagline = QLabel(self._BRAND_TAGLINE, self)
+            self._brand_tagline.setStyleSheet(
+                "color: #8fb8d8; font-size: 9px; font-weight: 600; letter-spacing: 3px;"
             )
-            left_layout.addWidget(self._capability_title)
-            for capability_id, label in _CAPABILITY_OPTIONS[:6]:
-                left_layout.addWidget(self._add_capability_button(label, capability_id))
-            left_layout.addStretch(1)
-            self._voice_button = self._add_action(
-                left_layout, "Modo Voz", self.voice_requested, "voice", voice_status=True
+            self._quote = QLabel(self._QUOTE, self)
+            self._quote.setStyleSheet(
+                "color: #cfe6f8; font-size: 10px; font-weight: 600; letter-spacing: 2px;"
+            )
+            self._footer = QLabel(self._FOOTER, self)
+            self._footer.setStyleSheet(
+                "color: #9fc6e8; font-size: 9px; font-weight: 600; letter-spacing: 2px;"
+            )
+            for label in (self._brand_title, self._brand_tagline, self._quote, self._footer):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            # Voice / exit bar under the bottom category.
+            self._bar = QFrame(self)
+            self._bar.setStyleSheet(
+                "QFrame { background: rgba(6, 16, 34, 150);"
+                "border: 1px solid rgba(96, 180, 255, 70); border-radius: 16px; }"
+            )
+            bar_layout = QHBoxLayout(self._bar)
+            bar_layout.setContentsMargins(12, 3, 12, 3)
+            bar_layout.setSpacing(8)
+            self._voice_button = QPushButton("Modo Voz", self._bar)
+            self._voice_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._voice_button.setIcon(QIcon(radial_icon_pixmap("voice", "#84d8ff", 16)))
+            self._voice_button.setIconSize(QSize(16, 16))
+            self._voice_button.setStyleSheet(self._bar_button_style("#e7f8ff"))
+            self._voice_button.clicked.connect(self.voice_requested.emit)
+            self._voice_button.clicked.connect(self.close_animated)
+            self._voice_indicator = QLabel(self._bar)
+            self._voice_indicator.setFixedSize(7, 7)
+            self._voice_indicator.setToolTip("Voz inactiva")
+            self._quit_button = QPushButton("Salir", self._bar)
+            self._quit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._quit_button.setStyleSheet(self._bar_button_style("#ffb6b6"))
+            self._quit_button.clicked.connect(self.quit_requested.emit)
+            self._quit_button.clicked.connect(self.close_animated)
+            bar_layout.addWidget(self._voice_button)
+            bar_layout.addWidget(self._voice_indicator)
+            bar_layout.addStretch(1)
+            bar_layout.addWidget(self._quit_button)
+            self._set_voice_indicator(False)
+            self.setFixedSize(int(HERO_ORB_SIZE * MENU_SIZE_FACTOR), int(HERO_ORB_SIZE * MENU_SIZE_FACTOR))
+            self._layout_items(1.0)
+
+        @staticmethod
+        def _bar_button_style(color: str) -> str:
+            return (
+                "QPushButton {"
+                f"color: {color}; background: rgba(10, 34, 66, 60);"
+                "border: 1px solid rgba(96, 202, 255, 70); border-radius: 12px;"
+                "padding: 3px 12px; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+                "}"
+                "QPushButton:hover { background: rgba(52, 173, 255, 55);"
+                "border-color: rgba(160, 235, 255, 200); }"
             )
 
-            right_layout = QVBoxLayout(self._right_panel)
-            right_layout.setContentsMargins(10, 12, 14, 12)
-            right_layout.setSpacing(4)
-            self._systems_title = QLabel(self._RIGHT_TITLE, self)
-            self._systems_title.setStyleSheet(
-                "color: #bdeeff; font-size: 10px; font-weight: 700; letter-spacing: 1.4px;"
+        def _build_item(
+            self, capability_id: str, title: str, subtitle: str, icon_name: str
+        ) -> QWidget:
+            container = QWidget(self)
+            container.setFixedSize(_RADIAL_ITEM_WIDTH, _RADIAL_ITEM_HEIGHT)
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(3)
+            button = QPushButton(container)
+            button.setFixedSize(_RADIAL_BUTTON_SIZE, _RADIAL_BUTTON_SIZE)
+            button.setIcon(QIcon(radial_icon_pixmap(icon_name)))
+            button.setIconSize(QSize(22, 22))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                "QPushButton {"
+                "background: qradialgradient(cx:0.5, cy:0.42, radius:0.85, fx:0.5, fy:0.42,"
+                " stop:0 rgba(16, 42, 78, 200), stop:1 rgba(4, 12, 28, 190));"
+                "border: 1px solid rgba(150, 215, 255, 130); border-radius: 22px; }"
+                "QPushButton:hover {"
+                "background: qradialgradient(cx:0.5, cy:0.42, radius:0.85, fx:0.5, fy:0.42,"
+                " stop:0 rgba(56, 140, 230, 215), stop:1 rgba(10, 30, 62, 200));"
+                "border: 1px solid rgba(210, 245, 255, 235); border-radius: 22px; }"
+                "QPushButton:pressed { background: rgba(70, 170, 255, 190); }"
             )
-            right_layout.addWidget(self._systems_title)
-            self._add_separator(right_layout)
-            for capability_id, label in _CAPABILITY_OPTIONS[6:]:
-                right_layout.addWidget(self._add_capability_button(label, capability_id))
-            right_layout.addStretch(1)
-            self._quit_button = self._add_action(right_layout, "Salir", self.quit_requested, "quit", danger=True)
+            title_label = QLabel(title, container)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            title_label.setStyleSheet(
+                "color: #eef8ff; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
+                "background: transparent;"
+            )
+            subtitle_label = QLabel(subtitle, container)
+            subtitle_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            subtitle_label.setStyleSheet(
+                "color: #9fc6e8; font-size: 8px; font-weight: 500; letter-spacing: 1px;"
+                "background: transparent;"
+            )
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(title_label)
+            layout.addWidget(subtitle_label)
+            if capability_id == "chat":
+                self._chat_button = button
+                button.clicked.connect(self._select_chat)
+            else:
+                button.clicked.connect(
+                    lambda checked=False, cid=capability_id: self._select_capability(cid)
+                )
+                self._capability_buttons[capability_id] = button
+            return container
 
-            # Manual HUD layout: both modules slide out from the núcleo.
-            self._left_panel.adjustSize()
-            self._right_panel.adjustSize()
-            panel_height = max(self._left_panel.height(), self._right_panel.height(), 120)
-            self._panel_height = panel_height
-            self._left_panel.setFixedHeight(panel_height)
-            self._right_panel.setFixedHeight(panel_height)
-            self.setFixedSize(self._menu_window_width(int(HERO_ORB_SIZE * MENU_CENTRE_FACTOR)), panel_height)
-            self._layout_panels(1.0)
+        def _select_chat(self) -> None:
+            self.close_animated()
+            self.chat_requested.emit()
 
-        def _menu_window_width(self, gap: int) -> int:
-            return MENU_PANEL_WIDTH * 2 + max(24, gap)
+        def _select_capability(self, capability_id: str) -> None:
+            self.close_animated()
+            self.capability_selected.emit(capability_id)
 
-        def _layout_panels(self, progress: float) -> None:
-            """Place both panels: progress 0 = collapsed at the núcleo, 1 = open."""
+        def _layout_items(self, progress: float) -> None:
+            """Place every element: progress 0 = núcleo, 1 = ellipse abierta.
+
+            ZERO-overlap contract: the categories ellipse keeps a hard margin
+            from every chrome label; the quote and footer live in the side
+            bands beyond the ellipse; the voice/exit bar owns the band below
+            the bottom category. Each band is computed from the live radii so
+            the layout stays responsive to the real window size.
+            """
             progress = max(0.0, min(1.0, progress))
             self._menu_progress = progress
-            mid = self.width() / 2.0
-            left_start = mid - MENU_PANEL_WIDTH
-            left_x = left_start * (1.0 - progress)
-            right_final = self.width() - MENU_PANEL_WIDTH
-            right_x = mid + (right_final - mid) * progress
-            self._left_panel.move(int(round(left_x)), 0)
-            self._right_panel.move(int(round(right_x)), 0)
-            self._apply_hud_mask()
+            w, h = self.width(), self.height()
+            cx, cy = w / 2.0, h / 2.0
+            scale = 0.28 + 0.72 * progress
+            rx = self._ellipse_radii[0] * scale
+            ry = self._ellipse_radii[1] * scale
+            item_w = _RADIAL_ITEM_WIDTH
+            item_h = _RADIAL_ITEM_HEIGHT
+            half_item = item_w / 2.0
+            for index, item in enumerate(self._items):
+                angle = math.radians(index * 36.0 - 90.0)
+                fx = cx + rx * math.cos(angle)
+                fy = cy + ry * math.sin(angle)
+                item.move(int(round(fx - half_item)), int(round(fy - _RADIAL_BUTTON_SIZE / 2.0)))
+
+            # Ellipse bounding box (items extend one item width beyond the
+            # ellipse horizontally and one item height below/above it).
+            ellipse_left = cx - rx - half_item
+            ellipse_right = cx + rx + half_item
+            ellipse_top = cy - ry - item_h / 2.0
+            ellipse_bottom = cy + ry + item_h / 2.0
+
+            # Brand chrome: top-left corner band, clear of the ellipse.
+            self._brand_title.adjustSize()
+            self._brand_tagline.adjustSize()
+            self._quote.adjustSize()
+            self._footer.adjustSize()
+            brand_left = max(14.0, min(34.0, ellipse_left - self._brand_title.width() - 24.0))
+            brand_y = max(12.0, min(int(h * 0.045), ellipse_top - self._brand_title.height() - 18.0))
+            self._brand_title.move(int(brand_left), int(brand_y))
+            self._brand_tagline.move(
+                int(brand_left + 4),
+                self._brand_title.y() + self._brand_title.height() + 5,
+            )
+
+            # Quote: right side band, vertically centred and ALWAYS beyond the
+            # ellipse's right edge (clamped inside the window, no overlap).
+            quote_x = ellipse_right + 12.0
+            if quote_x + self._quote.width() > w - 10.0:
+                # Narrow window: park the quote above the ellipse's top-right
+                # shoulder instead of touching the categories.
+                quote_x = min(w - self._quote.width() - 10.0, ellipse_right - self._quote.width() * 0.35)
+                quote_y = max(12.0, ellipse_top - self._quote.height() - 16.0)
+            else:
+                quote_y = max(12.0, min(cy - self._quote.height() / 2.0, h - self._quote.height() - 10.0))
+            self._quote.move(int(quote_x), int(quote_y))
+
+            # Footer: bottom-right corner band, below the ellipse bottom.
+            footer_y = ellipse_bottom + 10.0
+            if footer_y + self._footer.height() > h - 10.0:
+                footer_y = h - self._footer.height() - 10.0
+            self._footer.move(int(min(w - self._footer.width() - 12.0, ellipse_right)), int(footer_y))
+
+            # Voice/exit bar: centred band strictly below the bottom category.
+            bottom_item = self._items[5]  # PROYECTOS: parte inferior central.
+            self._bar.adjustSize()
+            self._bar.setFixedHeight(30)
+            bar_y = bottom_item.geometry().bottom() + 10.0
+            if bar_y + 30 > h - 8.0:
+                bar_y = h - 38.0
+            self._bar.move(
+                int(cx - self._bar.width() // 2),
+                int(bar_y),
+            )
 
         def _set_menu_progress(self, progress: float) -> None:
             progress = max(0.0, min(1.0, progress))
-            self._layout_panels(progress)
+            self._layout_items(progress)
             self.setWindowOpacity(progress)
 
         def _run_menu_animation(self, *, opening: bool) -> None:
-            """Short 150-250 ms fade + lateral slide driven synchronously.
+            """Short 150-250 ms fade + radial slide driven synchronously.
 
-            The loop processes Qt events so the animation really paints, while
-            staying transparent to callers/tests (the widget ends hidden when
-            closing, exactly as the previous instant ``hide()`` did).
+            The loop processes Qt events so the animation really paints,
+            while staying transparent to callers/tests (the widget ends
+            hidden when closing, exactly as an instant ``hide()`` would).
             """
             if self._menu_animating:
                 return
@@ -472,7 +724,7 @@ def create_orb_window(settings=None):
                 self._menu_animating = False
 
         def close_animated(self) -> None:
-            """Fade the HUD back into the núcleo and hide it."""
+            """Fade the radial menu back into the núcleo and hide it."""
             if not self.isVisible():
                 return
             self._run_menu_animation(opening=False)
@@ -482,91 +734,6 @@ def create_orb_window(settings=None):
             self._menu_animating = False
             self.setWindowOpacity(1.0)
             self._menu_progress = 1.0
-
-        def _add_capability_button(self, text: str, capability_id: str) -> QPushButton:
-            button = QPushButton(text, self)
-            button.setFixedHeight(MENU_BUTTON_HEIGHT)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(
-                "QPushButton {"
-                "color: #cdeeff; background: rgba(8, 30, 60, 46);"
-                "border: 1px solid rgba(96, 202, 255, 64); border-left: 2px solid rgba(110, 220, 255, 150);"
-                "border-radius: 4px; padding: 4px 8px; text-align: left; font-size: 11px;"
-                "}"
-                "QPushButton:hover { background: rgba(52, 173, 255, 46); border-color: rgba(130, 225, 255, 180);"
-                "border-left: 2px solid rgba(190, 245, 255, 230); }"
-            )
-            button.clicked.connect(lambda checked=False, cid=capability_id: self._select_capability(cid))
-            self._capability_buttons[capability_id] = button
-            return button
-
-        def _select_capability(self, capability_id: str) -> None:
-            self.close_animated()
-            self.capability_selected.emit(capability_id)
-
-        def _add_separator(self, layout) -> None:
-            separator = QFrame(self)
-            separator.setFrameShape(QFrame.Shape.HLine)
-            separator.setStyleSheet("color: rgba(85, 185, 255, 70);")
-            layout.addWidget(separator)
-
-        def _add_action(self, layout, text: str, signal, icon_name: str, *, danger: bool = False, voice_status: bool = False):
-            button = QPushButton(text, self)
-            button.setFixedHeight(MENU_BUTTON_HEIGHT)
-            color = "#ffb6b6" if danger else "#e7f8ff"
-            accent = "rgba(255, 96, 96, 200)" if danger else "rgba(110, 220, 255, 150)"
-            hover = "rgba(255, 78, 78, 40)" if danger else "rgba(52, 173, 255, 42)"
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setIcon(QIcon(self._action_icon(icon_name, "#ff9c9c" if danger else "#84d8ff")))
-            button.setIconSize(QSize(18, 18))
-            button.setStyleSheet(
-                "QPushButton {"
-                f"color: {color}; background: rgba(8, 30, 60, 40);"
-                "border: 1px solid rgba(96, 202, 255, 52); border-left: 2px solid " + accent + ";"
-                "border-radius: 4px; padding: 4px 8px; text-align: left; font-size: 11px;"
-                "}"
-                f"QPushButton:hover {{ background: {hover}; border-color: rgba(130, 225, 255, 160); }}"
-            )
-            button.clicked.connect(signal.emit)
-            button.clicked.connect(self.close_animated)
-            if voice_status:
-                row = QFrame(self)
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(6)
-                row_layout.addWidget(button, 1)
-                self._voice_indicator = QLabel(row)
-                self._voice_indicator.setFixedSize(8, 8)
-                self._voice_indicator.setToolTip("Voz inactiva")
-                row_layout.addWidget(self._voice_indicator)
-                layout.addWidget(row)
-                self._set_voice_indicator(False)
-            else:
-                layout.addWidget(button)
-            return button
-
-        def _action_icon(self, icon_name: str, color: str) -> QPixmap:
-            pixmap = QPixmap(18, 18)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pen = QPen(QColor(color), 1.7)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            if icon_name == "chat":
-                painter.drawRoundedRect(2, 3, 14, 10, 3, 3)
-                painter.drawLine(6, 13, 5, 16)
-                painter.drawLine(5, 16, 9, 13)
-            elif icon_name == "voice":
-                painter.drawRoundedRect(6, 2, 6, 10, 3, 3)
-                painter.drawArc(3, 7, 12, 8, 0, -180 * 16)
-                painter.drawLine(9, 15, 9, 17)
-                painter.drawLine(6, 17, 12, 17)
-            else:
-                painter.drawArc(3, 3, 12, 12, 45 * 16, 270 * 16)
-                painter.drawLine(9, 1, 9, 9)
-            painter.end()
-            return pixmap
 
         def _set_voice_indicator(self, active: bool) -> None:
             color = "#45ee94" if active else "#758496"
@@ -579,88 +746,91 @@ def create_orb_window(settings=None):
             self._set_voice_indicator(active)
 
         def show_beside(self, orb) -> None:
-            """Grow the HUD panels around the orb centre and clamp to screen."""
-            self.setFixedSize(
-                self._menu_window_width(int(MENU_CENTRE_FACTOR * orb.width())),
-                self._panel_height,
-            )
+            """Open the radial menu centred on the sphere, clamped to screen."""
             screen = orb.screen()
             if screen is None:
                 self.show()
                 return
             bounds = screen.availableGeometry()
+            target = int(orb.width() * MENU_SIZE_FACTOR)
+            # Responsive: keep the radial HUD inside the usable desktop and
+            # never below a readable minimum (the master proportions).
+            side = max(640, min(target, bounds.width() - 8, bounds.height() - 8))
+            self._ellipse_radii = (side * 0.335, side * 0.30)
+            self._hole_radius = max(90.0, min(orb.width() * 0.52, self._ellipse_radii[1] - 90.0))
+            self.setFixedSize(side, side)
             centre = orb.frameGeometry().center()
-            x = centre.x() - self.width() // 2
-            y = centre.y() - self.height() // 2
-            x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
-            y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
+            x = centre.x() - side // 2
+            y = centre.y() - side // 2
+            x = max(bounds.left(), min(x, bounds.right() - side + 1))
+            y = max(bounds.top(), min(y, bounds.bottom() - side + 1))
             self.move(x, y)
             self._set_menu_progress(0.0)
             self.show()
             self.raise_()
             self._run_menu_animation(opening=True)
 
-        def _apply_hud_mask(self) -> None:
-            """Only the two panels (plus wedges) receive clicks; the gap does not."""
-            w, h = self.width(), self.height()
-            left_x = int(self._left_panel.x())
-            right_x = int(self._right_panel.x()) - MENU_WEDGE_EXTENT
-            left = QRect(left_x, 0, MENU_PANEL_WIDTH + MENU_WEDGE_EXTENT, h)
-            right = QRect(right_x, 0, MENU_PANEL_WIDTH + MENU_WEDGE_EXTENT, h)
-            self.setMask(QRegion(left) | QRegion(right))
+        def radial_hole_contains(self, global_point) -> bool:
+            """True when the point is inside the click-through central disc."""
+            local = self.mapFromGlobal(global_point)
+            dx = local.x() - self.width() / 2.0
+            dy = local.y() - self.height() / 2.0
+            return math.hypot(dx, dy) <= self._hole_radius
+
+        @staticmethod
+        def _arc_rect(radius: float):
+            from PySide6.QtCore import QRectF
+
+            return QRectF(-radius, -radius, radius * 2.0, radius * 2.0)
+
+        def nativeEvent(self, event_type, message):  # noqa: N802 (Qt API)
+            """Forward clicks over the sphere to the orb window (HTTRANSPARENT).
+
+            WM_NCHITTEST is answered synchronously at click time, so the
+            central disc NEVER captures a click: the orb underneath keeps
+            handling open/close and dragging while the menu is visible.
+            """
+            if sys.platform == "win32" and event_type == b"windows_generic_MSG":
+                try:
+                    from ctypes import wintypes
+
+                    msg = wintypes.MSG.from_address(int(message))
+                    if msg.message == 0x0084 and self.radial_hole_contains(QCursor.pos()):
+                        return True, -1  # HTTRANSPARENT
+                except Exception:
+                    pass
+            return super().nativeEvent(event_type, message)
 
         def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+            """Two faint guide ellipses + a soft halo, as in the reference."""
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            for panel, side in ((self._left_panel, "left"), (self._right_panel, "right")):
-                if not panel.isVisible():
-                    continue
-                self._draw_hud_panel(painter, panel.geometry(), side)
-            painter.end()
+            progress = self._menu_progress
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            scale = 0.28 + 0.72 * progress
+            rx = self._ellipse_radii[0] * scale
+            ry = self._ellipse_radii[1] * scale
 
-        def _draw_hud_panel(self, painter, rect, side: str) -> None:
-            """One translucent fan panel with cian HUD border and corner ticks."""
-            inner = rect.adjusted(5, 5, -5, -5)
-            fill = QLinearGradient(inner.topLeft(), inner.bottomLeft())
-            fill.setColorAt(0.0, QColor(5, 24, 48, 52))
-            fill.setColorAt(0.55, QColor(3, 14, 32, 40))
-            fill.setColorAt(1.0, QColor(2, 9, 22, 30))
-            path = QPainterPath()
-            path.addRoundedRect(inner, 8, 8)
-            # Inner edge angles toward the sphere: the HUD is born from the orb.
-            wedge = QPainterPath()
-            wedge_extent = MENU_WEDGE_EXTENT - 6
-            if side == "left":
-                wedge.moveTo(inner.right() - 1, inner.top() + inner.height() * 0.16)
-                wedge.lineTo(inner.right() + wedge_extent, inner.center().y())
-                wedge.lineTo(inner.right() - 1, inner.top() + inner.height() * 0.84)
-            else:
-                wedge.moveTo(inner.left() + 1, inner.top() + inner.height() * 0.16)
-                wedge.lineTo(inner.left() - wedge_extent, inner.center().y())
-                wedge.lineTo(inner.left() + 1, inner.top() + inner.height() * 0.84)
-            wedge.closeSubpath()
+            # Soft ambient halo behind the sphere (never over the glass items).
+            halo = QRadialGradient(cx, cy, max(60.0, ry * 1.25))
+            halo.setColorAt(0.0, QColor(8, 24, 52, int(78 * progress)))
+            halo.setColorAt(0.55, QColor(5, 16, 36, int(44 * progress)))
+            halo.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawPath(path)
-            painter.setBrush(QColor(4, 18, 40, 36))
-            painter.drawPath(wedge)
+            painter.setBrush(halo)
+            painter.drawEllipse(self._arc_rect(max(60.0, ry * 1.25)).translated(QPointF(cx, cy)))
+
+            # Guide rings connecting the category icons.
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            # Soft outer glow, then the crisp cian border of the HUD module.
-            painter.setPen(QPen(QColor(96, 202, 255, 34), 5.0))
-            painter.drawPath(path)
-            painter.setPen(QPen(QColor(96, 202, 255, 150), 1.3))
-            painter.drawPath(path)
-            painter.setPen(QPen(QColor(120, 220, 255, 100), 1.0))
-            painter.drawPath(wedge)
-            # Corner ticks: small tech brackets on the outer corners.
-            tick = 9
-            painter.setPen(QPen(QColor(190, 245, 255, 200), 2.0))
-            if side == "left":
-                painter.drawLine(inner.topLeft() + QPointF(0, tick), inner.topLeft() + QPointF(0, 0) + QPointF(tick, 0))
-                painter.drawLine(inner.bottomLeft() + QPointF(0, -tick), inner.bottomLeft() + QPointF(tick, 0))
-            else:
-                painter.drawLine(inner.topRight() + QPointF(0, tick), inner.topRight() + QPointF(-tick, 0))
-                painter.drawLine(inner.bottomRight() + QPointF(0, -tick), inner.bottomRight() + QPointF(-tick, 0))
+            painter.setPen(QPen(QColor(110, 200, 255, int(52 * progress)), 1.2))
+            painter.drawEllipse(
+                QRectF(cx - rx * 1.06, cy - ry * 1.06, rx * 2.12, ry * 2.12)
+            )
+            painter.setPen(QPen(QColor(110, 200, 255, int(24 * progress)), 1.0))
+            painter.drawEllipse(
+                QRectF(cx - rx * 0.90, cy - ry * 0.90, rx * 1.80, ry * 1.80)
+            )
+            painter.end()
 
     class OrbWindow(QWidget):
         """Frameless translucent always-on-top circular state indicator."""
@@ -1154,23 +1324,27 @@ def create_orb_window(settings=None):
             return size * HERO_ASSET_FIT * HERO_SPHERE_FRACTION / 2.0
 
         def _draw_hero_halo(self, painter, c) -> None:
-            """Pulsating outer glow behind the approved sphere (never whitens it)."""
+            """Pulsating outer glow behind the approved sphere (never whitens it).
+
+            V5.1: contained glow — the master composition keeps the sphere
+            premium and integrated, not dominating the desktop.
+            """
             profile, period = c["profile"], c["period"] or 3.0
             breath = 0.5 + 0.5 * math.sin(c["elapsed"] * math.tau / max(0.4, period))
             intensity = profile["halo_strength"] * (0.55 + 0.45 * breath)
             halo = c["halo"]
             r = self._hero_sphere_radius(c["size"])
-            gradient = QRadialGradient(0.0, 0.0, r * 1.24)
-            gradient.setColorAt(0.70, QColor(*halo, 0))
-            gradient.setColorAt(0.80, QColor(*halo, int(26 * intensity)))
-            gradient.setColorAt(0.86, QColor(*halo, int(58 * intensity)))
-            gradient.setColorAt(0.95, QColor(*halo, int(12 * intensity)))
+            gradient = QRadialGradient(0.0, 0.0, r * 1.16)
+            gradient.setColorAt(0.72, QColor(*halo, 0))
+            gradient.setColorAt(0.80, QColor(*halo, int(18 * intensity)))
+            gradient.setColorAt(0.86, QColor(*halo, int(42 * intensity)))
+            gradient.setColorAt(0.95, QColor(*halo, int(9 * intensity)))
             gradient.setColorAt(1.0, QColor(*halo, 0))
             painter.save()
             painter.translate(c["center"], c["center"])
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(gradient)
-            painter.drawEllipse(self._arc_rect(r * 1.24))
+            painter.drawEllipse(self._arc_rect(r * 1.16))
             painter.restore()
 
         def _draw_hero_overlays(self, painter, c) -> None:
@@ -1807,6 +1981,7 @@ def create_transcript_panel():
         QLabel,
         QPlainTextEdit,
         QPushButton,
+        QSizeGrip,
         QTextBrowser,
         QVBoxLayout,
         QWidget,
@@ -1856,45 +2031,95 @@ def create_transcript_panel():
             self._hide_on_close = False
             self.setWindowTitle("Atlas - transcripcion")
             self.setObjectName("atlasTranscriptPanel")
-            self.setWindowFlags(Qt.WindowType.Window)
-            self.resize(380, 440)
-            self.setMinimumSize(360, 400)
-            self.setStyleSheet(
-                "QWidget#atlasTranscriptPanel { background: #060d1a; }"
-                "QLabel { color: #9fd8ff; font-size: 12px; font-weight: 600; }"
-                "QPushButton { background: #10233c; color: #d8efff; border: 1px solid #2d4b69; "
-                "border-radius: 6px; padding: 6px 12px; font-size: 12px; }"
-                "QPushButton:hover { background: #173154; border-color: #3f6d99; }"
-                "QPushButton:pressed { background: #1d3f6b; }"
+            self.setWindowFlags(
+                Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
             )
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 12, 12, 12)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.resize(400, 560)
+            self.setMinimumSize(380, 480)
+            self.setStyleSheet(
+                "QWidget#atlasTranscriptPanel { background: transparent; }"
+                "QFrame#atlasGlassCard { background: rgba(6, 12, 26, 226);"
+                "border: 1px solid rgba(96, 180, 255, 55); border-radius: 16px; }"
+                "QLabel { color: #9fd8ff; font-size: 12px; font-weight: 600; background: transparent; }"
+                "QPushButton { background: rgba(16, 36, 62, 180); color: #d8efff;"
+                "border: 1px solid rgba(70, 130, 190, 130); border-radius: 8px;"
+                "padding: 6px 12px; font-size: 12px; }"
+                "QPushButton:hover { background: rgba(30, 70, 118, 200);"
+                "border-color: rgba(120, 200, 255, 190); }"
+                "QPushButton:pressed { background: rgba(44, 96, 158, 210); }"
+            )
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            card = QFrame(self)
+            card.setObjectName("atlasGlassCard")
+            outer.addWidget(card)
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(16, 12, 16, 14)
             layout.setSpacing(8)
-            self._voice_status = QLabel("Desconectado", self)
-            layout.addWidget(self._voice_status)
+
+            header = QHBoxLayout()
+            header.setSpacing(8)
+            self._brand = QLabel("A T L A S  ·  CONVERSACIÓN", card)
+            self._brand.setStyleSheet(
+                "color: #f2faff; font-size: 13px; font-weight: 700; letter-spacing: 3px;"
+            )
+            self._voice_status = QLabel("Desconectado", card)
+            self._voice_status.setStyleSheet(
+                "color: #bfe3ff; background: rgba(14, 36, 66, 170);"
+                "border: 1px solid rgba(80, 150, 220, 110); border-radius: 10px;"
+                "padding: 3px 10px; font-size: 11px; font-weight: 600;"
+            )
+            self._close_button = QPushButton("—", card)
+            self._close_button.setToolTip("Cerrar conversación")
+            self._close_button.setFixedSize(30, 26)
+            self._close_button.clicked.connect(self.close_requested.emit)
+            header.addWidget(self._brand)
+            header.addStretch(1)
+            header.addWidget(self._voice_status)
+            header.addWidget(self._close_button)
+            header_frame = QFrame(card)
+            header_frame.setLayout(header)
+            header_frame.setStyleSheet("QFrame { background: transparent; }")
+            self._install_window_drag(header_frame)
+            layout.addWidget(header_frame)
+
             voice_layout = QHBoxLayout()
-            self._voice_start_button = QPushButton("Iniciar voz", self)
-            self._voice_stop_button = QPushButton("Detener voz", self)
-            self._voice_retry_button = QPushButton("Reintentar", self)
+            voice_layout.setSpacing(6)
+            self._voice_start_button = QPushButton("Iniciar voz", card)
+            self._voice_stop_button = QPushButton("Detener voz", card)
+            self._voice_retry_button = QPushButton("Reintentar", card)
+            for button in (self._voice_start_button, self._voice_stop_button, self._voice_retry_button):
+                button.setStyleSheet(
+                    "QPushButton { background: rgba(14, 34, 60, 170); color: #cfeaff;"
+                    "border: 1px solid rgba(70, 130, 190, 110); border-radius: 8px;"
+                    "padding: 4px 10px; font-size: 11px; }"
+                    "QPushButton:hover { background: rgba(26, 62, 108, 200);"
+                    "border-color: rgba(120, 200, 255, 180); }"
+                )
             self._voice_start_button.clicked.connect(self.voice_start_requested.emit)
             self._voice_stop_button.clicked.connect(self.voice_stop_requested.emit)
             self._voice_retry_button.clicked.connect(self.voice_retry_requested.emit)
             voice_layout.addWidget(self._voice_start_button)
             voice_layout.addWidget(self._voice_stop_button)
+            voice_layout.addStretch(1)
             voice_layout.addWidget(self._voice_retry_button)
             layout.addLayout(voice_layout)
-            self._view = QTextBrowser(self)
+
+            self._view = QTextBrowser(card)
             self._view.setReadOnly(True)
             self._view.setStyleSheet(
-                "QTextBrowser { background: #0b1220; color: #e6edf7; border: 1px solid #24344a; "
-                "border-radius: 8px; font-size: 15px; padding: 8px; }"
+                "QTextBrowser { background: transparent; color: #e6edf7;"
+                "border: 1px solid rgba(60, 110, 165, 80); border-radius: 10px;"
+                "font-size: 15px; padding: 8px; selection-background-color: #1d3f6b; }"
             )
-            layout.addWidget(self._view)
+            layout.addWidget(self._view, 1)
             self._pending_attachment = None
-            self._attachment_preview = QFrame(self)
+            self._attachment_preview = QFrame(card)
             self._attachment_preview.setFrameShape(QFrame.Shape.StyledPanel)
             self._attachment_preview.setStyleSheet(
-                "QFrame { background: #132238; border: 1px solid #2f5b82; border-radius: 6px; }"
+                "QFrame { background: rgba(16, 38, 66, 190);"
+                "border: 1px solid rgba(80, 150, 220, 130); border-radius: 8px; }"
             )
             attachment_layout = QHBoxLayout(self._attachment_preview)
             self._attachment_icon = QLabel("[archivo]", self._attachment_preview)
@@ -1909,23 +2134,66 @@ def create_transcript_panel():
             self._attachment_preview.hide()
             layout.addWidget(self._attachment_preview)
             input_layout = QHBoxLayout()
-            self._attachment_button = QPushButton("+", self)
+            input_layout.setSpacing(6)
+            self._attachment_button = QPushButton("+", card)
             self._attachment_button.setToolTip("Adjuntar archivo")
+            self._attachment_button.setFixedSize(34, 34)
             self._attachment_button.clicked.connect(self._choose_attachment)
-            self._input = ChatInput(self)
+            self._input = ChatInput(card)
             self._input.setPlaceholderText("Escribe un mensaje...")
             self._input.setFixedHeight(96)
             self._input.setStyleSheet(
-                "QPlainTextEdit { background: #101a2a; color: #edf5ff; border: 1px solid #2d4b69; "
-                "border-radius: 7px; font-size: 15px; padding: 8px; }"
+                "QPlainTextEdit { background: rgba(12, 26, 46, 200); color: #edf5ff;"
+                "border: 1px solid rgba(70, 130, 190, 120); border-radius: 10px;"
+                "font-size: 15px; padding: 8px; }"
             )
-            self._send_button = QPushButton("Enviar", self)
+            self._send_button = QPushButton("Enviar", card)
+            self._send_button.setStyleSheet(
+                "QPushButton { background: rgba(20, 90, 190, 200); color: #f2fbff;"
+                "border: 1px solid rgba(130, 220, 255, 160); border-radius: 10px;"
+                "padding: 8px 18px; font-size: 12px; font-weight: 700; letter-spacing: 1px; }"
+                "QPushButton:hover { background: rgba(40, 125, 235, 220);"
+                "border-color: rgba(190, 245, 255, 230); }"
+                "QPushButton:pressed { background: rgba(12, 66, 150, 220); }"
+            )
             self._input.submit_requested.connect(self._submit_input)
             self._send_button.clicked.connect(self._submit_input)
             input_layout.addWidget(self._attachment_button)
-            input_layout.addWidget(self._input)
+            input_layout.addWidget(self._input, 1)
             input_layout.addWidget(self._send_button)
             layout.addLayout(input_layout)
+            self._size_grip = QSizeGrip(card)
+            layout.addWidget(self._size_grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+
+        def _install_window_drag(self, handle) -> None:
+            """Drag the frameless glass panel from its header band."""
+
+            state = {"offset": None}
+
+            def press(event) -> None:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    state["offset"] = (
+                        event.globalPosition().toPoint()
+                        - self.frameGeometry().topLeft()
+                    )
+                    event.accept()
+                    return
+                event.ignore()
+
+            def move(event) -> None:
+                if state["offset"] is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                    self.move(event.globalPosition().toPoint() - state["offset"])
+                    event.accept()
+                    return
+                event.ignore()
+
+            def release(event) -> None:
+                state["offset"] = None
+                event.ignore()
+
+            handle.mousePressEvent = press
+            handle.mouseMoveEvent = move
+            handle.mouseReleaseEvent = release
 
         def _submit_input(self) -> None:
             text = self._input.text().strip()

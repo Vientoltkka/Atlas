@@ -66,6 +66,27 @@ def _stage_v2_requested() -> bool:
     return os.environ.get("ATLAS_STAGE_V2", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _legacy_stage_requested() -> bool:
+    """Feature flag ATLAS_STAGE: show the legacy fullscreen holographic stage.
+
+    V5 identity default is the floating orb alone over a transparent
+    desktop; the stage code stays intact but only loads when explicitly
+    requested.
+    """
+    return os.environ.get("ATLAS_STAGE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _master_hud_requested() -> bool:
+    """Feature flag ATLAS_MASTER_HUD (default on): the approved master
+    visual becomes the visible interface instead of the floating orb."""
+    return os.environ.get("ATLAS_MASTER_HUD", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 class OrbeController:
     """Own UI lifecycle; workers emit signals and never touch widgets."""
 
@@ -110,6 +131,26 @@ class OrbeController:
             except Exception:
                 self._controls = None
                 self._logger.warning("Capa de controles del stage no disponible")
+        # MASTER HUD (default identity): the approved master visual is the
+        # interface. Interaction layers (hitboxes, sphere states) reuse the
+        # existing controller flow; nothing else in Atlas is touched.
+        self._master_hud = None
+        if _master_hud_requested() and not _legacy_stage_requested():
+            try:
+                from ui.master_hud import create_master_hud
+
+                self._master_hud = create_master_hud()
+            except Exception as error:
+                self._master_hud = None
+                self._logger.warning("MASTER HUD no disponible: %s", error)
+        if self._master_hud is not None:
+            self._master_hud.capability_selected.connect(self.open_capability)
+            self._master_hud.sphere_clicked.connect(self.toggle_voice)
+            self._master_hud.hide_requested.connect(self.hide_interface)
+            if hasattr(self._orb, "visual_state_changed"):
+                self._orb.visual_state_changed.connect(
+                    self._master_hud.apply_state
+                )
         for overlay in (self._stage, self._controls):
             if overlay is None:
                 continue
@@ -119,8 +160,9 @@ class OrbeController:
             overlay.capability_selected.connect(self.open_capability)
             if hasattr(overlay, "hide_requested"):
                 overlay.hide_requested.connect(self.hide_interface)
-        # Stage V2 (experimental): when ATLAS_STAGE_V2 is truthy, Ctrl+Espacio
-        # shows ONLY AtlasStageV2; the legacy orb/stage/controls stay hidden.
+        # Stage V2 (experimental): with ATLAS_STAGE_V2 set, an AtlasStageV2
+        # window is created for its own demo flows, but it NO LONGER takes
+        # over Ctrl+Espacio: the V5 orb is always the hotkey's target.
         self._stage_v2 = None
         if _stage_v2_requested():
             factory = stage_v2_factory
@@ -214,6 +256,11 @@ class OrbeController:
         """Experimental Stage V2 (None unless ATLAS_STAGE_V2 is enabled)."""
         return self._stage_v2
 
+    @property
+    def master_hud(self):
+        """MASTER visual HUD (None when the asset or flag is unavailable)."""
+        return self._master_hud
+
     def start(
         self,
         *,
@@ -229,10 +276,11 @@ class OrbeController:
             if start_hidden:
                 self._orb.hide()
                 self._hide_stage()
-                self._logger.info("Autoarranque oculto: Orbe y chat ocultos")
+                if self._master_hud is not None:
+                    self._master_hud.hide()
+                self._logger.info("Autoarranque oculto: interfaz y chat ocultos")
             else:
-                self._orb.show()
-                self._show_stage()
+                self.show_orb()
         if not start_voice:
             self._application.setQuitOnLastWindowClosed(False)
         # Failsafe hotkey in EVERY mode: Ctrl+Espacio must always toggle.
@@ -304,19 +352,25 @@ class OrbeController:
             self._transcript_panel.prefill_input(prefix)
 
     def show_orb(self) -> None:
-        """Muestra el overlay Atlas completo: orbe + stage + controles."""
-        if self._stage_v2 is not None:
-            if not self._stage_v2.isVisible():
-                self._stage_v2.show()
-                self._stage_v2.raise_()
+        """Muestra la interfaz Atlas: MASTER HUD (por defecto) u orbe flotante.
+
+        Ctrl+Espacio SIEMPRE trae de vuelta la interfaz principal. El HUD
+        MASTER (imagen aprobada) cubre la esfera; sin asset disponible se
+        cae al orbe V5 compacto, y ATLAS_STAGE=1 restaura el overlay legacy.
+        """
+        if self._master_hud is not None:
+            self._orb.hide()
+            self._hide_stage()
+            self._master_hud.show()
+            self._master_hud.raise_()
             self._set_escape_hotkey(True)
-            self._logger.info("Overlay Atlas mostrado (Stage V2)")
+            self._logger.info("Overlay Atlas mostrado (HUD MASTER)")
             return
         self._orb.show()
         self._orb.raise_()
         self._show_stage()
         self._set_escape_hotkey(True)
-        self._logger.info("Overlay Atlas mostrado (orbe + stage + controles)")
+        self._logger.info("Overlay Atlas mostrado (orbe flotante)")
 
     def hide_interface(self) -> None:
         """Salida segura e inmediata: oculta TODO Atlas.
@@ -326,6 +380,8 @@ class OrbeController:
         ventanas; nunca depende de la voz ni de un worker.
         """
         self._hide_stage()
+        if self._master_hud is not None:
+            self._master_hud.hide()
         self._orb.hide()
         self._transcript_panel.hide()
         self._set_escape_hotkey(False)
@@ -343,6 +399,8 @@ class OrbeController:
             return True
         if self._orb.isVisible() or self._transcript_panel.isVisible():
             return True
+        if self._master_hud is not None and self._master_hud.isVisible():
+            return True
         stage_visible = self._stage is not None and self._stage.isVisible()
         controls_visible = self._controls is not None and self._controls.isVisible()
         return stage_visible or controls_visible
@@ -353,6 +411,14 @@ class OrbeController:
         The fullscreen stage is topmost, so it must hide first: otherwise
         the chat would open BEHIND it and look like a dead button.
         """
+        if self._master_hud is not None and self._master_hud.isVisible():
+            # Chat glass overlay: the MASTER stays visible underneath.
+            self._transcript_panel.show()
+            self._position_chat_over_master()
+            self._transcript_panel.raise_()
+            self._transcript_panel.activateWindow()
+            self._set_escape_hotkey(True)
+            return
         self._hide_stage()
         self._orb.show()
         self._transcript_panel.show()
@@ -360,6 +426,21 @@ class OrbeController:
         self._transcript_panel.raise_()
         self._transcript_panel.activateWindow()
         self._set_escape_hotkey(True)
+
+    def _position_chat_over_master(self) -> None:
+        """Dock the real chat as a glass overlay on the MASTER right side."""
+        panel = self._transcript_panel
+        hud_geometry = self._master_hud.frameGeometry()
+        screen = panel.screen() or self._master_hud.screen()
+        if screen is None:
+            panel.move(hud_geometry.right() - panel.width() - 32, hud_geometry.top() + 32)
+            return
+        bounds = screen.availableGeometry()
+        x = max(bounds.left(), min(hud_geometry.right() - panel.width() - 32,
+                                   bounds.right() - panel.width() + 1))
+        y = max(bounds.top(), min(hud_geometry.center().y() - panel.height() // 2,
+                                  bounds.bottom() - panel.height() + 1))
+        panel.move(x, y)
 
     def _position_chat_without_overlap(self) -> None:
         """Keep the initial orb position unless the newly shown panel covers it."""
@@ -399,11 +480,19 @@ class OrbeController:
             self._orb.move(orb_x, orb_y)
 
     def hide_chat(self) -> None:
-        """Hide the chat pair while preserving the running controller."""
+        """Cerrar el chat: volver al MASTER cuando es la interfaz activa."""
         self._transcript_panel.hide()
         self._orb.hide()
         self._hide_stage()
-        self._set_escape_hotkey(False)
+        if self._master_hud is not None:
+            if self._master_hud.isVisible():
+                self._master_hud.raise_()
+            else:
+                self._master_hud.hide()
+        # ESC sigue activo mientras el MASTER siga visible.
+        self._set_escape_hotkey(
+            self._master_hud is not None and self._master_hud.isVisible()
+        )
 
     def start_voice(self) -> None:
         """Start a new voice session only when no prior session is running."""
@@ -576,6 +665,9 @@ class OrbeController:
     # -- fullscreen stage -------------------------------------------------
 
     def _show_stage(self) -> None:
+        if not _legacy_stage_requested():
+            # V5 identity: floating orb alone; the legacy stage stays dormant.
+            return
         if self._stage is not None and not self._stage.isVisible():
             self._stage.show()
             self._stage.raise_()

@@ -118,13 +118,14 @@ def test_window_is_frameless_translucent_and_on_top(qapp, orb) -> None:
     assert orb.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
-def test_transcript_panel_is_a_normal_window_and_not_on_top(qapp) -> None:
+def test_transcript_panel_is_frameless_translucent_and_not_on_top(qapp) -> None:
     from PySide6.QtCore import Qt
 
     panel = orbe_app.create_transcript_panel()
     flags = panel.windowFlags()
 
-    assert flags & Qt.WindowType.WindowType_Mask == Qt.WindowType.Window
+    assert bool(flags & Qt.WindowType.FramelessWindowHint)
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert not flags & Qt.WindowType.WindowStaysOnTopHint
     panel.close()
 
@@ -293,8 +294,6 @@ def test_orb_click_toggles_the_custom_context_menu(qapp, orb) -> None:
 
 
 def test_context_menu_grows_around_the_orb_and_stays_on_screen(qapp, orb) -> None:
-    from PySide6.QtCore import QPoint
-
     bounds = orb.screen().availableGeometry()
     orb.move(bounds.center().x() - orb.width() // 2, bounds.center().y() - orb.height() // 2)
 
@@ -306,13 +305,15 @@ def test_context_menu_grows_around_the_orb_and_stays_on_screen(qapp, orb) -> Non
     assert geometry.right() <= bounds.right()
     assert geometry.top() >= bounds.top()
     assert geometry.bottom() <= bounds.bottom()
-    # The HUD is born around the sphere: both lateral panels leave the orb
-    # centre inside a transparent, click-through gap.
-    assert geometry.center().x() == orb.frameGeometry().center().x()
+    # The radial menu is born around the sphere: same centre, and the
+    # central disc is click-through so the orb keeps handling clicks.
+    assert abs(geometry.center().x() - orb.frameGeometry().center().x()) <= 2
+    assert abs(geometry.center().y() - orb.frameGeometry().center().y()) <= 2
     orb_centre_local = orb.frameGeometry().center() - geometry.topLeft()
-    assert not menu.mask().contains(orb_centre_local)
-    panel_point = QPoint(8, geometry.height() // 2)
-    assert menu.mask().contains(panel_point)
+    assert menu.radial_hole_contains(menu.mapToGlobal(orb_centre_local))
+    # The CHAT category sits at the top of the ellipse as a real widget.
+    chat_item = menu._items[0]
+    assert chat_item.geometry().center().y() < geometry.height() // 2
     menu.hide()
 
     # Clamped at the right edge, every part of the menu remains on screen.
@@ -368,16 +369,20 @@ def test_clickable_zone_is_a_central_disc_within_the_window(qapp, orb) -> None:
     assert not orb.clickable_at(orb.frameGeometry().topRight())
 
 
-def test_holo_menu_lists_every_capability_and_emits_selection(qapp, orb) -> None:
-    from ui.orbe_app import _CAPABILITY_OPTIONS
-    expected_ids = {
-        "coding", "proyectos", "entrenamiento", "nutricion", "salud",
-        "calendario", "control_pc", "automatizacion", "investigacion",
-        "legal", "finanzas", "agentes", "mas_herramientas",
-    }
+def test_holo_menu_lists_the_reference_categories_and_emits_selection(qapp, orb) -> None:
+    from ui.orbe_app import _RADIAL_ITEMS
+
+    # Ten reference categories; CHAT has its own dedicated button/signal.
+    expected_ids = {item_id for item_id, _title, _subtitle, _icon in _RADIAL_ITEMS if item_id != "chat"}
+    assert len(_RADIAL_ITEMS) == 10
+    assert [item_id for item_id, *_rest in _RADIAL_ITEMS][0] == "chat"
+    titles = {title for _id, title, _subtitle, _icon in _RADIAL_ITEMS}
+    assert {
+        "CHAT", "ENTRENAMIENTO", "NUTRICIÓN", "CONTROL PC", "FINANZAS",
+        "DESARROLLO", "PROYECTOS", "AGENTES", "SALUD", "AGENDA",
+    } == titles
     menu = orb.context_menu
     assert set(menu._capability_buttons) == expected_ids
-    assert {option_id for option_id, _label in _CAPABILITY_OPTIONS} == expected_ids
 
     selections: list[str] = []
     menu.capability_selected.connect(selections.append)
@@ -407,9 +412,10 @@ def test_fixed_orb_size(orb) -> None:
     assert orbe_app.CORE_RADIUS_FACTOR == pytest.approx(0.29)
     assert orb.width() == orb.height() == orbe_app.size_for_state(OrbVisualState.IDLE)
     if orb_assets.hero_available():
-        # The approved hero composition keeps the sphere in the target band.
+        # The approved hero composition keeps the sphere in the compact band
+        # (V5.1: the HUD must live with the desktop, not dominate it).
         sphere = orb.width() * orbe_app.HERO_ASSET_FIT * orbe_app.HERO_SPHERE_FRACTION
-        assert 380 <= sphere <= 480
+        assert 280 <= sphere <= 360
     else:
         assert 350 <= orbe_app.ORB_SIZE <= 370
 

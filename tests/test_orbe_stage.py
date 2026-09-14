@@ -50,7 +50,10 @@ def controls(qapp, stage):
 
 
 @pytest.fixture()
-def controller(qapp):
+def controller(qapp, monkeypatch):
+    # The legacy fullscreen stage is opt-in since V5 (ATLAS_STAGE flag);
+    # these tests exercise the stage contract, so they explicitly enable it.
+    monkeypatch.setenv("ATLAS_STAGE", "1")
     orb = orbe_app.create_orb_window()
     panel = orbe_app.create_transcript_panel()
     instance = orbe_controller.OrbeController(
@@ -181,7 +184,31 @@ def test_automation_panel_is_red_only_while_executing(stage) -> None:
     assert stage._state_accent() == (255, 82, 82)
 
 
-# ------------------------------------------------------------------ C: ESC
+# ------------------------------------------------------------------ ESC
+
+
+def test_default_desktop_shows_only_the_floating_orb(qapp) -> None:
+    """Default identity: MASTER HUD (or floating orb fallback), no legacy stage."""
+    orb = orbe_app.create_orb_window()
+    panel = orbe_app.create_transcript_panel()
+    controller = orbe_controller.OrbeController(
+        atlas=SimpleNamespace(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    try:
+        controller.show_orb()
+        _drain(qapp)
+        hud = controller.master_hud
+        if hud is not None:
+            assert hud.isVisible()
+            assert not orb.isVisible()
+        else:
+            assert orb.isVisible()
+        assert not controller.stage.isVisible()
+        assert controller.controls is None or not controller.controls.isVisible()
+    finally:
+        controller.hide_interface()
+        orb.close()
+        panel.close()
 
 
 def test_c_escape_hides_stage_and_orb(qapp, controller) -> None:

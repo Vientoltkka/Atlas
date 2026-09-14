@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Test focal: click en CHAT dentro de Stage V2 reutiliza el chat real.
 
 Ejecutar:  python -m pytest ui/stage_v2/test_chat_button_v2.py -q
@@ -77,6 +77,14 @@ def _controller_with(qapp, stage_v2):
     return controller, orb, panel
 
 
+def _atlas_visible(controller) -> bool:
+    """Atlas interface visible: MASTER HUD (default) or legacy floating orb."""
+    hud = controller.master_hud
+    if hud is not None and hud.isVisible():
+        return True
+    return controller._orb.isVisible()
+
+
 def test_controller_routes_stage_v2_chat_to_show_chat(qapp, monkeypatch):
     monkeypatch.setenv("ATLAS_STAGE_V2", "1")
     stage = renderer.AtlasStageV2()
@@ -85,7 +93,7 @@ def test_controller_routes_stage_v2_chat_to_show_chat(qapp, monkeypatch):
         assert controller.stage_v2 is stage
         _click(stage, 0)
         assert panel.isVisible()
-        assert orb.isVisible()
+        assert _atlas_visible(controller)
     finally:
         controller.hide_interface()
         orb.close()
@@ -97,13 +105,17 @@ def test_chat_click_hides_stage_v2_and_shows_chat(qapp, monkeypatch):
     stage = renderer.AtlasStageV2()
     controller, orb, panel = _controller_with(qapp, stage)
     try:
-        controller.show_orb()  # Stage V2 visible a pantalla completa
-        assert stage.isVisible()
+        # Contrato V5: Ctrl+Espacio/orbe nunca muestran Stage V2; la
+        # ventana demo V2 abre por su propio flujo y su boton CHAT sigue
+        # trayendo el chat real por delante.
+        controller.show_orb()
+        assert not stage.isVisible()
+        stage.show()
         _click(stage, 0)
         # El chat debe quedar VISIBLE, no tapado por Stage V2.
         assert not stage.isVisible()
         assert panel.isVisible()
-        assert orb.isVisible()
+        assert _atlas_visible(controller)
     finally:
         controller.hide_interface()
         stage.close()
@@ -144,9 +156,9 @@ def test_legacy_mode_without_flag_unchanged(qapp, monkeypatch):
         assert controller.stage_v2 is None
         controller.show_orb()
         orb.chat_requested.emit()
-        # Flujo legacy intacto: chat visible junto al orbe, sin Stage V2.
+        # Flujo legacy intacto: chat visible junto a la interfaz, sin Stage V2.
         assert panel.isVisible()
-        assert orb.isVisible()
+        assert _atlas_visible(controller)
     finally:
         controller.hide_interface()
         orb.close()
