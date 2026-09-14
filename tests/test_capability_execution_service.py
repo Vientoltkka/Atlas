@@ -108,8 +108,8 @@ class ChatAgent:
     def __init__(self) -> None:
         self.calls = 0
 
-    def run(self, *, model: str, messages):
-        del model, messages
+    def run(self, *, model: str, messages, provider_id=None):
+        del model, messages, provider_id
         self.calls += 1
         return "respuesta anterior"
 

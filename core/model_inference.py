@@ -26,6 +26,9 @@ class ModelInferenceResult:
     used_fallback: bool
     attempt_count: int
     fallback_reason: str | None = None
+    initial_provider_id: str | None = None
+    final_provider_id: str | None = None
+    attempted_provider_ids: tuple[str | None, ...] = ()
 
 
 class ModelSelectionError(RuntimeError):
@@ -46,11 +49,13 @@ class ModelHealthCheckError(RuntimeError):
         attempted_logical_model_ids: tuple[str, ...],
         allow_fallback: bool,
         last_result: ModelHealthResult,
+        attempted_provider_ids: tuple[str | None, ...] = (),
     ) -> None:
         self.initial_logical_model_id = initial_logical_model_id
         self.attempted_logical_model_ids = attempted_logical_model_ids
         self.allow_fallback = allow_fallback
         self.last_result = last_result
+        self.attempted_provider_ids = attempted_provider_ids
         super().__init__(
             "Model health check failed after "
             f"{len(attempted_logical_model_ids)} attempt(s); "
@@ -68,11 +73,13 @@ class InferenceFallbackExhaustedError(RuntimeError):
         attempted_logical_model_ids: tuple[str, ...],
         allow_fallback: bool,
         last_error: InferenceBackendError,
+        attempted_provider_ids: tuple[str | None, ...] = (),
     ) -> None:
         self.initial_logical_model_id = initial_logical_model_id
         self.attempted_logical_model_ids = attempted_logical_model_ids
         self.allow_fallback = allow_fallback
         self.last_error = last_error
+        self.attempted_provider_ids = attempted_provider_ids
         super().__init__(
             "Inference failed after "
             f"{len(attempted_logical_model_ids)} attempt(s); "
@@ -118,12 +125,14 @@ class ModelInferenceRunner:
         current = initial
         attempted: list[str] = []
         attempted_physical: list[str] = []
+        attempted_providers: list[str | None] = []
         fallback_reason: str | None = None
 
         while True:
             logical_id, physical_name = self._selection_identity(current)
             attempted.append(logical_id)
             attempted_physical.append(physical_name)
+            attempted_providers.append(current.provider_id)
             health_result = self._check_health(current)
             if health_result is not None and not health_result.healthy:
                 fallback_reason = health_result.reason
@@ -132,6 +141,7 @@ class ModelInferenceRunner:
                     initial,
                     attempted,
                     attempted_physical,
+                    attempted_providers,
                     health_result,
                 )
                 continue
@@ -155,6 +165,7 @@ class ModelInferenceRunner:
                         attempted_logical_model_ids=tuple(attempted),
                         allow_fallback=request.allow_fallback,
                         last_error=error,
+                        attempted_provider_ids=tuple(attempted_providers),
                     ) from error
                 current = next_selection
                 continue
@@ -164,6 +175,7 @@ class ModelInferenceRunner:
                 current,
                 len(attempted),
                 fallback_reason,
+                tuple(attempted_providers),
             )
             return value
 
@@ -180,12 +192,14 @@ class ModelInferenceRunner:
         current = initial
         attempted: list[str] = []
         attempted_physical: list[str] = []
+        attempted_providers: list[str | None] = []
         fallback_reason: str | None = None
 
         while True:
             logical_id, physical_name = self._selection_identity(current)
             attempted.append(logical_id)
             attempted_physical.append(physical_name)
+            attempted_providers.append(current.provider_id)
             health_result = self._check_health(current)
             if health_result is not None and not health_result.healthy:
                 fallback_reason = health_result.reason
@@ -194,6 +208,7 @@ class ModelInferenceRunner:
                     initial,
                     attempted,
                     attempted_physical,
+                    attempted_providers,
                     health_result,
                 )
                 continue
@@ -222,6 +237,7 @@ class ModelInferenceRunner:
                         attempted_logical_model_ids=tuple(attempted),
                         allow_fallback=request.allow_fallback,
                         last_error=error,
+                        attempted_provider_ids=tuple(attempted_providers),
                     ) from error
                 current = next_selection
                 continue
@@ -231,6 +247,7 @@ class ModelInferenceRunner:
                 current,
                 len(attempted),
                 fallback_reason,
+                tuple(attempted_providers),
             )
             return
 
@@ -266,6 +283,7 @@ class ModelInferenceRunner:
         initial: ModelSelectionResult,
         attempted: list[str],
         attempted_physical: list[str],
+        attempted_providers: list[str | None],
         health_result: ModelHealthResult,
     ) -> ModelSelectionResult:
         next_selection = self._model_manager.select_fallback(
@@ -280,6 +298,7 @@ class ModelInferenceRunner:
             attempted_logical_model_ids=tuple(attempted),
             allow_fallback=request.allow_fallback,
             last_result=health_result,
+            attempted_provider_ids=tuple(attempted_providers),
         )
 
     @staticmethod
@@ -297,6 +316,7 @@ class ModelInferenceRunner:
         final: ModelSelectionResult,
         attempt_count: int,
         fallback_reason: str | None,
+        attempted_provider_ids: tuple[str | None, ...],
     ) -> ModelInferenceResult:
         initial_logical, initial_physical = cls._selection_identity(initial)
         final_logical, final_physical = cls._selection_identity(final)
@@ -309,4 +329,7 @@ class ModelInferenceRunner:
             used_fallback=used_fallback,
             attempt_count=attempt_count,
             fallback_reason=fallback_reason if used_fallback else None,
+            initial_provider_id=initial.provider_id,
+            final_provider_id=final.provider_id,
+            attempted_provider_ids=attempted_provider_ids,
         )

@@ -849,6 +849,8 @@ class _AgentFake:
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        provider_id: str | None = None,
     ) -> str:
         self.calls += 1
         return "respuesta anterior"
@@ -894,6 +896,7 @@ class _CorrectionInteractionFake:
         project_root: Path,
         choose_model,
         confirm,
+        resolve_provider=None,
     ) -> str | None:
         self.confirm_received = confirm is not None
         return self.response

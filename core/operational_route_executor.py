@@ -1050,11 +1050,13 @@ class AgentDelegationRouteHandler(_BaseRouteHandler):
         agent_registry: AgentRegistry | None,
         *,
         model_selector: Callable[[str], str] | None = None,
+        provider_resolver: Callable[[str], str | None] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(clock=clock)
         self._agent_registry = agent_registry
         self._model_selector = model_selector
+        self._provider_resolver = provider_resolver
 
     def execute(self, request: AtlasRequest, decision: RouteDecision) -> RouteExecutionResult:
         return self.execute_with_context(request, decision, None)
@@ -1102,7 +1104,15 @@ class AgentDelegationRouteHandler(_BaseRouteHandler):
         messages.append({"role": "user", "content": delegation.objective})
         try:
             model = self._model_selector(agent_name) if self._model_selector else ""
-            output = agent.run(model=model, messages=messages)
+            provider_id = (
+                self._provider_resolver(model)
+                if self._provider_resolver is not None and model
+                else None
+            )
+            run_arguments = {"model": model, "messages": messages}
+            if provider_id is not None:
+                run_arguments["provider_id"] = provider_id
+            output = agent.run(**run_arguments)
         except Exception as cause:
             error = OperationalRouteExecutionError(
                 request_id=request.request_id,
@@ -1983,6 +1993,7 @@ def build_default_route_handlers(
     single_tool_runner: SingleToolRunner | None = None,
     agent_registry: AgentRegistry | None = None,
     model_selector: Callable[[str], str] | None = None,
+    provider_resolver: Callable[[str], str | None] | None = None,
     autonomous_orchestrator: AutonomousExecutionOrchestrator | None = None,
     execution_supervisor: object | None = None,
     execution_history: object | None = None,
@@ -2007,6 +2018,7 @@ def build_default_route_handlers(
         RequestRoute.AGENT_DELEGATION: AgentDelegationRouteHandler(
             agent_registry,
             model_selector=model_selector,
+            provider_resolver=provider_resolver,
             clock=clock,
         ),
         RequestRoute.AUTONOMOUS_EXECUTION: AutonomousExecutionRouteHandler(

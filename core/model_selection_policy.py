@@ -16,6 +16,7 @@ class ModelSelectionPolicy:
     prefer_local: bool | None = None
     max_cost: float | None = None
     max_latency: float | None = None
+    required_capabilities: tuple[str, ...] = ()
     allow_fallback: bool = True
 
     def __post_init__(self) -> None:
@@ -47,6 +48,11 @@ class ModelSelectionPolicy:
                 or value < 0
             ):
                 raise ValueError(f"{name} must be finite and non-negative when provided.")
+        object.__setattr__(
+            self,
+            "required_capabilities",
+            _normalized_capabilities(self.required_capabilities),
+        )
 
     def create_request(
         self,
@@ -62,5 +68,21 @@ class ModelSelectionPolicy:
             maximum_relative_latency=self.max_latency,
             preferred_model_id=preferred_model_id,
             preferred_provider_id=self.preferred_provider,
+            required_capabilities=self.required_capabilities,
             allow_fallback=self.allow_fallback,
         )
+
+
+def _normalized_capabilities(values: tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(values, str) or not isinstance(values, tuple):
+        raise TypeError("required_capabilities must be a tuple of strings.")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "required_capabilities entries must be non-empty strings."
+            )
+        item = value.strip()
+        if item not in normalized:
+            normalized.append(item)
+    return tuple(normalized)

@@ -79,7 +79,7 @@ class ChatAgentFake:
     def __init__(self) -> None:
         self.calls = 0
 
-    def run(self, model, messages):
+    def run(self, model, messages, *, provider_id=None):
         self.calls += 1
         return f"fallback:{model}:{messages[-1]['content']}"
 

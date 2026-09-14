@@ -91,6 +91,7 @@ class CorrectionInteractionUseCase:
         project_root: Path,
         choose_model: Callable[[str], str],
         confirm: Callable[[str], str],
+        resolve_provider: Callable[[str], str | None] | None = None,
     ) -> str | None:
         """Handle one correction prompt or return None for unrelated prompts."""
         command, error = self.parse(prompt)
@@ -114,9 +115,14 @@ class CorrectionInteractionUseCase:
             affected_files = self._affected_files(impact.affected_files)
             risk = self._risk_level(affected_files)
             model = choose_model("coding")
-            proposal = self._prompt_client.ask(
-                model=model,
-                messages=self._build_messages(
+            provider_id = (
+                resolve_provider(model)
+                if callable(resolve_provider)
+                else None
+            )
+            ask_arguments = {
+                "model": model,
+                "messages": self._build_messages(
                     user_objective=prompt,
                     path=relative_path,
                     content=content,
@@ -124,7 +130,10 @@ class CorrectionInteractionUseCase:
                     affected_files=affected_files,
                     risk=risk,
                 ),
-            )
+            }
+            if provider_id is not None:
+                ask_arguments["provider_id"] = provider_id
+            proposal = self._prompt_client.ask(**ask_arguments)
             parsed_proposal = self._parse_model_proposal(proposal)
             proposal_response = self._format_proposal_response(
                 path=relative_path,

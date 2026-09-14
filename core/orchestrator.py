@@ -313,6 +313,12 @@ class AtlasOrchestrator:
         """Expose the last gathered finance web evidence for observability."""
         return self._last_finance_evidence
 
+    def _provider_id_for_model(self, model_name: str) -> "str | None":
+        """Resolve the registered provider bound to one physical model name."""
+        resolve_model = getattr(self._model_manager, "resolve_model", None)
+        descriptor = resolve_model(model_name) if callable(resolve_model) else None
+        return descriptor.provider_id if descriptor is not None else None
+
     def _finance_evidence_messages(
         self,
         agent_name: str,
@@ -1568,12 +1574,14 @@ class AtlasOrchestrator:
             except ModelSelectionError as error:
                 if self._model_selection_policy != ModelSelectionPolicy():
                     raise
+                selected_model = self._model_manager.choose_model(
+                    model_task,
+                    selection_result=error.result,
+                )
                 raw_response = specialist_agent.run(
-                    model=self._model_manager.choose_model(
-                        model_task,
-                        selection_result=error.result,
-                    ),
+                    model=selected_model,
                     messages=messages,
+                    provider_id=self._provider_id_for_model(selected_model),
                 )
         response = (
             raw_response
@@ -1950,6 +1958,7 @@ class AtlasOrchestrator:
                 project_root=self._project_root,
                 choose_model=self._model_manager.choose_model,
                 confirm=confirm,
+                resolve_provider=self._provider_id_for_model,
             )
 
             if correction_response is not None:
@@ -2000,17 +2009,21 @@ class AtlasOrchestrator:
             except ModelSelectionError as error:
                 if self._model_selection_policy != ModelSelectionPolicy():
                     raise
+                selected_model = self._model_manager.choose_model(
+                    agent_name,
+                    selection_result=error.result,
+                )
                 response = agent.run(
-                    model=self._model_manager.choose_model(
-                        agent_name,
-                        selection_result=error.result,
-                    ),
+                    model=selected_model,
                     messages=messages,
+                    provider_id=self._provider_id_for_model(selected_model),
                 )
         else:
+            selected_model = self._model_manager.choose_model(agent_name)
             response = agent.run(
-                model=self._model_manager.choose_model(agent_name),
+                model=selected_model,
                 messages=messages,
+                provider_id=self._provider_id_for_model(selected_model),
             )
         self._memory.add_assistant(response)
 

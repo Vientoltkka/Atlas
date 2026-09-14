@@ -139,12 +139,70 @@ class TrainingAgent(BaseAgent):
                     provider_id=primary[1],
                 )
             except (InferenceBackendError, ValueError):
-                pass
+                declared = self._select_declared_fallback(primary)
+                if declared is not None:
+                    try:
+                        return self._client.ask(
+                            model=declared[0],
+                            messages=conversation,
+                            provider_id=declared[1],
+                        )
+                    except (InferenceBackendError, ValueError):
+                        pass
+        else:
+            registry_model = self._select_registry_chat_model()
+            if registry_model is not None:
+                try:
+                    return self._client.ask(
+                        model=registry_model[0],
+                        messages=conversation,
+                        provider_id=registry_model[1],
+                    )
+                except (InferenceBackendError, ValueError):
+                    pass
         return self._client.ask(
             model=self.FALLBACK_MODEL,
             messages=conversation,
             provider_id=self.FALLBACK_PROVIDER_ID,
         )
+
+    def _select_registry_chat_model(self) -> tuple[str, str] | None:
+        """Resolve one dynamic chat model when no primary is configured."""
+        try:
+            selection = self._model_manager.select_model(
+                ModelSelectionRequest(task="chat", allow_fallback=False)
+            )
+        except Exception:
+            return None
+        if not selection.success or not selection.physical_model_name:
+            return None
+        if not selection.provider_id:
+            return None
+        return (selection.physical_model_name, selection.provider_id)
+
+    def _select_declared_fallback(
+        self,
+        primary: tuple[str, str],
+    ) -> tuple[str, str] | None:
+        """Resolve the next declared fallback through the shared ModelManager."""
+        try:
+            selection = self._model_manager.select_fallback(
+                ModelSelectionRequest(
+                    task="chat",
+                    preferred_model_id=self.PRIMARY_LOGICAL_MODEL_ID,
+                    allow_fallback=True,
+                ),
+                initial_model_id=self.PRIMARY_LOGICAL_MODEL_ID,
+                attempted_model_ids=(self.PRIMARY_LOGICAL_MODEL_ID, primary[0]),
+            )
+        except Exception:
+            return None
+        if not selection.success or not selection.physical_model_name:
+            return None
+        provider_id = selection.provider_id
+        if not provider_id:
+            return None
+        return (selection.physical_model_name, provider_id)
 
     def _select_primary_model(self) -> tuple[str, str] | None:
         """Resolve the configured Gemini model through the shared ModelManager."""

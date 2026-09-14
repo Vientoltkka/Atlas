@@ -1493,6 +1493,12 @@ class Bootstrap:
         direct_selection_request = model_selection_policy.create_request(task="chat")
 
         def direct_provider_id(selected_model: str) -> str:
+            # Reachable only from the legacy ModelSelectionError path below:
+            # the V2 runner failed its initial selection (e.g. Ollama down) and
+            # the default policy fell back to choose_model. The model/provider
+            # pair stays consistent because both come from the same
+            # ModelManager.resolve_model descriptor, never from different
+            # selection sources.
             descriptor = model_manager.resolve_model(selected_model)
             if descriptor is None:
                 raise RuntimeError(f"Selected chat model '{selected_model}' is not registered.")
@@ -1506,10 +1512,10 @@ class Bootstrap:
             try:
                 return direct_inference_runner.run(
                     direct_selection_request,
-                    lambda selected_model, _selected_provider_id: chat_agent.run(
+                    lambda selected_model, selected_provider_id: chat_agent.run(
                         model=selected_model,
                         messages=messages,
-                        provider_id=direct_provider_id(selected_model),
+                        provider_id=selected_provider_id,
                     ),
                 )
             except ModelSelectionError as error:
@@ -1536,10 +1542,10 @@ class Bootstrap:
             try:
                 yield from direct_inference_runner.stream(
                     direct_selection_request,
-                    lambda selected_model, _selected_provider_id: stream(
+                    lambda selected_model, selected_provider_id: stream(
                         model=selected_model,
                         messages=messages,
-                        provider_id=direct_provider_id(selected_model),
+                        provider_id=selected_provider_id,
                     ),
                 )
             except ModelSelectionError as error:
@@ -1565,6 +1571,7 @@ class Bootstrap:
                 single_tool_runner=single_tool_runner,
                 agent_registry=registry,
                 model_selector=model_manager.choose_model,
+                provider_resolver=_resolve_provider_for_model(model_manager),
                 autonomous_orchestrator=autonomous_execution,
                 execution_supervisor=execution_supervisor,
                 execution_history=execution_history,
@@ -1666,6 +1673,20 @@ class Bootstrap:
         return orchestrator
 
 
+def _resolve_provider_for_model(model_manager):
+    """Resolve the provider bound to one physical model through ModelManager."""
+
+    resolve_model = getattr(model_manager, "resolve_model", None)
+    if not callable(resolve_model):
+        return lambda model_name: None
+
+    def resolve(model_name: str) -> str | None:
+        descriptor = resolve_model(model_name)
+        return descriptor.provider_id if descriptor is not None else None
+
+    return resolve
+
+
 def _build_async_goal_model_transformer(registry, model_manager):
     """Reuse the existing chat agent and model selection for text transforms."""
 
@@ -1674,9 +1695,13 @@ def _build_async_goal_model_transformer(registry, model_manager):
         if chat_agent is None:
             raise RuntimeError("Agent 'chat' is not registered.")
         model = model_manager.choose_model("chat")
+        descriptor = getattr(model_manager, "resolve_model", None)
+        descriptor = descriptor(model) if callable(descriptor) else None
+        provider_id = descriptor.provider_id if descriptor is not None else None
         return chat_agent.run(
             model=model,
             messages=[{"role": "user", "content": instruction}],
+            provider_id=provider_id,
         )
 
     return transform
