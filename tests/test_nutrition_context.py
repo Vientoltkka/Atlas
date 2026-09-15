@@ -13,7 +13,7 @@ def test_empty_context_is_explicit(tmp_path):
     rendered = provider.render(date(2026, 9, 16))
 
     assert "Fecha objetivo: 2026-09-16" in rendered
-    assert "- sin alimentos registrados" in rendered
+    assert "- sin alimentos disponibles registrados" in rendered
     assert rendered.count("- no registrado") == 2
 
 
