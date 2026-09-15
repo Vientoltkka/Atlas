@@ -838,6 +838,27 @@ class AtlasOrchestrator:
                 self._print_atlas(history_response)
                 continue
 
+            # Specialist agents bypass the legacy execution-conversation gate
+            # while reusing Atlas' existing model health/fallback pipeline.
+            # Without this step a nutrition prompt would fall through to the
+            # execution conversation and end as an unsupported capability.
+            followup_response = self._process_pending_agent_followup(request)
+            if followup_response is not None:
+                self._print_atlas(followup_response)
+                continue
+
+            specialist_decision = self.classify_request(request)
+            if specialist_decision.route is RequestRoute.AGENT_DELEGATION:
+                agent_name = specialist_decision.target_agent_name
+                if agent_name is None:
+                    raise RuntimeError("Specialist route did not select an agent.")
+                specialist_response = self._run_specialist_agent(
+                    agent_name,
+                    request.content,
+                )
+                self._print_atlas(specialist_response.text)
+                continue
+
             if self._desktop_interaction is not None:
                 desktop_response = self._desktop_interaction.execute(
                     request.content,
