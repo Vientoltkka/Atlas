@@ -16,10 +16,10 @@ core/skill_executor.py). A closed allowlist keeps workers on agents whose
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from queue import Empty, Queue
-from threading import Semaphore, Thread
+from threading import Lock, Semaphore, Thread
 import time
 from types import MappingProxyType
 
@@ -27,6 +27,7 @@ from agents.base_agent import AgentResponse
 from agents.registry import AgentRegistry
 from core.model_health import ModelHealthChecker
 from core.model_inference import ModelInferenceRunner
+from core.model_manager import ModelSelectionRequest, ModelSelectionResult
 from core.model_selection_policy import ModelSelectionPolicy
 
 
@@ -56,6 +57,14 @@ DEFAULT_SWARM_AGENT_ALLOWLIST = frozenset(
         "project",
     }
 )
+
+
+@dataclass(slots=True)
+class _WorkerModelAssignments:
+    """Reserve model/provider pairs for one concurrent swarm execution only."""
+
+    assigned_pairs: set[tuple[str, str]] = field(default_factory=set)
+    lock: Lock = field(default_factory=Lock)
 
 
 class SwarmError(RuntimeError):
@@ -365,7 +374,7 @@ class SwarmCoordinator:
         global_timeout = task.timeout_seconds or self._policy.global_timeout_seconds
         deadline = time.monotonic() + min(global_timeout, self._policy.global_timeout_seconds)
 
-        worker_results = self._execute_workers(task, deadline, events)
+        worker_results = self._execute_workers(task, deadline, events, _WorkerModelAssignments())
         succeeded = tuple(result for result in worker_results if result.succeeded)
         failed = tuple(result for result in worker_results if not result.succeeded)
 
@@ -422,6 +431,7 @@ class SwarmCoordinator:
         task: SwarmTask,
         deadline: float,
         events: list[SwarmEvent],
+        assignments: _WorkerModelAssignments,
     ) -> list[SwarmWorkerResult]:
         outcomes: dict[str, Queue[SwarmWorkerResult]] = {}
         threads: list[Thread] = []
@@ -430,7 +440,7 @@ class SwarmCoordinator:
             outcomes[spec.worker_id] = queue
             thread = Thread(
                 target=self._worker_target,
-                args=(task, spec, queue),
+                args=(task, spec, queue, assignments),
                 name=f"atlas-swarm-{task.task_id}-{spec.worker_id}",
                 daemon=True,
             )
@@ -478,11 +488,14 @@ class SwarmCoordinator:
         task: SwarmTask,
         spec: SwarmWorkerSpec,
         queue: Queue[SwarmWorkerResult],
+        assignments: _WorkerModelAssignments,
     ) -> None:
         with self._concurrency:
-            queue.put(self._run_worker(task, spec))
+            queue.put(self._run_worker(task, spec, assignments))
 
-    def _run_worker(self, task: SwarmTask, spec: SwarmWorkerSpec) -> SwarmWorkerResult:
+    def _run_worker(
+        self, task: SwarmTask, spec: SwarmWorkerSpec, assignments: _WorkerModelAssignments
+    ) -> SwarmWorkerResult:
         started = time.monotonic()
         if spec.agent_name not in self._policy.allowed_agent_names:
             return SwarmWorkerResult(
@@ -508,6 +521,10 @@ class SwarmCoordinator:
             {"role": "user", "content": _worker_user_message(task, spec, objective)},
         ]
         runner = ModelInferenceRunner(self._model_manager, health_checker=self._health_checker)
+        request = self._model_selection_policy.create_request(
+            task=spec.model_task, preferred_model_id=spec.preferred_model_id
+        )
+        initial_selection = self._reserve_worker_selection(request, assignments)
         captured: dict[str, str | None] = {"model": None, "provider": None}
 
         def infer(selected_model: str, selected_provider_id: str | None) -> str:
@@ -521,13 +538,7 @@ class SwarmCoordinator:
             return raw.text if isinstance(raw, AgentResponse) else raw
 
         try:
-            text = runner.run(
-                self._model_selection_policy.create_request(
-                    task=spec.model_task,
-                    preferred_model_id=spec.preferred_model_id,
-                ),
-                infer,
-            )
+            text = runner.run(request, infer, initial_selection=initial_selection)
         except Exception as error:  # noqa: BLE001 - one worker failure must not destroy the swarm
             return SwarmWorkerResult(
                 spec.worker_id,
@@ -556,6 +567,53 @@ class SwarmCoordinator:
             ),
             duration_seconds=time.monotonic() - started,
         )
+
+    def _reserve_worker_selection(
+        self,
+        request: ModelSelectionRequest,
+        assignments: _WorkerModelAssignments,
+    ) -> ModelSelectionResult | None:
+        """Prefer one unused compatible, healthy pair without changing fallback rules."""
+        normal = self._model_manager.select_model(request)
+        if not normal.success:
+            return None
+        normal_pair = _selection_pair(normal)
+        alternatives: list[ModelSelectionResult] = []
+        for descriptor in self._model_manager.list_model_descriptors(available_only=True):
+            candidate = self._model_manager.select_model(
+                replace(request, preferred_model_id=descriptor.logical_id, allow_fallback=False)
+            )
+            if (
+                candidate.success
+                and _selection_pair(candidate) != normal_pair
+                and self._selection_is_healthy(candidate)
+            ):
+                alternatives.append(candidate)
+        with assignments.lock:
+            if normal_pair not in assignments.assigned_pairs:
+                assignments.assigned_pairs.add(normal_pair)
+                return normal
+            for candidate in alternatives:
+                candidate_pair = _selection_pair(candidate)
+                if candidate_pair not in assignments.assigned_pairs:
+                    assignments.assigned_pairs.add(candidate_pair)
+                    return candidate
+            return normal
+
+    def _selection_is_healthy(self, selection: ModelSelectionResult) -> bool:
+        """Reuse the configured health checker before reserving an alternative."""
+        if self._health_checker is None:
+            return True
+        logical_id = selection.logical_model_id
+        physical_name = selection.physical_model_name
+        provider_id = selection.provider_id
+        if not logical_id or not physical_name or not provider_id:
+            return False
+        return self._health_checker.check(
+            logical_model_id=logical_id,
+            physical_model_name=physical_name,
+            provider_id=provider_id,
+        ).healthy
 
     # ------------------------------------------------------------------
     # Critic and synthesis
@@ -681,6 +739,13 @@ def _worker_user_message(task: SwarmTask, spec: SwarmWorkerSpec, objective: str)
         rendered = ", ".join(f"{key}={value}" for key, value in sorted(context.items(), key=lambda item: str(item[0])))
         parts.append(f"Contexto: {rendered}")
     return "\n".join(parts)
+
+
+def _selection_pair(selection: ModelSelectionResult) -> tuple[str, str]:
+    """Return the logical/provider reservation key for a successful selection."""
+    if not selection.logical_model_id or not selection.provider_id:
+        raise SwarmError("successful model selection must include model and provider ids.")
+    return selection.logical_model_id, selection.provider_id
 
 
 def _event(

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from agents.base_agent import AgentResponse, BaseAgent
 from agents.registry import AgentRegistry
+from core.model_health import ModelHealthResult
 from core.model_manager import ModelDescriptor, ModelManager
 from core.model_selection_policy import ModelSelectionPolicy
 from core.orchestrator import AtlasOrchestrator
@@ -26,6 +27,8 @@ from core.swarm_coordinator import (
     default_swarm_synthesizer,
 )
 from memory.conversation import ConversationMemory
+from models.chat_inference import ChatInferenceError
+from models.prompt_client import InferenceBackendError
 
 
 class StaticModelSource:
@@ -65,6 +68,22 @@ class RecordingAgent(BaseAgent):
         return self.answer
 
 
+class RecordingHealthChecker:
+    def __init__(self, unhealthy: set[str] | None = None) -> None:
+        self._unhealthy = unhealthy or set()
+        self.checked: list[str] = []
+
+    def check(self, *, logical_model_id: str, physical_model_name: str, provider_id: str) -> ModelHealthResult:
+        self.checked.append(logical_model_id)
+        return ModelHealthResult(
+            logical_model_id=logical_model_id,
+            physical_model_name=physical_model_name,
+            provider_id=provider_id,
+            healthy=logical_model_id not in self._unhealthy,
+            reason="unhealthy" if logical_model_id in self._unhealthy else None,
+        )
+
+
 def _descriptor(logical_id: str, model_name: str, provider_id: str, *, fallbacks: tuple[str, ...] = ()) -> ModelDescriptor:
     return ModelDescriptor(
         logical_id=logical_id,
@@ -92,6 +111,7 @@ def _coordinator(
     critic=None,
     synthesizer=None,
     policy: SwarmPolicy | None = None,
+    health_checker=None,
 ) -> SwarmCoordinator:
     registry = AgentRegistry()
     for agent in agents:
@@ -107,6 +127,7 @@ def _coordinator(
         registry,
         manager if manager is not None else _manager(),
         model_selection_policy=ModelSelectionPolicy(),
+        health_checker=health_checker,
         critic=critic,
         synthesizer=synthesizer,
         policy=policy,
@@ -442,3 +463,115 @@ def test_worker_effective_timeout_falls_back_to_policy_default() -> None:
     worker = result.worker_results[0]
     assert worker.status is SwarmWorkerStatus.TIMEOUT
     assert result.status is SwarmStatus.FAILED
+
+
+def test_workers_prefer_distinct_healthy_compatible_model_provider_pairs() -> None:
+    manager = ModelManager(
+        StaticModelSource(["first:latest", "second:latest"]),
+        (
+            _descriptor("first", "first:latest", "provider-a"),
+            _descriptor("second", "second:latest", "provider-b"),
+        ),
+    )
+    coordinator = _coordinator(
+        (RecordingAgent("chat_a", "a"), RecordingAgent("chat_b", "b")),
+        manager=manager,
+        health_checker=RecordingHealthChecker(),
+    )
+
+    result = coordinator.execute(
+        _task((_spec("w1", "chat_a"), _spec("w2", "chat_b")), timeout_seconds=15)
+    )
+
+    assert result.status is SwarmStatus.SUCCESS
+    assert {(item.logical_model_id, item.provider_id) for item in result.worker_results} == {
+        ("first", "provider-a"),
+        ("second", "provider-b"),
+    }
+
+
+def test_workers_share_the_normal_selection_when_no_alternative_is_valid() -> None:
+    manager = ModelManager(
+        StaticModelSource(["only:latest"]),
+        (_descriptor("only", "only:latest", "provider-a"),),
+    )
+    coordinator = _coordinator(
+        (RecordingAgent("chat_a", "a"), RecordingAgent("chat_b", "b")),
+        manager=manager,
+        health_checker=RecordingHealthChecker(),
+    )
+
+    result = coordinator.execute(
+        _task((_spec("w1", "chat_a"), _spec("w2", "chat_b")), timeout_seconds=15)
+    )
+
+    assert {(item.logical_model_id, item.provider_id) for item in result.worker_results} == {
+        ("only", "provider-a")
+    }
+
+
+def test_unhealthy_or_incompatible_alternatives_are_not_reserved() -> None:
+    manager = ModelManager(
+        StaticModelSource(["healthy:latest", "unhealthy:latest", "coding:latest"]),
+        (
+            _descriptor("healthy", "healthy:latest", "provider-a"),
+            _descriptor("unhealthy", "unhealthy:latest", "provider-b"),
+            ModelDescriptor(
+                logical_id="coding-only",
+                provider_id="provider-c",
+                model_name="coding:latest",
+                capabilities=("coding",),
+            ),
+        ),
+    )
+    health = RecordingHealthChecker({"unhealthy"})
+    coordinator = _coordinator(
+        (RecordingAgent("chat_a", "a"), RecordingAgent("chat_b", "b")),
+        manager=manager,
+        health_checker=health,
+    )
+
+    result = coordinator.execute(
+        _task((_spec("w1", "chat_a"), _spec("w2", "chat_b")), timeout_seconds=15)
+    )
+
+    assert {(item.logical_model_id, item.provider_id) for item in result.worker_results} == {
+        ("healthy", "provider-a")
+    }
+    assert "unhealthy" in health.checked
+    assert "coding-only" not in health.checked
+
+
+def test_explicit_diverse_initial_selection_keeps_cross_provider_fallback() -> None:
+    manager = ModelManager(
+        StaticModelSource(["local:latest"]),
+        (
+            ModelDescriptor(
+                logical_id="remote",
+                provider_id="gemini",
+                model_name="remote:latest",
+                capabilities=("chat",),
+                local=False,
+                priority=10,
+                fallback_logical_ids=("local",),
+            ),
+            _descriptor("local", "local:latest", "ollama"),
+        ),
+    )
+
+    class FallbackAgent(RecordingAgent):
+        def run(self, model: str, messages: list[dict[str, str]], *, provider_id: str | None = None) -> str:
+            self.calls.append((model, provider_id))
+            if provider_id == "gemini":
+                error = ChatInferenceError("gemini", model, "quota exhausted")
+                raise InferenceBackendError(model, error.reason) from error
+            return self.answer
+
+    agent = FallbackAgent("chat", "fallback ok")
+    result = _coordinator((agent,), manager=manager).execute(
+        _task((_spec("w1", "chat"),), timeout_seconds=15)
+    )
+
+    assert result.worker_results[0].status is SwarmWorkerStatus.SUCCEEDED
+    assert agent.calls == [("remote:latest", "gemini"), ("local:latest", "ollama")]
+    assert result.worker_results[0].provider_id == "ollama"
