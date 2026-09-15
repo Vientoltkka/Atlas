@@ -209,7 +209,9 @@ def test_worker_timeout_does_not_block_the_swarm() -> None:
         ),
     )
     started = time.monotonic()
-    result = coordinator.execute(_task((_spec("w_slow", "slow_chat"), _spec("w_fast", "fast_chat")), timeout_seconds=15))
+    # El timeout de la tarea (3s) es el presupuesto efectivo del worker: por
+    # debajo del delay del agente lento (5s), fuerza su TIMEOUT sin colgar el swarm.
+    result = coordinator.execute(_task((_spec("w_fast", "fast_chat"), _spec("w_slow", "slow_chat")), timeout_seconds=3))
     elapsed = time.monotonic() - started
 
     statuses = {worker.worker_id: worker.status for worker in result.worker_results}
@@ -407,3 +409,36 @@ def test_worker_runs_are_parallel_and_bounded() -> None:
 
     assert result.status is SwarmStatus.SUCCESS
     assert elapsed < 0.9
+
+
+# 11. Regresión E2E (smoke-1): el timeout efectivo del worker hereda el timeout
+# explícito de la tarea; el default de política no lo trunca.
+def test_worker_effective_timeout_inherits_task_timeout() -> None:
+    agent = RecordingAgent("chat", "ok dentro del presupuesto de la tarea", delay=2.0)
+    coordinator = _coordinator(
+        (agent,),
+        policy=SwarmPolicy(worker_timeout_seconds=1, global_timeout_seconds=30),
+    )
+    started = time.monotonic()
+    result = coordinator.execute(_task((_spec("w1", "chat"),), timeout_seconds=5))
+    elapsed = time.monotonic() - started
+
+    worker = result.worker_results[0]
+    assert worker.status is SwarmWorkerStatus.SUCCEEDED
+    assert worker.duration_seconds >= 2.0
+    assert result.status is SwarmStatus.SUCCESS
+    assert elapsed < 5.0
+
+
+# 12. Sin timeout de tarea explícito, el default de política sigue mandando.
+def test_worker_effective_timeout_falls_back_to_policy_default() -> None:
+    agent = RecordingAgent("chat", "nunca a tiempo", delay=3.0)
+    coordinator = _coordinator(
+        (agent,),
+        policy=SwarmPolicy(worker_timeout_seconds=1, global_timeout_seconds=30),
+    )
+    result = coordinator.execute(_task((_spec("w1", "chat"),)))
+
+    worker = result.worker_results[0]
+    assert worker.status is SwarmWorkerStatus.TIMEOUT
+    assert result.status is SwarmStatus.FAILED

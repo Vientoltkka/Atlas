@@ -440,30 +440,38 @@ class SwarmCoordinator:
 
         results: list[SwarmWorkerResult] = []
         for spec in task.worker_specs:
-            worker_timeout = spec.timeout_seconds or self._policy.worker_timeout_seconds
+            worker_timeout = (
+                spec.timeout_seconds
+                or task.timeout_seconds
+                or self._policy.worker_timeout_seconds
+            )
             effective_timeout = min(worker_timeout, deadline - time.monotonic())
             if effective_timeout <= 0:
-                results.append(
-                    SwarmWorkerResult(
-                        spec.worker_id,
-                        spec.agent_name,
-                        SwarmWorkerStatus.TIMEOUT,
-                        error="swarm global deadline expired before the worker finished.",
-                    )
-                )
+                results.append(self._collect_expired(spec, outcomes[spec.worker_id]))
                 continue
             try:
                 results.append(outcomes[spec.worker_id].get(timeout=effective_timeout))
             except Empty:
-                results.append(
-                    SwarmWorkerResult(
-                        spec.worker_id,
-                        spec.agent_name,
-                        SwarmWorkerStatus.TIMEOUT,
-                        error="worker exceeded its effective timeout.",
-                    )
-                )
+                # El hilo pudo terminar durante la recolección anterior: drena
+                # cualquier resultado ya disponible antes de declarar TIMEOUT.
+                results.append(self._collect_expired(spec, outcomes[spec.worker_id]))
         return results
+
+    @staticmethod
+    def _collect_expired(
+        spec: SwarmWorkerSpec,
+        queue: Queue[SwarmWorkerResult],
+    ) -> SwarmWorkerResult:
+        """Drain one already-finished worker result, else mark it TIMEOUT."""
+        try:
+            return queue.get_nowait()
+        except Empty:
+            return SwarmWorkerResult(
+                spec.worker_id,
+                spec.agent_name,
+                SwarmWorkerStatus.TIMEOUT,
+                error="worker exceeded its effective timeout.",
+            )
 
     def _worker_target(
         self,
