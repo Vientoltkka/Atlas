@@ -25,9 +25,7 @@ class NutritionConsumptionCommandHandler:
     def handle(self, text: str, *, today: date) -> NutritionConsumptionCommandResult:
         raw = " ".join(str(text).strip().split())
         folded = _fold(raw)
-        match = re.fullmatch(
-            r"(?:he (?:desayunado|comido|cenado)|he tomado) (.+)", folded,
-        )
+        match = re.fullmatch(r"(?:he (?:desayunado|comido|cenado)|he tomado) (.+)", folded)
         if match is None:
             return NutritionConsumptionCommandResult(False)
 
@@ -35,30 +33,55 @@ class NutritionConsumptionCommandHandler:
         if not foods:
             return NutritionConsumptionCommandResult(False)
 
-        # Validate the whole command before mutating anything.
+        # Resolve and validate the whole command before mutating anything.
         resolved = []
-        for quantity, unit, folded_name in foods:
+        for quantity, requested_unit, folded_name in foods:
             food_id = _slug(folded_name)
             item = self._store.get_food(food_id)
-            if item is None or item.unit != unit or item.quantity < quantity:
+            if item is None:
                 return NutritionConsumptionCommandResult(
-                    True,
-                    f"No puedo descontar {quantity:g} {unit} de {folded_name}: inventario insuficiente o unidad distinta.",
+                    True, f"No puedo descontar {quantity:g} {requested_unit} de {folded_name}: alimento no registrado.",
                 )
-            resolved.append((item, quantity))
+            inventory_quantity = _convert(quantity, requested_unit, item.unit)
+            if inventory_quantity is None:
+                return NutritionConsumptionCommandResult(
+                    True, f"No puedo descontar {quantity:g} {requested_unit} de {item.name}: unidad incompatible con {item.unit}.",
+                )
+            if item.quantity < inventory_quantity:
+                return NutritionConsumptionCommandResult(
+                    True, f"No puedo descontar {quantity:g} {requested_unit} de {item.name}: inventario insuficiente.",
+                )
+            resolved.append((item, quantity, requested_unit, inventory_quantity))
 
-        for item, quantity in resolved:
-            self._store.adjust_food(item.food_id, -quantity)
+        for item, _quantity, _requested_unit, inventory_quantity in resolved:
+            self._store.adjust_food(item.food_id, -inventory_quantity)
 
         state = self._store.get_day(today)
         meal = DailyMealRecord(
             meal_id=f"consumed-{len(state.consumed_meals) + 1}",
             label=_meal_label(folded),
-            foods=tuple(f"{quantity:g} {item.unit} {item.name}" for item, quantity in resolved),
+            foods=tuple(
+                f"{quantity:g} {requested_unit} {item.name}"
+                for item, quantity, requested_unit, _inventory_quantity in resolved
+            ),
         )
         self._store.set_consumed_meals(today, (*state.consumed_meals, meal))
         detail = ", ".join(meal.foods)
         return NutritionConsumptionCommandResult(True, f"Consumo registrado: {detail}. Inventario actualizado.")
+
+
+def _convert(quantity: float, source_unit: str, target_unit: str) -> float | None:
+    """Convert only exact metric mass/volume pairs; units remain discrete."""
+    if source_unit == target_unit:
+        return quantity
+    factors = {
+        ("g", "kg"): 0.001,
+        ("kg", "g"): 1000.0,
+        ("ml", "l"): 0.001,
+        ("l", "ml"): 1000.0,
+    }
+    factor = factors.get((source_unit, target_unit))
+    return None if factor is None else quantity * factor
 
 
 def _parse_foods(value: str) -> tuple[tuple[float, str, str], ...]:
