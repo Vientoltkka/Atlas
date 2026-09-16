@@ -88,7 +88,10 @@ def _parse_foods(value: str) -> tuple[tuple[float, str, str], ...]:
     parts = re.split(r"\s+y\s+|\s*,\s*", value)
     parsed = []
     for part in parts:
-        match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|unidades?|uds?)\s+(?:de\s+)?(.+)", part.strip())
+        match = re.fullmatch(
+            r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|unidad(?:es)?|ud|uds)\s+(?:de\s+)?(.+)",
+            part.strip(),
+        )
         if match is None:
             return ()
         parsed.append((float(match.group(1).replace(",", ".")), _unit(match.group(2)), match.group(3).strip()))
