@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from core.daily_nutrition_state import DailyNutritionStore
+from core.daily_nutrition_state import DailyMealRecord, DailyNutritionStore
 from core.nutrition_context import NutritionContextProvider
 
 
@@ -15,6 +15,8 @@ def test_empty_context_is_explicit(tmp_path):
     assert "Fecha objetivo: 2026-09-16" in rendered
     assert "- sin alimentos disponibles registrados" in rendered
     assert rendered.count("- no registrado") == 2
+    assert "Comidas ya consumidas:" in rendered
+    assert "- ninguna registrada" in rendered
 
 
 def test_context_contains_only_available_inventory(tmp_path):
@@ -57,6 +59,35 @@ def test_context_contains_work_training_and_notes_for_requested_day(tmp_path):
     assert "- 18:00-19:00" in rendered
     assert "- Priorizar inventario disponible" in rendered
     assert "10:00-18:00" not in rendered
+
+
+def test_context_contains_consumed_meals_for_requested_day(tmp_path):
+    store = DailyNutritionStore(tmp_path / "nutrition-state.json")
+    requested_day = date(2026, 9, 16)
+    other_day = date(2026, 9, 17)
+    store.set_consumed_meals(requested_day, (
+        DailyMealRecord(
+            meal_id="consumed-1",
+            label="desayuno",
+            scheduled_time=None,
+            foods=("3 unit huevos", "150 g arroz"),
+        ),
+    ))
+    store.set_consumed_meals(other_day, (
+        DailyMealRecord(
+            meal_id="consumed-2",
+            label="cena",
+            scheduled_time=None,
+            foods=("200 g pollo",),
+        ),
+    ))
+    provider = NutritionContextProvider(store)
+
+    rendered = provider.render(requested_day)
+
+    assert "Comidas ya consumidas:" in rendered
+    assert "- desayuno: 3 unit huevos; 150 g arroz" in rendered
+    assert "200 g pollo" not in rendered
 
 
 def test_render_does_not_mutate_store_or_persist_empty_day(tmp_path):
