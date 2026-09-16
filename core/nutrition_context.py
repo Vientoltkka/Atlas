@@ -35,6 +35,15 @@ class NutritionContextProvider:
         else:
             lines.append("- no registrado")
 
+        lines.append("Comidas ya consumidas:")
+        if state.consumed_meals:
+            for meal in state.consumed_meals:
+                foods = "; ".join(meal.foods) if meal.foods else "sin alimentos detallados"
+                when = f" ({meal.scheduled_time})" if meal.scheduled_time else ""
+                lines.append(f"- {meal.label}{when}: {foods}")
+        else:
+            lines.append("- ninguna registrada")
+
         if state.notes:
             lines.append("Notas operativas:")
             lines.extend(f"- {note}" for note in state.notes)
