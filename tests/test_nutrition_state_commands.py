@@ -92,3 +92,37 @@ def test_ambiguous_or_unrelated_text_does_not_mutate_state(tmp_path):
     assert not result.handled
     assert store.list_inventory() == ()
     assert store.get_day(date(2026, 9, 17)).training_schedule == ()
+
+
+def test_multiple_newline_commands_are_applied_as_one_message(tmp_path):
+    store, handler = _handler(tmp_path)
+
+    result = handler.handle(
+        "Tengo 2 kg de arroz\n"
+        "Tengo 12 unidades de huevos\n"
+        "Mañana trabajo de 7 a 15\n"
+        "Hoy entreno de 18 a 19",
+        today=TODAY,
+    )
+
+    assert result.handled
+    assert store.get_food("arroz").quantity == 2
+    assert store.get_food("huevos").quantity == 12
+    assert store.get_day(date(2026, 9, 17)).work_schedule == (("07:00", "15:00"),)
+    assert store.get_day(TODAY).training_schedule == (("18:00", "19:00"),)
+    assert result.message.count("\n") == 3
+
+
+def test_multiple_inline_commands_are_applied_when_each_is_explicit(tmp_path):
+    store, handler = _handler(tmp_path)
+
+    result = handler.handle(
+        "Tengo 2 kg de arroz, tengo 12 unidades de huevos, mañana trabajo de 7 a 15 y hoy entreno de 18 a 19",
+        today=TODAY,
+    )
+
+    assert result.handled
+    assert store.get_food("arroz").quantity == 2
+    assert store.get_food("huevos").quantity == 12
+    assert store.get_day(date(2026, 9, 17)).work_schedule == (("07:00", "15:00"),)
+    assert store.get_day(TODAY).training_schedule == (("18:00", "19:00"),)
