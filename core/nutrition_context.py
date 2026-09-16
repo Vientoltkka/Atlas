@@ -20,8 +20,9 @@ class NutritionContextProvider:
         lines = [
             f"Fecha objetivo: {day.isoformat()}",
             "Reglas del contexto operativo:",
-            "- El inventario listado es exhaustivo para peticiones basadas en alimentos disponibles/en casa; no uses ni supongas alimentos no registrados.",
-            "- Si el inventario no permite cumplir el objetivo nutricional, indícalo y señala qué falta, sin fingir que está disponible.",
+            "- El inventario listado es exhaustivo para peticiones basadas en alimentos disponibles/en casa; no uses, recomiendes ni supongas alimentos no registrados como disponibles.",
+            "- Si el inventario no permite cumplir el objetivo nutricional, indícalo y señala qué falta por categoría o nutriente, sin fingir que alimentos concretos no registrados están disponibles.",
+            "- Las comidas listadas como ya consumidas son hechos autoritativos del día: no las vuelvas a planificar ni afirmes que no se han consumido.",
             "- No infieras si una cantidad consumida estaba cruda o cocida cuando el registro no lo especifica; si afecta al cálculo preciso, pide aclaración o marca la estimación como imprecisa.",
             "Inventario disponible:",
         ]
