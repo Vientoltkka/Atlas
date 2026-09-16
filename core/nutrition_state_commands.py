@@ -23,28 +23,29 @@ class NutritionStateCommandHandler:
         self._store = store
 
     def handle(self, text: str, *, today: date) -> NutritionStateCommandResult:
-        raw = " ".join(str(text).strip().split())
-        if not raw:
+        original = str(text).strip()
+        if not original:
             return NutritionStateCommandResult(False)
 
-        single = self._handle_single(raw, today=today)
-        if single.handled:
-            return single
+        # Preserve explicit separators until after command splitting. Collapsing
+        # whitespace here would erase newlines and let one inventory regex
+        # consume the rest of a multi-command message as part of the food name.
+        parts = _split_explicit_commands(original)
+        if len(parts) > 1:
+            results: list[NutritionStateCommandResult] = []
+            for part in parts:
+                raw = " ".join(part.split())
+                result = self._handle_single(raw, today=today)
+                if not result.handled:
+                    return NutritionStateCommandResult(False)
+                results.append(result)
+            return NutritionStateCommandResult(
+                True,
+                "\n".join(result.message for result in results if result.message),
+            )
 
-        parts = _split_explicit_commands(raw)
-        if len(parts) <= 1:
-            return NutritionStateCommandResult(False)
-
-        results: list[NutritionStateCommandResult] = []
-        for part in parts:
-            result = self._handle_single(part, today=today)
-            if not result.handled:
-                return NutritionStateCommandResult(False)
-            results.append(result)
-        return NutritionStateCommandResult(
-            True,
-            "\n".join(result.message for result in results if result.message),
-        )
+        raw = " ".join(original.split())
+        return self._handle_single(raw, today=today)
 
     def _handle_single(self, raw: str, *, today: date) -> NutritionStateCommandResult:
         normalized = _fold(raw)
