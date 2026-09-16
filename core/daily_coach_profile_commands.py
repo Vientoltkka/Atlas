@@ -61,7 +61,11 @@ def _fold(text: str) -> str:
 
 
 def _looks_like_profile_registration(text: str) -> bool:
-    return any(marker in text for marker in ("mi perfil", "perfil:", "perfil daily coach"))
+    """Recognize explicit user declarations, never Atlas confirmation text."""
+    stripped = text.strip()
+    return bool(re.match(r"^(?:mi\s+)?perfil\s*:", stripped)) and not stripped.startswith(
+        "perfil daily coach guardado:"
+    )
 
 
 def _sex(text: str) -> str | None:
