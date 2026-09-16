@@ -6,6 +6,7 @@ import unicodedata
 
 from bootstrap.bootstrap import Bootstrap
 from core.daily_coach_profile import DailyCoachProfileStore, render_daily_coach_profile
+from core.daily_coach_profile_commands import DailyCoachProfileCommandHandler
 from core.daily_nutrition_state import DailyNutritionStore
 from core.nutrition_context import NutritionContextProvider
 from core.nutrition_state_commands import NutritionStateCommandHandler
@@ -15,29 +16,27 @@ class Atlas:
     """Main Atlas application."""
 
     def __init__(self) -> None:
-        """Initialize Atlas."""
-
         self._orchestrator = Bootstrap.build()
         data_dir = Path(__file__).resolve().parents[1] / "data"
         self._nutrition_state_store = DailyNutritionStore(data_dir / "nutrition_state.json")
         self._nutrition_state_commands = NutritionStateCommandHandler(self._nutrition_state_store)
         self._nutrition_context = NutritionContextProvider(self._nutrition_state_store)
         self._daily_coach_profile_store = DailyCoachProfileStore(data_dir / "daily_coach_profile.json")
+        self._daily_coach_profile_commands = DailyCoachProfileCommandHandler(self._daily_coach_profile_store)
 
     def start(self) -> None:
-        """Start Atlas."""
-
         self._orchestrator.start()
 
     def start_voice(self, state_listener=None, status_sink=None, typed_input=None) -> None:
-        """Start Atlas in manual voice mode."""
         self._orchestrator.start_voice(
             state_listener=state_listener, status_sink=status_sink, typed_input=typed_input,
         )
 
     def process_prompt(self, prompt: str) -> str:
-        """Process one textual Orbe request without blocking the UI thread."""
         today = datetime.now().astimezone().date()
+        profile_command = self._daily_coach_profile_commands.handle(prompt)
+        if profile_command.handled:
+            return profile_command.message
         command = self._nutrition_state_commands.handle(prompt, today=today)
         if command.handled:
             return command.message
@@ -80,7 +79,6 @@ def _mentions_tomorrow(prompt: str) -> bool:
 
 
 def _requests_daily_nutrition_context(prompt: str) -> bool:
-    """Keep operational context bounded to explicit nutrition/meal requests."""
     folded = _fold(prompt)
     markers = (
         "alimentacion", "nutricion", "dieta", "comida", "comer", "desayuno",
