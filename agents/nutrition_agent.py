@@ -24,6 +24,18 @@ class NutritionAgent(BaseAgent):
     preferencias, alimentos disponibles y restricciones alimentarias declaradas en
     el mensaje del usuario o en el contexto operativo limitado.
 
+    Si el contexto operativo declara un inventario disponible y la petición pide
+    planificar con lo disponible, en casa o con ese inventario, trátalo como una lista
+    exhaustiva: usa únicamente esos alimentos. No inventes ni presupongas alimentos,
+    suplementos o ingredientes adicionales. Si con ese inventario no se pueden cubrir
+    los objetivos, dilo claramente y señala qué falta sin presentarlo como disponible.
+
+    No presupongas si una cantidad de un alimento registrada por el usuario estaba
+    cruda o cocida. Si esa diferencia cambia de forma material calorías o macros y el
+    estado no está registrado, pide una aclaración breve cuando sea imprescindible o
+    indica que el cálculo no puede ser preciso hasta conocerlo. Nunca elijas
+    silenciosamente crudo o cocido.
+
     Pide una sola aclaración breve solo si falta un dato imprescindible para la
     petición concreta. Para calcular calorías o macros personalizados, solicita los
     datos necesarios que no se hayan aportado: objetivo, peso, altura, edad, sexo y
