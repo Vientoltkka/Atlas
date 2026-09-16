@@ -8,6 +8,7 @@ from bootstrap.bootstrap import Bootstrap
 from core.daily_coach_profile import DailyCoachProfileStore, render_daily_coach_profile
 from core.daily_coach_profile_commands import DailyCoachProfileCommandHandler
 from core.daily_nutrition_state import DailyNutritionStore
+from core.nutrition_consumption_commands import NutritionConsumptionCommandHandler
 from core.nutrition_context import NutritionContextProvider
 from core.nutrition_state_commands import NutritionStateCommandHandler
 
@@ -20,6 +21,7 @@ class Atlas:
         data_dir = Path(__file__).resolve().parents[1] / "data"
         self._nutrition_state_store = DailyNutritionStore(data_dir / "nutrition_state.json")
         self._nutrition_state_commands = NutritionStateCommandHandler(self._nutrition_state_store)
+        self._nutrition_consumption_commands = NutritionConsumptionCommandHandler(self._nutrition_state_store)
         self._nutrition_context = NutritionContextProvider(self._nutrition_state_store)
         self._daily_coach_profile_store = DailyCoachProfileStore(data_dir / "daily_coach_profile.json")
         self._daily_coach_profile_commands = DailyCoachProfileCommandHandler(self._daily_coach_profile_store)
@@ -37,6 +39,9 @@ class Atlas:
         profile_command = self._daily_coach_profile_commands.handle(prompt)
         if profile_command.handled:
             return profile_command.message
+        consumption_command = self._nutrition_consumption_commands.handle(prompt, today=today)
+        if consumption_command.handled:
+            return consumption_command.message
         command = self._nutrition_state_commands.handle(prompt, today=today)
         if command.handled:
             return command.message
