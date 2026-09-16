@@ -30,8 +30,24 @@ Atlas Core
 Versión inicial:
 Atlas v1.0
 
-## Voz V1
+## Arranque manual en Windows
 
-Comando oficial: `python -B main.py --voice`.
+Desde `C:\AI\Atlas`, usa siempre el Python del entorno virtual del proyecto. Esto evita ejecutar Atlas accidentalmente con otro Python instalado en Windows y perder dependencias del proyecto.
+
+Chat / interfaz:
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --chat
+```
+
+Voz:
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --voice
+```
+
+No uses `python main.py ...` como comando operativo salvo que el entorno virtual ya esté activado y hayas comprobado que `python` apunta a `C:\AI\Atlas\.venv\Scripts\python.exe`.
+
+## Voz V1
 
 Consulta [operación, configuración, métricas, límites conocidos y objetivo Voz V2](docs/voice_v2.md).
