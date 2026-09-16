@@ -27,15 +27,11 @@ class NutritionStateCommandHandler:
         if not original:
             return NutritionStateCommandResult(False)
 
-        # Preserve explicit separators until after command splitting. Collapsing
-        # whitespace here would erase newlines and let one inventory regex
-        # consume the rest of a multi-command message as part of the food name.
         parts = _split_explicit_commands(original)
         if len(parts) > 1:
             results: list[NutritionStateCommandResult] = []
             for part in parts:
-                raw = " ".join(part.split())
-                result = self._handle_single(raw, today=today)
+                result = self._handle_single(part, today=today)
                 if not result.handled:
                     return NutritionStateCommandResult(False)
                 results.append(result)
@@ -44,15 +40,15 @@ class NutritionStateCommandHandler:
                 "\n".join(result.message for result in results if result.message),
             )
 
-        raw = " ".join(original.split())
-        return self._handle_single(raw, today=today)
+        return self._handle_single(original, today=today)
 
     def _handle_single(self, raw: str, *, today: date) -> NutritionStateCommandResult:
-        normalized = _fold(raw)
-        result = self._handle_exhausted(raw, normalized)
+        normalized_raw = " ".join(raw.strip().split())
+        normalized = _fold(normalized_raw)
+        result = self._handle_exhausted(normalized_raw, normalized)
         if result.handled:
             return result
-        result = self._handle_inventory(raw, normalized)
+        result = self._handle_inventory(normalized_raw, normalized)
         if result.handled:
             return result
         return self._handle_schedule(normalized, today=today)
@@ -61,7 +57,7 @@ class NutritionStateCommandHandler:
         match = re.fullmatch(r"(?:se (?:acabo|termino)|no (?:me )?queda) (?:el |la |los |las )?(.+)", normalized)
         if match is None:
             return NutritionStateCommandResult(False)
-        food_name = _extract_original_tail(raw, match.group(1))
+        food_name = _original_group(raw, normalized, match.group(1))
         food_id = _slug(food_name)
         if self._store.get_food(food_id) is None:
             return NutritionStateCommandResult(False)
@@ -77,8 +73,7 @@ class NutritionStateCommandHandler:
             return NutritionStateCommandResult(False)
         quantity = float(match.group(1).replace(",", "."))
         unit = _unit(match.group(2))
-        folded_name = match.group(3).strip()
-        food_name = _extract_original_tail(raw, folded_name)
+        food_name = _original_group(raw, normalized, match.group(3))
         item = self._store.set_food(_slug(food_name), food_name, quantity, unit)
         return NutritionStateCommandResult(True, f"Inventario actualizado: {item.name} = {item.quantity:g} {item.unit}.")
 
@@ -106,17 +101,29 @@ class NutritionStateCommandHandler:
 
 def _split_explicit_commands(raw: str) -> tuple[str, ...]:
     """Split only where the next text clearly starts a supported command."""
+    folded = _fold(raw)
     command_start = (
         r"(?:tengo|me quedan|he comprado|compre|se (?:acabo|termino)|"
         r"no (?:me )?queda|(?:hoy|manana) (?:trabajo|entreno|entrenamiento)|"
         r"trabajo|entreno|entrenamiento)\b"
     )
-    parts = re.split(
-        rf"(?:\s*[\n;]+\s*|\s*,\s*|\s+y\s+)(?={command_start})",
-        raw,
-        flags=re.IGNORECASE,
+    separators = list(
+        re.finditer(
+            rf"(?:\s*[\n;]+\s*|\s*,\s*|\s+y\s+)(?={command_start})",
+            folded,
+            flags=re.IGNORECASE,
+        )
     )
-    return tuple(part.strip(" .") for part in parts if part.strip(" ."))
+    if not separators:
+        return (raw.strip(" ."),)
+
+    parts: list[str] = []
+    start = 0
+    for separator in separators:
+        parts.append(raw[start:separator.start()].strip(" ."))
+        start = separator.end()
+    parts.append(raw[start:].strip(" ."))
+    return tuple(part for part in parts if part)
 
 
 def _fold(value: str) -> str:
@@ -143,10 +150,16 @@ def _clock(value: str) -> str:
     return f"{int(hour):02d}:{int(minute):02d}"
 
 
-def _extract_original_tail(raw: str, folded_tail: str) -> str:
-    words = folded_tail.split()
-    if not words:
-        return folded_tail
-    count = len(words)
-    original_words = raw.split()
-    return " ".join(original_words[-count:]).strip(" .")
+def _original_group(raw: str, folded_raw: str, folded_group: str) -> str:
+    """Recover the matched group from this already isolated command only."""
+    group_start = folded_raw.rfind(folded_group)
+    if group_start < 0:
+        return folded_group.strip()
+    prefix = folded_raw[:group_start]
+    raw_words = raw.split()
+    prefix_words = prefix.split()
+    group_words = folded_group.split()
+    start = len(prefix_words)
+    end = start + len(group_words)
+    candidate = " ".join(raw_words[start:end]).strip(" .")
+    return candidate or folded_group.strip()
