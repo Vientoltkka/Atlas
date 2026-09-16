@@ -24,20 +24,37 @@ class NutritionStateCommandHandler:
 
     def handle(self, text: str, *, today: date) -> NutritionStateCommandResult:
         raw = " ".join(str(text).strip().split())
-        normalized = _fold(raw)
-        if not normalized:
+        if not raw:
             return NutritionStateCommandResult(False)
 
+        single = self._handle_single(raw, today=today)
+        if single.handled:
+            return single
+
+        parts = _split_explicit_commands(raw)
+        if len(parts) <= 1:
+            return NutritionStateCommandResult(False)
+
+        results: list[NutritionStateCommandResult] = []
+        for part in parts:
+            result = self._handle_single(part, today=today)
+            if not result.handled:
+                return NutritionStateCommandResult(False)
+            results.append(result)
+        return NutritionStateCommandResult(
+            True,
+            "\n".join(result.message for result in results if result.message),
+        )
+
+    def _handle_single(self, raw: str, *, today: date) -> NutritionStateCommandResult:
+        normalized = _fold(raw)
         result = self._handle_exhausted(raw, normalized)
         if result.handled:
             return result
         result = self._handle_inventory(raw, normalized)
         if result.handled:
             return result
-        result = self._handle_schedule(normalized, today=today)
-        if result.handled:
-            return result
-        return NutritionStateCommandResult(False)
+        return self._handle_schedule(normalized, today=today)
 
     def _handle_exhausted(self, raw: str, normalized: str) -> NutritionStateCommandResult:
         match = re.fullmatch(r"(?:se (?:acabo|termino)|no (?:me )?queda) (?:el |la |los |las )?(.+)", normalized)
@@ -84,6 +101,21 @@ class NutritionStateCommandHandler:
         except InvalidNutritionStateError:
             return NutritionStateCommandResult(False)
         return NutritionStateCommandResult(True, f"{label} registrado para {target.isoformat()}: {start}-{end}.")
+
+
+def _split_explicit_commands(raw: str) -> tuple[str, ...]:
+    """Split only where the next text clearly starts a supported command."""
+    command_start = (
+        r"(?:tengo|me quedan|he comprado|compre|se (?:acabo|termino)|"
+        r"no (?:me )?queda|(?:hoy|manana) (?:trabajo|entreno|entrenamiento)|"
+        r"trabajo|entreno|entrenamiento)\b"
+    )
+    parts = re.split(
+        rf"(?:\s*[\n;]+\s*|\s*,\s*|\s+y\s+)(?={command_start})",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    return tuple(part.strip(" .") for part in parts if part.strip(" ."))
 
 
 def _fold(value: str) -> str:
