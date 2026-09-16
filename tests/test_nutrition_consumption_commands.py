@@ -69,7 +69,7 @@ def test_rejects_insufficient_inventory_without_partial_mutation(tmp_path):
     assert store.get_day(TODAY).consumed_meals == ()
 
 
-def test_incompatible_unit_does_not_mutate_state(tmp_path):
+def test_incompatible_singular_unit_does_not_mutate_state(tmp_path):
     store = DailyNutritionStore(tmp_path / "state.json")
     store.set_food("arroz", "arroz", 2, "kg")
     result = NutritionConsumptionCommandHandler(store).handle(
