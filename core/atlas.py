@@ -89,4 +89,18 @@ def _requests_daily_nutrition_context(prompt: str) -> bool:
         "alimentacion", "nutricion", "dieta", "comida", "comer", "desayuno",
         "almuerzo", "merienda", "cena", "calorias", "macro", "pre entren", "post entren",
     )
-    return any(marker in folded for marker in markers)
+    if any(marker in folded for marker in markers):
+        return True
+
+    # Natural household-inventory questions belong to Daily Coach even when
+    # the user does not explicitly say nutrition, food or diet.
+    inventory_queries = (
+        "que me queda en casa",
+        "que tengo en casa",
+        "que alimentos tengo",
+        "que comida tengo",
+        "que me queda de comida",
+        "que queda en el inventario",
+        "que tengo en el inventario",
+    )
+    return any(query in folded for query in inventory_queries)
