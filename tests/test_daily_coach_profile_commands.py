@@ -49,3 +49,12 @@ def test_unrelated_prompt_is_not_handled(tmp_path):
         DailyCoachProfileStore(tmp_path / "profile.json")
     ).handle("Prepárame la alimentación de hoy")
     assert not result.handled
+
+
+def test_atlas_profile_confirmation_is_not_registration(tmp_path):
+    path = tmp_path / "profile.json"
+    result = DailyCoachProfileCommandHandler(DailyCoachProfileStore(path)).handle(
+        "Perfil Daily Coach guardado: 48 años, 180 cm, 73.8 kg, objetivo 80 kg."
+    )
+    assert not result.handled
+    assert not path.exists()
