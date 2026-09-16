@@ -17,7 +17,14 @@ class NutritionContextProvider:
         inventory = tuple(item for item in self._store.list_inventory() if item.quantity > 0)
         state = self._store.get_day(day)
 
-        lines = [f"Fecha objetivo: {day.isoformat()}", "Inventario disponible:"]
+        lines = [
+            f"Fecha objetivo: {day.isoformat()}",
+            "Reglas del contexto operativo:",
+            "- El inventario listado es exhaustivo para peticiones basadas en alimentos disponibles/en casa; no uses ni supongas alimentos no registrados.",
+            "- Si el inventario no permite cumplir el objetivo nutricional, indícalo y señala qué falta, sin fingir que está disponible.",
+            "- No infieras si una cantidad consumida estaba cruda o cocida cuando el registro no lo especifica; si afecta al cálculo preciso, pide aclaración o marca la estimación como imprecisa.",
+            "Inventario disponible:",
+        ]
         if inventory:
             lines.extend(f"- {item.name}: {item.quantity:g} {item.unit}" for item in inventory)
         else:
