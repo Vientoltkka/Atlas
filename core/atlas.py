@@ -1,6 +1,11 @@
 """Atlas main application."""
 
+from datetime import datetime
+from pathlib import Path
+
 from bootstrap.bootstrap import Bootstrap
+from core.daily_nutrition_state import DailyNutritionStore
+from core.nutrition_state_commands import NutritionStateCommandHandler
 
 
 class Atlas:
@@ -10,6 +15,9 @@ class Atlas:
         """Initialize Atlas."""
 
         self._orchestrator = Bootstrap.build()
+        state_path = Path(__file__).resolve().parents[1] / "data" / "nutrition_state.json"
+        self._nutrition_state_store = DailyNutritionStore(state_path)
+        self._nutrition_state_commands = NutritionStateCommandHandler(self._nutrition_state_store)
 
     def start(self) -> None:
         """Start Atlas."""
@@ -32,7 +40,14 @@ class Atlas:
 
     def process_prompt(self, prompt: str) -> str:
         """Process one textual Orbe request without blocking the UI thread."""
+        command = self._nutrition_state_commands.handle(
+            prompt,
+            today=datetime.now().astimezone().date(),
+        )
+        if command.handled:
+            return command.message
         return self._orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+
     def add_supervision_state_listener(self, listener) -> None:
         """Expose supervised execution transitions to an optional UI observer."""
         self._orchestrator.add_supervision_state_listener(listener)
