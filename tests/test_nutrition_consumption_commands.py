@@ -27,6 +27,32 @@ def test_records_consumption_and_deducts_inventory(tmp_path):
     assert meals[0].foods == ("3 unit huevos", "150 g arroz")
 
 
+def test_converts_grams_to_inventory_kilograms_atomically(tmp_path):
+    store = DailyNutritionStore(tmp_path / "state.json")
+    store.set_food("huevos", "huevos", 12, "unit")
+    store.set_food("arroz", "arroz", 2, "kg")
+
+    result = NutritionConsumptionCommandHandler(store).handle(
+        "He desayunado 3 unidades de huevos y 150 g de arroz", today=TODAY
+    )
+
+    assert result.handled
+    assert "consumo registrado" in result.message.casefold()
+    assert store.get_food("huevos").quantity == 9
+    assert store.get_food("arroz").quantity == 1.85
+    assert store.get_day(TODAY).consumed_meals[0].foods == ("3 unit huevos", "150 g arroz")
+
+
+def test_converts_millilitres_to_inventory_litres(tmp_path):
+    store = DailyNutritionStore(tmp_path / "state.json")
+    store.set_food("leche", "leche", 2, "l")
+    result = NutritionConsumptionCommandHandler(store).handle(
+        "He tomado 250 ml de leche", today=TODAY
+    )
+    assert result.handled
+    assert store.get_food("leche").quantity == 1.75
+
+
 def test_rejects_insufficient_inventory_without_partial_mutation(tmp_path):
     store = DailyNutritionStore(tmp_path / "state.json")
     store.set_food("huevos", "huevos", 2, "unit")
@@ -40,6 +66,18 @@ def test_rejects_insufficient_inventory_without_partial_mutation(tmp_path):
     assert "no puedo descontar" in result.message.casefold()
     assert store.get_food("huevos").quantity == 2
     assert store.get_food("arroz").quantity == 200
+    assert store.get_day(TODAY).consumed_meals == ()
+
+
+def test_incompatible_unit_does_not_mutate_state(tmp_path):
+    store = DailyNutritionStore(tmp_path / "state.json")
+    store.set_food("arroz", "arroz", 2, "kg")
+    result = NutritionConsumptionCommandHandler(store).handle(
+        "He comido 1 unidad de arroz", today=TODAY
+    )
+    assert result.handled
+    assert "unidad incompatible" in result.message.casefold()
+    assert store.get_food("arroz").quantity == 2
     assert store.get_day(TODAY).consumed_meals == ()
 
 
