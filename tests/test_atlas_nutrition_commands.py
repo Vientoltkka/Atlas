@@ -73,6 +73,27 @@ def test_daily_nutrition_request_receives_profile_inventory_and_today_schedule(t
     assert "- 18:00-19:00" in routed
 
 
+def test_text_repl_routes_daily_nutrition_through_application_context(tmp_path, monkeypatch, capsys):
+    app = _build_app(tmp_path, monkeypatch)
+    today = datetime.now().astimezone().date()
+    app._nutrition_state_store.set_food("arroz", "arroz", 2, "kg")
+    app._nutrition_state_store.set_work_schedule(today, [("07:00", "15:00")])
+    inputs = iter(("Prepárame lo que debo comer hoy utilizando únicamente los alimentos que tengo en casa.", "salir"))
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+    app.start()
+
+    assert len(_FakeBootstrap.orchestrator.prompts) == 1
+    routed = _FakeBootstrap.orchestrator.prompts[0]
+    assert "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN" in routed
+    assert f"Fecha objetivo: {today.isoformat()}" in routed
+    assert "- arroz: 2 kg" in routed
+    assert "- 07:00-15:00" in routed
+    assert "[PETICIÓN ACTUAL DEL USUARIO]" in routed
+    assert "Prepárame lo que debo comer hoy" in routed
+    assert "Hasta pronto." in capsys.readouterr().out
+
+
 def test_tomorrow_nutrition_request_uses_tomorrow_schedule(tmp_path, monkeypatch):
     app = _build_app(tmp_path, monkeypatch)
     today = datetime.now().astimezone().date()
