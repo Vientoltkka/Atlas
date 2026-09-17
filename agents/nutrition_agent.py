@@ -92,30 +92,92 @@ class NutritionAgent(BaseAgent):
         preflight_response = self.preflight(messages)
         if preflight_response is not None:
             return preflight_response
+
+        operational = _daily_operational_constraints(messages)
+
         conversation = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         conversation.extend(messages)
+
+        if operational is not None:
+            conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Para esta petición Daily Coach añade una clave JSON adicional "
+                        "\"plan\". Debe ser una lista de comidas. Cada comida debe tener "
+                        "exactamente \"label\", \"time\" y \"foods\". \"time\" usa HH:MM "
+                        "y \"foods\" contiene únicamente nombres del inventario disponible. "
+                        "La clave \"text\" debe corresponder al mismo plan."
+                    ),
+                }
+            )
+
         response = ask_prompt_client(
             self._client,
             model,
             conversation,
             provider_id,
         )
-        try:
-            payload = json.loads(_structured_response_content(response))
-        except (TypeError, json.JSONDecodeError):
-            return response
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"text", "requires_follow_up"}
-            or not isinstance(payload["text"], str)
-            or not isinstance(payload["requires_follow_up"], bool)
-        ):
-            return response
-        return AgentResponse(
-            text=payload["text"],
-            requires_follow_up=payload["requires_follow_up"],
+
+        if operational is None:
+            return _parse_standard_response(response)
+
+        parsed, errors = _parse_and_validate_daily_response(
+            response,
+            operational,
         )
 
+
+        if not errors and parsed is not None:
+            return parsed
+
+        correction = (
+            "Tu propuesta anterior incumple restricciones operativas autoritativas. "
+            "Corrige únicamente estos errores:\n- "
+            + "\n- ".join(errors)
+            + "\nDebes conservar EXACTAMENTE este contrato JSON: "
+            "{\"text\": string, \"requires_follow_up\": boolean, "
+            "\"plan\": [{\"label\": string, \"time\": \"HH:MM\", "
+            "\"foods\": [string]}]}. "
+            "No cambies los nombres de las claves ni el tipo de sus valores. "
+            "Todas las horas del plan deben ser iguales o posteriores a la hora "
+            "local actual indicada en el contexto. "
+            "Todos los nombres de foods deben coincidir con alimentos del "
+            "inventario exhaustivo. "
+            "Si por la hora actual ya no procede planificar ninguna comida hoy, "
+            "devuelve \"plan\": [] y explícalo brevemente en text. "
+            "Devuelve exclusivamente el objeto JSON, sin markdown."
+        )
+
+        retry_conversation = [
+            *conversation,
+            {"role": "assistant", "content": response},
+            {"role": "user", "content": correction},
+        ]
+
+        retry = ask_prompt_client(
+            self._client,
+            model,
+            retry_conversation,
+            provider_id,
+        )
+
+        parsed, retry_errors = _parse_and_validate_daily_response(
+            retry,
+            operational,
+        )
+
+
+        if not retry_errors and parsed is not None:
+            return parsed
+
+        return AgentResponse(
+            text=(
+                "No puedo generar ahora un plan diario que cumpla de forma fiable "
+                "el horario y el inventario registrados. Reintenta la petición."
+            ),
+            requires_follow_up=False,
+        )
     def preflight(self, messages: list[dict[str, str]]) -> AgentResponse | None:
         """Return a local clarification before the model health check when needed."""
         missing_data = _missing_calculation_data(messages)
@@ -158,6 +220,146 @@ class NutritionAgent(BaseAgent):
             requires_follow_up=False,
         )
 
+
+def _parse_standard_response(response: str) -> str | AgentResponse:
+    """Parse the existing two-key Nutrition response contract."""
+    try:
+        payload = json.loads(_structured_response_content(response))
+    except (TypeError, json.JSONDecodeError):
+        return response
+
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"text", "requires_follow_up"}
+        or not isinstance(payload["text"], str)
+        or not isinstance(payload["requires_follow_up"], bool)
+    ):
+        return response
+
+    return AgentResponse(
+        text=payload["text"],
+        requires_follow_up=payload["requires_follow_up"],
+    )
+
+
+def _daily_operational_constraints(
+    messages: list[dict[str, str]],
+) -> tuple[str, frozenset[str]] | None:
+    """Extract current clock and exhaustive inventory from authoritative context."""
+    content = "\n".join(
+        message.get("content", "")
+        for message in messages
+    )
+
+    marker = "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN"
+    if marker not in content:
+        return None
+
+    clock_match = re.search(
+        r"Hora local actual:\s*(\d{2}:\d{2})",
+        content,
+        re.IGNORECASE,
+    )
+    if clock_match is None:
+        return None
+
+    inventory_match = re.search(
+        r"Inventario disponible:\s*\n(.*?)(?=\nHorario de trabajo:|\Z)",
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if inventory_match is None:
+        return None
+
+    foods: set[str] = set()
+
+    for line in inventory_match.group(1).splitlines():
+        match = re.match(r"\s*-\s*([^:]+):", line)
+        if match:
+            foods.add(match.group(1).strip().casefold())
+
+    return clock_match.group(1), frozenset(foods)
+
+
+def _parse_and_validate_daily_response(
+    response: str,
+    operational: tuple[str, frozenset[str]],
+) -> tuple[AgentResponse | None, list[str]]:
+    """Validate machine-readable Daily Coach facts before exposing model text."""
+    try:
+        payload = json.loads(_structured_response_content(response))
+    except (TypeError, json.JSONDecodeError):
+        return None, ["La respuesta no es JSON válido."]
+
+    if not isinstance(payload, dict):
+        return None, ["La respuesta JSON no es un objeto."]
+
+    if set(payload) != {"text", "requires_follow_up", "plan"}:
+        return None, [
+            "El JSON debe contener exactamente text, requires_follow_up y plan."
+        ]
+
+    if (
+        not isinstance(payload["text"], str)
+        or not isinstance(payload["requires_follow_up"], bool)
+        or not isinstance(payload["plan"], list)
+    ):
+        return None, ["Los tipos del contrato Daily Coach no son válidos."]
+
+    current_clock, inventory = operational
+    errors: list[str] = []
+
+    for index, meal in enumerate(payload["plan"], start=1):
+        if not isinstance(meal, dict) or set(meal) != {"label", "time", "foods"}:
+            errors.append(
+                f"La comida {index} debe contener exactamente label, time y foods."
+            )
+            continue
+
+        label = meal["label"]
+        meal_time = meal["time"]
+        foods = meal["foods"]
+
+        if (
+            not isinstance(label, str)
+            or not isinstance(meal_time, str)
+            or re.fullmatch(r"\d{2}:\d{2}", meal_time) is None
+            or not isinstance(foods, list)
+            or not all(isinstance(food, str) for food in foods)
+        ):
+            errors.append(f"La comida {index} tiene datos inválidos.")
+            continue
+
+        if meal_time < current_clock:
+            errors.append(
+                f"La comida {index} usa {meal_time}, anterior a la hora actual "
+                f"{current_clock}."
+            )
+
+        unknown = sorted(
+            {
+                food.strip().casefold()
+                for food in foods
+                if food.strip().casefold() not in inventory
+            }
+        )
+
+        if unknown:
+            errors.append(
+                "La comida "
+                f"{index} usa alimentos fuera del inventario: {', '.join(unknown)}."
+            )
+
+    if errors:
+        return None, errors
+
+    return (
+        AgentResponse(
+            text=payload["text"],
+            requires_follow_up=payload["requires_follow_up"],
+        ),
+        [],
+    )
 
 def _structured_response_content(response: str) -> str:
     """Return the full JSON payload when the model encloses it in a JSON fence."""

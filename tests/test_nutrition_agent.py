@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agents.base_agent import AgentResponse
@@ -209,3 +211,293 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
         "role": "user",
         "content": "Calcula mis macros para ganar masa: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
     }
+
+
+def test_daily_coach_valid_plan_needs_only_one_inference() -> None:
+    client = RecordingPromptClient()
+    calls: list[list[dict[str, str]]] = []
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return json.dumps(
+            {
+                "text": "A las 16:00 toma arroz y huevos.",
+                "requires_follow_up": False,
+                "plan": [
+                    {
+                        "label": "merienda",
+                        "time": "16:00",
+                        "foods": ["arroz", "huevos"],
+                    }
+                ],
+            }
+        )
+
+    client.ask = respond  # type: ignore[method-assign]
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                    "Hora local actual: 15:00\n"
+                    "Inventario disponible:\n"
+                    "- arroz: 1.85 kg\n"
+                    "- huevos: 9 unit\n"
+                    "Horario de trabajo:\n"
+                    "- 07:00-15:00\n"
+                    "[FIN DEL CONTEXTO OPERATIVO AUTORITATIVO]\n\n"
+                    "[PETICIÓN ACTUAL DEL USUARIO]\n"
+                    "Prepárame lo que debo comer hoy utilizando únicamente "
+                    "los alimentos que tengo en casa."
+                ),
+            }
+        ],
+    )
+
+    assert response == AgentResponse(
+        text="A las 16:00 toma arroz y huevos.",
+        requires_follow_up=False,
+    )
+    assert len(calls) == 1
+
+
+def test_daily_coach_retries_once_when_plan_uses_past_time() -> None:
+    client = RecordingPromptClient()
+    calls: list[list[dict[str, str]]] = []
+
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "text": "Desayuna a las 08:00.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "desayuno",
+                            "time": "08:00",
+                            "foods": ["arroz", "huevos"],
+                        }
+                    ],
+                }
+            ),
+            json.dumps(
+                {
+                    "text": "A las 16:00 toma arroz y huevos.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "merienda",
+                            "time": "16:00",
+                            "foods": ["arroz", "huevos"],
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return next(responses)
+
+    client.ask = respond  # type: ignore[method-assign]
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                    "Hora local actual: 15:00\n"
+                    "Inventario disponible:\n"
+                    "- arroz: 1.85 kg\n"
+                    "- huevos: 9 unit\n"
+                    "[FIN DEL CONTEXTO OPERATIVO AUTORITATIVO]\n\n"
+                    "[PETICIÓN ACTUAL DEL USUARIO]\n"
+                    "Prepárame lo que debo comer hoy utilizando únicamente "
+                    "los alimentos que tengo en casa."
+                ),
+            }
+        ],
+    )
+
+    assert response == AgentResponse(
+        text="A las 16:00 toma arroz y huevos.",
+        requires_follow_up=False,
+    )
+    assert len(calls) == 2
+    assert "08:00" in calls[1][-1]["content"]
+    assert "15:00" in calls[1][-1]["content"]
+
+
+def test_daily_coach_retries_once_when_plan_invents_food() -> None:
+    client = RecordingPromptClient()
+    calls: list[list[dict[str, str]]] = []
+
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "text": "A las 16:00 toma pollo con arroz.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "merienda",
+                            "time": "16:00",
+                            "foods": ["pollo", "arroz"],
+                        }
+                    ],
+                }
+            ),
+            json.dumps(
+                {
+                    "text": "A las 16:00 toma arroz y huevos.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "merienda",
+                            "time": "16:00",
+                            "foods": ["arroz", "huevos"],
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return next(responses)
+
+    client.ask = respond  # type: ignore[method-assign]
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                    "Hora local actual: 15:00\n"
+                    "Inventario disponible:\n"
+                    "- arroz: 1.85 kg\n"
+                    "- huevos: 9 unit\n"
+                    "[FIN DEL CONTEXTO OPERATIVO AUTORITATIVO]\n\n"
+                    "[PETICIÓN ACTUAL DEL USUARIO]\n"
+                    "Prepárame lo que debo comer hoy utilizando únicamente "
+                    "los alimentos que tengo en casa."
+                ),
+            }
+        ],
+    )
+
+    assert response == AgentResponse(
+        text="A las 16:00 toma arroz y huevos.",
+        requires_follow_up=False,
+    )
+    assert len(calls) == 2
+    assert "pollo" in calls[1][-1]["content"].casefold()
+
+
+def test_regular_nutrition_keeps_existing_two_key_contract() -> None:
+    client = RecordingPromptClient()
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        return json.dumps(
+            {
+                "text": "Orientación nutricional normal.",
+                "requires_follow_up": False,
+            }
+        )
+
+    client.ask = respond  # type: ignore[method-assign]
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [{"role": "user", "content": "Qué como antes de entrenar CrossFit?"}],
+    )
+
+    assert response == AgentResponse(
+        text="Orientación nutricional normal.",
+        requires_follow_up=False,
+    )
+
+
+def test_daily_coach_stops_after_second_invalid_plan() -> None:
+    client = RecordingPromptClient()
+    calls: list[list[dict[str, str]]] = []
+
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "text": "A las 08:00 toma pollo.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "desayuno",
+                            "time": "08:00",
+                            "foods": ["pollo"],
+                        }
+                    ],
+                }
+            ),
+            json.dumps(
+                {
+                    "text": "A las 09:00 toma pollo.",
+                    "requires_follow_up": False,
+                    "plan": [
+                        {
+                            "label": "desayuno",
+                            "time": "09:00",
+                            "foods": ["pollo"],
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return next(responses)
+
+    client.ask = respond  # type: ignore[method-assign]
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    response = agent.run(
+        "simulated-model",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                    "Hora local actual: 15:00\n"
+                    "Inventario disponible:\n"
+                    "- arroz: 1.85 kg\n"
+                    "- huevos: 9 unit\n"
+                    "[FIN DEL CONTEXTO OPERATIVO AUTORITATIVO]\n\n"
+                    "[PETICIÓN ACTUAL DEL USUARIO]\n"
+                    "Prepárame lo que debo comer hoy utilizando únicamente "
+                    "los alimentos que tengo en casa."
+                ),
+            }
+        ],
+    )
+
+    assert response == AgentResponse(
+        text=(
+            "No puedo generar ahora un plan diario que cumpla de forma fiable "
+            "el horario y el inventario registrados. Reintenta la petición."
+        ),
+        requires_follow_up=False,
+    )
+    assert len(calls) == 2
