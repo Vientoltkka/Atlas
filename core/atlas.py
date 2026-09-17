@@ -27,7 +27,30 @@ class Atlas:
         self._daily_coach_profile_commands = DailyCoachProfileCommandHandler(self._daily_coach_profile_store)
 
     def start(self) -> None:
-        self._orchestrator.start()
+        """Run text REPL through the application boundary so operational context is preserved."""
+        while True:
+            try:
+                prompt = input("Tú: ").strip()
+            except EOFError:
+                print("\nHasta pronto.")
+                break
+            except KeyboardInterrupt:
+                print("\n\nInterrupcion recibida. Hasta pronto.")
+                break
+
+            if not prompt:
+                print("\nAtlas:")
+                print("La peticion esta vacia. Escribe una instruccion o 'salir'.")
+                print()
+                continue
+            if prompt.casefold() in ("exit", "quit", "salir"):
+                print("\nHasta pronto.")
+                break
+
+            response = self.process_prompt(prompt)
+            print("\nAtlas:")
+            print(response)
+            print()
 
     def start_voice(self, state_listener=None, status_sink=None, typed_input=None) -> None:
         self._orchestrator.start_voice(
