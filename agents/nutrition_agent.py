@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 
 from agents.base_agent import AgentResponse, BaseAgent, ask_prompt_client
@@ -90,8 +89,6 @@ class NutritionAgent(BaseAgent):
         provider_id: str | None = None,
     ) -> str | AgentResponse:
         """Generate nutrition guidance without mutating memory or runtime state."""
-        if _nutrition_debug_enabled():
-            print(f"[nutrition-debug] agent_messages={messages!r}")
         preflight_response = self.preflight(messages)
         if preflight_response is not None:
             return preflight_response
@@ -103,8 +100,6 @@ class NutritionAgent(BaseAgent):
             conversation,
             provider_id,
         )
-        if _nutrition_debug_enabled():
-            print(f"[nutrition-debug] raw_response={response!r}")
         try:
             payload = json.loads(_structured_response_content(response))
         except (TypeError, json.JSONDecodeError):
@@ -162,16 +157,6 @@ class NutritionAgent(BaseAgent):
             ),
             requires_follow_up=False,
         )
-
-
-def _nutrition_debug_enabled() -> bool:
-    return os.getenv("ATLAS_NUTRITION_DEBUG", "").strip().casefold() in {
-        "1",
-        "true",
-        "yes",
-        "si",
-        "sí",
-    }
 
 
 def _structured_response_content(response: str) -> str:
