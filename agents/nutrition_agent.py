@@ -90,6 +90,8 @@ class NutritionAgent(BaseAgent):
         provider_id: str | None = None,
     ) -> str | AgentResponse:
         """Generate nutrition guidance without mutating memory or runtime state."""
+        if _nutrition_debug_enabled():
+            print(f"[nutrition-debug] agent_messages={messages!r}")
         preflight_response = self.preflight(messages)
         if preflight_response is not None:
             return preflight_response
