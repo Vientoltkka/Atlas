@@ -162,6 +162,23 @@ def test_nutrition_agent_calculates_locally_when_all_data_is_available() -> None
     )
 
 
+def test_nutrition_agent_unwraps_fenced_structured_response() -> None:
+    client = RecordingPromptClient()
+    agent = NutritionAgent(client)  # type: ignore[arg-type]
+
+    def respond(*, model: str, messages: list[dict[str, str]]) -> str:
+        return '```json\n{\n  "text": "Respuesta visible.",\n  "requires_follow_up": false\n}\n```'
+
+    client.ask = respond  # type: ignore[method-assign]
+
+    response = agent.run(
+        "simulated-model",
+        [{"role": "user", "content": "Ajusta lo que me queda por comer hoy."}],
+    )
+
+    assert response == AgentResponse(text="Respuesta visible.", requires_follow_up=False)
+
+
 def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkeypatch) -> None:
     orchestrator = Bootstrap.build()
     nutrition = orchestrator._registry.get("nutrition")
@@ -192,4 +209,3 @@ def test_conversation_executes_existing_nutrition_agent_with_mocked_model(monkey
         "role": "user",
         "content": "Calcula mis macros para ganar masa: hombre, 35 anos, 80 kg, 180 cm y entreno 5 dias.",
     }
-
