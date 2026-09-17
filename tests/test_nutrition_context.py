@@ -105,3 +105,134 @@ def test_render_does_not_mutate_store_or_persist_empty_day(tmp_path):
     reloaded = DailyNutritionStore(path)
     assert reloaded.get_food("eggs") is not None
     assert reloaded.get_day(date(2026, 9, 16)).work_schedule == ()
+
+
+def test_planned_future_meal_today_is_pending(tmp_path):
+    from datetime import datetime
+
+    store = DailyNutritionStore(tmp_path / "nutrition-state.json")
+    day = date(2026, 9, 17)
+
+    store.set_planned_meals(
+        day,
+        (
+            DailyMealRecord(
+                meal_id="lunch",
+                label="comida",
+                scheduled_time="15:30",
+            ),
+        ),
+    )
+
+    provider = NutritionContextProvider(
+        store,
+        now_provider=lambda: datetime(
+            2026, 9, 17, 13, 30, tzinfo=datetime.now().astimezone().tzinfo
+        ),
+    )
+
+    rendered = provider.render(day)
+
+    assert "Hora local actual: 13:30" in rendered
+    assert "- comida (15:30): pendiente" in rendered
+
+
+def test_planned_past_meal_without_consumption_is_omitted(tmp_path):
+    from datetime import datetime
+
+    store = DailyNutritionStore(tmp_path / "nutrition-state.json")
+    day = date(2026, 9, 17)
+
+    store.set_planned_meals(
+        day,
+        (
+            DailyMealRecord(
+                meal_id="breakfast",
+                label="desayuno",
+                scheduled_time="06:30",
+            ),
+        ),
+    )
+
+    provider = NutritionContextProvider(
+        store,
+        now_provider=lambda: datetime(
+            2026, 9, 17, 13, 30, tzinfo=datetime.now().astimezone().tzinfo
+        ),
+    )
+
+    rendered = provider.render(day)
+
+    assert "- desayuno (06:30): pasada/omitida" in rendered
+    assert "- desayuno (06:30): consumida" not in rendered
+
+
+def test_planned_meal_with_consumed_record_is_consumed(tmp_path):
+    from datetime import datetime
+
+    store = DailyNutritionStore(tmp_path / "nutrition-state.json")
+    day = date(2026, 9, 17)
+
+    planned = DailyMealRecord(
+        meal_id="breakfast",
+        label="desayuno",
+        scheduled_time="06:30",
+    )
+
+    consumed = DailyMealRecord(
+        meal_id="breakfast",
+        label="desayuno",
+        scheduled_time="06:30",
+        foods=("3 unit huevos",),
+    )
+
+    store.set_planned_meals(day, (planned,))
+    store.set_consumed_meals(day, (consumed,))
+
+    provider = NutritionContextProvider(
+        store,
+        now_provider=lambda: datetime(
+            2026, 9, 17, 13, 30, tzinfo=datetime.now().astimezone().tzinfo
+        ),
+    )
+
+    rendered = provider.render(day)
+
+    assert "- desayuno (06:30): consumida" in rendered
+    assert "- desayuno (06:30): pasada/omitida" not in rendered
+
+
+def test_future_day_meal_is_not_marked_past_using_today_clock(tmp_path):
+    from datetime import datetime
+
+    store = DailyNutritionStore(tmp_path / "nutrition-state.json")
+
+    tomorrow = date(2026, 9, 18)
+
+    store.set_planned_meals(
+        tomorrow,
+        (
+            DailyMealRecord(
+                meal_id="breakfast",
+                label="desayuno",
+                scheduled_time="06:30",
+            ),
+        ),
+    )
+
+    provider = NutritionContextProvider(
+        store,
+        now_provider=lambda: datetime(
+            2026, 9, 17, 13, 30, tzinfo=datetime.now().astimezone().tzinfo
+        ),
+    )
+
+    rendered = provider.render(tomorrow)
+
+    assert (
+        "Hora local actual: no aplicable; "
+        "la fecha objetivo no es hoy"
+    ) in rendered
+
+    assert "- desayuno (06:30): pendiente" in rendered
+    assert "- desayuno (06:30): pasada/omitida" not in rendered
