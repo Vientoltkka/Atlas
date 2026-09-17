@@ -52,10 +52,21 @@ class Atlas:
             context = self._nutrition_context.render(target_day)
             profile_context = render_daily_coach_profile(self._daily_coach_profile_store.load())
             routed_prompt = (
-                f"{prompt}\n\n"
-                "[CONTEXTO OPERATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                "[CONTEXTO OPERATIVO AUTORITATIVO DE NUTRICIÓN — SOLO LECTURA]\n"
+                "Los datos siguientes ya son conocidos por Atlas y son hechos operativos "
+                "para esta petición. Úsalos antes de pedir información al usuario.\n"
+                "No vuelvas a pedir ningún dato que ya figure aquí.\n"
+                "Las comidas registradas como consumidas ya ocurrieron: no las vuelvas a "
+                "planificar ni afirmes que no se consumieron.\n"
+                "El inventario con stock positivo es el inventario disponible real. Si la "
+                "petición exige usar únicamente lo disponible/en casa, no incluyas como "
+                "parte del plan alimentos que no estén en ese inventario.\n"
+                "Si falta un dato imprescindible que realmente no figure en este contexto, "
+                "pide solo esa aclaración.\n\n"
                 f"{profile_context}\n{context}\n"
-                "[FIN DEL CONTEXTO OPERATIVO]"
+                "[FIN DEL CONTEXTO OPERATIVO AUTORITATIVO]\n\n"
+                "[PETICIÓN ACTUAL DEL USUARIO]\n"
+                f"{prompt}"
             )
         return self._orchestrator.process_prompt(routed_prompt, confirm=lambda _prompt: "")
 
