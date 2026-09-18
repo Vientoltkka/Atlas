@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import time
 from typing import TypeVar
 
 from core.model_health import ModelHealthChecker, ModelHealthResult
+from core.model_latency import ModelLatencyTracker
 from core.model_manager import ModelManager, ModelSelectionRequest, ModelSelectionResult
 from models.chat_inference import ChatInferenceError
 from models.prompt_client import InferenceBackendError
@@ -107,9 +109,11 @@ class ModelInferenceRunner:
         model_manager: ModelManager,
         *,
         health_checker: ModelHealthChecker | None = None,
+        latency_tracker: ModelLatencyTracker | None = None,
     ) -> None:
         self._model_manager = model_manager
         self._health_checker = health_checker
+        self._latency_tracker = latency_tracker
         self.last_result: ModelInferenceResult | None = None
 
     def run(
@@ -145,6 +149,7 @@ class ModelInferenceRunner:
                     health_result,
                 )
                 continue
+            inference_started = time.monotonic()
             try:
                 value = infer(physical_name, current.provider_id)
             except InferenceBackendError as error:
@@ -170,6 +175,12 @@ class ModelInferenceRunner:
                 current = next_selection
                 continue
 
+            if self._latency_tracker is not None:
+                self._latency_tracker.record(
+                    physical_name,
+                    current.provider_id,
+                    time.monotonic() - inference_started,
+                )
             self.last_result = self._success_result(
                 initial,
                 current,
@@ -213,8 +224,18 @@ class ModelInferenceRunner:
                 )
                 continue
             emitted = False
+            first_fragment_recorded = False
+            inference_started = time.monotonic()
             try:
                 for fragment in infer(physical_name, current.provider_id):
+                    if not first_fragment_recorded:
+                        if self._latency_tracker is not None:
+                            self._latency_tracker.record(
+                                physical_name,
+                                current.provider_id,
+                                time.monotonic() - inference_started,
+                            )
+                        first_fragment_recorded = True
                     emitted = True
                     yield fragment
             except InferenceBackendError as error:

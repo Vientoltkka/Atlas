@@ -35,9 +35,11 @@ from bootstrap.capability_planner import build_core_capability_planner
 from bootstrap.capability_resolver import build_core_capability_resolver
 from bootstrap.execution_plan_library import build_core_execution_plan_library
 from bootstrap.workflow_selector import build_core_workflow_selector
+from core.execution_resources import OptimizationGoal
 from core.capability_execution_service import CapabilityExecutionService
 from core.supervised_capability_gap import SupervisedCapabilityGapDetector
 from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
+from core.model_latency import ModelLatencyTracker
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager
 from core.model_registry import load_model_descriptors_from_environment
@@ -1056,10 +1058,12 @@ class Bootstrap:
         tool_selector = Bootstrap.build_tool_selector(tool_registry)
         schema_registry = Bootstrap.build_argument_schema_registry()
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
+        model_latency_tracker = ModelLatencyTracker()
         model_manager = ModelManager(
             descriptors=load_model_descriptors_from_environment(
                 reserved_logical_ids=(item.logical_id for item in ModelManager._DEFAULT_DESCRIPTORS),
             ),
+            latency_tracker=model_latency_tracker,
         )
         model_selection_policy = Bootstrap.build_model_selection_policy()
         prompt_client = PromptClient()
@@ -1489,8 +1493,13 @@ class Bootstrap:
         direct_inference_runner = ModelInferenceRunner(
             model_manager,
             health_checker=model_health_checker,
+            latency_tracker=model_latency_tracker,
         )
         direct_selection_request = model_selection_policy.create_request(task="chat")
+        voice_selection_request = model_selection_policy.create_request(
+            task="chat",
+            optimization_goal=OptimizationGoal.MINIMIZE_LATENCY,
+        )
 
         def direct_provider_id(selected_model: str) -> str:
             # Reachable only from the legacy ModelSelectionError path below:
@@ -1511,7 +1520,7 @@ class Bootstrap:
             messages = direct_messages(request, context)
             try:
                 return direct_inference_runner.run(
-                    direct_selection_request,
+                    voice_selection_request if request.source.value == "voice" else direct_selection_request,
                     lambda selected_model, selected_provider_id: chat_agent.run(
                         model=selected_model,
                         messages=messages,
@@ -1541,7 +1550,7 @@ class Bootstrap:
             messages = direct_messages(request, context)
             try:
                 yield from direct_inference_runner.stream(
-                    direct_selection_request,
+                    voice_selection_request if request.source.value == "voice" else direct_selection_request,
                     lambda selected_model, selected_provider_id: stream(
                         model=selected_model,
                         messages=messages,

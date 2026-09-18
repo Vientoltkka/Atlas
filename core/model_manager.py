@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import math
 from typing import Protocol
 
+from core.model_latency import ModelLatencyTracker
 from core.execution_resources import (
     ExecutionResourceCatalog,
     ExecutionResourceOptimizer,
@@ -102,6 +103,7 @@ class ModelSelectionRequest:
     preferred_provider_id: str | None = None
     allow_fallback: bool = False
     required_capabilities: tuple[str, ...] = ()
+    optimization_goal: OptimizationGoal = OptimizationGoal.BALANCED
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, str) or not self.task.strip():
@@ -205,8 +207,11 @@ class ModelManager:
         self,
         client: _ModelSource | None = None,
         descriptors: Iterable[ModelDescriptor] = (),
+        *,
+        latency_tracker: ModelLatencyTracker | None = None,
     ) -> None:
         self._client = client if client is not None else OllamaClient()
+        self._latency_tracker = latency_tracker
         self._descriptors = {
             descriptor.logical_id: descriptor
             for descriptor in self._DEFAULT_DESCRIPTORS
@@ -373,7 +378,7 @@ class ModelManager:
                     decision = ExecutionResourceOptimizer(
                         ExecutionResourcePolicy(
                             enabled=True,
-                            optimization_goal=OptimizationGoal.BALANCED,
+                            optimization_goal=request.optimization_goal,
                         )
                     ).select(
                         step_id="model_selection",
@@ -558,7 +563,23 @@ class ModelManager:
                     capabilities=descriptor.capabilities,
                     quality_tier=descriptor.priority,
                     estimated_cost=descriptor.relative_cost,
-                    estimated_latency=descriptor.relative_latency,
+                    estimated_latency=(
+                        self._latency_tracker.estimate(
+                            descriptor.model_name,
+                            descriptor.provider_id,
+                        )
+                        if self._latency_tracker is not None
+                        else descriptor.relative_latency
+                    )
+                    if (
+                        self._latency_tracker is not None
+                        and self._latency_tracker.estimate(
+                            descriptor.model_name,
+                            descriptor.provider_id,
+                        )
+                        is not None
+                    )
+                    else descriptor.relative_latency,
                     local=descriptor.local,
                     available=descriptor.available,
                     health_status=(

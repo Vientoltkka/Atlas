@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from core.execution_resources import OptimizationGoal
 from core.model_manager import ModelSelectionRequest
 
 
@@ -59,6 +60,7 @@ class ModelSelectionPolicy:
         *,
         task: str,
         preferred_model_id: str | None = None,
+        optimization_goal: OptimizationGoal = OptimizationGoal.BALANCED,
     ) -> ModelSelectionRequest:
         """Create one isolated request without making a selection decision."""
         return ModelSelectionRequest(
@@ -70,6 +72,7 @@ class ModelSelectionPolicy:
             preferred_provider_id=self.preferred_provider,
             required_capabilities=self.required_capabilities,
             allow_fallback=self.allow_fallback,
+            optimization_goal=optimization_goal,
         )
 
 
