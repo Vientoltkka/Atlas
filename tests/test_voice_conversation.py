@@ -3916,3 +3916,88 @@ def test_barge_in_rejects_isolated_phantom_word_during_tts() -> None:
     )
 
     assert accepted is None
+
+def test_streaming_without_fragments_falls_back_to_final_response_tts() -> None:
+    speech = FakeSpeechEngine(
+        [
+            speech_result("dame una recomendacion de entrenamiento"),
+            speech_result("salir"),
+        ]
+    )
+    output = FakeSpeechOutputEngine()
+
+    final_response = "Haz una sesion suave de movilidad y trabajo aerobico."
+
+    def stream_response(_prompt: str, _fragment_sink) -> str:
+        # El proveedor soporta la interfaz streaming pero no emite fragmentos.
+        return final_response
+
+    result = make_use_case(speech, output=output).execute_manual(
+        process_text=lambda _text: "ruta bloqueante no usada",
+        process_text_stream=stream_response,
+    )
+
+    assert output.calls == [final_response]
+    assert result.session.turns[0].response == final_response
+    assert result.session.successful_turns == 1
+
+def test_barge_in_rejects_partial_tts_echo_with_corrupted_leading_word() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    transcription = speech_result("después está tardando demasiado")
+
+    accepted = use_case._accepted_barge_in_text(
+        transcription,
+        "La respuesta está tardando demasiado. Inténtalo de nuevo.",
+    )
+
+    assert accepted is None
+
+
+def test_barge_in_accepts_real_human_interruption_during_tts() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+    transcription = speech_result("Atlas cambia de tema")
+
+    accepted = use_case._accepted_barge_in_text(
+        transcription,
+        "La respuesta está tardando demasiado. Inténtalo de nuevo.",
+    )
+
+    assert accepted == "Atlas cambia de tema"
+
+
+def test_repeated_stop_prefix_is_pure_interruption() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+
+    recognized, remainder = use_case._strip_interruption_prefix("para para")
+
+    assert recognized is True
+    assert remainder == ""
+
+
+def test_repeated_stop_prefix_preserves_follow_up_query() -> None:
+    use_case = make_use_case(FakeSpeechEngine([]))
+
+    recognized, remainder = use_case._strip_interruption_prefix(
+        "para para, ?qu? hora es?"
+    )
+
+    assert recognized is True
+    assert remainder == "?qu? hora es?"
+
+
+
+def test_barge_in_rejects_short_acoustic_capture_that_looks_like_tool_query() -> None:
+    from dataclasses import replace
+
+    use_case = make_use_case(FakeSpeechEngine([]))
+    transcription = replace(
+        speech_result("Bloc de notas"),
+        accumulated_voice_ms=300.0,
+    )
+
+    accepted = use_case._accepted_barge_in_text(
+        transcription,
+        "La inteligencia artificial permite a las máquinas aprender.",
+    )
+
+    assert accepted is None

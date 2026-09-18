@@ -1041,14 +1041,6 @@ class VoiceConversationUseCase:
                 voice_debug,
             )
         else:
-            self._deliver_voice_response(
-                session,
-                text,
-                response,
-                False,
-                emit,
-                voice_debug,
-            )
             output_metrics = self._finish_streaming_delivery(
                 stream_delivery,
                 session,
@@ -1056,6 +1048,24 @@ class VoiceConversationUseCase:
                 voice_debug,
                 should_speak_response,
             )
+            if should_speak_response and not stream_delivery.tts_started:
+                output_metrics = self._deliver_voice_response(
+                    session,
+                    text,
+                    response,
+                    True,
+                    emit,
+                    voice_debug,
+                )
+            else:
+                self._deliver_voice_response(
+                    session,
+                    text,
+                    response,
+                    False,
+                    emit,
+                    voice_debug,
+                )
         turn_finished = time.monotonic()
         first_token_seconds = (
             stream_delivery.first_fragment_seconds
@@ -1819,16 +1829,42 @@ class VoiceConversationUseCase:
         if len(words) < 2 and not self._is_close_command(clean_text):
             return None
 
-        return self._accepted_transcription_text(
+        accepted = self._accepted_transcription_text(
             replace(transcription, text=clean_text),
             trim_edge_punctuation=False,
         )
+        if accepted is None:
+            return None
+
+        # During active TTS, extremely short acoustic captures can produce
+        # plausible STT hallucinations. Do not dispatch them as new actions.
+        # Explicit interruption/close commands remain available.
+        if 0.0 < transcription.accumulated_voice_ms < 450.0:
+            normalized = self._normalize_echo_text(accepted)
+            explicit_interruptions = {
+                "para",
+                "parate",
+                "detente",
+                "callate",
+                "silencio",
+            }
+            if (
+                normalized not in explicit_interruptions
+                and not self._is_close_command(accepted)
+            ):
+                return None
+
+        return accepted
 
     def _strip_interruption_prefix(
         self,
         text: str,
     ) -> tuple[bool, str]:
-        match = re.match(r"^\s*para\b", text, flags=re.IGNORECASE)
+        match = re.match(
+            r"^\s*para\b(?:\s*[,.;:!?-]*\s*para\b)*",
+            text,
+            flags=re.IGNORECASE,
+        )
         if match is None:
             return False, text
 
@@ -1975,6 +2011,31 @@ class VoiceConversationUseCase:
         response_tokens = normalized_response.split()
         if not transcription_tokens:
             return False
+
+        # STT can corrupt the beginning of Atlas's own speech while preserving
+        # a contiguous multi-word fragment. Reject that fragment as TTS echo
+        # instead of dispatching it as a new user query.
+        matcher = SequenceMatcher(
+            None,
+            transcription_tokens,
+            response_tokens,
+            autojunk=False,
+        )
+        longest_match = matcher.find_longest_match(
+            0,
+            len(transcription_tokens),
+            0,
+            len(response_tokens),
+        )
+        if longest_match.size >= 3:
+            matched_characters = sum(
+                len(token)
+                for token in transcription_tokens[
+                    longest_match.a:longest_match.a + longest_match.size
+                ]
+            )
+            if matched_characters >= self._MIN_TTS_ECHO_PREFIX_CHARACTERS:
+                return True
 
         content_tokens = [
             token
