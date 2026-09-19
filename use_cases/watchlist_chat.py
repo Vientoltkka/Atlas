@@ -141,6 +141,11 @@ class WatchlistChat:
     def store(self) -> WatchlistStore:
         return self._store
 
+    @property
+    def store(self):
+        """Expose the shared watchlist store for read-only finance services."""
+        return self._store
+
     def handles(self, prompt: str) -> bool:
         """True solo ante un comando explicito de seguimiento."""
         return classify_watchlist_prompt(prompt) is not None

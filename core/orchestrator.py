@@ -141,6 +141,11 @@ from use_cases.market_analysis_chat import (
     handles_market_analysis_prompt,
 )
 from use_cases.watchlist_chat import WatchlistChat, handles_watchlist_prompt
+from use_cases.finance_opportunity_chat import (
+    FinanceOpportunityChat,
+    handles_finance_opportunity_prompt,
+)
+from finance.opportunity_service import FinanceOpportunityService
 from use_cases.tactical_backtest_chat import (
     TacticalBacktestChat,
     handles_tactical_backtest_prompt,
@@ -219,6 +224,7 @@ class AtlasOrchestrator:
         self._market_data_chat_handler = None
         self._market_analysis_chat_handler = None
         self._watchlist_chat_handler = None
+        self._finance_opportunity_chat_handler = None
         self._tactical_backtest_chat_handler = None
         self._alpha_vantage_client_instance = None
         self._router = router
@@ -1079,6 +1085,10 @@ class AtlasOrchestrator:
         if market_analysis_response is not None:
             return market_analysis_response
 
+        finance_opportunity_response = self._handle_finance_opportunity(prompt)
+        if finance_opportunity_response is not None:
+            return finance_opportunity_response
+
         watchlist_response = self._handle_watchlist(prompt)
         if watchlist_response is not None:
             return watchlist_response
@@ -1385,6 +1395,28 @@ class AtlasOrchestrator:
             )
         return self._watchlist_chat_handler
 
+    def _finance_opportunity_chat(self):
+        """Resolve Finance Opportunity V1 over the shared watchlist store."""
+        if self._finance_opportunity_chat_handler is None:
+            watchlist_chat = self._watchlist_chat()
+            service = FinanceOpportunityService(
+                watchlist_chat.store,
+                self._alpha_vantage_client(),
+            )
+            self._finance_opportunity_chat_handler = FinanceOpportunityChat(service)
+        return self._finance_opportunity_chat_handler
+
+    def _handle_finance_opportunity(self, prompt: str) -> "str | None":
+        """Intercept explicit tactical opportunity scans deterministically."""
+        if not handles_finance_opportunity_prompt(prompt):
+            return None
+
+        response_text = self._finance_opportunity_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
     def _handle_watchlist(self, prompt: str) -> "str | None":
         """Intercept explicit watchlist commands deterministically (V2.8).
 
@@ -1560,6 +1592,14 @@ class AtlasOrchestrator:
                 self._memory.add_assistant(response_text)
                 self._pending_agent_followup = None
                 return AgentResponse(text=response_text)
+            opportunity_chat = self._finance_opportunity_chat()
+            if opportunity_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = opportunity_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+
             watchlist_chat = self._watchlist_chat()
             if watchlist_chat.handles(prompt):
                 self._memory.add_user(prompt)
