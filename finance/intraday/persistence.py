@@ -24,8 +24,20 @@ def _json_value(value):
 
 
 class IntradayResearchLedger:
-    def __init__(self, path: str | Path) -> None:
+    DEFAULT_STRATEGY_VERSION = "intraday-momentum-v1"
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        strategy_version: str = DEFAULT_STRATEGY_VERSION,
+    ) -> None:
+        version = strategy_version.strip()
+        if not version:
+            raise ValueError("strategy_version is required")
+
         self._path = Path(path)
+        self._strategy_version = version
 
     @property
     def path(self) -> Path:
@@ -54,6 +66,7 @@ class IntradayResearchLedger:
         self._append(
             {
                 "type": "SIGNAL",
+                "strategy_version": self._strategy_version,
                 "symbol": signal.symbol,
                 "timestamp": signal.timestamp,
                 "action": signal.action,
@@ -69,6 +82,7 @@ class IntradayResearchLedger:
         self._append(
             {
                 "type": "OUTCOME",
+                "strategy_version": self._strategy_version,
                 **asdict(outcome),
             }
         )

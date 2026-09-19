@@ -34,6 +34,7 @@ class IntradaySignalEvaluator:
         self,
         *,
         horizons_minutes: tuple[int, ...] = (1, 5, 15, 30),
+        maximum_lateness_seconds: int = 30,
     ) -> None:
         if not horizons_minutes:
             raise ValueError("at least one horizon is required")
@@ -44,7 +45,13 @@ class IntradaySignalEvaluator:
         if len(set(horizons_minutes)) != len(horizons_minutes):
             raise ValueError("horizons must be unique")
 
+        if maximum_lateness_seconds < 0:
+            raise ValueError("maximum lateness cannot be negative")
+
         self._horizons = tuple(sorted(horizons_minutes))
+        self._maximum_lateness = timedelta(
+            seconds=maximum_lateness_seconds
+        )
 
     def evaluate(
         self,
@@ -72,21 +79,33 @@ class IntradaySignalEvaluator:
         for horizon in self._horizons:
             target = signal.timestamp + timedelta(minutes=horizon)
 
+            exit_observation = next(
+                (
+                    item
+                    for item in future
+                    if item.timestamp >= target
+                ),
+                None,
+            )
+
+            # Do not score an incomplete or excessively late horizon.
+            if exit_observation is None:
+                continue
+
+            if (
+                exit_observation.timestamp - target
+                > self._maximum_lateness
+            ):
+                continue
+
             eligible = [
                 item
                 for item in future
-                if item.timestamp <= target
+                if item.timestamp <= exit_observation.timestamp
             ]
 
-            # Do not score an incomplete horizon.
-            if not eligible:
-                continue
-
-            if eligible[-1].timestamp < target:
-                continue
-
             prices = [item.price for item in eligible]
-            exit_price = eligible[-1].price
+            exit_price = exit_observation.price
 
             forward_return = (exit_price / entry) - Decimal("1")
             mfe = (max(prices) / entry) - Decimal("1")

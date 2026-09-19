@@ -97,6 +97,51 @@ def test_evaluator_scores_completed_horizons_without_lookahead() -> None:
     )
 
 
+def test_evaluator_accepts_first_observation_after_target_within_tolerance() -> None:
+    signal = candidate_signal()
+
+    target = signal.timestamp + timedelta(minutes=5)
+
+    late = IntradayObservation(
+        symbol="BTC-USD",
+        price=Decimal("100.90"),
+        bid=Decimal("100.85"),
+        ask=Decimal("100.95"),
+        timestamp=target + timedelta(seconds=7),
+    )
+
+    outcomes = IntradaySignalEvaluator(
+        horizons_minutes=(5,),
+        maximum_lateness_seconds=30,
+    ).evaluate(signal, [late])
+
+    assert len(outcomes) == 1
+    assert outcomes[0].exit_price == Decimal("100.90")
+    assert outcomes[0].observations == 1
+
+
+def test_evaluator_rejects_observation_beyond_lateness_tolerance() -> None:
+    signal = candidate_signal()
+
+    target = signal.timestamp + timedelta(minutes=5)
+
+    too_late = IntradayObservation(
+        symbol="BTC-USD",
+        price=Decimal("100.90"),
+        bid=Decimal("100.85"),
+        ask=Decimal("100.95"),
+        timestamp=target + timedelta(seconds=45),
+    )
+
+    outcomes = IntradaySignalEvaluator(
+        horizons_minutes=(5,),
+        maximum_lateness_seconds=30,
+    ).evaluate(signal, [too_late])
+
+    assert outcomes == ()
+
+
+
 def test_evaluator_does_not_score_incomplete_horizon() -> None:
     signal = candidate_signal()
 

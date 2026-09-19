@@ -122,3 +122,39 @@ def test_persistence_has_no_execution_dependency() -> None:
     assert "finance.execution" not in source
     assert "BrokerAdapter" not in source
     assert "PaperFinanceService" not in source
+
+
+def test_ledger_records_strategy_version(tmp_path) -> None:
+    ledger = IntradayResearchLedger(
+        tmp_path / "intraday.jsonl",
+        strategy_version="intraday-momentum-v1-test",
+    )
+
+    signal = candidate()
+    ledger.record_signal(signal)
+
+    outcome = IntradaySignalEvaluator(
+        horizons_minutes=(1,)
+    ).evaluate(
+        signal,
+        [
+            obs(6, "100.55"),
+        ],
+    )[0]
+
+    ledger.record_outcome(outcome)
+
+    records = ledger.records()
+
+    assert len(records) == 2
+    assert records[0]["type"] == "SIGNAL"
+    assert records[1]["type"] == "OUTCOME"
+
+    assert (
+        records[0]["strategy_version"]
+        == "intraday-momentum-v1-test"
+    )
+    assert (
+        records[1]["strategy_version"]
+        == "intraday-momentum-v1-test"
+    )
