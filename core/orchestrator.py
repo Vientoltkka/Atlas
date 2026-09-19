@@ -144,6 +144,7 @@ from use_cases.watchlist_chat import WatchlistChat, handles_watchlist_prompt
 from use_cases.finance_opportunity_chat import (
     FinanceOpportunityChat,
     handles_finance_opportunity_prompt,
+    handles_strategy_performance_prompt,
 )
 from finance.opportunity_service import FinanceOpportunityService
 from use_cases.tactical_backtest_chat import (
@@ -1408,7 +1409,10 @@ class AtlasOrchestrator:
 
     def _handle_finance_opportunity(self, prompt: str) -> "str | None":
         """Intercept explicit tactical opportunity scans deterministically."""
-        if not handles_finance_opportunity_prompt(prompt):
+        if not (
+            handles_finance_opportunity_prompt(prompt)
+            or handles_strategy_performance_prompt(prompt)
+        ):
             return None
 
         response_text = self._finance_opportunity_chat().handle(prompt)

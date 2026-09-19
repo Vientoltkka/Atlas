@@ -5,6 +5,7 @@ from __future__ import annotations
 import unicodedata
 
 from finance.opportunity_service import FinanceOpportunityService
+from finance.strategy_evaluation import StrategyEvaluationStore
 
 
 def _fold(text: str) -> str:
@@ -13,6 +14,14 @@ def _fold(text: str) -> str:
         char for char in normalized
         if not unicodedata.combining(char)
     ).lower().strip()
+
+
+def handles_strategy_performance_prompt(prompt: str) -> bool:
+    folded = _fold(prompt)
+    return (
+        "rendimiento" in folded
+        and any(token in folded for token in ("estrategia", "senales"))
+    )
 
 
 def handles_finance_opportunity_prompt(prompt: str) -> bool:
@@ -45,7 +54,45 @@ def handles_finance_opportunity_prompt(prompt: str) -> bool:
 class FinanceOpportunityChat:
     def __init__(self, service: FinanceOpportunityService) -> None:
         self._service = service
+        self._evaluation_store = StrategyEvaluationStore()
         self._last_candidates: tuple[str, ...] = ()
+
+    def _render_strategy_performance(self) -> str:
+        summary = self._evaluation_store.summary()
+
+        total = summary["total_signals"]
+        evaluated = summary["evaluated_20"]
+        opened = summary["open"]
+        win_rate = summary["win_rate_20"]
+        average = summary["average_return_20"]
+
+        lines = [
+            "[PAPER][STRATEGY] Rendimiento de estrategia t?ctica.",
+            f"Se?ales registradas: {total}.",
+            f"Evaluadas a 20 sesiones: {evaluated}.",
+            f"Abiertas: {opened}.",
+        ]
+
+        if evaluated == 0:
+            lines.append(
+                "Todav?a no existen se?ales con 20 sesiones posteriores; "
+                "no hay evidencia suficiente para calcular win rate "
+                "ni retorno medio."
+            )
+        else:
+            lines.append(
+                f"Win rate a 20 sesiones: {(win_rate * 100):.2f}%."
+            )
+            lines.append(
+                f"Retorno medio a 20 sesiones: {(average * 100):.2f}%."
+            )
+
+        lines.append(
+            "M?tricas descriptivas PAPER; no implican rentabilidad futura "
+            "ni ejecutan ?rdenes."
+        )
+
+        return "\n".join(lines)
 
     @property
     def last_candidates(self) -> tuple[str, ...]:
@@ -56,6 +103,8 @@ class FinanceOpportunityChat:
         return handles_finance_opportunity_prompt(prompt)
 
     def handle(self, prompt: str) -> str:
+        if handles_strategy_performance_prompt(prompt):
+            return self._render_strategy_performance()
         if not self.handles(prompt):
             raise ValueError("unsupported finance opportunity prompt")
 

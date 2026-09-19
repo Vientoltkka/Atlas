@@ -11,6 +11,7 @@ from finance.opportunity import (
 )
 from finance.paper.policy import PaperMode
 from finance.quant.metrics import build_quant_snapshot
+from finance.strategy_evaluation import StrategyEvaluationStore
 from tools.alpha_vantage import AlphaVantageClient, AlphaVantageError
 
 
@@ -33,10 +34,12 @@ class FinanceOpportunityService:
         market_client: AlphaVantageClient,
         *,
         engine: TacticalOpportunityEngine | None = None,
+        evaluation_store: StrategyEvaluationStore | None = None,
     ) -> None:
         self._store = watchlist_store
         self._market_client = market_client
         self._engine = engine or TacticalOpportunityEngine()
+        self._evaluation_store = evaluation_store or StrategyEvaluationStore()
 
     def scan_tactical_watchlist(self) -> OpportunityScanResult:
         entries = self._store.entries()
@@ -67,7 +70,17 @@ class FinanceOpportunityService:
                 errors.append(f"{symbol}: invalid market series: {error}")
                 continue
 
+            # Update previously recorded signals with every successful
+            # daily series before recording today's candidate.
+            self._evaluation_store.evaluate_series(series)
+
             if opportunity.signal is OpportunitySignal.CANDIDATE:
+                self._evaluation_store.record_candidate(
+                    symbol=symbol,
+                    signal_day=snapshot.last_day,
+                    signal_close=snapshot.last_close,
+                    rule="trend=ALZA",
+                )
                 opportunities.append(opportunity)
 
         return OpportunityScanResult(

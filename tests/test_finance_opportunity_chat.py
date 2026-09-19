@@ -72,3 +72,38 @@ def test_opportunity_chat_remembers_candidates_and_warns_daily_not_realtime():
     assert "no son cotizaciones en tiempo real" in text
     assert "importa primero el cierre diario" in text
     assert "cantidad expl?cita" in text
+
+def test_handles_strategy_performance_prompt():
+    from use_cases.finance_opportunity_chat import (
+        handles_strategy_performance_prompt,
+    )
+
+    assert handles_strategy_performance_prompt("rendimiento de estrategia")
+    assert handles_strategy_performance_prompt("rendimiento de se\u00f1ales")
+    assert not handles_strategy_performance_prompt("busca oportunidades")
+
+
+def test_strategy_performance_with_open_signal(tmp_path):
+    from datetime import date
+    from decimal import Decimal
+
+    from finance.strategy_evaluation import StrategyEvaluationStore
+    from use_cases.finance_opportunity_chat import FinanceOpportunityChat
+
+    store = StrategyEvaluationStore(tmp_path)
+    store.record_candidate(
+        symbol="VUSA.AMS",
+        signal_day=date(2026, 9, 18),
+        signal_close=Decimal("125.9990"),
+        rule="trend=ALZA",
+    )
+
+    chat = FinanceOpportunityChat.__new__(FinanceOpportunityChat)
+    chat._evaluation_store = store
+
+    text = chat._render_strategy_performance()
+
+    assert "Se?ales registradas: 1." in text
+    assert "Evaluadas a 20 sesiones: 0." in text
+    assert "Abiertas: 1." in text
+    assert "no hay evidencia suficiente" in text

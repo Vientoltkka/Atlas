@@ -112,19 +112,29 @@ class Engine:
         )
 
 
+
+class NoOpEvaluationStore:
+    def evaluate_series(self, series):
+        return ()
+
+    def record_candidate(self, **kwargs):
+        return None
+
+
 def test_service_scans_only_tactical_verified_entries(monkeypatch):
     market = Market()
     engine = Engine()
 
     monkeypatch.setattr(
         "finance.opportunity_service.build_quant_snapshot",
-        lambda series: series,
+        lambda series: snapshot(TREND_UP),
     )
 
     result = FinanceOpportunityService(
         Store(),
         market,
         engine=engine,
+        evaluation_store=NoOpEvaluationStore(),
     ).scan_tactical_watchlist()
 
     assert result.checked_symbols == ("AAA", "BBB")
@@ -139,13 +149,174 @@ def test_scan_does_not_mutate_watchlist_or_create_orders(monkeypatch):
 
     monkeypatch.setattr(
         "finance.opportunity_service.build_quant_snapshot",
-        lambda series: series,
+        lambda series: snapshot(TREND_UP),
     )
 
     FinanceOpportunityService(
         store,
         Market(),
         engine=Engine(),
+        evaluation_store=NoOpEvaluationStore(),
     ).scan_tactical_watchlist()
 
     assert store.entries() == original
+
+
+def test_candidate_is_recorded_for_strategy_evaluation(monkeypatch, tmp_path):
+    from datetime import date
+    from decimal import Decimal
+
+    from finance.strategy_evaluation import StrategyEvaluationStore
+    from tools.alpha_vantage import DailyBar, DailySeries
+
+    class SingleTacticalStore:
+        def entries(self):
+            return (
+                {
+                    "symbol": "VUSA",
+                    "provider_symbol": "VUSA.AMS",
+                    "mode": "TACTICAL",
+                    "needs_review": False,
+                },
+            )
+
+    def real_series(symbol):
+        bars = tuple(
+            DailyBar(
+                day=date(2026, 9, day),
+                open=Decimal("125"),
+                high=Decimal("127"),
+                low=Decimal("124"),
+                close=Decimal("125.9990"),
+                volume=1000,
+            )
+            for day in range(1, 19)
+        )
+        return DailySeries(
+            symbol=symbol,
+            provider_last_refreshed="2026-09-18",
+            provider_timezone="UTC",
+            bars=bars,
+        )
+
+    class EvaluationMarket:
+        def daily_series(self, symbol):
+            return real_series(symbol)
+
+    class CandidateEngine:
+        def evaluate(self, symbol, quant_snapshot):
+            from finance.opportunity import (
+                FinanceOpportunity,
+                OpportunitySignal,
+            )
+            return FinanceOpportunity(
+                symbol=symbol,
+                signal=OpportunitySignal.CANDIDATE,
+                reasons=("trend=ALZA",),
+                evidence=(),
+            )
+
+    quant = snapshot(TREND_UP)
+
+    monkeypatch.setattr(
+        "finance.opportunity_service.build_quant_snapshot",
+        lambda series: quant,
+    )
+
+    evaluation_store = StrategyEvaluationStore(tmp_path)
+
+    result = FinanceOpportunityService(
+        SingleTacticalStore(),
+        EvaluationMarket(),
+        engine=CandidateEngine(),
+        evaluation_store=evaluation_store,
+    ).scan_tactical_watchlist()
+
+    assert len(result.opportunities) == 1
+
+    entries = evaluation_store.entries()
+    assert len(entries) == 1
+    assert entries[0].symbol == "VUSA.AMS"
+    assert entries[0].signal_day == quant.last_day
+    assert entries[0].signal_close == quant.last_close
+    assert entries[0].rule == "trend=ALZA"
+
+
+def test_repeated_scan_does_not_duplicate_strategy_signal(monkeypatch, tmp_path):
+    from datetime import date
+    from decimal import Decimal
+
+    from finance.strategy_evaluation import StrategyEvaluationStore
+    from tools.alpha_vantage import DailyBar, DailySeries
+
+    class SingleTacticalStore:
+        def entries(self):
+            return (
+                {
+                    "symbol": "VUSA",
+                    "provider_symbol": "VUSA.AMS",
+                    "mode": "TACTICAL",
+                    "needs_review": False,
+                },
+            )
+
+    def real_series(symbol):
+        bars = tuple(
+            DailyBar(
+                day=date(2026, 9, day),
+                open=Decimal("125"),
+                high=Decimal("127"),
+                low=Decimal("124"),
+                close=Decimal("125.9990"),
+                volume=1000,
+            )
+            for day in range(1, 19)
+        )
+        return DailySeries(
+            symbol=symbol,
+            provider_last_refreshed="2026-09-18",
+            provider_timezone="UTC",
+            bars=bars,
+        )
+
+    class EvaluationMarket:
+        def daily_series(self, symbol):
+            return real_series(symbol)
+
+    class CandidateEngine:
+        def evaluate(self, symbol, quant_snapshot):
+            from finance.opportunity import (
+                FinanceOpportunity,
+                OpportunitySignal,
+            )
+            return FinanceOpportunity(
+                symbol=symbol,
+                signal=OpportunitySignal.CANDIDATE,
+                reasons=("trend=ALZA",),
+                evidence=(),
+            )
+
+    quant = snapshot(TREND_UP)
+
+    monkeypatch.setattr(
+        "finance.opportunity_service.build_quant_snapshot",
+        lambda series: quant,
+    )
+
+    evaluation_store = StrategyEvaluationStore(tmp_path)
+
+    service = FinanceOpportunityService(
+        SingleTacticalStore(),
+        EvaluationMarket(),
+        engine=CandidateEngine(),
+        evaluation_store=evaluation_store,
+    )
+
+    service.scan_tactical_watchlist()
+    service.scan_tactical_watchlist()
+
+    entries = evaluation_store.entries()
+
+    assert len(entries) == 1
+    assert entries[0].symbol == "VUSA.AMS"
+    assert entries[0].signal_day == quant.last_day
