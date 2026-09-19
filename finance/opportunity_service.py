@@ -1,4 +1,4 @@
-﻿"""Read-only tactical opportunity scan over the Atlas watchlist."""
+"""Read-only tactical opportunity scan over the Atlas watchlist."""
 
 from __future__ import annotations
 

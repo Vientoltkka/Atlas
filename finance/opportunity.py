@@ -1,4 +1,4 @@
-﻿"""Deterministic tactical opportunity detection for Atlas Finance.
+"""Deterministic tactical opportunity detection for Atlas Finance.
 
 This layer interprets Atlas' existing QuantSnapshot. It does not create
 orders, execute trades, mutate portfolios, call an LLM, or invent data.

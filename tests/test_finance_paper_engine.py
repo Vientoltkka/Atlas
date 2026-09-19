@@ -399,7 +399,7 @@ def test_paper_stack_imports_only_stdlib_and_finance_modules() -> None:
         "yfinance",
         "websocket",
     }
-    package_dir = Path(__file__).resolve().parent.parent / "finance"
+    package_dir = Path(__file__).resolve().parent.parent / "finance" / "paper"
     py_files = sorted(package_dir.rglob("*.py"))
     assert len(py_files) >= 5
 
