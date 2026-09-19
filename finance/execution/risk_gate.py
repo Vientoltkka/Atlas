@@ -32,6 +32,27 @@ class RiskGate:
             return RiskDecision(intent.intent_id, False, tuple(reasons), evidence=evidence)
         assert state.nav is not None and state.cash is not None and state.positions is not None and state.prices is not None
         assert state.daily_trade_count is not None and state.daily_realized_loss is not None
+        missing_position_prices = sorted(
+            symbol
+            for symbol, quantity in state.positions.items()
+            if quantity != 0
+            and (
+                symbol not in state.prices
+                or state.prices[symbol] <= 0
+            )
+        )
+        if missing_position_prices:
+            reasons.append("MISSING_POSITION_PRICE")
+            evidence["missing_position_prices"] = ",".join(
+                missing_position_prices
+            )
+            return RiskDecision(
+                intent.intent_id,
+                False,
+                tuple(reasons),
+                evidence=evidence,
+            )
+
         reference = intent.reference_price or state.prices.get(intent.symbol)
         if reference is None or reference <= 0:
             reasons.append("MISSING_REFERENCE_PRICE")

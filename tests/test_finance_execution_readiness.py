@@ -28,7 +28,19 @@ def intent(**changes):
     ({"quantity": Decimal("11")}, "MAX_ORDER_VALUE"),
     ({"positions": {"AAPL": Decimal("20")}}, "MAX_EXPOSURE_PER_ASSET"),
     ({"positions": {"MSFT": Decimal("60")}, "prices": {"AAPL": Decimal("100"), "MSFT": Decimal("100")}}, "MAX_TOTAL_EXPOSURE"),
-    ({"positions": {str(i): Decimal("1") for i in range(10)}}, "MAX_OPEN_POSITIONS"),
+    ({
+        "positions": {
+            str(i): Decimal("1")
+            for i in range(10)
+        },
+        "prices": {
+            **{"AAPL": Decimal("100")},
+            **{
+                str(i): Decimal("1")
+                for i in range(10)
+            },
+        },
+    }, "MAX_OPEN_POSITIONS"),
     ({"daily_trade_count": 5}, "MAX_DAILY_TRADES"),
     ({"daily_realized_loss": Decimal("500")}, "MAX_DAILY_LOSS"),
 ])
@@ -36,6 +48,29 @@ def test_gate_rejects_each_limit(changed, reason):
     item_changes = {key: changed.pop(key) for key in tuple(changed) if key == "quantity"}
     decision = RiskGate().evaluate(intent(**item_changes), state(**changed), RiskPolicy())
     assert not decision.approved and reason in decision.reasons
+
+
+def test_gate_fails_closed_when_open_position_has_no_valid_price():
+    gate = RiskGate()
+
+    for prices in (
+        {"AAPL": Decimal("100")},
+        {"AAPL": Decimal("100"), "MSFT": Decimal("0")},
+        {"AAPL": Decimal("100"), "MSFT": Decimal("-1")},
+    ):
+        decision = gate.evaluate(
+            intent(),
+            state(
+                positions={"MSFT": Decimal("5")},
+                prices=prices,
+            ),
+            RiskPolicy(),
+        )
+
+        assert not decision.approved
+        assert "MISSING_POSITION_PRICE" in decision.reasons
+        assert decision.evidence["missing_position_prices"] == "MSFT"
+
 
 
 def test_gate_approves_valid_paper_intent_and_fails_closed():
