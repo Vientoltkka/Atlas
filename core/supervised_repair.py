@@ -10,6 +10,12 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping
+import inspect
+
+from core.repair_workspace import (
+    RepairWorkspace,
+    RepairWorkspaceManager,
+)
 
 
 class ImprovementClassification(str, Enum):
@@ -78,9 +84,19 @@ class RepairValidation:
 class SupervisedRepairWorkflow:
     """Apply a pre-inspected minimal repair only after explicit approval."""
 
-    def __init__(self, project_root: Path, *, validator: Callable[[RepairProposal], RepairValidation]) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        validator: Callable[[RepairProposal], RepairValidation],
+        workspace_manager: RepairWorkspaceManager | None = None,
+    ) -> None:
         self._root = project_root.resolve()
         self._validator = validator
+        self._workspace_manager = (
+            workspace_manager or RepairWorkspaceManager(self._root)
+        )
+        self._workspace: RepairWorkspace | None = None
         self._proposal: RepairProposal | None = None
         self._originals: dict[str, str | None] = {}
         self._state: RepairState | None = None
@@ -128,21 +144,47 @@ class SupervisedRepairWorkflow:
         proposal = self._proposal
         if proposal is None or self._state is not RepairState.PROPOSED:
             return False
-        if self._authorization_consumed or not hmac.compare_digest(authorization, proposal.authorization):
+        if (
+            self._authorization_consumed
+            or not hmac.compare_digest(
+                authorization,
+                proposal.authorization,
+            )
+        ):
             self._record("authorization_rejected", proposal)
             return False
+
         self._authorization_consumed = True
+
+        try:
+            workspace = self._workspace_manager.create()
+            for relative, content in proposal.files.items():
+                target = self._workspace_target(workspace, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        except Exception:
+            if "workspace" in locals():
+                self._workspace_manager.remove(workspace)
+            self._record("isolated_apply_failed", proposal)
+            return False
+
+        self._workspace = workspace
         self._state = RepairState.AUTHORIZED
-        for relative, content in proposal.files.items():
-            target = self._target(relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        self._record("applied", proposal)
+        self._record("applied_in_isolation", proposal)
         return True
 
     def validate(self) -> RepairValidation:
         proposal = self._require_state(RepairState.AUTHORIZED)
-        result = self._validator(proposal)
+        validator_parameters = inspect.signature(
+            self._validator
+        ).parameters
+        if "validation_root" in validator_parameters:
+            result = self._validator(
+                proposal,
+                validation_root=self.validation_root,
+            )
+        else:
+            result = self._validator(proposal)
         if not result.passed or not self._metrics_improved(proposal, result):
             self.rollback("validation_failed")
             return result
@@ -155,6 +197,74 @@ class SupervisedRepairWorkflow:
         if not accepted:
             self.rollback("final_rejected")
             return False
+
+        workspace = self._workspace
+        if workspace is None:
+            raise RuntimeError(
+                "validated repair has no isolated workspace."
+            )
+
+        # Refuse promotion if production changed after propose().
+        for relative, original in self._originals.items():
+            target = self._target(relative)
+            current = (
+                target.read_text(encoding="utf-8")
+                if target.exists()
+                else None
+            )
+            if current != original:
+                self._record(
+                    "acceptance_conflict",
+                    proposal,
+                    detail=(
+                        "source changed externally before acceptance: "
+                        + relative
+                    ),
+                )
+                return False
+
+        # Refuse promotion if validated workspace content no longer
+        # matches the exact authorized proposal.
+        for relative, approved in proposal.files.items():
+            isolated = self._workspace_target(workspace, relative)
+            current = (
+                isolated.read_text(encoding="utf-8")
+                if isolated.exists()
+                else None
+            )
+            if current != approved:
+                self._record(
+                    "acceptance_conflict",
+                    proposal,
+                    detail=(
+                        "isolated repair changed after validation: "
+                        + relative
+                    ),
+                )
+                return False
+
+        written: list[str] = []
+        try:
+            for relative, approved in proposal.files.items():
+                target = self._target(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                written.append(relative)
+                target.write_text(approved, encoding="utf-8")
+        except Exception:
+            # Best-effort transactional restoration of any source
+            # files already promoted during this acceptance attempt.
+            for relative in reversed(written):
+                target = self._target(relative)
+                original = self._originals[relative]
+                if original is None:
+                    if target.exists():
+                        target.unlink()
+                    self._remove_empty_parents(target.parent)
+                else:
+                    target.write_text(original, encoding="utf-8")
+            raise
+
+        self._discard_workspace()
         self._state = RepairState.ACCEPTED
         self._record("accepted", proposal)
         return True
@@ -163,20 +273,39 @@ class SupervisedRepairWorkflow:
         proposal = self._proposal
         if proposal is None:
             return
-        for relative, applied in proposal.files.items():
-            target = self._target(relative)
-            current = target.read_text(encoding="utf-8") if target.exists() else None
-            if current != applied:
-                raise RuntimeError("rollback refused because an approved file changed externally: " + relative)
-        for relative, original in self._originals.items():
-            target = self._target(relative)
-            if original is None:
-                target.unlink()
-                self._remove_empty_parents(target.parent)
-            else:
-                target.write_text(original, encoding="utf-8")
+
+        self._discard_workspace()
         self._state = RepairState.ROLLED_BACK
         self._record("rolled_back", proposal, detail=reason)
+
+    @property
+    def validation_root(self) -> Path:
+        workspace = self._workspace
+        if workspace is None:
+            raise RuntimeError(
+                "repair has no active isolated workspace."
+            )
+        return workspace.workspace_root
+
+    def _workspace_target(
+        self,
+        workspace: RepairWorkspace,
+        relative: str,
+    ) -> Path:
+        root = workspace.workspace_root.resolve()
+        candidate = (root / relative).resolve()
+        if candidate == root or root not in candidate.parents:
+            raise ValueError(
+                "repair scope must remain inside the isolated workspace."
+            )
+        return candidate
+
+    def _discard_workspace(self) -> None:
+        workspace = self._workspace
+        if workspace is None:
+            return
+        self._workspace = None
+        self._workspace_manager.remove(workspace)
 
     def _validate_scope(self, proposal: RepairProposal) -> None:
         for relative in proposal.files:

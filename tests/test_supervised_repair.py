@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -11,6 +12,48 @@ from core.supervised_repair import (
     RepairValidation,
     SupervisedRepairWorkflow,
 )
+
+
+def _ensure_git_repo(root: Path) -> None:
+    """Create a real temporary Git repository for isolated-repair tests."""
+    if (root / ".git").exists():
+        return
+
+    subprocess.run(
+        ("git", "init"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.email", "atlas-tests@example.invalid"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Atlas Tests"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "add", "-A"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "commit", "--allow-empty", "-m", "test fixture"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 def _proposal() -> RepairProposal:
@@ -24,6 +67,7 @@ def _proposal() -> RepairProposal:
 
 
 def _workflow(root: Path, *, passed: bool = True) -> SupervisedRepairWorkflow:
+    _ensure_git_repo(root)
     return SupervisedRepairWorkflow(
         root,
         validator=lambda _: RepairValidation(passed, {"failures": 1}, {"failures": 0}, "fixture validation"),
@@ -54,7 +98,12 @@ def test_no_change_before_exact_proposal_authorization(tmp_path: Path) -> None:
     assert not workflow.authorize_and_apply("AUTORIZAR repair.other invalid")
     assert target.read_text(encoding="utf-8") == "original\n"
     assert workflow.authorize_and_apply(proposal.authorization)
-    assert target.read_text(encoding="utf-8") == "fixed\n"
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert (
+        (workflow.validation_root / "fixture.txt")
+        .read_text(encoding="utf-8")
+        == "fixed\n"
+    )
     assert not workflow.authorize_and_apply(proposal.authorization)
 
 
@@ -72,7 +121,12 @@ def test_validation_records_metrics_and_final_acceptance_preserves_change(tmp_pa
     assert workflow.finalize(accepted=True)
     assert workflow.state is RepairState.ACCEPTED
     assert target.read_text(encoding="utf-8") == "fixed\n"
-    assert [entry["event"] for entry in workflow.audit_log] == ["proposed", "applied", "validated", "accepted"]
+    assert [entry["event"] for entry in workflow.audit_log] == [
+        "proposed",
+        "applied_in_isolation",
+        "validated",
+        "accepted",
+    ]
 
 
 def test_failed_validation_rolls_back_exact_scope_and_leaves_unrelated_file(tmp_path: Path) -> None:
@@ -109,3 +163,47 @@ def test_rejects_secret_and_outside_scope_before_snapshot(tmp_path: Path) -> Non
         workflow.propose(RepairProposal("repair.secret", "x", {".env": "x"}, ("test",)))
     with pytest.raises(ValueError):
         workflow.propose(RepairProposal("repair.outside", "x", {"../outside.txt": "x"}, ("test",)))
+
+
+def test_final_acceptance_refuses_external_source_change(tmp_path: Path) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("original\n", encoding="utf-8")
+    workflow = _workflow(tmp_path)
+    proposal = workflow.propose(_proposal())
+
+    assert workflow.authorize_and_apply(proposal.authorization)
+    validation = workflow.validate()
+    assert validation.passed
+    assert workflow.state is RepairState.VALIDATED
+
+    target.write_text("human edit\n", encoding="utf-8")
+
+    assert not workflow.finalize(accepted=True)
+    assert workflow.state is RepairState.VALIDATED
+    assert target.read_text(encoding="utf-8") == "human edit\n"
+
+    workflow.rollback("acceptance_conflict")
+    assert workflow.state is RepairState.ROLLED_BACK
+    assert target.read_text(encoding="utf-8") == "human edit\n"
+
+def test_final_acceptance_refuses_tampered_isolated_workspace(tmp_path: Path) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("original\n", encoding="utf-8")
+    workflow = _workflow(tmp_path)
+    proposal = workflow.propose(_proposal())
+
+    assert workflow.authorize_and_apply(proposal.authorization)
+    validation = workflow.validate()
+    assert validation.passed
+    assert workflow.state is RepairState.VALIDATED
+
+    isolated = workflow.validation_root / "fixture.txt"
+    isolated.write_text("tampered\n", encoding="utf-8")
+
+    assert not workflow.finalize(accepted=True)
+    assert workflow.state is RepairState.VALIDATED
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+    workflow.rollback("acceptance_conflict")
+    assert workflow.state is RepairState.ROLLED_BACK
+    assert target.read_text(encoding="utf-8") == "original\n"

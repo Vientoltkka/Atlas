@@ -97,7 +97,24 @@ class VoiceCodeRepairBuilder:
             metric_directions={"expired_model_worker_wait_ms": "decrease"},
         )
 
-    def validator(self, _proposal: RepairProposal) -> RepairValidation:
+    def validator(
+        self,
+        _proposal: RepairProposal,
+        *,
+        validation_root: Path | None = None,
+    ) -> RepairValidation:
+        original_root = self._root
+        if validation_root is not None:
+            self._root = validation_root.resolve()
+        try:
+            return self._validate_current_root(_proposal)
+        finally:
+            self._root = original_root
+
+    def _validate_current_root(
+        self,
+        _proposal: RepairProposal,
+    ) -> RepairValidation:
         before = self._before_latency_ms
         if before is None:
             return RepairValidation(False, detail="No existe una medición previa confiable.")

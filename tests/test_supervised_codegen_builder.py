@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -153,6 +154,37 @@ class _FakeClient:
         return self.response
 
 
+
+
+def _ensure_git_repo(root: Path) -> None:
+    """Create an independent Git fixture required by isolated repairs."""
+    root.mkdir(parents=True, exist_ok=True)
+
+    if (root / ".git").exists():
+        return
+
+    commands = (
+        ("git", "init"),
+        ("git", "config", "user.email", "atlas-tests@example.invalid"),
+        ("git", "config", "user.name", "Atlas Tests"),
+        ("git", "add", "-A"),
+        ("git", "commit", "--allow-empty", "-m", "fixture baseline"),
+    )
+
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Git fixture failed: {' '.join(command)}\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+
 def _builder(root: Path, response: str = _RESPONSE, **kwargs: object) -> tuple[SupervisedCodegenCapabilityBuilder, _FakeClient]:
     client = _FakeClient(response)
     return SupervisedCodegenCapabilityBuilder(root, client, model="test-model", **kwargs), client
@@ -162,6 +194,7 @@ def _project_root(tmp_path: Path) -> Path:
     root = tmp_path / "project"
     (root / "bootstrap").mkdir(parents=True)
     (root / _BOOTSTRAP_PATH).write_text(_BOOTSTRAP, encoding="utf-8")
+    _ensure_git_repo(root)
     return root
 
 
@@ -604,23 +637,38 @@ def test_host_validator_runs_focal_tests_and_the_model_is_not_consulted(tmp_path
     assert workflow.state is not None and workflow.state.value == "ACCEPTED"
 
 
+
 def test_full_flow_conserves_the_new_capability(tmp_path: Path) -> None:
     root = _project_root(tmp_path)
     builder, _ = _builder(root)
     proposal = builder.build(builder.diagnose(_PROMPT), _PROMPT)
     workflow = SupervisedRepairWorkflow(root, validator=builder.validator)
     workflow.propose(proposal)
+
     assert not (root / _USE_CASE_PATH).exists()
     assert workflow.authorize_and_apply(proposal.authorization)
 
     validation = workflow.validate()
 
     assert validation.passed
-    assert (root / _USE_CASE_PATH).read_text(encoding="utf-8") == _USE_CASE
-    assert 'registry.register("handler.text-report", _text_report_handler)' in (root / _BOOTSTRAP_PATH).read_text(encoding="utf-8")
-    assert (root / _MANIFEST_PATH).exists()
+
+    # Validation occurs only inside the isolated worktree.
+    assert not (root / _USE_CASE_PATH).exists()
+    assert (
+        'registry.register("handler.text-report", _text_report_handler)'
+        not in (root / _BOOTSTRAP_PATH).read_text(encoding="utf-8")
+    )
+    assert not (root / _MANIFEST_PATH).exists()
+
+    # Only final human acceptance promotes the exact reviewed files.
     assert workflow.finalize(accepted=True)
 
+    assert (root / _USE_CASE_PATH).read_text(encoding="utf-8") == _USE_CASE
+    assert (
+        'registry.register("handler.text-report", _text_report_handler)'
+        in (root / _BOOTSTRAP_PATH).read_text(encoding="utf-8")
+    )
+    assert (root / _MANIFEST_PATH).exists()
 
 def test_failed_focal_tests_roll_back_the_exact_scope(tmp_path: Path) -> None:
     root = _project_root(tmp_path)

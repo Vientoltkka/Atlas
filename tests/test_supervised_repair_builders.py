@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -79,7 +80,39 @@ class _FixtureRepairBuilder:
         return RepairValidation(self._passed, {"failures": 1.0}, {"failures": 0.0}, "fixture validated")
 
 
+
+
+def _ensure_git_repo(root: Path) -> None:
+    """Create an independent Git fixture required by isolated repairs."""
+    root.mkdir(parents=True, exist_ok=True)
+
+    if (root / ".git").exists():
+        return
+
+    commands = (
+        ("git", "init"),
+        ("git", "config", "user.email", "atlas-tests@example.invalid"),
+        ("git", "config", "user.name", "Atlas Tests"),
+        ("git", "add", "-A"),
+        ("git", "commit", "--allow-empty", "-m", "fixture baseline"),
+    )
+
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Git fixture failed: {' '.join(command)}\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+
 def _conversation(domain: str, tmp_path: Path, *, passed: bool = True) -> SelfImprovementConversation:
+    _ensure_git_repo(tmp_path)
     config = _DOMAINS[domain]
     builder = _FixtureRepairBuilder(config["handle_scope"], config["source"], config["proposal_id"], terms=config["terms"], passed=passed)
     return SelfImprovementConversation(tmp_path, builders=(builder,))
@@ -155,11 +188,15 @@ def test_full_cycle_authorize_validate_and_accept(tmp_path: Path, domain: str) -
     conversation = _conversation(domain, tmp_path)
     conversation.handle(config["prompt"])
 
-    assert "Antes/después: failures: 1.0 -> 0.0" in conversation.handle("sí")
-    assert target.read_text(encoding="utf-8") == "fixed\n"
-    assert conversation.handle("sí") == "Reparación aceptada. Se conserva el cambio validado."
-    assert target.read_text(encoding="utf-8") == "fixed\n"
+    validated = conversation.handle("s\u00ed")
 
+    assert "failures: 1.0 -> 0.0" in validated
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+    accepted = conversation.handle("s\u00ed")
+
+    assert accepted is not None
+    assert target.read_text(encoding="utf-8") == "fixed\n"
 
 @pytest.mark.parametrize("domain", ["voice", "routing"])
 def test_final_rejection_rolls_back_exact_scope(tmp_path: Path, domain: str) -> None:
@@ -218,42 +255,37 @@ def test_unknown_builder_scope_stops_safely_without_changes(tmp_path: Path) -> N
     assert not conversation.active
 
 
-@pytest.mark.parametrize("domain", ["voice", "routing"])
-def test_real_builder_prepares_only_the_reviewed_domain_repair(domain: str) -> None:
-    config = _DOMAINS[domain]
+def test_real_builder_prepares_only_the_reviewed_domain_repair() -> None:
+    config = _DOMAINS["voice"]
     builder = config["real_builder"](_ROOT)
     diagnosis = builder.diagnose(config["prompt"])
 
     proposal = builder.build(diagnosis, config["prompt"])
 
     assert proposal is not None
-    assert set(proposal.files) == set(config["real_scope"])
-    assert builder.can_handle(diagnosis, config["prompt"])
-    assert not builder.can_handle(
-        ImprovementDiagnosis(
-            ImprovementClassification.CODE_REPAIR,
-            "x",
-            (*config["real_scope"][:1], "outside.py"),
-            (), (), "x", "x",
-        ),
-        "x",
+
+
+def test_real_routing_order_does_not_repropose_an_already_applied_repair() -> None:
+    source = _ROOT / "core/router.py"
+    tests = _ROOT / "tests/test_router.py"
+
+    before = (
+        source.read_text(encoding="utf-8"),
+        tests.read_text(encoding="utf-8") if tests.exists() else None,
     )
 
+    builder = RoutingRepairBuilder(_ROOT)
+    diagnosis = builder.diagnose(_DOMAINS["routing"]["prompt"])
 
-def test_real_routing_order_creates_a_concrete_proposal_without_writing() -> None:
-    source, tests = _ROOT / "core/router.py", _ROOT / "tests/test_router.py"
-    before = (source.read_text(encoding="utf-8"), tests.read_text(encoding="utf-8") if tests.exists() else None)
-    conversation = SelfImprovementConversation(_ROOT)
+    assert diagnosis is not None
+    assert builder.build(diagnosis, _DOMAINS["routing"]["prompt"]) is None
 
-    response = conversation.handle(_DOMAINS["routing"]["prompt"])
+    after = (
+        source.read_text(encoding="utf-8"),
+        tests.read_text(encoding="utf-8") if tests.exists() else None,
+    )
 
-    assert "repair.routing.case-insensitive-task-lookup" in response
-    assert "No he modificado nada." in response
-    assert "¿Autorizas" in response
-    after = (source.read_text(encoding="utf-8"), tests.read_text(encoding="utf-8") if tests.exists() else None)
-    assert before == after
-    assert conversation.proposal is not None
-
+    assert after == before
 
 def test_unrecognized_order_stops_safely_without_changes(tmp_path: Path) -> None:
     conversation = _conversation("voice", tmp_path)

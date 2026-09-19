@@ -206,15 +206,18 @@ class SupervisedCodegenCapabilityBuilder:
             metric_directions={_METRIC: "increase"},
         )
 
-    def validator(self, proposal: RepairProposal) -> RepairValidation:
+    def validator(self, proposal: RepairProposal, validation_root: Path) -> RepairValidation:
         before = self._before_passed
         if before is None:
             return RepairValidation(False, detail="No existe una medicion previa confiable.")
         if not self._scope_respected(proposal):
             return RepairValidation(False, detail="La propuesta aplicada salio del alcance permitido; no se valida.")
-        return_code, after, summary = self._pytest_run(proposal.focused_tests)
-        compiled = self._compile_ok([path for path in proposal.files if path.endswith(".py")])
-        clean = self._git_clean()
+        return_code, after, summary = self._pytest_run(proposal.focused_tests, root=validation_root)
+        compiled = self._compile_ok(
+            [path for path in proposal.files if path.endswith(".py")],
+            root=validation_root,
+        )
+        clean = self._git_clean(root=validation_root)
         passed = return_code == 0 and after > before and compiled and clean
         failures = [
             label
@@ -418,7 +421,12 @@ class SupervisedCodegenCapabilityBuilder:
     def _pytest_passed(self, focused_tests: tuple[str, ...]) -> int:
         return self._pytest_run(focused_tests)[1]
 
-    def _pytest_run(self, focused_tests: tuple[str, ...]) -> tuple[int, int, str]:
+    def _pytest_run(
+        self,
+        focused_tests: tuple[str, ...],
+        *,
+        root: Path | None = None,
+    ) -> tuple[int, int, str]:
         if not focused_tests:
             return 1, 0, ""
         basetemp = Path(tempfile.gettempdir()) / "atlas-supervised-codegen"
@@ -432,6 +440,7 @@ class SupervisedCodegenCapabilityBuilder:
             "--basetemp",
             str(basetemp),
             *focused_tests,
+            root=root,
         )
         match = _PASSED.search(result.stdout)
         return result.returncode, int(match.group(1)) if match else 0, self._failure_summary(result.stdout, result.stderr)
@@ -485,21 +494,38 @@ class SupervisedCodegenCapabilityBuilder:
             context += 1
         return lines[start:stop]
 
-    def _compile_ok(self, paths: list[str]) -> bool:
+    def _compile_ok(self, paths: list[str], *, root: Path | None = None) -> bool:
         if not paths:
             return False
-        return self._run(sys.executable, "-c", _COMPILE_SCRIPT, *paths).returncode == 0
+        return self._run(
+            sys.executable,
+            "-c",
+            _COMPILE_SCRIPT,
+            *paths,
+            root=root,
+        ).returncode == 0
 
-    def _git_clean(self) -> bool:
-        result = self._run("git", "diff", "--check")
+    def _git_clean(self, *, root: Path | None = None) -> bool:
+        result = self._run("git", "diff", "--check", root=root)
         if result.returncode != 0 and "not a git repository" in (result.stderr + result.stdout).casefold():
             return True
         return result.returncode == 0
 
-    def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        *arguments: str,
+        root: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        return subprocess.run(arguments, cwd=self._root, capture_output=True, text=True, check=False, env=environment)
+        return subprocess.run(
+            arguments,
+            cwd=(root or self._root).resolve(),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
 
     @staticmethod
     def _proposal_id(prompt: str) -> str:

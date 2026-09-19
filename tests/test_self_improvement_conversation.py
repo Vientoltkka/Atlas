@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -13,13 +14,55 @@ from core.voice_repair_builder import VoiceCodeRepairBuilder
 from memory.conversation import ConversationMemory
 
 
+def _ensure_git_repo(root: Path) -> None:
+    """Create a real temporary Git repository for isolated-repair tests."""
+    if (root / ".git").exists():
+        return
+
+    subprocess.run(
+        ("git", "init"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.email", "atlas-tests@example.invalid"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Atlas Tests"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "add", "-A"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "commit", "--allow-empty", "-m", "test fixture"),
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 class _Chat:
     name = "chat"
 
     def __init__(self) -> None:
         self.calls = 0
 
-    def run(self, *, model, messages):
+    def run(self, *, model, messages, provider_id=None):
         self.calls += 1
         return "ruta normal"
 
@@ -33,6 +76,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _conversation(root: Path, *, passed: bool = True) -> SelfImprovementConversation:
+    _ensure_git_repo(root)
     def build(diagnosis: ImprovementDiagnosis, _prompt: str) -> RepairProposal | None:
         if diagnosis.classification is not ImprovementClassification.CODE_REPAIR:
             return None
@@ -152,15 +196,21 @@ def test_e2e_propose_authorize_validate_and_accept(tmp_path: Path) -> None:
     target.write_text("original\n", encoding="utf-8")
     app, _ = _orchestrator(tmp_path)
 
-    proposal = app.process_prompt("Atlas, corrige los fallos de la voz sin romper las funciones actuales.", confirm=lambda _: "")
+    proposal = app.process_prompt(
+        "Atlas, corrige los fallos de la voz sin romper las funciones actuales.",
+        confirm=lambda _: "",
+    )
     assert "proposal_id: repair.dialogue-fixture" in proposal
     assert target.read_text(encoding="utf-8") == "original\n"
-    validated = app.process_prompt("sí", confirm=lambda _: "")
-    assert "Antes/después: failures: 1 -> 0" in validated
-    assert target.read_text(encoding="utf-8") == "fixed\n"
-    assert app.process_prompt("sí", confirm=lambda _: "") == "Reparación aceptada. Se conserva el cambio validado."
-    assert target.read_text(encoding="utf-8") == "fixed\n"
 
+    validated = app.process_prompt("s\u00ed", confirm=lambda _: "")
+    assert "Antes/despu\u00e9s: failures: 1 -> 0" in validated
+
+    # First approval applies and validates only inside the isolated worktree.
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+    accepted = app.process_prompt("s\u00ed", confirm=lambda _: "")
+    assert target.read_text(encoding="utf-8") == "fixed\n"
 
 def test_rejection_rolls_back_exact_fixture_scope(tmp_path: Path) -> None:
     target = tmp_path / "fixture.txt"
@@ -197,3 +247,31 @@ def test_normal_conversation_is_not_captured(tmp_path: Path) -> None:
     app, chat = _orchestrator(tmp_path)
     assert app.process_prompt("corrige este texto", confirm=lambda _: "") == "ruta normal"
     assert chat.calls == 1
+
+def test_acceptance_conflict_is_not_reported_as_success(tmp_path: Path) -> None:
+    conversation = _conversation(tmp_path)
+    proposed = conversation.handle("Atlas, corrige los fallos de la voz")
+
+    assert proposed is not None
+    validated = conversation.handle("s\u00ed")
+    assert validated is not None
+    assert conversation.active
+
+    workflow = conversation._workflow
+    assert workflow is not None
+
+    target = tmp_path / "fixture.txt"
+    target.write_text("human edit\n", encoding="utf-8")
+
+    response = conversation.handle("s\u00ed")
+
+    assert response is not None
+    assert "No se pudo conservar" in response
+    assert "Reparaci\u00f3n aceptada" not in response
+    assert conversation.active
+    assert target.read_text(encoding="utf-8") == "human edit\n"
+
+    rejected = conversation.handle("no")
+    assert rejected is not None
+    assert not conversation.active
+    assert target.read_text(encoding="utf-8") == "human edit\n"

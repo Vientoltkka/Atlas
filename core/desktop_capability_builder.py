@@ -158,18 +158,22 @@ class DesktopCapabilityImprovementBuilder:
             metric_directions={_METRIC: "increase"},
         )
 
-    def validator(self, proposal: RepairProposal) -> RepairValidation:
+    def validator(self, proposal: RepairProposal, validation_root: Path) -> RepairValidation:
         if proposal.proposal_id == _OPEN_APPS_PROPOSAL_ID:
             before, metric = self._before_open_apps_successes, _OPEN_APPS_METRIC
         else:
             before, metric = self._before_successes, _METRIC
         if before is None:
             return RepairValidation(False, detail="No existe una medicion previa confiable.")
-        after = self._measure_open_applications_by_name() if metric == _OPEN_APPS_METRIC else self._measure_open_with_application()
+        after = (
+            self._measure_open_applications_by_name(root=validation_root)
+            if metric == _OPEN_APPS_METRIC
+            else self._measure_open_with_application(root=validation_root)
+        )
         basetemp = Path(tempfile.gettempdir()) / "atlas-supervised-pytest"
-        tests = self._run("-m", "pytest", "-q", _TEST_SOURCE, "--basetemp", str(basetemp))
-        compiled = self._run("-m", "py_compile", _USE_CASE_SOURCE)
-        diff_checked = self._git("diff", "--check")
+        tests = self._run("-m", "pytest", "-q", _TEST_SOURCE, "--basetemp", str(basetemp), root=validation_root)
+        compiled = self._run("-m", "py_compile", _USE_CASE_SOURCE, root=validation_root)
+        diff_checked = self._git("diff", "--check", root=validation_root)
         passed = after > before and all(result.returncode == 0 for result in (tests, compiled, diff_checked))
         detail = "tests focales, py_compile y git diff --check correctos." if passed else self._validation_error(tests, compiled, diff_checked)
         return RepairValidation(passed, {metric: float(before)}, {metric: float(after)}, detail)
@@ -379,7 +383,7 @@ class DesktopCapabilityImprovementBuilder:
         )
         return inspection.tests_source + block
 
-    def _measure_open_applications_by_name(self) -> int:
+    def _measure_open_applications_by_name(self, *, root: Path | None = None) -> int:
         """Count known-application-by-name opening successes in a fresh interpreter."""
         script = (
             "from pathlib import Path\n"
@@ -397,20 +401,21 @@ class DesktopCapabilityImprovementBuilder:
             "        return \"ok\"\n"
             "\n"
             "executor = _Executor()\n"
-            f"use_case = DesktopInteractionUseCase(executor, project_root=Path({str(self._root)!r}))\n"
+            f"use_case = DesktopInteractionUseCase(executor, project_root=Path({str((root or self._root).resolve())!r}))\n"
             "use_case.execute('abre la calculadora')\n"
             "ok = bool(executor.calls)\n"
             "ok = ok and executor.calls[0][0] == 'desktop.open_application'\n"
             "ok = ok and executor.calls[0][1].get('application') == 'calculadora'\n"
             "print(1 if ok else 0)\n"
         )
-        result = subprocess.run((sys.executable, "-c", script), cwd=self._root, capture_output=True, text=True, check=False)
+        execution_root = (root or self._root).resolve()
+        result = subprocess.run((sys.executable, "-c", script), cwd=execution_root, capture_output=True, text=True, check=False)
         try:
             return int(result.stdout.strip().splitlines()[-1])
         except (IndexError, ValueError):
             return 0
 
-    def _measure_open_with_application(self) -> int:
+    def _measure_open_with_application(self, *, root: Path | None = None) -> int:
         """Count open-with-application successes in a fresh interpreter."""
         script = (
             "import os\n"
@@ -434,7 +439,7 @@ class DesktopCapabilityImprovementBuilder:
             "os.close(descriptor)\n"
             "try:\n"
             "    executor = _Executor()\n"
-            f"    use_case = DesktopInteractionUseCase(executor, project_root=Path({str(self._root)!r}))\n"
+            f"    use_case = DesktopInteractionUseCase(executor, project_root=Path({str((root or self._root).resolve())!r}))\n"
             "    use_case.execute('abre ' + path + ' con el bloc de notas')\n"
             "    ok = bool(executor.calls)\n"
             "    ok = ok and executor.calls[0][0] == 'desktop.open_file'\n"
@@ -443,17 +448,30 @@ class DesktopCapabilityImprovementBuilder:
             "finally:\n"
             "    os.unlink(path)\n"
         )
-        result = subprocess.run((sys.executable, "-c", script), cwd=self._root, capture_output=True, text=True, check=False)
+        execution_root = (root or self._root).resolve()
+        result = subprocess.run((sys.executable, "-c", script), cwd=execution_root, capture_output=True, text=True, check=False)
         try:
             return int(result.stdout.strip().splitlines()[-1])
         except (IndexError, ValueError):
             return 0
 
-    def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run((sys.executable, *arguments), cwd=self._root, capture_output=True, text=True, check=False)
+    def _run(self, *arguments: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            (sys.executable, *arguments),
+            cwd=(root or self._root).resolve(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-    def _git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(("git", *arguments), cwd=self._root, capture_output=True, text=True, check=False)
+    def _git(self, *arguments: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("git", *arguments),
+            cwd=(root or self._root).resolve(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     @staticmethod
     def _validation_error(*results: subprocess.CompletedProcess[str]) -> str:

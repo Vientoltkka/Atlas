@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import inspect
+import inspect
 import re
 from typing import Protocol, runtime_checkable
 import unicodedata
@@ -16,6 +18,7 @@ from core.supervised_repair import (
     RepairValidation,
     SupervisedRepairWorkflow,
 )
+from core.self_diagnosis import SelfDiagnosisService
 
 
 _AFFIRMATIVE = frozenset({"si", "s", "vale", "ok", "de acuerdo", "adelante"})
@@ -62,7 +65,7 @@ class SupervisedRepairBuilder(Protocol):
 
     def build(self, diagnosis: ImprovementDiagnosis, prompt: str) -> RepairProposal | None: ...
 
-    def validator(self, proposal: RepairProposal) -> RepairValidation: ...
+    def validator(self, proposal: RepairProposal, validation_root: Path) -> RepairValidation: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +109,13 @@ class _CallableRepairBuilder:
     def build(self, diagnosis: ImprovementDiagnosis, prompt: str) -> RepairProposal | None:
         return self._build(diagnosis, prompt)
 
-    def validator(self, proposal: RepairProposal) -> RepairValidation:
+    def validator(self, proposal: RepairProposal, validation_root: Path) -> RepairValidation:
         factory = self._validator_factory or (lambda _proposal: _unavailable_validator)
-        return factory(proposal)(proposal)
+        validator = factory(proposal)
+        parameters = inspect.signature(validator).parameters
+        if "validation_root" in parameters:
+            return validator(proposal, validation_root=validation_root)
+        return validator(proposal)
 
 
 class SelfImprovementConversation:
@@ -121,8 +128,10 @@ class SelfImprovementConversation:
         builders: Sequence[SupervisedRepairBuilder] | None = None,
         proposal_builder: ProposalBuilder | None = None,
         validator_factory: ValidatorFactory | None = None,
+        self_diagnosis_service: SelfDiagnosisService | None = None,
     ) -> None:
         self._root = project_root
+        self._self_diagnosis_service = self_diagnosis_service
         if builders is not None:
             registry = SupervisedRepairBuilderRegistry(builders)
         elif proposal_builder is not None:
@@ -165,6 +174,8 @@ class SelfImprovementConversation:
         pending = self._handle_pending(prompt)
         if pending is not None:
             return pending
+        if self.is_self_diagnosis_request(prompt):
+            return self._present_self_diagnosis()
         if not self.is_self_improvement_request(prompt):
             return None
         diagnosis = self.diagnose(prompt)
@@ -190,6 +201,64 @@ class SelfImprovementConversation:
         workflow.propose(proposal)
         self._workflow, self._diagnosis = workflow, diagnosis
         return self._present_proposal(diagnosis, proposal)
+
+    @staticmethod
+    def is_self_diagnosis_request(prompt: str) -> bool:
+        if not isinstance(prompt, str):
+            return False
+        text = _normal(prompt)
+        asks_analysis = any(
+            term in text
+            for term in (
+                "que puedes automejorar",
+                "que puedes mejorar de ti",
+                "analiza que puedes automejorar",
+                "analiza que puedes mejorar",
+            )
+        )
+        return asks_analysis and ("atlas" in text or "ti" in text)
+
+    def _present_self_diagnosis(self) -> str:
+        service = self._self_diagnosis_service
+        if service is None:
+            return (
+                "No dispongo todav?a de evidencia operativa suficiente "
+                "para realizar un autodiagn?stico verificable. "
+                "No he modificado nada."
+            )
+
+        findings = service.diagnose()
+        if not findings:
+            return (
+                "No he encontrado ahora mismo una oportunidad de mejora "
+                "respaldada por evidencia operativa. "
+                "No he modificado nada."
+            )
+
+        lines = [
+            "Autodiagn?stico de Atlas basado en evidencia real.",
+            "No he modificado nada.",
+        ]
+        for finding in findings:
+            lines.extend(
+                (
+                    "",
+                    f"Hallazgo: {finding.title}",
+                    f"id: {finding.finding_id}",
+                    "Evidencia:",
+                    *(f"- {item}" for item in finding.evidence),
+                    f"Objetivo: {finding.objective}",
+                    f"Riesgo: {finding.risk}",
+                )
+            )
+        lines.extend(
+            (
+                "",
+                "Este diagn?stico no autoriza ning?n cambio.",
+                "Puedes pedirme que prepare una mejora concreta sobre uno de los hallazgos.",
+            )
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def is_self_improvement_request(prompt: str) -> bool:
@@ -222,33 +291,69 @@ class SelfImprovementConversation:
         workflow = self._workflow
         if workflow is None:
             return None
+
         answer = _normal(prompt)
+
         if workflow.state is RepairState.PROPOSED:
             if answer in _NEGATIVE:
                 self._clear()
-                return "Reparación cancelada. No se han realizado cambios."
+                return "Reparaci\u00f3n cancelada. No se han realizado cambios."
+
             if answer not in _AFFIRMATIVE:
-                return "Hay una propuesta de reparación activa. Responde sí para autorizarla o no para cancelarla."
+                return (
+                    "Hay una propuesta de reparaci\u00f3n activa. "
+                    "Responde s\u00ed para autorizarla o no para cancelarla."
+                )
+
             proposal = self.proposal
             assert proposal is not None
+
             if not workflow.authorize_and_apply(proposal.authorization):
                 self._clear()
-                return "La autorización de la propuesta activa fue rechazada. No se han realizado cambios."
+                return (
+                    "La autorizaci\u00f3n de la propuesta activa fue rechazada. "
+                    "No se han realizado cambios."
+                )
+
             validation = workflow.validate()
+
             if workflow.state is RepairState.ROLLED_BACK:
                 self._clear()
-                return "La validación falló; se restauró exactamente el alcance aprobado. " + validation.detail
+                return (
+                    "La validaci\u00f3n fall\u00f3; se restaur\u00f3 exactamente "
+                    "el alcance aprobado. " + validation.detail
+                )
+
             return self._present_validation(validation)
+
         if workflow.state is RepairState.VALIDATED:
             if answer not in _AFFIRMATIVE | _NEGATIVE:
-                return "La reparación está validada. Responde sí para conservarla o no para restaurar el estado anterior."
+                return (
+                    "La reparaci\u00f3n est\u00e1 validada. Responde s\u00ed para "
+                    "conservarla o no para restaurar el estado anterior."
+                )
+
             accepted = answer in _AFFIRMATIVE
-            workflow.finalize(accepted=accepted)
+            finalized = workflow.finalize(accepted=accepted)
+
+            if accepted and not finalized:
+                return (
+                    "No se pudo conservar la reparaci\u00f3n porque el c\u00f3digo "
+                    "cambi? despu\u00e9s de la validaci\u00f3n. La propuesta sigue "
+                    "aislada y no se ha sobrescrito el estado actual. "
+                    "Responde no para descartarla."
+                )
+
             if accepted:
                 self._clear()
-                return "Reparación aceptada. Se conserva el cambio validado."
+                return "Reparaci\u00f3n aceptada. Se conserva el cambio validado."
+
             self._clear()
-            return "Reparación rechazada. Se restauró exactamente el estado anterior."
+            return (
+                "Reparaci\u00f3n rechazada. "
+                "Se restaur\u00f3 exactamente el estado anterior."
+            )
+
         return None
 
     def _clear(self) -> None:

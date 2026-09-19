@@ -10,6 +10,7 @@ class ModelLatencySample:
     provider_id: str | None
     model_name: str
     latency_seconds: float
+    observation_count: int
 
 
 class ModelLatencyTracker:
@@ -20,6 +21,7 @@ class ModelLatencyTracker:
             raise ValueError("alpha must be in (0, 1].")
         self._alpha = float(alpha)
         self._estimates: dict[tuple[str | None, str], float] = {}
+        self._counts: dict[tuple[str | None, str], int] = {}
         self._lock = RLock()
 
     def record(
@@ -48,6 +50,7 @@ class ModelLatencyTracker:
                 if previous is None
                 else self._alpha * value + (1.0 - self._alpha) * previous
             )
+            self._counts[key] = self._counts.get(key, 0) + 1
 
     def estimate(
         self,
@@ -56,3 +59,32 @@ class ModelLatencyTracker:
     ) -> float | None:
         with self._lock:
             return self._estimates.get((provider_id, model_name.strip()))
+
+    def snapshot(self) -> tuple[ModelLatencySample, ...]:
+        """Return an immutable point-in-time view of observed model latencies."""
+        with self._lock:
+            items = tuple(
+                (
+                    provider_id,
+                    model_name,
+                    latency_seconds,
+                    self._counts.get((provider_id, model_name), 0),
+                )
+                for (provider_id, model_name), latency_seconds
+                in self._estimates.items()
+            )
+
+        return tuple(
+            ModelLatencySample(
+                provider_id=provider_id,
+                model_name=model_name,
+                latency_seconds=latency_seconds,
+                observation_count=observation_count,
+            )
+            for (
+                provider_id,
+                model_name,
+                latency_seconds,
+                observation_count,
+            ) in items
+        )

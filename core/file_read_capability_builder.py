@@ -106,15 +106,15 @@ class FileReadCapabilityImprovementBuilder:
             metric_directions={_METRIC: "increase"},
         )
 
-    def validator(self, _proposal: RepairProposal) -> RepairValidation:
+    def validator(self, _proposal: RepairProposal, validation_root: Path) -> RepairValidation:
         before = self._before_successes
         if before is None:
             return RepairValidation(False, detail="No existe una medicion previa confiable.")
-        after = self._measure_bounded_reads(self._tool_class)
+        after = self._measure_bounded_reads(self._tool_class, root=validation_root)
         basetemp = Path(tempfile.gettempdir()) / "atlas-supervised-pytest"
-        tests = self._run("-m", "pytest", "-q", _READ_TOOL_TEST, "--basetemp", str(basetemp))
-        compiled = self._run("-m", "py_compile", _READ_TOOL_SOURCE, _BOOTSTRAP_SOURCE)
-        diff_checked = self._git("diff", "--check")
+        tests = self._run("-m", "pytest", "-q", _READ_TOOL_TEST, "--basetemp", str(basetemp), root=validation_root)
+        compiled = self._run("-m", "py_compile", _READ_TOOL_SOURCE, _BOOTSTRAP_SOURCE, root=validation_root)
+        diff_checked = self._git("diff", "--check", root=validation_root)
         passed = after > before and all(result.returncode == 0 for result in (tests, compiled, diff_checked))
         detail = "tests focales, py_compile y git diff --check correctos." if passed else self._validation_error(tests, compiled, diff_checked)
         return RepairValidation(passed, {_METRIC: float(before)}, {_METRIC: float(after)}, detail)
@@ -240,7 +240,7 @@ class FileReadCapabilityImprovementBuilder:
         )
         return header + body
 
-    def _measure_bounded_reads(self, tool_class: str) -> int:
+    def _measure_bounded_reads(self, tool_class: str, *, root: Path | None = None) -> int:
         """Count bounded-read successes in a fresh interpreter."""
         script = (
             "import os\n"
@@ -256,17 +256,30 @@ class FileReadCapabilityImprovementBuilder:
             "finally:\n"
             "    os.unlink(path)\n"
         )
-        result = subprocess.run((sys.executable, "-c", script), cwd=self._root, capture_output=True, text=True, check=False)
+        execution_root = (root or self._root).resolve()
+        result = subprocess.run((sys.executable, "-c", script), cwd=execution_root, capture_output=True, text=True, check=False)
         try:
             return int(result.stdout.strip().splitlines()[-1])
         except (IndexError, ValueError):
             return 0
 
-    def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run((sys.executable, *arguments), cwd=self._root, capture_output=True, text=True, check=False)
+    def _run(self, *arguments: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            (sys.executable, *arguments),
+            cwd=(root or self._root).resolve(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-    def _git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(("git", *arguments), cwd=self._root, capture_output=True, text=True, check=False)
+    def _git(self, *arguments: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("git", *arguments),
+            cwd=(root or self._root).resolve(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     @staticmethod
     def _validation_error(*results: subprocess.CompletedProcess[str]) -> str:

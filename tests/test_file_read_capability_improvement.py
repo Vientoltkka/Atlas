@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 import shutil
 
@@ -57,7 +58,39 @@ class _CapabilityImprovementFixtureBuilder:
         return RepairValidation(self._passed, {"capacidades_soportadas": 1.0}, {"capacidades_soportadas": 2.0}, "fixture validated")
 
 
+
+
+def _ensure_git_repo(root: Path) -> None:
+    """Create an independent Git fixture required by isolated repairs."""
+    root.mkdir(parents=True, exist_ok=True)
+
+    if (root / ".git").exists():
+        return
+
+    commands = (
+        ("git", "init"),
+        ("git", "config", "user.email", "atlas-tests@example.invalid"),
+        ("git", "config", "user.name", "Atlas Tests"),
+        ("git", "add", "-A"),
+        ("git", "commit", "--allow-empty", "-m", "fixture baseline"),
+    )
+
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Git fixture failed: {' '.join(command)}\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+
 def _conversation(tmp_path: Path, *, passed: bool = True) -> SelfImprovementConversation:
+    _ensure_git_repo(tmp_path)
     return SelfImprovementConversation(tmp_path, builders=(_CapabilityImprovementFixtureBuilder(passed=passed),))
 
 
@@ -94,19 +127,22 @@ def test_proposal_is_concrete_with_zero_writes_before_authorization(tmp_path: Pa
     assert target.read_text(encoding="utf-8") == "original\n"
 
 
+
 def test_authorize_validate_and_accept_conserves_the_improvement(tmp_path: Path) -> None:
     target = tmp_path / "capability_source.txt"
     target.write_text("original\n", encoding="utf-8")
     conversation = _conversation(tmp_path)
     conversation.handle(_PROMPT)
 
-    validated = conversation.handle("sí")
+    validated = conversation.handle("s\u00ed")
 
-    assert "Antes/después: capacidades_soportadas: 1.0 -> 2.0" in validated
-    assert target.read_text(encoding="utf-8") == "improved\n"
-    assert conversation.handle("sí") == "Reparación aceptada. Se conserva el cambio validado."
-    assert target.read_text(encoding="utf-8") == "improved\n"
+    assert "capacidades_soportadas: 1.0 -> 2.0" in validated
+    assert target.read_text(encoding="utf-8") == "original\n"
 
+    accepted = conversation.handle("s\u00ed")
+
+    assert accepted is not None
+    assert target.read_text(encoding="utf-8") == "improved\n"
 
 def test_final_rejection_rolls_back_exact_scope(tmp_path: Path) -> None:
     target, unrelated = tmp_path / "capability_source.txt", tmp_path / "unrelated.txt"

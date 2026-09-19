@@ -40,6 +40,8 @@ from core.capability_execution_service import CapabilityExecutionService
 from core.supervised_capability_gap import SupervisedCapabilityGapDetector
 from core.model_health import ModelHealthChecker, OllamaModelHealthChecker
 from core.model_latency import ModelLatencyTracker
+from core.self_diagnosis import SelfDiagnosisService
+from core.self_improvement_conversation import SelfImprovementConversation
 from core.model_inference import ModelInferenceRunner, ModelSelectionError
 from core.model_manager import ModelManager
 from core.model_registry import load_model_descriptors_from_environment
@@ -1059,6 +1061,13 @@ class Bootstrap:
         schema_registry = Bootstrap.build_argument_schema_registry()
         argument_validator = Bootstrap.build_argument_validator(schema_registry)
         model_latency_tracker = ModelLatencyTracker()
+        self_diagnosis_service = SelfDiagnosisService(
+            latency_tracker=model_latency_tracker,
+        )
+        self_improvement_conversation = SelfImprovementConversation(
+            Path("."),
+            self_diagnosis_service=self_diagnosis_service,
+        )
         model_manager = ModelManager(
             descriptors=load_model_descriptors_from_environment(
                 reserved_logical_ids=(item.logical_id for item in ModelManager._DEFAULT_DESCRIPTORS),
@@ -1660,6 +1669,7 @@ class Bootstrap:
             execution_dispatcher=execution_dispatcher,
             tool_registry=tool_registry,
             web_search_tool=web_search_tool,
+            self_improvement_conversation=self_improvement_conversation,
             skill_system=(
                 agent_system.skill_system
                 if agent_system is not None
