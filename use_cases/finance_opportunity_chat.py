@@ -45,6 +45,12 @@ def handles_finance_opportunity_prompt(prompt: str) -> bool:
 class FinanceOpportunityChat:
     def __init__(self, service: FinanceOpportunityService) -> None:
         self._service = service
+        self._last_candidates: tuple[str, ...] = ()
+
+    @property
+    def last_candidates(self) -> tuple[str, ...]:
+        """Candidates from the latest explicit tactical scan."""
+        return self._last_candidates
 
     def handles(self, prompt: str) -> bool:
         return handles_finance_opportunity_prompt(prompt)
@@ -54,6 +60,9 @@ class FinanceOpportunityChat:
             raise ValueError("unsupported finance opportunity prompt")
 
         result = self._service.scan_tactical_watchlist()
+        self._last_candidates = tuple(
+            item.symbol for item in result.opportunities
+        )
 
         lines = ["[PAPER][OPPORTUNITY] Escaneo táctico de watchlist."]
 
@@ -90,7 +99,17 @@ class FinanceOpportunityChat:
 
         lines.append("")
         lines.append(
+            "Datos diarios del proveedor; no son cotizaciones en tiempo real."
+        )
+        lines.append(
             "Lectura PAPER y solo informativa: no se ha creado ni ejecutado ninguna orden."
         )
+
+        if self._last_candidates:
+            lines.append(
+                "Para preparar una simulaci?n, importa primero el cierre diario "
+                "del candidato elegido a PAPER; despu?s solicita la orden PAPER "
+                "con una cantidad expl?cita. Cada paso mantiene su confirmaci?n independiente."
+            )
 
         return "\n".join(lines)
