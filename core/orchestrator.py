@@ -147,6 +147,18 @@ from use_cases.finance_opportunity_chat import (
     handles_strategy_performance_prompt,
 )
 from finance.opportunity_service import FinanceOpportunityService
+from finance.discovery_universe import DiscoveryUniverseStore
+from finance.signal_discovery import FinanceSignalDiscovery
+from use_cases.finance_signal_discovery_chat import (
+    FinanceSignalDiscoveryChat,
+    handles_signal_discovery_prompt,
+)
+from finance.discovery_universe import DiscoveryUniverseStore
+from finance.signal_discovery import FinanceSignalDiscovery
+from use_cases.finance_signal_discovery_chat import (
+    FinanceSignalDiscoveryChat,
+    handles_signal_discovery_prompt,
+)
 from use_cases.tactical_backtest_chat import (
     TacticalBacktestChat,
     handles_tactical_backtest_prompt,
@@ -226,6 +238,8 @@ class AtlasOrchestrator:
         self._market_analysis_chat_handler = None
         self._watchlist_chat_handler = None
         self._finance_opportunity_chat_handler = None
+        self._finance_signal_discovery_chat_handler = None
+        self._finance_signal_discovery_chat_handler = None
         self._tactical_backtest_chat_handler = None
         self._alpha_vantage_client_instance = None
         self._router = router
@@ -1086,6 +1100,14 @@ class AtlasOrchestrator:
         if market_analysis_response is not None:
             return market_analysis_response
 
+        signal_discovery_response = self._handle_finance_signal_discovery(prompt)
+        if signal_discovery_response is not None:
+            return signal_discovery_response
+
+        signal_discovery_response = self._handle_finance_signal_discovery(prompt)
+        if signal_discovery_response is not None:
+            return signal_discovery_response
+
         finance_opportunity_response = self._handle_finance_opportunity(prompt)
         if finance_opportunity_response is not None:
             return finance_opportunity_response
@@ -1396,6 +1418,56 @@ class AtlasOrchestrator:
             )
         return self._watchlist_chat_handler
 
+    def _finance_signal_discovery_chat(self):
+        """Resolve Finance Signal Discovery V1 over its isolated universe."""
+        if self._finance_signal_discovery_chat_handler is None:
+            universe = DiscoveryUniverseStore()
+            service = FinanceOpportunityService(
+                self._watchlist_chat().store,
+                self._alpha_vantage_client(),
+            )
+            discovery = FinanceSignalDiscovery(universe, service)
+            self._finance_signal_discovery_chat_handler = (
+                FinanceSignalDiscoveryChat(discovery, universe)
+            )
+        return self._finance_signal_discovery_chat_handler
+
+    def _handle_finance_signal_discovery(self, prompt: str) -> "str | None":
+        """Intercept explicit Signal Discovery commands deterministically."""
+        if not handles_signal_discovery_prompt(prompt):
+            return None
+
+        response_text = self._finance_signal_discovery_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
+    def _finance_signal_discovery_chat(self):
+        """Resolve Finance Signal Discovery V1 over its isolated universe."""
+        if self._finance_signal_discovery_chat_handler is None:
+            universe = DiscoveryUniverseStore()
+            service = FinanceOpportunityService(
+                self._watchlist_chat().store,
+                self._alpha_vantage_client(),
+            )
+            discovery = FinanceSignalDiscovery(universe, service)
+            self._finance_signal_discovery_chat_handler = (
+                FinanceSignalDiscoveryChat(discovery, universe)
+            )
+        return self._finance_signal_discovery_chat_handler
+
+    def _handle_finance_signal_discovery(self, prompt: str) -> "str | None":
+        """Intercept explicit Signal Discovery commands deterministically."""
+        if not handles_signal_discovery_prompt(prompt):
+            return None
+
+        response_text = self._finance_signal_discovery_chat().handle(prompt)
+        self._memory.add_user(prompt)
+        self._memory.add_assistant(response_text)
+        self._pending_agent_followup = None
+        return response_text
+
     def _finance_opportunity_chat(self):
         """Resolve Finance Opportunity V1 over the shared watchlist store."""
         if self._finance_opportunity_chat_handler is None:
@@ -1596,6 +1668,22 @@ class AtlasOrchestrator:
                 self._memory.add_assistant(response_text)
                 self._pending_agent_followup = None
                 return AgentResponse(text=response_text)
+            discovery_chat = self._finance_signal_discovery_chat()
+            if discovery_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = discovery_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+
+            discovery_chat = self._finance_signal_discovery_chat()
+            if discovery_chat.handles(prompt):
+                self._memory.add_user(prompt)
+                response_text = discovery_chat.handle(prompt)
+                self._memory.add_assistant(response_text)
+                self._pending_agent_followup = None
+                return AgentResponse(text=response_text)
+
             opportunity_chat = self._finance_opportunity_chat()
             if opportunity_chat.handles(prompt):
                 self._memory.add_user(prompt)

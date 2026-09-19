@@ -320,3 +320,123 @@ def test_repeated_scan_does_not_duplicate_strategy_signal(monkeypatch, tmp_path)
     assert len(entries) == 1
     assert entries[0].symbol == "VUSA.AMS"
     assert entries[0].signal_day == quant.last_day
+
+def test_scan_symbols_normalizes_deduplicates_and_limits(monkeypatch):
+    from finance.opportunity import FinanceOpportunity, OpportunitySignal
+
+    class Store:
+        def entries(self):
+            return []
+
+    class Market:
+        def __init__(self):
+            self.calls = []
+
+        def daily_series(self, symbol):
+            self.calls.append(symbol)
+            return Series(symbol)
+
+    class Engine:
+        def evaluate(self, symbol, quant_snapshot):
+            return FinanceOpportunity(
+                symbol=symbol,
+                signal=OpportunitySignal.NO_ACTION,
+                reasons=("test",),
+                evidence=("test",),
+            )
+
+    class Evaluation:
+        def evaluate_series(self, series):
+            return None
+
+        def record_candidate(self, **kwargs):
+            raise AssertionError("NO_ACTION no debe registrar candidato")
+
+    monkeypatch.setattr(
+        "finance.opportunity_service.build_quant_snapshot",
+        lambda series: snapshot(TREND_UP),
+    )
+
+    market = Market()
+
+    service = FinanceOpportunityService(
+        Store(),
+        market,
+        engine=Engine(),
+        evaluation_store=Evaluation(),
+    )
+
+    result = service.scan_symbols(
+        [" aaa ", "AAA", "", "bbb", "ccc", "ddd", "eee", "fff"]
+    )
+
+    assert result.checked_symbols == ("AAA", "BBB", "CCC", "DDD", "EEE")
+    assert market.calls == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    assert result.opportunities == ()
+    assert result.errors == ()
+
+
+def test_scan_symbols_candidate_uses_strategy_evaluation(monkeypatch):
+    from finance.opportunity import FinanceOpportunity, OpportunitySignal
+
+    class Store:
+        def entries(self):
+            return []
+
+    class Market:
+        def daily_series(self, symbol):
+            return Series(symbol)
+
+    class Engine:
+        def evaluate(self, symbol, quant_snapshot):
+            return FinanceOpportunity(
+                symbol=symbol,
+                signal=OpportunitySignal.CANDIDATE,
+                reasons=("trend=ALZA",),
+                evidence=("test",),
+            )
+
+    class Evaluation:
+        def __init__(self):
+            self.recorded = []
+            self.evaluated = []
+
+        def evaluate_series(self, series):
+            self.evaluated.append(series.symbol)
+
+        def record_candidate(self, *, symbol, signal_day, signal_close, rule):
+            self.recorded.append(
+                (symbol, signal_day, signal_close, rule)
+            )
+
+    quant = snapshot(TREND_UP)
+
+    monkeypatch.setattr(
+        "finance.opportunity_service.build_quant_snapshot",
+        lambda series: quant,
+    )
+
+    evaluation = Evaluation()
+
+    service = FinanceOpportunityService(
+        Store(),
+        Market(),
+        engine=Engine(),
+        evaluation_store=evaluation,
+    )
+
+    result = service.scan_symbols(["VUSA.AMS"])
+
+    assert result.checked_symbols == ("VUSA.AMS",)
+    assert len(result.opportunities) == 1
+    assert result.opportunities[0].symbol == "VUSA.AMS"
+    assert result.errors == ()
+    assert evaluation.evaluated == ["VUSA.AMS"]
+    assert evaluation.recorded == [
+        (
+            "VUSA.AMS",
+            quant.last_day,
+            quant.last_close,
+            "trend=ALZA",
+        )
+    ]
