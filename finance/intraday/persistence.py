@@ -10,7 +10,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from finance.intraday.evaluation import IntradaySignalOutcome
-from finance.intraday.models import IntradaySignal
+from finance.intraday.models import (
+    IntradayObservation,
+    IntradaySignal,
+)
 
 
 def _json_value(value):
@@ -61,6 +64,18 @@ class IntradayResearchLedger:
             handle.write(chr(10))
             handle.flush()
             os.fsync(handle.fileno())
+
+    def record_observation(
+        self,
+        observation: IntradayObservation,
+    ) -> None:
+        self._append(
+            {
+                "type": "OBSERVATION",
+                "strategy_version": self._strategy_version,
+                **asdict(observation),
+            }
+        )
 
     def record_signal(self, signal: IntradaySignal) -> None:
         self._append(
