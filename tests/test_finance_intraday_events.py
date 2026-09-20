@@ -5,6 +5,7 @@ import pytest
 
 from finance.intraday.evaluation import (
     DEFAULT_ESTIMATED_ROUND_TRIP_COST,
+    DEFAULT_MAXIMUM_LATENESS_SECONDS,
     EventDetector,
     IndependentSignalEvent,
 )
@@ -117,6 +118,62 @@ def test_too_late_future_price_is_not_an_outcome() -> None:
     assert event.outcome_5m.gross_return is None
     assert event.outcome_5m.net_return is None
     assert event.outcome_5m.future_price is None
+
+
+def test_resolved_event_outcome_is_not_replaced_by_later_observations() -> None:
+    event = IndependentSignalEvent(
+        "BTC-USD", "LONG", "MOMENTUM", "test", START, Decimal("100"),
+    )
+
+    event.calculate_outcomes([observation(1, "101")])
+    event.calculate_outcomes([observation(1, "101"), observation(2, "99")])
+
+    assert event.outcome_1m.future_price == Decimal("101")
+    assert event.outcome_1m.gross_return == Decimal("0.01")
+
+
+def test_pending_updates_only_report_newly_resolved_horizons() -> None:
+    detector = EventDetector()
+    event = detect(detector, 0)
+
+    assert detector.update_pending([observation(1, "101")]) == (event,)
+    assert detector.update_pending([observation(1, "101")]) == ()
+    assert event.outcome_1m.net_return == Decimal("0.0090")
+
+
+def test_late_observations_do_not_report_repeated_or_material_updates() -> None:
+    detector = EventDetector()
+    event = detect(detector, 0)
+    target_1m = event.timestamp + timedelta(minutes=1)
+    late_timestamp = target_1m + timedelta(
+        seconds=DEFAULT_MAXIMUM_LATENESS_SECONDS + 1
+    )
+    late_observation = IntradayObservation(
+        symbol="BTC-USD",
+        price=Decimal("101"),
+        bid=Decimal("100.99"),
+        ask=Decimal("101.01"),
+        timestamp=late_timestamp,
+    )
+    another_late_observation = IntradayObservation(
+        symbol="BTC-USD",
+        price=Decimal("102"),
+        bid=Decimal("101.99"),
+        ask=Decimal("102.01"),
+        timestamp=late_timestamp + timedelta(seconds=1),
+    )
+
+    assert detector.update_pending([late_observation]) == ()
+    assert detector.update_pending(
+        [late_observation, another_late_observation]
+    ) == ()
+    assert event.outcome_1m.future_price is None
+    assert event.outcome_1m.gross_return is None
+    assert event.outcome_1m.net_return is None
+
+    assert detector.update_pending([observation(5, "99")]) == (event,)
+    assert detector.update_pending([observation(5, "99")]) == ()
+    assert event.outcome_5m.future_price == Decimal("99")
 
 
 def test_detector_rejects_invalid_direction() -> None:

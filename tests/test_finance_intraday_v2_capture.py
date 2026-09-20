@@ -78,6 +78,25 @@ class CandidateService:
         )
 
 
+class CandidateThenNoActionService(CandidateService):
+    def __init__(self, candidates: int) -> None:
+        self._candidates = candidates
+        self._calls = 0
+
+    def ingest(self, observation):
+        self._calls += 1
+        signal = super().ingest(observation)
+        if self._calls <= self._candidates:
+            return signal
+        return IntradaySignal(
+            symbol=signal.symbol,
+            timestamp=signal.timestamp,
+            action=IntradaySignalAction.NO_ACTION,
+            reasons=("TEST_POLICY",),
+            features=signal.features,
+        )
+
+
 def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
     collector, ledger = make_v2(tmp_path / "research.jsonl")
 
@@ -251,3 +270,89 @@ def test_v2_event_restores_open_cooldown_without_duplication(tmp_path):
     ]
     assert len(events) == 1
     assert restarted._events[next(iter(restarted._events))].observation_count == 2
+
+
+def test_v2_no_action_observations_complete_one_event_once(tmp_path):
+    path = tmp_path / "future-events.jsonl"
+    collector, ledger = make_v2(
+        path,
+        evaluator=IntradaySignalEvaluator(
+            horizons_minutes=(1,),
+            maximum_lateness_seconds=30,
+        ),
+    )
+    # Use the real event horizons; the evaluator override above only limits
+    # legacy OUTCOME records.
+    collector._signal_service = CandidateThenNoActionService(candidates=4)
+
+    for second in range(4):
+        collector.ingest_quote(
+            Quote(
+                symbol="BTC-USD",
+                bid=Decimal("99.95"),
+                ask=Decimal("100.05"),
+                timestamp=START + timedelta(seconds=second),
+                provider="test",
+            )
+        )
+
+    future = {
+        1: "101",
+        5: "99",
+        15: "102",
+        30: "98",
+    }
+    for minute, price in future.items():
+        result = collector.ingest_quote(quote(minute, price))
+        assert result.signal.action is IntradaySignalAction.NO_ACTION
+
+    event = next(iter(collector._events.values()))
+    assert event.observation_count == 4
+    assert event.outcome_1m.future_price == Decimal("101")
+    assert event.outcome_5m.future_price == Decimal("99")
+    assert event.outcome_15m.future_price == Decimal("102")
+    assert event.outcome_30m.future_price == Decimal("98")
+    assert event.outcome_1m.gross_return == Decimal("0.01")
+    assert event.outcome_5m.gross_return == Decimal("-0.01")
+    assert event.outcome_15m.gross_return == Decimal("0.02")
+    assert event.outcome_30m.gross_return == Decimal("-0.02")
+    assert event.outcome_1m.net_return == Decimal("0.0090")
+    assert event.outcome_5m.net_return == Decimal("-0.0110")
+
+    updates = [
+        item for item in ledger.records() if item["type"] == "EVENT_UPDATE"
+    ]
+    assert len(updates) == 7
+
+    before = len(updates)
+    collector.ingest_quote(quote(31, "98"))
+    assert sum(
+        item["type"] == "EVENT_UPDATE" for item in ledger.records()
+    ) == before
+
+
+def test_v2_restored_resolved_event_does_not_duplicate_update(tmp_path):
+    path = tmp_path / "resolved-events.jsonl"
+    service = CandidateThenNoActionService(candidates=1)
+    ledger = IntradayResearchLedger(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+    )
+    collector = IntradayResearchCollector.for_time_based_v2(
+        ledger=ledger,
+        signal_service=service,
+    )
+    collector.ingest_quote(quote(0, "100"))
+    collector.ingest_quote(quote(1, "101"))
+    before = ledger.records()
+
+    restarted = IntradayResearchCollector.for_time_based_v2(
+        ledger=IntradayResearchLedger(
+            path,
+            strategy_version=TIME_BASED_STRATEGY_VERSION,
+        ),
+        signal_service=CandidateThenNoActionService(candidates=1),
+    )
+
+    assert ledger.records() == before
+    assert restarted._events[next(iter(restarted._events))].outcome_1m.future_price == Decimal("101")

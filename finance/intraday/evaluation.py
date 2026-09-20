@@ -207,28 +207,38 @@ class IndependentSignalEvent:
     def calculate_outcomes(
         self,
         observations: list[IntradayObservation],
-    ) -> None:
+    ) -> bool:
+        changed = False
         future = sorted(
             (item for item in observations
              if item.symbol == self.symbol and item.timestamp > self.timestamp),
             key=lambda item: item.timestamp,
         )
         for horizon in INDEPENDENT_EVENT_HORIZONS:
+            current = getattr(self, f"outcome_{horizon}m")
+            if current is not None and current.future_price is not None:
+                continue
             target = self.timestamp + timedelta(minutes=horizon)
             item = next((item for item in future if item.timestamp >= target), None)
-            if (
+            valid_item = (
                 item is not None
                 and item.timestamp - target
-                > timedelta(seconds=DEFAULT_MAXIMUM_LATENESS_SECONDS)
-            ):
-                item = None
-            gross = None if item is None else self._gross_return(item.price)
-            outcome = EventOutcome(
-                future_price=None if item is None else item.price,
-                gross_return=gross,
-                net_return=None if gross is None else gross - self.estimated_round_trip_cost,
+                <= timedelta(seconds=DEFAULT_MAXIMUM_LATENESS_SECONDS)
             )
-            setattr(self, f"outcome_{horizon}m", outcome)
+            if valid_item:
+                gross = self._gross_return(item.price)
+                outcome = EventOutcome(
+                    future_price=item.price,
+                    gross_return=gross,
+                    net_return=gross - self.estimated_round_trip_cost,
+                )
+                changed = changed or current is None or current.future_price is None
+                if current is None or current.future_price is None:
+                    setattr(self, f"outcome_{horizon}m", outcome)
+            elif current is None:
+                # Preserve the existing public shape while the horizon is pending.
+                setattr(self, f"outcome_{horizon}m", EventOutcome(None, None, None))
+        return changed
 
     def _gross_return(self, future_price: Decimal) -> Decimal:
         if self.direction == "LONG":
@@ -312,3 +322,23 @@ class EventDetector:
             raise ValueError("event observation timestamp cannot move backwards")
         self._active[key] = event
         self._last_observation_timestamps[key] = last_timestamp
+
+    def update_pending(
+        self,
+        observations: list[IntradayObservation],
+        *,
+        symbol: str | None = None,
+    ) -> tuple[IndependentSignalEvent, ...]:
+        """Update open events from any accepted observation.
+
+        Only a newly resolved horizon is reported as a material change. Empty
+        pending outcome shells are intentionally not reported.
+        """
+        normalized_symbol = symbol.strip().upper() if symbol is not None else None
+        changed: list[IndependentSignalEvent] = []
+        for event in self._active.values():
+            if normalized_symbol is not None and event.symbol != normalized_symbol:
+                continue
+            if event.calculate_outcomes(observations):
+                changed.append(event)
+        return tuple(changed)

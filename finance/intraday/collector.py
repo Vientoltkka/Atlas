@@ -88,6 +88,8 @@ class IntradayResearchCollector:
 
     def _restore_from_ledger(self) -> None:
         for record in self._ledger.records():
+            if record.get("strategy_version") != self._ledger.strategy_version:
+                continue
             record_type = record.get("type")
 
             if record_type == "OBSERVATION":
@@ -137,6 +139,15 @@ class IntradayResearchCollector:
             self._observations[symbol].sort(
                 key=lambda item: item.timestamp
             )
+
+        # Safely complete outcomes from observations already in this ledger.
+        # The append-only history is preserved; only missing event snapshots
+        # are added, so a restart cannot duplicate resolved updates.
+        if self._event_detector is not None:
+            for event in self._event_detector.update_pending(
+                [item for items in self._observations.values() for item in items]
+            ):
+                self._ledger.record_event_update(event)
 
     @staticmethod
     def _observation_from_record(
@@ -225,6 +236,12 @@ class IntradayResearchCollector:
         signal = self._signal_service.ingest(observation)
 
         if signal is None:
+            if self._event_detector is not None:
+                for event in self._event_detector.update_pending(
+                    observations,
+                    symbol=observation.symbol,
+                ):
+                    self._ledger.record_event_update(event)
             return IntradayCollectorResult(
                 accepted_observation=True,
                 recorded_outcomes=recorded_outcomes,
@@ -258,6 +275,13 @@ class IntradayResearchCollector:
                     self._events[event.id] = event
                 else:
                     self._ledger.record_event_update(event)
+
+        if self._event_detector is not None:
+            for event in self._event_detector.update_pending(
+                observations,
+                symbol=observation.symbol,
+            ):
+                self._ledger.record_event_update(event)
 
         return IntradayCollectorResult(
             accepted_observation=True,
