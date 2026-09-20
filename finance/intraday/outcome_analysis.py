@@ -11,11 +11,15 @@ Measures forward returns after historical momentum states.
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from statistics import mean, median
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from finance.intraday.evaluation import IndependentSignalEvent
 from finance.intraday.models import IntradayObservation
@@ -59,8 +63,18 @@ class EventHorizonSummary:
     outcomes_available: int
     outcomes_pending: int
     mean_gross_return: Decimal | None
+    median_gross_return: Decimal | None
     mean_net_return: Decimal | None
+    median_net_return: Decimal | None
     net_win_rate: Decimal | None
+
+    @property
+    def resolved_events(self) -> int:
+        return self.outcomes_available
+
+    @property
+    def pending_events(self) -> int:
+        return self.outcomes_pending
 
 
 @dataclass(frozen=True)
@@ -73,12 +87,93 @@ class ResearchEventReport:
     events_by_direction: dict[str, int] | None = None
     events_by_cooldown: dict[int, int] | None = None
     candidate_observations: int = 0
+    aggregated_by_cooldown: int = 0
+    cooldown_minutes: tuple[int, ...] = ()
+    estimated_round_trip_costs: tuple[Decimal, ...] = ()
+    by_symbol: dict[str, "ResearchEventGroup"] | None = None
+    by_direction: dict[str, "ResearchEventGroup"] | None = None
+    by_signal: dict[str, "ResearchEventGroup"] | None = None
+    by_source: dict[str, "ResearchEventGroup"] | None = None
+    by_signal_source: dict[str, "ResearchEventGroup"] | None = None
+    strategy_version: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def estimated_round_trip_cost(self) -> Decimal | None:
+        return (
+            self.estimated_round_trip_costs[0]
+            if len(self.estimated_round_trip_costs) == 1 else None
+        )
+
+
+@dataclass(frozen=True)
+class ResearchEventGroup:
+    independent_events: int
+    candidate_observations: int
+    aggregated_by_cooldown: int
+    horizons: dict[int, EventHorizonSummary]
+    cooldown_minutes: tuple[int, ...]
+    estimated_round_trip_costs: tuple[Decimal, ...]
+
+    @property
+    def estimated_round_trip_cost(self) -> Decimal | None:
+        return (
+            self.estimated_round_trip_costs[0]
+            if len(self.estimated_round_trip_costs) == 1 else None
+        )
 
 
 def _mean_decimal(values: list[Decimal]) -> Decimal | None:
     if not values:
         return None
     return sum(values, Decimal("0")) / Decimal(len(values))
+
+
+def _horizon_summary(events: Sequence[IndependentSignalEvent], horizon: int) -> EventHorizonSummary:
+    outcomes = [
+        getattr(event, f"outcome_{horizon}m")
+        for event in events
+    ]
+    available = [
+        outcome for outcome in outcomes
+        if outcome is not None
+        and outcome.gross_return is not None
+        and outcome.net_return is not None
+    ]
+    gross_values = [outcome.gross_return for outcome in available]
+    net_values = [outcome.net_return for outcome in available]
+    return EventHorizonSummary(
+        outcomes_available=len(available),
+        outcomes_pending=len(events) - len(available),
+        mean_gross_return=_mean_decimal(gross_values),
+        median_gross_return=median(gross_values) if gross_values else None,
+        mean_net_return=_mean_decimal(net_values),
+        median_net_return=median(net_values) if net_values else None,
+        net_win_rate=(
+            Decimal(sum(value > 0 for value in net_values)) / Decimal(len(net_values))
+            if net_values else None
+        ),
+    )
+
+
+def _group(
+    events: Sequence[IndependentSignalEvent],
+    candidate_observations: int | None = None,
+) -> ResearchEventGroup:
+    counts: dict[int, int] = {}
+    for event in events:
+        counts[event.cooldown_minutes] = counts.get(event.cooldown_minutes, 0) + 1
+    return ResearchEventGroup(
+        independent_events=len(events),
+        candidate_observations=(
+            sum(event.observation_count for event in events)
+            if candidate_observations is None else candidate_observations
+        ),
+        aggregated_by_cooldown=sum(max(event.observation_count - 1, 0) for event in events),
+        horizons={horizon: _horizon_summary(events, horizon) for horizon in HORIZONS},
+        cooldown_minutes=tuple(sorted(counts)),
+        estimated_round_trip_costs=tuple(sorted({event.estimated_round_trip_cost for event in events})),
+    )
 
 
 def aggregate_event_report(
@@ -101,33 +196,16 @@ def aggregate_event_report(
         for (signal, source), count in sorted(grouped.items())
     )
 
-    horizon_summaries: dict[int, EventHorizonSummary] = {}
-    for horizon in HORIZONS:
-        available = []
-        for event in event_list:
-            outcome = getattr(event, f"outcome_{horizon}m")
-            if (
-                outcome is not None
-                and outcome.gross_return is not None
-                and outcome.net_return is not None
-            ):
-                available.append(outcome)
+    horizon_summaries = {
+        horizon: _horizon_summary(event_list, horizon) for horizon in HORIZONS
+    }
+    group = _group(event_list)
 
-        gross_values = [outcome.gross_return for outcome in available]
-        net_values = [outcome.net_return for outcome in available]
-        available_count = len(available)
-        horizon_summaries[horizon] = EventHorizonSummary(
-            outcomes_available=available_count,
-            outcomes_pending=len(event_list) - available_count,
-            mean_gross_return=_mean_decimal(gross_values),
-            mean_net_return=_mean_decimal(net_values),
-            net_win_rate=(
-                None
-                if not net_values
-                else Decimal(sum(value > 0 for value in net_values))
-                / Decimal(len(net_values))
-            ),
-        )
+    def grouped_by(key):
+        values: dict[str, list[IndependentSignalEvent]] = {}
+        for item in event_list:
+            values.setdefault(key(item), []).append(item)
+        return {name: _group(items) for name, items in sorted(values.items())}
 
     return ResearchEventReport(
         total_events=len(event_list),
@@ -147,10 +225,242 @@ def aggregate_event_report(
         candidate_observations=sum(
             event.observation_count for event in event_list
         ),
+        aggregated_by_cooldown=group.aggregated_by_cooldown,
+        cooldown_minutes=group.cooldown_minutes,
+        estimated_round_trip_costs=group.estimated_round_trip_costs,
+        by_symbol=grouped_by(lambda item: item.symbol),
+        by_direction=grouped_by(lambda item: item.direction),
+        by_signal=grouped_by(lambda item: item.signal),
+        by_source=grouped_by(lambda item: item.source),
+        by_signal_source=grouped_by(lambda item: f"{item.signal}|{item.source}"),
     )
 
 
 build_event_report = aggregate_event_report
+
+
+def _decimal_value(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _horizon_dict(summary: EventHorizonSummary) -> dict:
+    return {
+        "resolved_events": summary.resolved_events,
+        "pending_events": summary.pending_events,
+        "mean_gross_return": _decimal_value(summary.mean_gross_return),
+        "median_gross_return": _decimal_value(summary.median_gross_return),
+        "mean_net_return": _decimal_value(summary.mean_net_return),
+        "median_net_return": _decimal_value(summary.median_net_return),
+        "net_win_rate": _decimal_value(summary.net_win_rate),
+    }
+
+
+def _group_dict(group: ResearchEventGroup) -> dict:
+    return {
+        "independent_events": group.independent_events,
+        "candidate_observations": group.candidate_observations,
+        "aggregated_by_cooldown": group.aggregated_by_cooldown,
+        "cooldown_minutes": list(group.cooldown_minutes),
+        "estimated_round_trip_costs": [
+            str(value) for value in group.estimated_round_trip_costs
+        ],
+        "estimated_round_trip_cost": _decimal_value(group.estimated_round_trip_cost),
+        "horizons": {
+            str(horizon): _horizon_dict(summary)
+            for horizon, summary in sorted(group.horizons.items())
+        },
+    }
+
+
+def report_to_dict(report: ResearchEventReport) -> dict:
+    """Return a JSON-stable representation; returns remain decimal strings."""
+    result = {
+        "strategy_version": report.strategy_version,
+        "independent_events": report.total_events,
+        "candidate_observations": report.candidate_observations,
+        "aggregated_by_cooldown": report.aggregated_by_cooldown,
+        "cooldown_minutes": list(report.cooldown_minutes),
+        "estimated_round_trip_costs": [
+            str(value) for value in report.estimated_round_trip_costs
+        ],
+        "estimated_round_trip_cost": _decimal_value(report.estimated_round_trip_cost),
+        "events_by_direction": dict(sorted((report.events_by_direction or {}).items())),
+        "events_by_cooldown": {
+            str(key): value
+            for key, value in sorted((report.events_by_cooldown or {}).items())
+        },
+        "horizons": {
+            str(horizon): _horizon_dict(summary)
+            for horizon, summary in sorted(report.horizons.items())
+        },
+        "by_symbol": {
+            key: _group_dict(value)
+            for key, value in sorted((report.by_symbol or {}).items())
+        },
+        "by_direction": {
+            key: _group_dict(value)
+            for key, value in sorted((report.by_direction or {}).items())
+        },
+        "by_signal": {
+            key: _group_dict(value)
+            for key, value in sorted((report.by_signal or {}).items())
+        },
+        "by_source": {
+            key: _group_dict(value)
+            for key, value in sorted((report.by_source or {}).items())
+        },
+        "by_signal_source": {
+            key: _group_dict(value)
+            for key, value in sorted((report.by_signal_source or {}).items())
+        },
+        "warnings": list(report.warnings),
+    }
+    return result
+
+
+def load_research_event_report(
+    path: str | Path,
+    *,
+    strategy_version: str,
+) -> ResearchEventReport:
+    """Read and aggregate one strategy from an existing append-only ledger."""
+    requested_version = strategy_version.strip()
+    if not requested_version:
+        raise ValueError("strategy_version is required")
+
+    ledger_path = Path(path)
+    if not ledger_path.exists():
+        raise FileNotFoundError(f"ledger does not exist: {ledger_path}")
+
+    from finance.intraday.persistence import IntradayResearchLedger
+
+    snapshots: dict[str, object] = {}
+    candidate_observations = 0
+    try:
+        with ledger_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"invalid JSONL at line {line_number}: {exc.msg}"
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid JSONL at line {line_number}: object required")
+                if record.get("strategy_version") != requested_version:
+                    continue
+                if record.get("type") == "SIGNAL" and record.get("action") == "CANDIDATE":
+                    candidate_observations += 1
+                elif record.get("type") in {"EVENT", "EVENT_UPDATE"}:
+                    try:
+                        event = IntradayResearchLedger.event_from_record(record)
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"invalid event record at line {line_number}: {exc}"
+                        ) from exc
+                    snapshots[str(record.get("id", event.id))] = event
+    except OSError as exc:
+        raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
+
+    report = aggregate_event_report(snapshots.values())
+    warning = () if report.total_events else (
+        "Sin eventos EVENT para la strategy_version solicitada.",
+        "Muestra exploratoria; no permite inferir rentabilidad",
+    )
+    return ResearchEventReport(
+        **{field: getattr(report, field) for field in report.__dataclass_fields__
+           if field not in {"strategy_version", "warnings", "candidate_observations"}},
+        candidate_observations=candidate_observations,
+        strategy_version=requested_version,
+        warnings=warning,
+    )
+
+
+def _text_percentage(value: Decimal | None) -> str:
+    return "n/a" if value is None else f"{value * Decimal('100'):.4f}%"
+
+
+def format_report_text(report: ResearchEventReport) -> str:
+    lines = [
+        "ATLAS INTRADAY RESEARCH EVENT REPORT V2",
+        "RESEARCH ONLY - READ-ONLY; NO EXECUTION",
+        f"strategy_version: {report.strategy_version}",
+        f"independent_events: {report.total_events}",
+        f"candidate_observations: {report.candidate_observations}",
+        f"aggregated_by_cooldown: {report.aggregated_by_cooldown}",
+        f"cooldown_minutes: {', '.join(map(str, report.cooldown_minutes)) or 'n/a'}",
+        "estimated_round_trip_costs (decimal): "
+        + (", ".join(map(str, report.estimated_round_trip_costs)) or "n/a"),
+    ]
+    for warning in report.warnings:
+        lines.append(f"WARNING: {warning}")
+    for horizon, summary in report.horizons.items():
+        lines.append(
+            f"+{horizon}m: resolved={summary.resolved_events} "
+            f"pending={summary.pending_events} "
+            f"gross_mean={_text_percentage(summary.mean_gross_return)} "
+            f"gross_median={_text_percentage(summary.median_gross_return)} "
+            f"net_mean={_text_percentage(summary.mean_net_return)} "
+            f"net_median={_text_percentage(summary.median_net_return)} "
+            f"net_win_rate={_text_percentage(summary.net_win_rate)}"
+        )
+    return "\n".join(lines)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Read-only V2 event outcome report")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--strategy-version", required=True)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _legacy_main() -> None:
+    path = Path(
+        ".atlas/finance_intraday/live_research.jsonl"
+    )
+
+    observations = load_observations(path)
+
+    print("=== ATLAS INTRADAY OUTCOME ANALYZER V2 ===")
+    print("RESEARCH ONLY - NO EXECUTION")
+    print(f"Observations: {len(observations)}")
+
+    configurations = (
+        ReplayConfiguration(1, 3),
+        ReplayConfiguration(1, 5),
+        ReplayConfiguration(3, 5),
+    )
+
+    for configuration in configurations:
+        analyze(
+            observations,
+            configuration,
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> int | None:
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    if not arguments:
+        return _legacy_main()
+
+    args = _parser().parse_args(arguments)
+    try:
+        report = load_research_event_report(
+            args.ledger,
+            strategy_version=args.strategy_version,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    if args.as_json:
+        print(json.dumps(report_to_dict(report), sort_keys=True, separators=(",", ":")))
+    else:
+        print(format_report_text(report))
+    return 0
 
 
 def percentile(values, q):
@@ -354,31 +664,5 @@ def analyze(observations, configuration):
     )
 
 
-def main():
-    from pathlib import Path
-
-    path = Path(
-        ".atlas/finance_intraday/live_research.jsonl"
-    )
-
-    observations = load_observations(path)
-
-    print("=== ATLAS INTRADAY OUTCOME ANALYZER V2 ===")
-    print("RESEARCH ONLY - NO EXECUTION")
-    print(f"Observations: {len(observations)}")
-
-    configurations = (
-        ReplayConfiguration(1, 3),
-        ReplayConfiguration(1, 5),
-        ReplayConfiguration(3, 5),
-    )
-
-    for configuration in configurations:
-        analyze(
-            observations,
-            configuration,
-        )
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

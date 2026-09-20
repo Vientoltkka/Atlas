@@ -1,12 +1,19 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
+import subprocess
+import sys
 
 from finance.intraday.evaluation import IndependentSignalEvent
 from finance.intraday.models import IntradayObservation
 from finance.intraday.outcome_analysis import (
     HORIZONS,
     aggregate_event_report,
+    load_research_event_report,
+    main,
+    report_to_dict,
 )
+from finance.intraday.persistence import IntradayResearchLedger
 
 
 START = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
@@ -127,3 +134,107 @@ def test_report_module_has_no_execution_or_broker_dependency() -> None:
     assert "PaperFinanceService" not in source
     assert "finance.execution" not in source
     assert HORIZONS == (1, 5, 15, 30)
+
+
+def test_ledger_reconstructs_event_updates_as_one_event(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    ledger = IntradayResearchLedger(path, strategy_version="v2")
+    item = event()
+    item.observation_count = 3
+    item.last_observation_timestamp = START + timedelta(minutes=2)
+    ledger.record_event(item)
+    ledger.record_event_update(item)
+    ledger.record_event_update(item)
+
+    report = load_research_event_report(path, strategy_version="v2")
+
+    assert report.total_events == 1
+    assert report.candidate_observations == 0
+    assert report.aggregated_by_cooldown == 2
+
+
+def test_ledger_counts_candidates_and_filters_strategy_version(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    target = IntradayResearchLedger(path, strategy_version="v2")
+    other = IntradayResearchLedger(path, strategy_version="other")
+    for _ in range(3):
+        target._append({"type": "SIGNAL", "strategy_version": "v2", "action": "CANDIDATE"})
+    item = event()
+    item.observation_count = 3
+    target.record_event(item)
+    other.record_event(event(signal="OTHER"))
+
+    report = load_research_event_report(path, strategy_version="v2")
+
+    assert report.total_events == 1
+    assert report.candidate_observations == 3
+    assert report.aggregated_by_cooldown == 2
+
+
+def test_ledger_report_has_resolved_pending_median_and_win_rate(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    ledger = IntradayResearchLedger(path, strategy_version="v2")
+    first = event()
+    second = event(signal="SECOND")
+    first.calculate_outcomes([observation(1, "101"), observation(5, "102")])
+    second.calculate_outcomes([observation(1, "99"), observation(5, "104")])
+    ledger.record_event(first)
+    ledger.record_event(second)
+
+    horizon = load_research_event_report(path, strategy_version="v2").horizons[1]
+
+    assert horizon.resolved_events == 2
+    assert horizon.pending_events == 0
+    assert horizon.mean_gross_return == Decimal("0")
+    assert horizon.median_gross_return == Decimal("0")
+    assert horizon.net_win_rate == Decimal("0.5")
+    assert load_research_event_report(path, strategy_version="v2").horizons[15].pending_events == 2
+
+
+def test_empty_ledger_is_safe_and_cli_json_does_not_write(tmp_path) -> None:
+    path = tmp_path / "empty.jsonl"
+    path.write_text("{\"type\":\"CONFIGURATION\",\"strategy_version\":\"v2\"}\n", encoding="utf-8")
+    before = path.read_bytes()
+    report = load_research_event_report(path, strategy_version="v2")
+    assert report.total_events == 0
+    assert "Muestra exploratoria; no permite inferir rentabilidad" in report.warnings
+
+    result = subprocess.run(
+        [sys.executable, "-m", "finance.intraday.outcome_analysis", "--ledger", str(path), "--strategy-version", "v2", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == report_to_dict(report)
+    assert path.read_bytes() == before
+
+
+def test_main_without_arguments_uses_legacy_research_path(monkeypatch, capsys) -> None:
+    import finance.intraday.outcome_analysis as outcome_analysis
+
+    observations = [observation(0, "100")]
+    loaded_paths = []
+    analyzed = []
+
+    def fake_load(path):
+        loaded_paths.append(path)
+        return observations
+
+    monkeypatch.setattr(outcome_analysis, "load_observations", fake_load)
+    monkeypatch.setattr(
+        outcome_analysis,
+        "analyze",
+        lambda items, configuration: analyzed.append((items, configuration)),
+    )
+
+    assert main([]) is None
+
+    assert [str(path) for path in loaded_paths] == [
+        ".atlas\\finance_intraday\\live_research.jsonl"
+    ]
+    assert [
+        (item.short_minutes, item.long_minutes)
+        for _, item in analyzed
+    ] == [(1, 3), (1, 5), (3, 5)]
+    assert all(items is observations for items, _ in analyzed)
+    assert "ATLAS INTRADAY OUTCOME ANALYZER V2" in capsys.readouterr().out
