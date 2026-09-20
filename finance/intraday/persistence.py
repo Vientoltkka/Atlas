@@ -46,6 +46,10 @@ class IntradayResearchLedger:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def strategy_version(self) -> str:
+        return self._strategy_version
+
     def _append(self, record: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -74,6 +78,22 @@ class IntradayResearchLedger:
                 "type": "OBSERVATION",
                 "strategy_version": self._strategy_version,
                 **asdict(observation),
+            }
+        )
+
+    def ensure_configuration(self, configuration: dict) -> None:
+        """Persist the effective research configuration once per strategy."""
+        if any(
+            record.get("type") == "CONFIGURATION"
+            and record.get("strategy_version") == self._strategy_version
+            for record in self.records()
+        ):
+            return
+        self._append(
+            {
+                "type": "CONFIGURATION",
+                "strategy_version": self._strategy_version,
+                "configuration": configuration,
             }
         )
 

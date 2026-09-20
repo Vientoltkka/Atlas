@@ -87,6 +87,14 @@ class TimeBasedIntradayFeatureEngine:
     def minimum_history(self) -> timedelta:
         return max(self._long, self._short * 2)
 
+    @property
+    def maximum_reference_lateness_seconds(self) -> int:
+        return int(self._maximum_lateness.total_seconds())
+
+    @property
+    def volatility_step_seconds(self) -> int:
+        return int(self._volatility_step.total_seconds())
+
     def _reference(
         self,
         observations: list[IntradayObservation],

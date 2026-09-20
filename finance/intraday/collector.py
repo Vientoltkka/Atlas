@@ -54,16 +54,47 @@ class IntradayResearchCollector:
 
         self._restore_from_ledger()
 
+    @classmethod
+    def for_time_based_v2(
+        cls,
+        *,
+        ledger: IntradayResearchLedger,
+        signal_service=None,
+        evaluator: IntradaySignalEvaluator | None = None,
+    ) -> "IntradayResearchCollector":
+        from finance.intraday.service import TimeBasedIntradaySignalService
+        from finance.intraday.time_replay import TIME_BASED_STRATEGY_VERSION
+
+        if ledger.strategy_version != TIME_BASED_STRATEGY_VERSION:
+            raise ValueError(
+                "time-based V2 requires the V2 strategy version"
+            )
+
+        service = signal_service or TimeBasedIntradaySignalService()
+        ledger.ensure_configuration(service.configuration)
+        return cls(
+            signal_service=service,
+            ledger=ledger,
+            evaluator=evaluator,
+            record_no_action=True,
+        )
+
     def _restore_from_ledger(self) -> None:
         for record in self._ledger.records():
             record_type = record.get("type")
 
             if record_type == "OBSERVATION":
                 observation = self._observation_from_record(record)
-                self._observations.setdefault(
+                existing = self._observations.setdefault(
                     observation.symbol,
                     [],
-                ).append(observation)
+                )
+                if any(
+                    item.timestamp == observation.timestamp
+                    for item in existing
+                ):
+                    continue
+                existing.append(observation)
 
                 # Rebuild the signal service buffer without
                 # writing new research evidence.

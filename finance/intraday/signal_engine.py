@@ -31,6 +31,10 @@ class IntradaySignalEngine:
     ) -> None:
         self._policy = policy or IntradaySignalPolicy()
 
+    @property
+    def policy(self) -> IntradaySignalPolicy:
+        return self._policy
+
     def evaluate(self, features: IntradayFeatures) -> IntradaySignal:
         reasons: list[str] = []
 
