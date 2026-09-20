@@ -1,7 +1,8 @@
 ﻿"""Time-based intraday feature calculation.
 
 V2 research implementation.
-Windows are defined by elapsed time, not observation count.
+Feature windows and volatility sampling are defined by elapsed time,
+not by the number of raw market observations.
 V1 remains unchanged.
 """
 
@@ -32,7 +33,7 @@ def _sqrt(value: Decimal) -> Decimal:
 
 
 class TimeBasedIntradayFeatureEngine:
-    """Calculate features from explicit elapsed-time windows."""
+    """Calculate cadence-independent features from elapsed-time windows."""
 
     def __init__(
         self,
@@ -40,6 +41,7 @@ class TimeBasedIntradayFeatureEngine:
         short_minutes: int = 1,
         long_minutes: int = 5,
         maximum_reference_lateness_seconds: int = 30,
+        volatility_step_seconds: int = 60,
     ) -> None:
         if short_minutes <= 0:
             raise ValueError("short_minutes must be positive")
@@ -54,10 +56,23 @@ class TimeBasedIntradayFeatureEngine:
                 "maximum_reference_lateness_seconds cannot be negative"
             )
 
+        if volatility_step_seconds <= 0:
+            raise ValueError(
+                "volatility_step_seconds must be positive"
+            )
+
+        if volatility_step_seconds > long_minutes * 60:
+            raise ValueError(
+                "volatility_step_seconds cannot exceed long window"
+            )
+
         self._short = timedelta(minutes=short_minutes)
         self._long = timedelta(minutes=long_minutes)
         self._maximum_lateness = timedelta(
             seconds=maximum_reference_lateness_seconds
+        )
+        self._volatility_step = timedelta(
+            seconds=volatility_step_seconds
         )
 
     @property
@@ -67,6 +82,10 @@ class TimeBasedIntradayFeatureEngine:
     @property
     def long_minutes(self) -> float:
         return self._long.total_seconds() / 60
+
+    @property
+    def minimum_history(self) -> timedelta:
+        return max(self._long, self._short * 2)
 
     def _reference(
         self,
@@ -90,6 +109,35 @@ class TimeBasedIntradayFeatureEngine:
 
         return reference
 
+    def _volatility_anchors(
+        self,
+        observations: list[IntradayObservation],
+        *,
+        last: IntradayObservation,
+    ) -> list[IntradayObservation]:
+        target = last.timestamp - self._long
+        anchors: list[IntradayObservation] = []
+
+        while target < last.timestamp:
+            anchors.append(
+                self._reference(
+                    observations,
+                    target=target,
+                )
+            )
+            target += self._volatility_step
+
+        anchors.append(last)
+
+        for previous, current in zip(anchors, anchors[1:]):
+            if current.timestamp <= previous.timestamp:
+                raise ValueError(
+                    "insufficient distinct observations "
+                    "for volatility grid"
+                )
+
+        return anchors
+
     def calculate(
         self,
         observations: list[IntradayObservation],
@@ -112,8 +160,17 @@ class TimeBasedIntradayFeatureEngine:
 
         last = ordered[-1]
 
+        if (
+            ordered[0].timestamp
+            > last.timestamp - self.minimum_history
+        ):
+            raise ValueError("insufficient time history")
+
         short_target = last.timestamp - self._short
         long_target = last.timestamp - self._long
+        prior_short_start_target = (
+            last.timestamp - (self._short * 2)
+        )
 
         short_reference = self._reference(
             ordered,
@@ -123,6 +180,11 @@ class TimeBasedIntradayFeatureEngine:
         long_reference = self._reference(
             ordered,
             target=long_target,
+        )
+
+        prior_short_start = self._reference(
+            ordered,
+            target=prior_short_start_target,
         )
 
         return_short = _return(
@@ -135,36 +197,23 @@ class TimeBasedIntradayFeatureEngine:
             long_reference.price,
         )
 
-        prior_short_end_target = short_target
-
-        prior_short_end = self._reference(
-            ordered,
-            target=prior_short_end_target,
-        )
-
-        prior_short_start = self._reference(
-            ordered,
-            target=prior_short_end.timestamp - self._short,
-        )
-
         prior_short_return = _return(
-            prior_short_end.price,
+            short_reference.price,
             prior_short_start.price,
         )
 
         acceleration = return_short - prior_short_return
 
-        long_window = [
-            item
-            for item in ordered
-            if item.timestamp >= long_reference.timestamp
-        ]
+        anchors = self._volatility_anchors(
+            ordered,
+            last=last,
+        )
 
         returns = [
             _return(current.price, previous.price)
             for previous, current in zip(
-                long_window,
-                long_window[1:],
+                anchors,
+                anchors[1:],
             )
         ]
 
@@ -202,7 +251,7 @@ class TimeBasedIntradayFeatureEngine:
         return IntradayFeatures(
             symbol=symbol,
             timestamp=last.timestamp,
-            observations=len(long_window),
+            observations=len(anchors),
             last_price=last.price,
             return_short=return_short,
             return_long=return_long,
