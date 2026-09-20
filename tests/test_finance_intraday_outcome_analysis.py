@@ -8,6 +8,7 @@ from finance.intraday.evaluation import IndependentSignalEvent
 from finance.intraday.models import IntradayObservation
 from finance.intraday.outcome_analysis import (
     HORIZONS,
+    MINIMUM_EXPLORATORY_EVENT_COUNT,
     aggregate_event_report,
     load_research_event_report,
     main,
@@ -157,18 +158,40 @@ def test_ledger_counts_candidates_and_filters_strategy_version(tmp_path) -> None
     path = tmp_path / "events.jsonl"
     target = IntradayResearchLedger(path, strategy_version="v2")
     other = IntradayResearchLedger(path, strategy_version="other")
-    for _ in range(3):
+    for _ in range(16):
         target._append({"type": "SIGNAL", "strategy_version": "v2", "action": "CANDIDATE"})
     item = event()
-    item.observation_count = 3
+    item.observation_count = 4
     target.record_event(item)
     other.record_event(event(signal="OTHER"))
 
     report = load_research_event_report(path, strategy_version="v2")
 
     assert report.total_events == 1
-    assert report.candidate_observations == 3
-    assert report.aggregated_by_cooldown == 2
+    assert report.candidate_observations == 16
+    assert report.event_backed_candidate_observations == 4
+    assert report.unlinked_candidate_observations == 12
+    assert report.aggregated_by_cooldown == 3
+    assert "Candidatos sin EVENT asociado no se usan para retornos independientes." in report.warnings
+
+
+def test_exploratory_warning_uses_independent_event_count() -> None:
+    one_event = aggregate_event_report([event()])
+    assert "Muestra exploratoria; no permite inferir rentabilidad" in one_event.warnings
+
+    enough_events = aggregate_event_report(
+        [event(source=str(index)) for index in range(MINIMUM_EXPLORATORY_EVENT_COUNT)]
+    )
+    assert "Muestra exploratoria; no permite inferir rentabilidad" not in enough_events.warnings
+
+
+def test_report_json_contains_candidate_linkage_fields() -> None:
+    report = aggregate_event_report([event()])
+    payload = report_to_dict(report)
+
+    assert payload["event_backed_candidate_observations"] == 1
+    assert payload["unlinked_candidate_observations"] == 0
+    assert payload["warnings"] == ["Muestra exploratoria; no permite inferir rentabilidad"]
 
 
 def test_ledger_report_has_resolved_pending_median_and_win_rate(tmp_path) -> None:

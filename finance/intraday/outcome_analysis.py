@@ -45,6 +45,11 @@ class MomentumOutcome:
 
 
 HORIZONS = (1, 5, 15, 30)
+MINIMUM_EXPLORATORY_EVENT_COUNT = 30
+UNLINKED_CANDIDATE_WARNING = (
+    "Candidatos sin EVENT asociado no se usan para retornos independientes."
+)
+EXPLORATORY_SAMPLE_WARNING = "Muestra exploratoria; no permite inferir rentabilidad"
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,8 @@ class ResearchEventReport:
     events_by_cooldown: dict[int, int] | None = None
     candidate_observations: int = 0
     aggregated_by_cooldown: int = 0
+    event_backed_candidate_observations: int = 0
+    unlinked_candidate_observations: int = 0
     cooldown_minutes: tuple[int, ...] = ()
     estimated_round_trip_costs: tuple[Decimal, ...] = ()
     by_symbol: dict[str, "ResearchEventGroup"] | None = None
@@ -114,6 +121,8 @@ class ResearchEventGroup:
     horizons: dict[int, EventHorizonSummary]
     cooldown_minutes: tuple[int, ...]
     estimated_round_trip_costs: tuple[Decimal, ...]
+    event_backed_candidate_observations: int = 0
+    unlinked_candidate_observations: int = 0
 
     @property
     def estimated_round_trip_cost(self) -> Decimal | None:
@@ -163,17 +172,30 @@ def _group(
     counts: dict[int, int] = {}
     for event in events:
         counts[event.cooldown_minutes] = counts.get(event.cooldown_minutes, 0) + 1
+    event_backed = sum(event.observation_count for event in events)
+    candidates = event_backed if candidate_observations is None else candidate_observations
     return ResearchEventGroup(
         independent_events=len(events),
-        candidate_observations=(
-            sum(event.observation_count for event in events)
-            if candidate_observations is None else candidate_observations
-        ),
+        candidate_observations=candidates,
         aggregated_by_cooldown=sum(max(event.observation_count - 1, 0) for event in events),
         horizons={horizon: _horizon_summary(events, horizon) for horizon in HORIZONS},
         cooldown_minutes=tuple(sorted(counts)),
         estimated_round_trip_costs=tuple(sorted({event.estimated_round_trip_cost for event in events})),
+        event_backed_candidate_observations=event_backed,
+        unlinked_candidate_observations=max(candidates - event_backed, 0),
     )
+
+
+def _report_warnings(
+    independent_events: int,
+    unlinked_candidates: int,
+) -> tuple[str, ...]:
+    warnings = []
+    if unlinked_candidates > 0:
+        warnings.append(UNLINKED_CANDIDATE_WARNING)
+    if independent_events < MINIMUM_EXPLORATORY_EVENT_COUNT:
+        warnings.append(EXPLORATORY_SAMPLE_WARNING)
+    return tuple(warnings)
 
 
 def aggregate_event_report(
@@ -226,6 +248,8 @@ def aggregate_event_report(
             event.observation_count for event in event_list
         ),
         aggregated_by_cooldown=group.aggregated_by_cooldown,
+        event_backed_candidate_observations=group.event_backed_candidate_observations,
+        unlinked_candidate_observations=group.unlinked_candidate_observations,
         cooldown_minutes=group.cooldown_minutes,
         estimated_round_trip_costs=group.estimated_round_trip_costs,
         by_symbol=grouped_by(lambda item: item.symbol),
@@ -233,6 +257,9 @@ def aggregate_event_report(
         by_signal=grouped_by(lambda item: item.signal),
         by_source=grouped_by(lambda item: item.source),
         by_signal_source=grouped_by(lambda item: f"{item.signal}|{item.source}"),
+        warnings=_report_warnings(
+            len(event_list), group.unlinked_candidate_observations
+        ),
     )
 
 
@@ -260,6 +287,8 @@ def _group_dict(group: ResearchEventGroup) -> dict:
         "independent_events": group.independent_events,
         "candidate_observations": group.candidate_observations,
         "aggregated_by_cooldown": group.aggregated_by_cooldown,
+        "event_backed_candidate_observations": group.event_backed_candidate_observations,
+        "unlinked_candidate_observations": group.unlinked_candidate_observations,
         "cooldown_minutes": list(group.cooldown_minutes),
         "estimated_round_trip_costs": [
             str(value) for value in group.estimated_round_trip_costs
@@ -279,6 +308,8 @@ def report_to_dict(report: ResearchEventReport) -> dict:
         "independent_events": report.total_events,
         "candidate_observations": report.candidate_observations,
         "aggregated_by_cooldown": report.aggregated_by_cooldown,
+        "event_backed_candidate_observations": report.event_backed_candidate_observations,
+        "unlinked_candidate_observations": report.unlinked_candidate_observations,
         "cooldown_minutes": list(report.cooldown_minutes),
         "estimated_round_trip_costs": [
             str(value) for value in report.estimated_round_trip_costs
@@ -365,16 +396,24 @@ def load_research_event_report(
         raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
 
     report = aggregate_event_report(snapshots.values())
-    warning = () if report.total_events else (
-        "Sin eventos EVENT para la strategy_version solicitada.",
-        "Muestra exploratoria; no permite inferir rentabilidad",
+    unlinked_candidates = max(
+        candidate_observations - report.event_backed_candidate_observations,
+        0,
     )
+    warnings = list(_report_warnings(report.total_events, unlinked_candidates))
+    if not report.total_events:
+        warnings.insert(0, "Sin eventos EVENT para la strategy_version solicitada.")
     return ResearchEventReport(
         **{field: getattr(report, field) for field in report.__dataclass_fields__
-           if field not in {"strategy_version", "warnings", "candidate_observations"}},
+           if field not in {
+               "strategy_version", "warnings", "candidate_observations",
+               "event_backed_candidate_observations", "unlinked_candidate_observations",
+           }},
         candidate_observations=candidate_observations,
+        event_backed_candidate_observations=report.event_backed_candidate_observations,
+        unlinked_candidate_observations=unlinked_candidates,
         strategy_version=requested_version,
-        warnings=warning,
+        warnings=tuple(warnings),
     )
 
 
@@ -389,6 +428,10 @@ def format_report_text(report: ResearchEventReport) -> str:
         f"strategy_version: {report.strategy_version}",
         f"independent_events: {report.total_events}",
         f"candidate_observations: {report.candidate_observations}",
+        "event_backed_candidate_observations: "
+        f"{report.event_backed_candidate_observations}",
+        "unlinked_candidate_observations: "
+        f"{report.unlinked_candidate_observations}",
         f"aggregated_by_cooldown: {report.aggregated_by_cooldown}",
         f"cooldown_minutes: {', '.join(map(str, report.cooldown_minutes)) or 'n/a'}",
         "estimated_round_trip_costs (decimal): "
