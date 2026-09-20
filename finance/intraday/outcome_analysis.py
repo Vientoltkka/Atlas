@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from statistics import mean, median
+from typing import Iterable
 
+from finance.intraday.evaluation import IndependentSignalEvent
 from finance.intraday.models import IntradayObservation
 from finance.intraday.time_features import (
     TimeBasedIntradayFeatureEngine,
@@ -39,6 +41,99 @@ class MomentumOutcome:
 
 
 HORIZONS = (1, 5, 15, 30)
+
+
+@dataclass(frozen=True)
+class EventSignalSourceGroup:
+    """Deterministic event count for one signal/source pair."""
+
+    signal: str
+    source: str
+    event_count: int
+
+
+@dataclass(frozen=True)
+class EventHorizonSummary:
+    """Research-only aggregate for one forward horizon."""
+
+    outcomes_available: int
+    outcomes_pending: int
+    mean_gross_return: Decimal | None
+    mean_net_return: Decimal | None
+    net_win_rate: Decimal | None
+
+
+@dataclass(frozen=True)
+class ResearchEventReport:
+    """Reproducible aggregate of already evaluated independent events."""
+
+    total_events: int
+    events_by_signal_source: tuple[EventSignalSourceGroup, ...]
+    horizons: dict[int, EventHorizonSummary]
+
+
+def _mean_decimal(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return sum(values, Decimal("0")) / Decimal(len(values))
+
+
+def aggregate_event_report(
+    events: Iterable[IndependentSignalEvent],
+) -> ResearchEventReport:
+    """Aggregate outcomes without evaluating or mutating the supplied events.
+
+    ``estimated_round_trip_cost`` is already reflected in each event's
+    ``net_return`` as a research-only hypothesis, not as a real commission.
+    """
+
+    event_list = tuple(events)
+    grouped: dict[tuple[str, str], int] = {}
+    for event in event_list:
+        key = (event.signal, event.source)
+        grouped[key] = grouped.get(key, 0) + 1
+
+    groups = tuple(
+        EventSignalSourceGroup(signal=signal, source=source, event_count=count)
+        for (signal, source), count in sorted(grouped.items())
+    )
+
+    horizon_summaries: dict[int, EventHorizonSummary] = {}
+    for horizon in HORIZONS:
+        available = []
+        for event in event_list:
+            outcome = getattr(event, f"outcome_{horizon}m")
+            if (
+                outcome is not None
+                and outcome.gross_return is not None
+                and outcome.net_return is not None
+            ):
+                available.append(outcome)
+
+        gross_values = [outcome.gross_return for outcome in available]
+        net_values = [outcome.net_return for outcome in available]
+        available_count = len(available)
+        horizon_summaries[horizon] = EventHorizonSummary(
+            outcomes_available=available_count,
+            outcomes_pending=len(event_list) - available_count,
+            mean_gross_return=_mean_decimal(gross_values),
+            mean_net_return=_mean_decimal(net_values),
+            net_win_rate=(
+                None
+                if not net_values
+                else Decimal(sum(value > 0 for value in net_values))
+                / Decimal(len(net_values))
+            ),
+        )
+
+    return ResearchEventReport(
+        total_events=len(event_list),
+        events_by_signal_source=groups,
+        horizons=horizon_summaries,
+    )
+
+
+build_event_report = aggregate_event_report
 
 
 def percentile(values, q):
