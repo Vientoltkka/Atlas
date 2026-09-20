@@ -14,6 +14,7 @@ from pathlib import Path
 from finance.intraday.collector import IntradayResearchCollector
 from finance.intraday.persistence import IntradayResearchLedger
 from finance.intraday.service import IntradaySignalService
+from finance.intraday.time_replay import TIME_BASED_STRATEGY_VERSION
 from finance.market_data.models import Quote
 from finance.market_data.quality import MarketDataQualityGate
 from finance.market_data.revolut_x import RevolutXPublicMarketDataProvider
@@ -21,6 +22,14 @@ from finance.market_data.revolut_x import RevolutXPublicMarketDataProvider
 
 DEFAULT_LEDGER = Path(
     ".atlas/finance_intraday/live_research.jsonl"
+)
+DEFAULT_V2_LEDGER = Path(
+    ".atlas/finance_intraday/time_based_v2_research.jsonl"
+)
+V1_STRATEGY_VERSION = IntradayResearchLedger.DEFAULT_STRATEGY_VERSION
+STRATEGY_VERSIONS = (
+    V1_STRATEGY_VERSION,
+    TIME_BASED_STRATEGY_VERSION,
 )
 
 
@@ -46,7 +55,8 @@ class LiveIntradayResearchRunner:
         symbol: str,
         duration_seconds: float,
         poll_seconds: float,
-        ledger_path: str | Path = DEFAULT_LEDGER,
+        ledger_path: str | Path | None = None,
+        strategy_version: str = V1_STRATEGY_VERSION,
         provider=None,
         quality_gate: MarketDataQualityGate | None = None,
         collector: IntradayResearchCollector | None = None,
@@ -62,10 +72,15 @@ class LiveIntradayResearchRunner:
             raise ValueError("duration_seconds must be positive")
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if strategy_version not in STRATEGY_VERSIONS:
+            raise ValueError(
+                f"unsupported strategy_version: {strategy_version}"
+            )
 
         self._symbol = normalized
         self._duration_seconds = duration_seconds
         self._poll_seconds = poll_seconds
+        self._strategy_version = strategy_version
 
         self._provider = (
             provider
@@ -80,11 +95,43 @@ class LiveIntradayResearchRunner:
         )
 
         if collector is None:
-            ledger = IntradayResearchLedger(ledger_path)
-            collector = IntradayResearchCollector(
-                signal_service=IntradaySignalService(),
-                ledger=ledger,
+            if ledger_path is None:
+                ledger_path = (
+                    DEFAULT_V2_LEDGER
+                    if strategy_version == TIME_BASED_STRATEGY_VERSION
+                    else DEFAULT_LEDGER
+                )
+
+            ledger = IntradayResearchLedger(
+                ledger_path,
+                strategy_version=strategy_version,
             )
+            existing_versions = {
+                record.get("strategy_version")
+                for record in ledger.records()
+            }
+            incompatible_versions = existing_versions - {
+                strategy_version
+            }
+            if incompatible_versions:
+                versions = ", ".join(
+                    sorted(str(version) for version in incompatible_versions)
+                )
+                raise ValueError(
+                    f"ledger {ledger.path} contains incompatible "
+                    f"strategy_version(s): {versions}; expected "
+                    f"{strategy_version}"
+                )
+
+            if strategy_version == TIME_BASED_STRATEGY_VERSION:
+                collector = IntradayResearchCollector.for_time_based_v2(
+                    ledger=ledger,
+                )
+            else:
+                collector = IntradayResearchCollector(
+                    signal_service=IntradaySignalService(),
+                    ledger=ledger,
+                )
 
         self._collector = collector
         self._sleep = sleep_fn
@@ -202,7 +249,13 @@ def _parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--ledger",
-        default=str(DEFAULT_LEDGER),
+        default=None,
+    )
+
+    parser.add_argument(
+        "--strategy-version",
+        choices=STRATEGY_VERSIONS,
+        default=V1_STRATEGY_VERSION,
     )
 
     return parser
@@ -216,6 +269,7 @@ def main() -> int:
         duration_seconds=args.minutes * 60,
         poll_seconds=args.poll_seconds,
         ledger_path=args.ledger,
+        strategy_version=args.strategy_version,
     )
 
     print(

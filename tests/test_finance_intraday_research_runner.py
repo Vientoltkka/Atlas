@@ -1,9 +1,16 @@
 ﻿from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from finance.intraday.research_runner import (
+    DEFAULT_LEDGER,
+    DEFAULT_V2_LEDGER,
     LiveIntradayResearchRunner,
+    V1_STRATEGY_VERSION,
+    _parser,
 )
+from finance.intraday.time_replay import TIME_BASED_STRATEGY_VERSION
 from finance.market_data.models import Quote
 
 
@@ -130,3 +137,81 @@ def test_live_runner_has_no_execution_dependency():
     assert "ExecutionIntent" not in source
     assert "BrokerAdapter" not in source
     assert "PaperFinanceService" not in source
+
+
+def test_parser_keeps_v1_defaults():
+    args = _parser().parse_args([])
+
+    assert args.strategy_version == V1_STRATEGY_VERSION
+    assert args.symbol == "BTC-USD"
+    assert args.minutes == 60.0
+    assert args.poll_seconds == 5.0
+    assert args.ledger is None
+    assert DEFAULT_LEDGER.name == "live_research.jsonl"
+
+
+def test_v2_parser_and_runner_use_time_based_collector(tmp_path):
+    args = _parser().parse_args(
+        ["--strategy-version", TIME_BASED_STRATEGY_VERSION]
+    )
+    ledger_path = tmp_path / "v2.jsonl"
+
+    runner = LiveIntradayResearchRunner(
+        symbol=args.symbol,
+        duration_seconds=args.minutes * 60,
+        poll_seconds=args.poll_seconds,
+        ledger_path=ledger_path,
+        strategy_version=args.strategy_version,
+        provider=FakeProvider([]),
+    )
+
+    collector = runner._collector
+    ledger = collector._ledger
+    assert ledger.strategy_version == TIME_BASED_STRATEGY_VERSION
+    assert collector._record_no_action is True
+    assert any(
+        record["type"] == "CONFIGURATION"
+        for record in ledger.records()
+    )
+
+
+def test_v2_default_ledger_path():
+    assert DEFAULT_V2_LEDGER == (
+        DEFAULT_V2_LEDGER.parent / "time_based_v2_research.jsonl"
+    )
+
+
+def test_runner_rejects_mixed_ledger_strategy(tmp_path):
+    ledger_path = tmp_path / "mixed.jsonl"
+    ledger_path.write_text(
+        '{"strategy_version":"intraday-momentum-v1",'
+        '"type":"OBSERVATION"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="incompatible strategy_version"):
+        LiveIntradayResearchRunner(
+            symbol="BTC-USD",
+            duration_seconds=600,
+            poll_seconds=5,
+            ledger_path=ledger_path,
+            strategy_version=TIME_BASED_STRATEGY_VERSION,
+            provider=FakeProvider([]),
+        )
+
+
+def test_v2_without_ledger_uses_v2_default(monkeypatch, tmp_path):
+    import finance.intraday.research_runner as module
+
+    default_path = tmp_path / "time_based_v2_research.jsonl"
+    monkeypatch.setattr(module, "DEFAULT_V2_LEDGER", default_path)
+
+    runner = LiveIntradayResearchRunner(
+        symbol="BTC-USD",
+        duration_seconds=600,
+        poll_seconds=5,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+        provider=FakeProvider([]),
+    )
+
+    assert runner._collector._ledger.path == default_path
