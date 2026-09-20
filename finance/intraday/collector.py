@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from finance.intraday.bridge import observation_from_quote
-from finance.intraday.evaluation import IntradaySignalEvaluator
+from finance.intraday.evaluation import EventDetector, IntradaySignalEvaluator
 from finance.intraday.models import (
     IntradayFeatures,
     IntradayObservation,
@@ -37,11 +37,16 @@ class IntradayResearchCollector:
         ledger: IntradayResearchLedger,
         evaluator: IntradaySignalEvaluator | None = None,
         record_no_action: bool = False,
+        event_detector: EventDetector | None = None,
+        event_source: str | None = None,
     ) -> None:
         self._signal_service = signal_service
         self._ledger = ledger
         self._evaluator = evaluator or IntradaySignalEvaluator()
         self._record_no_action = record_no_action
+        self._event_detector = event_detector
+        self._event_source = event_source
+        self._events: dict[str, object] = {}
 
         self._observations: dict[str, list[IntradayObservation]] = {}
         self._candidates: dict[
@@ -77,6 +82,8 @@ class IntradayResearchCollector:
             ledger=ledger,
             evaluator=evaluator,
             record_no_action=True,
+            event_detector=EventDetector(),
+            event_source=TIME_BASED_STRATEGY_VERSION,
         )
 
     def _restore_from_ledger(self) -> None:
@@ -108,6 +115,12 @@ class IntradayResearchCollector:
                 self._candidates[
                     (signal.symbol, signal.timestamp)
                 ] = signal
+
+            elif record_type in {"EVENT", "EVENT_UPDATE"}:
+                event = self._ledger.event_from_record(record)
+                self._events[event.id] = event
+                if self._event_detector is not None:
+                    self._event_detector.restore(event)
 
             elif record_type == "OUTCOME":
                 self._completed.add(
@@ -180,6 +193,7 @@ class IntradayResearchCollector:
             ),
             reasons=tuple(record["reasons"]),
             features=features,
+            direction=record.get("direction"),
         )
 
     def ingest_quote(
@@ -227,6 +241,23 @@ class IntradayResearchCollector:
         if signal.action is IntradaySignalAction.CANDIDATE:
             key = (signal.symbol, signal.timestamp)
             self._candidates[key] = signal
+            if self._event_detector is not None:
+                if signal.direction not in {"LONG", "SHORT"}:
+                    raise ValueError("candidate signal requires a valid direction")
+                event = self._event_detector.observe(
+                    symbol=signal.symbol,
+                    direction=signal.direction,
+                    signal="MOMENTUM",
+                    source=self._event_source or self._ledger.strategy_version,
+                    timestamp=signal.timestamp,
+                    entry_price=signal.features.last_price,
+                )
+                event.calculate_outcomes(observations)
+                if event.id not in self._events:
+                    self._ledger.record_event(event)
+                    self._events[event.id] = event
+                else:
+                    self._ledger.record_event_update(event)
 
         return IntradayCollectorResult(
             accepted_observation=True,

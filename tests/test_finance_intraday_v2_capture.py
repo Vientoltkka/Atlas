@@ -3,6 +3,11 @@ from decimal import Decimal
 
 from finance.intraday.collector import IntradayResearchCollector
 from finance.intraday.evaluation import IntradaySignalEvaluator
+from finance.intraday.models import (
+    IntradayFeatures,
+    IntradaySignal,
+    IntradaySignalAction,
+)
 from finance.intraday.persistence import IntradayResearchLedger
 from finance.intraday.service import TimeBasedIntradaySignalService
 from finance.intraday.signal_engine import IntradaySignalEngine
@@ -49,6 +54,30 @@ def make_v2(path, *, evaluator=None):
     return collector, ledger
 
 
+class CandidateService:
+    configuration = {}
+
+    def ingest(self, observation):
+        return IntradaySignal(
+            symbol=observation.symbol,
+            timestamp=observation.timestamp,
+            action=IntradaySignalAction.CANDIDATE,
+            reasons=("TEST_POLICY",),
+            features=IntradayFeatures(
+                symbol=observation.symbol,
+                timestamp=observation.timestamp,
+                observations=1,
+                last_price=observation.price,
+                return_short=Decimal("0.01"),
+                return_long=Decimal("0.01"),
+                acceleration=Decimal("0.01"),
+                realized_volatility=Decimal("0"),
+                relative_spread=Decimal("0"),
+            ),
+            direction="LONG",
+        )
+
+
 def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
     collector, ledger = make_v2(tmp_path / "research.jsonl")
 
@@ -62,6 +91,7 @@ def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
     assert all(item.accepted_observation for item in results)
     assert signals
     assert signals[-1]["strategy_version"] == TIME_BASED_STRATEGY_VERSION
+    assert signals[-1]["direction"] == "LONG"
     assert configurations == [
         {
             "type": "CONFIGURATION",
@@ -97,6 +127,7 @@ def test_v2_persists_no_action_but_not_insufficient_history(tmp_path):
     ]
     assert len(signals) == 1
     assert signals[0]["action"] == "NO_ACTION"
+    assert signals[0]["direction"] is None
     assert signals[0]["strategy_version"] == TIME_BASED_STRATEGY_VERSION
 
 
@@ -160,3 +191,63 @@ def test_v2_modules_have_no_execution_dependency():
         assert "ExecutionIntent" not in source
         assert "BrokerAdapter" not in source
         assert "PaperFinanceService" not in source
+
+
+def test_v2_candidates_within_cooldown_are_one_durable_event(tmp_path):
+    path = tmp_path / "events.jsonl"
+    ledger = IntradayResearchLedger(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+    )
+    collector = IntradayResearchCollector.for_time_based_v2(
+        ledger=ledger,
+        signal_service=CandidateService(),
+    )
+
+    for second in range(12):
+        value = Decimal("100") + Decimal(second) / Decimal("100")
+        collector.ingest_quote(
+            Quote(
+                symbol="BTC-USD",
+                bid=value - Decimal("0.05"),
+                ask=value + Decimal("0.05"),
+                timestamp=START + timedelta(seconds=second),
+                provider="test",
+            )
+        )
+
+    records = ledger.records()
+    events = [item for item in records if item["type"] == "EVENT"]
+    updates = [item for item in records if item["type"] == "EVENT_UPDATE"]
+    assert len(events) == 1
+    assert events[0]["direction"] == "LONG"
+    assert updates[-1]["observation_count"] == 12
+
+
+def test_v2_event_restores_open_cooldown_without_duplication(tmp_path):
+    path = tmp_path / "events.jsonl"
+    ledger = IntradayResearchLedger(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+    )
+    first = IntradayResearchCollector.for_time_based_v2(
+        ledger=ledger,
+        signal_service=CandidateService(),
+    )
+    first.ingest_quote(quote(0, "100"))
+
+    restarted = IntradayResearchCollector.for_time_based_v2(
+        ledger=IntradayResearchLedger(
+            path,
+            strategy_version=TIME_BASED_STRATEGY_VERSION,
+        ),
+        signal_service=CandidateService(),
+    )
+    restarted.ingest_quote(quote(1, "100.01"))
+
+    events = [
+        item for item in restarted._ledger.records()
+        if item["type"] == "EVENT"
+    ]
+    assert len(events) == 1
+    assert restarted._events[next(iter(restarted._events))].observation_count == 2

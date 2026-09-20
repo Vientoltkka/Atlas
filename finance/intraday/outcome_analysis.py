@@ -70,6 +70,9 @@ class ResearchEventReport:
     total_events: int
     events_by_signal_source: tuple[EventSignalSourceGroup, ...]
     horizons: dict[int, EventHorizonSummary]
+    events_by_direction: dict[str, int] | None = None
+    events_by_cooldown: dict[int, int] | None = None
+    candidate_observations: int = 0
 
 
 def _mean_decimal(values: list[Decimal]) -> Decimal | None:
@@ -130,6 +133,20 @@ def aggregate_event_report(
         total_events=len(event_list),
         events_by_signal_source=groups,
         horizons=horizon_summaries,
+        events_by_direction={
+            direction: sum(1 for event in event_list if event.direction == direction)
+            for direction in sorted({event.direction for event in event_list})
+        },
+        events_by_cooldown={
+            cooldown: sum(
+                1 for event in event_list
+                if event.cooldown_minutes == cooldown
+            )
+            for cooldown in sorted({event.cooldown_minutes for event in event_list})
+        },
+        candidate_observations=sum(
+            event.observation_count for event in event_list
+        ),
     )
 
 

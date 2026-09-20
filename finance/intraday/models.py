@@ -61,3 +61,11 @@ class IntradaySignal:
     action: IntradaySignalAction
     reasons: tuple[str, ...]
     features: IntradayFeatures
+    direction: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.direction is not None:
+            normalized = self.direction.strip().upper()
+            if normalized not in {"LONG", "SHORT"}:
+                raise ValueError("direction must be LONG or SHORT")
+            object.__setattr__(self, "direction", normalized)

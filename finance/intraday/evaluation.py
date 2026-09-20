@@ -161,6 +161,7 @@ class IndependentSignalEvent:
     outcome_5m: EventOutcome | None = None
     outcome_15m: EventOutcome | None = None
     outcome_30m: EventOutcome | None = None
+    last_observation_timestamp: datetime | None = None
     _last_observation_timestamp: datetime = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -180,7 +181,16 @@ class IndependentSignalEvent:
             raise ValueError("cooldown_minutes cannot be negative")
         if self.estimated_round_trip_cost < 0:
             raise ValueError("estimated_round_trip_cost cannot be negative")
-        self._last_observation_timestamp = self.timestamp
+        if self.last_observation_timestamp is None:
+            self.last_observation_timestamp = self.timestamp
+        if (
+            self.last_observation_timestamp.tzinfo is None
+            or self.last_observation_timestamp.utcoffset() is None
+        ):
+            raise ValueError("last_observation_timestamp must be timezone-aware")
+        if self.last_observation_timestamp < self.timestamp:
+            raise ValueError("last_observation_timestamp cannot precede timestamp")
+        self._last_observation_timestamp = self.last_observation_timestamp
 
     @property
     def id(self) -> str:
@@ -275,6 +285,7 @@ class EventDetector:
             if elapsed < timedelta(minutes=self.cooldown_minutes):
                 current.observation_count += 1
                 current._last_observation_timestamp = timestamp
+                current.last_observation_timestamp = timestamp
                 self._last_observation_timestamps[key] = timestamp
                 return current
 
@@ -291,3 +302,13 @@ class EventDetector:
         self._active[key] = event
         self._last_observation_timestamps[key] = timestamp
         return event
+
+    def restore(self, event: IndependentSignalEvent) -> None:
+        """Restore the latest append-only snapshot for an open event."""
+        key = event.equivalence_key
+        last_timestamp = event._last_observation_timestamp
+        previous = self._last_observation_timestamps.get(key)
+        if previous is not None and last_timestamp < previous:
+            raise ValueError("event observation timestamp cannot move backwards")
+        self._active[key] = event
+        self._last_observation_timestamps[key] = last_timestamp

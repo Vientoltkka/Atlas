@@ -9,7 +9,11 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from finance.intraday.evaluation import IntradaySignalOutcome
+from finance.intraday.evaluation import (
+    EventOutcome,
+    IndependentSignalEvent,
+    IntradaySignalOutcome,
+)
 from finance.intraday.models import (
     IntradayObservation,
     IntradaySignal,
@@ -106,8 +110,75 @@ class IntradayResearchLedger:
                 "timestamp": signal.timestamp,
                 "action": signal.action,
                 "reasons": list(signal.reasons),
+                "direction": signal.direction,
                 "features": asdict(signal.features),
             }
+        )
+
+    @staticmethod
+    def _event_payload(event: IndependentSignalEvent) -> dict:
+        outcomes = {}
+        for horizon in (1, 5, 15, 30):
+            outcome = getattr(event, f"outcome_{horizon}m")
+            outcomes[str(horizon)] = None if outcome is None else asdict(outcome)
+        return {
+            "id": event.id,
+            "symbol": event.symbol,
+            "direction": event.direction,
+            "signal": event.signal,
+            "source": event.source,
+            "timestamp": event.timestamp,
+            "entry_price": event.entry_price,
+            "observation_count": event.observation_count,
+            "cooldown_minutes": event.cooldown_minutes,
+            "estimated_round_trip_cost": event.estimated_round_trip_cost,
+            "last_observation_timestamp": event.last_observation_timestamp,
+            "outcomes": outcomes,
+        }
+
+    def record_event(self, event: IndependentSignalEvent) -> None:
+        self._append({
+            "type": "EVENT",
+            "strategy_version": self._strategy_version,
+            **self._event_payload(event),
+        })
+
+    def record_event_update(self, event: IndependentSignalEvent) -> None:
+        self._append({
+            "type": "EVENT_UPDATE",
+            "strategy_version": self._strategy_version,
+            **self._event_payload(event),
+        })
+
+    @staticmethod
+    def event_from_record(record: dict) -> IndependentSignalEvent:
+        outcomes = {}
+        for horizon in (1, 5, 15, 30):
+            raw = record.get("outcomes", {}).get(str(horizon))
+            outcomes[f"outcome_{horizon}m"] = (
+                None if raw is None else EventOutcome(
+                    future_price=Decimal(raw["future_price"])
+                    if raw["future_price"] is not None else None,
+                    gross_return=Decimal(raw["gross_return"])
+                    if raw["gross_return"] is not None else None,
+                    net_return=Decimal(raw["net_return"])
+                    if raw["net_return"] is not None else None,
+                )
+            )
+        return IndependentSignalEvent(
+            symbol=record["symbol"],
+            direction=record["direction"],
+            signal=record["signal"],
+            source=record["source"],
+            timestamp=datetime.fromisoformat(record["timestamp"]),
+            entry_price=Decimal(record["entry_price"]),
+            observation_count=int(record["observation_count"]),
+            cooldown_minutes=int(record["cooldown_minutes"]),
+            estimated_round_trip_cost=Decimal(record["estimated_round_trip_cost"]),
+            last_observation_timestamp=datetime.fromisoformat(
+                record.get("last_observation_timestamp", record["timestamp"])
+            ),
+            **outcomes,
         )
 
     def record_outcome(

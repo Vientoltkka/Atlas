@@ -65,4 +65,7 @@ class IntradaySignalEngine:
             action=action,
             reasons=tuple(reasons) if reasons else ("POLICY_MATCH",),
             features=features,
+            # The current policy only accepts positive momentum, so its
+            # deterministic directional decision is LONG.
+            direction="LONG" if action is IntradaySignalAction.CANDIDATE else None,
         )
