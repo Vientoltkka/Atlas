@@ -5,15 +5,18 @@ Evaluation is research-only and has no order-execution capability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 
 from finance.intraday.models import (
     IntradayObservation,
     IntradaySignal,
     IntradaySignalAction,
 )
+
+DEFAULT_MAXIMUM_LATENESS_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,7 @@ class IntradaySignalEvaluator:
         self,
         *,
         horizons_minutes: tuple[int, ...] = (1, 5, 15, 30),
-        maximum_lateness_seconds: int = 30,
+        maximum_lateness_seconds: int = DEFAULT_MAXIMUM_LATENESS_SECONDS,
     ) -> None:
         if not horizons_minutes:
             raise ValueError("at least one horizon is required")
@@ -126,3 +129,165 @@ class IntradaySignalEvaluator:
             )
 
         return tuple(outcomes)
+
+
+# Research-only default: an illustrative round-trip cost hypothesis, not a
+# statement about any broker's actual commission or spread.
+DEFAULT_ESTIMATED_ROUND_TRIP_COST = Decimal("0.0010")
+INDEPENDENT_EVENT_HORIZONS = (1, 5, 15, 30)
+
+
+@dataclass
+class EventOutcome:
+    future_price: Decimal | None
+    gross_return: Decimal | None
+    net_return: Decimal | None
+
+
+@dataclass
+class IndependentSignalEvent:
+    """A deduplicated signal occurrence for research evaluation only."""
+
+    symbol: str
+    direction: str
+    signal: str
+    source: str
+    timestamp: datetime
+    entry_price: Decimal
+    observation_count: int = 1
+    cooldown_minutes: int = 15
+    estimated_round_trip_cost: Decimal = DEFAULT_ESTIMATED_ROUND_TRIP_COST
+    outcome_1m: EventOutcome | None = None
+    outcome_5m: EventOutcome | None = None
+    outcome_15m: EventOutcome | None = None
+    outcome_30m: EventOutcome | None = None
+    _last_observation_timestamp: datetime = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.symbol = self.symbol.strip().upper()
+        self.direction = self.direction.strip().upper()
+        self.signal = self.signal.strip()
+        self.source = self.source.strip()
+        if not self.symbol or not self.direction or not self.signal or not self.source:
+            raise ValueError("symbol, direction, signal, and source are required")
+        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        if self.entry_price <= 0:
+            raise ValueError("entry_price must be positive")
+        if self.observation_count < 1:
+            raise ValueError("observation_count must be positive")
+        if self.cooldown_minutes < 0:
+            raise ValueError("cooldown_minutes cannot be negative")
+        if self.estimated_round_trip_cost < 0:
+            raise ValueError("estimated_round_trip_cost cannot be negative")
+        self._last_observation_timestamp = self.timestamp
+
+    @property
+    def id(self) -> str:
+        identity = "|".join(
+            (self.symbol, self.direction, self.signal, self.source,
+             self.timestamp.isoformat(), str(self.entry_price))
+        )
+        return sha256(identity.encode("utf-8")).hexdigest()
+
+    @property
+    def equivalence_key(self) -> tuple[str, str, str, str]:
+        return (self.symbol, self.direction, self.signal, self.source)
+
+    def calculate_outcomes(
+        self,
+        observations: list[IntradayObservation],
+    ) -> None:
+        future = sorted(
+            (item for item in observations
+             if item.symbol == self.symbol and item.timestamp > self.timestamp),
+            key=lambda item: item.timestamp,
+        )
+        for horizon in INDEPENDENT_EVENT_HORIZONS:
+            target = self.timestamp + timedelta(minutes=horizon)
+            item = next((item for item in future if item.timestamp >= target), None)
+            if (
+                item is not None
+                and item.timestamp - target
+                > timedelta(seconds=DEFAULT_MAXIMUM_LATENESS_SECONDS)
+            ):
+                item = None
+            gross = None if item is None else self._gross_return(item.price)
+            outcome = EventOutcome(
+                future_price=None if item is None else item.price,
+                gross_return=gross,
+                net_return=None if gross is None else gross - self.estimated_round_trip_cost,
+            )
+            setattr(self, f"outcome_{horizon}m", outcome)
+
+    def _gross_return(self, future_price: Decimal) -> Decimal:
+        if self.direction == "LONG":
+            return (future_price - self.entry_price) / self.entry_price
+        if self.direction == "SHORT":
+            return (self.entry_price - future_price) / self.entry_price
+        raise ValueError("direction must be LONG or SHORT")
+
+
+class EventDetector:
+    """Groups equivalent observations during a configurable cooldown."""
+
+    def __init__(
+        self,
+        *,
+        cooldown_minutes: int = 15,
+        estimated_round_trip_cost: Decimal = DEFAULT_ESTIMATED_ROUND_TRIP_COST,
+    ) -> None:
+        if cooldown_minutes < 0:
+            raise ValueError("cooldown_minutes cannot be negative")
+        if estimated_round_trip_cost < 0:
+            raise ValueError("estimated_round_trip_cost cannot be negative")
+        self.cooldown_minutes = cooldown_minutes
+        self.estimated_round_trip_cost = estimated_round_trip_cost
+        self._active: dict[tuple[str, str, str, str], IndependentSignalEvent] = {}
+        self._last_observation_timestamps: dict[
+            tuple[str, str, str, str], datetime
+        ] = {}
+
+    def observe(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        signal: str,
+        source: str,
+        timestamp: datetime,
+        entry_price: Decimal,
+    ) -> IndependentSignalEvent:
+        normalized_direction = direction.strip().upper()
+        if normalized_direction not in {"LONG", "SHORT"}:
+            raise ValueError("direction must be LONG or SHORT")
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+
+        key = (symbol.strip().upper(), normalized_direction, signal.strip(), source.strip())
+        last_timestamp = self._last_observation_timestamps.get(key)
+        if last_timestamp is not None and timestamp < last_timestamp:
+            raise ValueError("observation timestamp cannot move backwards")
+
+        current = self._active.get(key)
+        if current is not None:
+            elapsed = timestamp - current._last_observation_timestamp
+            if elapsed < timedelta(minutes=self.cooldown_minutes):
+                current.observation_count += 1
+                current._last_observation_timestamp = timestamp
+                self._last_observation_timestamps[key] = timestamp
+                return current
+
+        event = IndependentSignalEvent(
+            symbol=symbol,
+            direction=normalized_direction,
+            signal=signal,
+            source=source,
+            timestamp=timestamp,
+            entry_price=entry_price,
+            cooldown_minutes=self.cooldown_minutes,
+            estimated_round_trip_cost=self.estimated_round_trip_cost,
+        )
+        self._active[key] = event
+        self._last_observation_timestamps[key] = timestamp
+        return event
