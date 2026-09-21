@@ -349,6 +349,10 @@ def detect_multi_task_goal(prompt: str) -> MultiTaskGoal | None:
     if _WINDOWS_ABSOLUTE_PATH_PATTERN.search(normalized):
         # Windows absolute paths keep the existing supervised flows.
         return None
+    if re.search(r"\b(?:copia|copiar)\b", normalized) and "contenido" in normalized:
+        # Verbatim file copies belong to the deterministic structured planner.
+        # Otherwise the destination can be misclassified as another read.
+        return None
 
     search_match = _SEARCH_PATTERN.search(normalized)
     if search_match is not None:

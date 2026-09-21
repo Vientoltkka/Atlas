@@ -394,6 +394,50 @@ def test_real_confirmation_stays_pending_without_tool_execution(
     assert read_calls == []
 
 
+def test_explicit_confirmation_executes_spanish_copy_in_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_real_runtime(monkeypatch, tmp_path)
+    real_read = FileService.read
+    real_write = FileService.write
+    read_calls: list[str] = []
+    write_calls: list[str] = []
+
+    def counted_read(path: str) -> str:
+        read_calls.append(str(path))
+        return real_read(path)
+
+    def counted_write(path: str, content: str) -> None:
+        write_calls.append(str(path))
+        real_write(path, content)
+
+    monkeypatch.setattr(FileService, "read", staticmethod(counted_read))
+    monkeypatch.setattr(FileService, "write", staticmethod(counted_write))
+    orchestrator = Bootstrap.build()
+    prompt = "Lee README.md y copia su contenido en phase_15_1_output.txt"
+
+    pending = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+    assert orchestrator.last_structured_execution_response is not None
+    assert "confirmo" in pending
+    assert read_calls == []
+    assert write_calls == []
+
+    orchestrator.process_prompt("confirmo", confirm=lambda _prompt: "")
+    detail = orchestrator.last_structured_execution_response
+
+    assert detail is not None
+    assert detail.execution_result is not None
+    assert detail.execution_result.success is True
+    assert read_calls == ["README.md"]
+    assert write_calls == ["phase_15_1_output.txt"]
+    output_path = Path.cwd() / "phase_15_1_output.txt"
+    assert output_path.read_text(encoding="utf-8") == (
+        Path("README.md").read_text(encoding="utf-8")
+    )
+    output_path.unlink()
+
+
 def test_unknown_tool_fails_controlled_and_is_persisted(
     tmp_path: Path,
 ) -> None:
