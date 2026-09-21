@@ -24,7 +24,7 @@ from core.self_diagnosis import SelfDiagnosisService
 _AFFIRMATIVE = frozenset({"si", "s", "vale", "ok", "de acuerdo", "adelante"})
 _NEGATIVE = frozenset({"no", "n", "cancelar", "cancela"})
 _IMPROVEMENT = re.compile(
-    r"\b(?:mejora|mejorar|corrige|corregir|repara|reparar|optimiza|optimizar|haz que puedas|crea (?:la|una) capacidad(?:es)? para)\b",
+    r"\b(?:automejora(?:r|rte)?|mejora|mejorar|corrige|corregir|repara|reparar|optimiza|optimizar|haz que puedas|crea (?:la|una) capacidad(?:es)? para)\b",
     re.IGNORECASE,
 )
 
@@ -211,20 +211,24 @@ class SelfImprovementConversation:
             term in text
             for term in (
                 "que puedes automejorar",
+                "en que puedes automejorarte",
                 "que puedes mejorar de ti",
+                "en que puedes mejorar de ti",
                 "analiza que puedes automejorar",
                 "analiza que puedes mejorar",
             )
         )
-        return asks_analysis and ("atlas" in text or "ti" in text)
+        return asks_analysis and ("atlas" in text or "ti" in text or "en que puedes" in text)
 
     def _present_self_diagnosis(self) -> str:
         service = self._self_diagnosis_service
         if service is None:
             return (
-                "No dispongo todav?a de evidencia operativa suficiente "
-                "para realizar un autodiagn?stico verificable. "
-                "No he modificado nada."
+                "Puedo diagnosticar oportunidades con evidencia operativa disponible "
+                "y preparar propuestas acotadas con pruebas focalizadas. "
+                "Toda aplicacion de cambios requiere autorizacion humana y validacion. "
+                "No me automejoro por mi cuenta: no modifico codigo, permisos, memoria, "
+                "modelos ni datos sin ese mecanismo autorizado."
             )
 
         findings = service.diagnose()
@@ -266,7 +270,7 @@ class SelfImprovementConversation:
             return False
         text = _normal(prompt)
         # A normal editing request has neither Atlas nor one of its own surfaces.
-        return any(term in text for term in ("atlas", "voz", "voice", "control pc", "desktop", "puedas", "capacidad"))
+        return any(term in text for term in ("atlas", "voz", "voice", "control pc", "desktop", "puedas", "automejor", "mejorar de ti", "capacidad"))
 
     def diagnose(self, prompt: str) -> ImprovementDiagnosis:
         """Classify a prompt without domain knowledge; builders own their domains."""

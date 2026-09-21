@@ -117,12 +117,28 @@ def _orchestrator(root: Path, *, passed: bool = True):
         ("Atlas, optimiza tu voz", True),
         ("Haz que puedas organizar mis tareas", True),
         ("Crea la capacidad para que Atlas lea calendarios", True),
+        ("En que puedes automejorarte?", True),
+        ("¿En qué puedes mejorar esta carta?", False),
+        ("¿En qué puedes mejorar este texto?", False),
         ("corrige este texto", False),
         ("mejora esta carta", False),
     ],
 )
 def test_detects_only_atlas_self_improvement_intent(prompt: str, expected: bool) -> None:
     assert SelfImprovementConversation.is_self_improvement_request(prompt) is expected
+
+
+def test_self_improvement_question_is_honest_and_requires_authorization() -> None:
+    response = SelfImprovementConversation(_ROOT).handle("En que puedes automejorarte?")
+
+    assert response is not None
+    assert "diagnosticar oportunidades con evidencia operativa" in response
+    assert "propuestas acotadas con pruebas focalizadas" in response
+    assert "autorizacion humana" in response
+    for limit in ("codigo", "permisos", "memoria", "modelos", "datos"):
+        assert limit in response
+    assert "por mi cuenta" in response
+    assert "aprendo constantemente" not in response
 
 
 @pytest.mark.parametrize(
