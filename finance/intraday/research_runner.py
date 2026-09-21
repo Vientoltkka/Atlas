@@ -31,6 +31,20 @@ STRATEGY_VERSIONS = (
     V1_STRATEGY_VERSION,
     TIME_BASED_STRATEGY_VERSION,
 )
+DEFAULT_PROVIDER_RETRIES = 3
+DEFAULT_PROVIDER_RETRY_BACKOFF = (1.0, 2.0, 4.0)
+PROVIDER_ERRORS = (
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    ValueError,
+    RuntimeError,
+)
+RETRYABLE_PROVIDER_ERRORS = (
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
 
 
 @dataclass
@@ -44,6 +58,9 @@ class LiveResearchStats:
     candidates: int = 0
     outcomes: int = 0
     provider_errors: int = 0
+    provider_errors_finales: int = 0
+    provider_retries_recovered: int = 0
+    provider_retry_attempts: int = 0
 
 
 class LiveIntradayResearchRunner:
@@ -63,6 +80,10 @@ class LiveIntradayResearchRunner:
         sleep_fn=time.sleep,
         monotonic_fn=time.monotonic,
         now_fn=lambda: datetime.now(timezone.utc),
+        max_provider_retries: int = DEFAULT_PROVIDER_RETRIES,
+        provider_retry_backoff: tuple[float, ...] = (
+            *DEFAULT_PROVIDER_RETRY_BACKOFF,
+        ),
     ) -> None:
         normalized = symbol.strip().upper().replace("/", "-")
 
@@ -72,6 +93,14 @@ class LiveIntradayResearchRunner:
             raise ValueError("duration_seconds must be positive")
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if max_provider_retries < 0:
+            raise ValueError("max_provider_retries must not be negative")
+        if any(delay < 0 for delay in provider_retry_backoff):
+            raise ValueError("provider retry backoff must not be negative")
+        if max_provider_retries and not provider_retry_backoff:
+            raise ValueError(
+                "provider_retry_backoff is required when retries are enabled"
+            )
         if strategy_version not in STRATEGY_VERSIONS:
             raise ValueError(
                 f"unsupported strategy_version: {strategy_version}"
@@ -81,6 +110,8 @@ class LiveIntradayResearchRunner:
         self._duration_seconds = duration_seconds
         self._poll_seconds = poll_seconds
         self._strategy_version = strategy_version
+        self._max_provider_retries = max_provider_retries
+        self._provider_retry_backoff = provider_retry_backoff
 
         self._provider = (
             provider
@@ -153,54 +184,100 @@ class LiveIntradayResearchRunner:
             ):
                 stats.polls += 1
 
-                try:
-                    events = tuple(self._provider.events())
+                events = None
+                retry_count = 0
+                provider_error = None
 
-                    for event in events:
-                        if not isinstance(event, Quote):
-                            continue
-
-                        stats.quotes_received += 1
-
-                        decision = self._quality_gate.evaluate(
-                            event,
-                            now=self._now(),
+                while True:
+                    try:
+                        events = tuple(self._provider.events())
+                        break
+                    except RETRYABLE_PROVIDER_ERRORS as exc:
+                        provider_error = exc
+                        remaining = (
+                            self._duration_seconds
+                            - (self._monotonic() - started)
                         )
 
-                        if not decision.accepted:
-                            stats.quotes_rejected_quality += 1
-                            continue
+                        if (
+                            retry_count >= self._max_provider_retries
+                            or remaining <= 0
+                        ):
+                            break
 
-                        result = self._collector.ingest_quote(event)
+                        delay_index = min(
+                            retry_count,
+                            len(self._provider_retry_backoff) - 1,
+                        )
+                        delay = self._provider_retry_backoff[delay_index]
+                        self._sleep(min(delay, remaining))
 
-                        if not result.accepted_observation:
-                            stats.quotes_rejected_duplicate += 1
-                            continue
+                        if (
+                            self._monotonic() - started
+                            >= self._duration_seconds
+                        ):
+                            break
 
-                        stats.quotes_accepted += 1
-                        stats.outcomes += result.recorded_outcomes
+                        retry_count += 1
+                        stats.provider_retry_attempts += 1
 
-                        if result.signal is not None:
-                            stats.signals += 1
-
-                            if (
-                                result.signal.action.value
-                                == "CANDIDATE"
-                            ):
-                                stats.candidates += 1
-
-                except (
-                    ConnectionError,
-                    TimeoutError,
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                ) as exc:
+                if events is None:
                     stats.provider_errors += 1
+                    stats.provider_errors_finales += 1
                     print(
                         f"[provider-error] "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{type(provider_error).__name__}: {provider_error}"
                     )
+                else:
+                    if retry_count:
+                        stats.provider_retries_recovered += 1
+                        print(
+                            "[provider-retry-recovered] "
+                            f"quote poll recovered after {retry_count} "
+                            "retry attempt(s)"
+                        )
+
+                    try:
+                        for event in events:
+                            if not isinstance(event, Quote):
+                                continue
+
+                            stats.quotes_received += 1
+
+                            decision = self._quality_gate.evaluate(
+                                event,
+                                now=self._now(),
+                            )
+
+                            if not decision.accepted:
+                                stats.quotes_rejected_quality += 1
+                                continue
+
+                            result = self._collector.ingest_quote(event)
+
+                            if not result.accepted_observation:
+                                stats.quotes_rejected_duplicate += 1
+                                continue
+
+                            stats.quotes_accepted += 1
+                            stats.outcomes += result.recorded_outcomes
+
+                            if result.signal is not None:
+                                stats.signals += 1
+
+                                if (
+                                    result.signal.action.value
+                                    == "CANDIDATE"
+                                ):
+                                    stats.candidates += 1
+
+                    except RETRYABLE_PROVIDER_ERRORS as exc:
+                        stats.provider_errors += 1
+                        stats.provider_errors_finales += 1
+                        print(
+                            f"[provider-error] "
+                            f"{type(exc).__name__}: {exc}"
+                        )
 
                 remaining = (
                     self._duration_seconds
@@ -297,6 +374,12 @@ def main() -> int:
     print(f"candidates: {stats.candidates}")
     print(f"outcomes: {stats.outcomes}")
     print(f"provider_errors: {stats.provider_errors}")
+    print(f"provider_errors_finales: {stats.provider_errors_finales}")
+    print(
+        "provider_retries_recovered: "
+        f"{stats.provider_retries_recovered}"
+    )
+    print(f"provider_retry_attempts: {stats.provider_retry_attempts}")
 
     return 0
 

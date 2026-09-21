@@ -39,6 +39,29 @@ class FakeProvider:
         return iter((self.quotes.pop(0),))
 
 
+class SequenceProvider:
+    def __init__(self, actions):
+        self.actions = list(actions)
+        self.events_calls = 0
+        self.connected = False
+
+    def connect(self):
+        self.connected = True
+
+    def disconnect(self):
+        self.connected = False
+
+    def subscribe(self, symbols):
+        self.subscribed = tuple(symbols)
+
+    def events(self):
+        self.events_calls += 1
+        action = self.actions.pop(0) if self.actions else None
+        if isinstance(action, BaseException):
+            raise action
+        return iter(()) if action is None else iter((action,))
+
+
 class FakeClock:
     def __init__(self):
         self.value = 0.0
@@ -123,6 +146,124 @@ def test_live_runner_rejects_stale_quote(tmp_path):
     assert stats.quotes_received == 1
     assert stats.quotes_accepted == 0
     assert stats.quotes_rejected_quality == 1
+
+
+def test_live_runner_recovers_timeout_without_duplicate_processing(
+    tmp_path,
+    capsys,
+):
+    clock = FakeClock()
+    quote = make_quote(0)
+    provider = SequenceProvider(
+        [TimeoutError("read operation timed out"), quote, quote]
+    )
+
+    runner = LiveIntradayResearchRunner(
+        symbol="BTC-USD",
+        duration_seconds=2,
+        poll_seconds=1,
+        ledger_path=tmp_path / "research.jsonl",
+        provider=provider,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+        now_fn=lambda: NOW + timedelta(seconds=2),
+        provider_retry_backoff=(0,),
+    )
+
+    stats = runner.run()
+
+    assert stats.provider_retry_attempts == 1
+    assert stats.provider_retries_recovered == 1
+    assert stats.provider_errors_finales == 0
+    assert stats.provider_errors == 0
+    assert stats.quotes_received == 2
+    assert stats.quotes_accepted == 1
+    assert stats.quotes_rejected_duplicate == 1
+    assert provider.events_calls == 3
+    assert "[provider-retry-recovered]" in capsys.readouterr().out
+
+
+def test_live_runner_continues_after_retry_exhaustion(tmp_path):
+    clock = FakeClock()
+    provider = SequenceProvider(
+        [
+            TimeoutError("timeout 1"),
+            TimeoutError("timeout 2"),
+            TimeoutError("timeout 3"),
+            TimeoutError("timeout 4"),
+            make_quote(1),
+        ]
+    )
+
+    runner = LiveIntradayResearchRunner(
+        symbol="BTC-USD",
+        duration_seconds=2,
+        poll_seconds=1,
+        ledger_path=tmp_path / "research.jsonl",
+        provider=provider,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+        now_fn=lambda: NOW + timedelta(seconds=2),
+        provider_retry_backoff=(0,),
+    )
+
+    stats = runner.run()
+
+    assert stats.provider_retry_attempts == 3
+    assert stats.provider_retries_recovered == 0
+    assert stats.provider_errors_finales == 1
+    assert stats.provider_errors == 1
+    assert stats.quotes_accepted == 1
+    assert stats.polls == 2
+
+
+def test_live_runner_does_not_retry_after_capture_window(tmp_path):
+    clock = FakeClock()
+    provider = SequenceProvider([TimeoutError("timeout"), make_quote(1)])
+
+    runner = LiveIntradayResearchRunner(
+        symbol="BTC-USD",
+        duration_seconds=0.5,
+        poll_seconds=1,
+        ledger_path=tmp_path / "research.jsonl",
+        provider=provider,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+        now_fn=lambda: NOW,
+        provider_retry_backoff=(1,),
+    )
+
+    stats = runner.run()
+
+    assert provider.events_calls == 1
+    assert stats.provider_retry_attempts == 0
+    assert stats.provider_errors_finales == 1
+
+
+@pytest.mark.parametrize("error", [ValueError("invalid quote"), RuntimeError("bug")])
+def test_live_runner_does_not_retry_non_transient_provider_errors(
+    tmp_path,
+    error,
+):
+    clock = FakeClock()
+    provider = SequenceProvider([error])
+
+    runner = LiveIntradayResearchRunner(
+        symbol="BTC-USD",
+        duration_seconds=1,
+        poll_seconds=1,
+        ledger_path=tmp_path / "research.jsonl",
+        provider=provider,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+        provider_retry_backoff=(0,),
+    )
+
+    with pytest.raises(type(error), match=str(error)):
+        runner.run()
+
+    assert provider.events_calls == 1
+    assert clock.value == 0
 
 
 def test_live_runner_has_no_execution_dependency():
