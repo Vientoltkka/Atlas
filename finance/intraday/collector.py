@@ -53,6 +53,7 @@ class IntradayResearchCollector:
             tuple[str, object],
             IntradaySignal,
         ] = {}
+        self._candidate_event_ids: dict[tuple[str, object], str] = {}
         self._completed: set[
             tuple[str, object, int]
         ] = set()
@@ -114,9 +115,13 @@ class IntradayResearchCollector:
                 and record.get("action") == "CANDIDATE"
             ):
                 signal = self._signal_from_record(record)
-                self._candidates[
-                    (signal.symbol, signal.timestamp)
-                ] = signal
+                key = (signal.symbol, signal.timestamp)
+                self._candidates[key] = signal
+                event_id = record.get("event_id")
+                if event_id is not None:
+                    if not isinstance(event_id, str) or not event_id.strip():
+                        raise ValueError("candidate signal event_id must be non-empty")
+                    self._candidate_event_ids[key] = event_id
 
             elif record_type in {"EVENT", "EVENT_UPDATE"}:
                 event = self._ledger.event_from_record(record)
@@ -148,6 +153,10 @@ class IntradayResearchCollector:
                 [item for items in self._observations.values() for item in items]
             ):
                 self._ledger.record_event_update(event)
+
+        for event_id in self._candidate_event_ids.values():
+            if event_id not in self._events:
+                raise ValueError("candidate signal references a missing event")
 
     @staticmethod
     def _observation_from_record(
@@ -252,12 +261,8 @@ class IntradayResearchCollector:
             or self._record_no_action
         )
 
-        if should_record:
-            self._ledger.record_signal(signal)
-
         if signal.action is IntradaySignalAction.CANDIDATE:
             key = (signal.symbol, signal.timestamp)
-            self._candidates[key] = signal
             if self._event_detector is not None:
                 if signal.direction not in {"LONG", "SHORT"}:
                     raise ValueError("candidate signal requires a valid direction")
@@ -275,6 +280,15 @@ class IntradayResearchCollector:
                     self._events[event.id] = event
                 else:
                     self._ledger.record_event_update(event)
+                if should_record:
+                    self._ledger.record_signal(signal, event_id=event.id)
+                    self._candidate_event_ids[key] = event.id
+            elif should_record:
+                # Non-V2 ledgers retain their historical unlinked shape.
+                self._ledger.record_signal(signal)
+            self._candidates[key] = signal
+        elif should_record:
+            self._ledger.record_signal(signal)
 
         if self._event_detector is not None:
             for event in self._event_detector.update_pending(

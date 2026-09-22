@@ -101,9 +101,20 @@ class IntradayResearchLedger:
             }
         )
 
-    def record_signal(self, signal: IntradaySignal) -> None:
-        self._append(
-            {
+    def record_signal(
+        self,
+        signal: IntradaySignal,
+        *,
+        event_id: str | None = None,
+    ) -> None:
+        if event_id is not None:
+            if not isinstance(event_id, str):
+                raise ValueError("event_id must be a string")
+            event_id = event_id.strip()
+            if not event_id:
+                raise ValueError("event_id cannot be empty")
+
+        record = {
                 "type": "SIGNAL",
                 "strategy_version": self._strategy_version,
                 "symbol": signal.symbol,
@@ -112,8 +123,10 @@ class IntradayResearchLedger:
                 "reasons": list(signal.reasons),
                 "direction": signal.direction,
                 "features": asdict(signal.features),
-            }
-        )
+        }
+        if event_id is not None:
+            record["event_id"] = event_id
+        self._append(record)
 
     @staticmethod
     def _event_payload(event: IndependentSignalEvent) -> dict:

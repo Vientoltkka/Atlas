@@ -238,9 +238,35 @@ def test_v2_candidates_within_cooldown_are_one_durable_event(tmp_path):
     records = ledger.records()
     events = [item for item in records if item["type"] == "EVENT"]
     updates = [item for item in records if item["type"] == "EVENT_UPDATE"]
+    candidates = [
+        item for item in records
+        if item["type"] == "SIGNAL" and item["action"] == "CANDIDATE"
+    ]
     assert len(events) == 1
     assert events[0]["direction"] == "LONG"
     assert updates[-1]["observation_count"] == 12
+    assert candidates
+    assert all(item["event_id"] == events[0]["id"] for item in candidates)
+    assert len({item["event_id"] for item in candidates}) == 1
+
+
+def test_v2_candidate_event_link_is_restored_without_reconstruction(tmp_path):
+    path = tmp_path / "events.jsonl"
+    collector, ledger = make_v2(path)
+    for item in rising_quotes():
+        collector.ingest_quote(item)
+
+    candidate = next(
+        item for item in ledger.records()
+        if item["type"] == "SIGNAL" and item["action"] == "CANDIDATE"
+    )
+    assert candidate["event_id"] in {
+        item["id"] for item in ledger.records() if item["type"] == "EVENT"
+    }
+
+    restarted, _ = make_v2(path)
+    key = (candidate["symbol"], datetime.fromisoformat(candidate["timestamp"]))
+    assert restarted._candidate_event_ids[key] == candidate["event_id"]
 
 
 def test_v2_event_restores_open_cooldown_without_duplication(tmp_path):

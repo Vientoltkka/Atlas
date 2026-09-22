@@ -169,8 +169,8 @@ def test_ledger_counts_candidates_and_filters_strategy_version(tmp_path) -> None
 
     assert report.total_events == 1
     assert report.candidate_observations == 16
-    assert report.event_backed_candidate_observations == 4
-    assert report.unlinked_candidate_observations == 12
+    assert report.event_backed_candidate_observations == 0
+    assert report.unlinked_candidate_observations == 16
     assert report.aggregated_by_cooldown == 3
     assert "Candidatos sin EVENT asociado no se usan para retornos independientes." in report.warnings
 

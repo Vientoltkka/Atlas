@@ -367,6 +367,7 @@ def load_research_event_report(
 
     snapshots: dict[str, object] = {}
     candidate_observations = 0
+    candidate_event_ids: list[str | None] = []
     try:
         with ledger_path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, 1):
@@ -384,6 +385,10 @@ def load_research_event_report(
                     continue
                 if record.get("type") == "SIGNAL" and record.get("action") == "CANDIDATE":
                     candidate_observations += 1
+                    event_id = record.get("event_id")
+                    candidate_event_ids.append(
+                        event_id if isinstance(event_id, str) and event_id.strip() else None
+                    )
                 elif record.get("type") in {"EVENT", "EVENT_UPDATE"}:
                     try:
                         event = IntradayResearchLedger.event_from_record(record)
@@ -396,8 +401,12 @@ def load_research_event_report(
         raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
 
     report = aggregate_event_report(snapshots.values())
+    linked_candidate_observations = sum(
+        event_id is not None and event_id in snapshots
+        for event_id in candidate_event_ids
+    )
     unlinked_candidates = max(
-        candidate_observations - report.event_backed_candidate_observations,
+        candidate_observations - linked_candidate_observations,
         0,
     )
     warnings = list(_report_warnings(report.total_events, unlinked_candidates))
@@ -410,7 +419,7 @@ def load_research_event_report(
                "event_backed_candidate_observations", "unlinked_candidate_observations",
            }},
         candidate_observations=candidate_observations,
-        event_backed_candidate_observations=report.event_backed_candidate_observations,
+        event_backed_candidate_observations=linked_candidate_observations,
         unlinked_candidate_observations=unlinked_candidates,
         strategy_version=requested_version,
         warnings=tuple(warnings),
