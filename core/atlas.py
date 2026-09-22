@@ -57,6 +57,14 @@ class Atlas:
             state_listener=state_listener, status_sink=status_sink, typed_input=typed_input,
         )
 
+    def transcribe_once(self, stop_event=None, stage_sink=None, finalize_event=None):
+        """Transcribe one chat-composer recording through the shared STT engine."""
+        return self._orchestrator.transcribe_once(
+            stop_event=stop_event,
+            stage_sink=stage_sink,
+            finalize_event=finalize_event,
+        )
+
     def process_prompt(self, prompt: str) -> str:
         today = datetime.now().astimezone().date()
         profile_command = self._daily_coach_profile_commands.handle(prompt)

@@ -1011,6 +1011,16 @@ class AtlasOrchestrator:
             )
         execute_manual(**voice_kwargs)
 
+    def transcribe_once(self, stop_event=None, stage_sink=None, finalize_event=None):
+        """Transcribe one composer recording through the existing STT engine."""
+        if self._voice_conversation is None:
+            raise RuntimeError("Modo de voz no disponible.")
+        return self._voice_conversation.transcribe_once(
+            stop_event=stop_event,
+            stage_sink=stage_sink,
+            finalize_event=finalize_event,
+        )
+
     def start_assistant(self, state_listener=None) -> None:
         """Start permanent assistant mode with wake word."""
         if self._permanent_assistant is None:
@@ -2596,6 +2606,7 @@ class AtlasOrchestrator:
         on_model_fragment=None,
     ) -> str:
         """Route transcribed voice text before falling back to the model."""
+        voice_prompt = prompt
         prompt = _strip_voice_invocation_prefix(prompt)
         request = self._request_gateway.from_voice(prompt)
         routing_text = self._voice_routing_text(request.content)
@@ -2639,6 +2650,12 @@ class AtlasOrchestrator:
         memory_response = self._process_memory_request(request)
         if memory_response is not None:
             return memory_response
+
+        self_improvement_response = self._self_improvement_conversation.handle(
+            voice_prompt
+        )
+        if self_improvement_response is not None:
+            return self_improvement_response
 
         close_request = (
             self._desktop_interaction.close_application_tool_request(routing_text)

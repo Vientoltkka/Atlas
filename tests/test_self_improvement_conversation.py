@@ -118,6 +118,13 @@ def _orchestrator(root: Path, *, passed: bool = True):
         ("Haz que puedas organizar mis tareas", True),
         ("Crea la capacidad para que Atlas lea calendarios", True),
         ("En que puedes automejorarte?", True),
+        ("Qué mejora te falta tener", True),
+        ("Qué herramientas necesitas para ser mejor", True),
+        ("Qué te falta para mejorar de cara al futuro", True),
+        ("Hola Atlas, ¿Qué mejorarías de tu sistema operativo?", True),
+        ("Atlas, que mejor irías en tu sistema operativo", True),
+        ("Atlas, qué mejorarías en tu sistema operativo", True),
+        ("Cómo mejoro mi sistema operativo", False),
         ("¿En qué puedes mejorar esta carta?", False),
         ("¿En qué puedes mejorar este texto?", False),
         ("corrige este texto", False),
@@ -139,6 +146,37 @@ def test_self_improvement_question_is_honest_and_requires_authorization() -> Non
         assert limit in response
     assert "por mi cuenta" in response
     assert "aprendo constantemente" not in response
+
+
+def test_operating_system_question_uses_bounded_verifiable_response() -> None:
+    response = SelfImprovementConversation(_ROOT).handle(
+        "Hola, Atlas: ¿Qué mejorarías de tu sistema operativo?"
+    )
+
+    assert response is not None
+    assert "capacidades acotadas" in response
+    assert "evidencia" in response
+    assert "autorizar y validar" in response
+    assert "kernel" in response
+    assert "latencia o errores cero" in response
+    assert "conciencia" not in response
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Qué mejora te falta tener",
+        "Qué herramientas necesitas para ser mejor",
+        "Qué te falta para mejorar de cara al futuro",
+    ],
+)
+def test_self_diagnosis_questions_have_the_bounded_response(prompt: str) -> None:
+    response = SelfImprovementConversation(_ROOT).handle(prompt)
+
+    assert response is not None
+    assert "capacidades actuales" in response
+    assert "autorizacion humana" in response
+    assert "No me automejoro por mi cuenta" in response
 
 
 @pytest.mark.parametrize(

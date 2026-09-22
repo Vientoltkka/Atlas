@@ -157,6 +157,27 @@ def test_empty_chat_input_does_not_send(qapp) -> None:
     panel.close()
 
 
+def test_chat_dictation_button_toggles_and_inserts_without_sending(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    toggles: list[bool] = []
+    sent: list[str] = []
+    panel.dictation_toggle_requested.connect(lambda: toggles.append(True))
+    panel.send_requested.connect(sent.append)
+
+    panel._dictation_button.click()
+    assert toggles == [True]
+    panel.set_dictation_state("RECORDING")
+    assert panel._dictation_status.text() == "Dictado: Grabando"
+    panel.insert_transcription("texto reconocido")
+    assert panel._input.text() == "texto reconocido"
+    assert sent == []
+    panel.set_dictation_state("TRANSCRIBING")
+    assert panel._dictation_status.text() == "Dictado: Transcribiendo"
+    panel.set_dictation_state("ERROR", "Sin audio")
+    assert panel._dictation_status.text() == "Dictado: Sin audio"
+    panel.close()
+
+
 def test_transcript_uses_distinct_escaped_user_and_atlas_turns(qapp) -> None:
     panel = orbe_app.create_transcript_panel()
     panel.append_user("<b>sin formato</b>\nsegunda linea")
@@ -170,6 +191,23 @@ def test_transcript_uses_distinct_escaped_user_and_atlas_turns(qapp) -> None:
     assert "#123b5c" in rendered
     assert "#162235" in rendered
     assert rendered.count("<table") == 2
+    panel.close()
+
+
+def test_clear_button_clears_visible_transcript_and_draft_without_sending(qapp) -> None:
+    panel = orbe_app.create_transcript_panel()
+    sent: list[str] = []
+    panel.send_requested.connect(sent.append)
+    panel.append_user("visible")
+    panel._input.setText("borrador")
+
+    assert panel._clear_button.text() == "Limpiar"
+    assert panel._clear_button.accessibleName() == "Limpiar conversación visible"
+    panel._clear_button.click()
+
+    assert panel._view.toPlainText() == ""
+    assert panel._input.text() == ""
+    assert sent == []
     panel.close()
 
 

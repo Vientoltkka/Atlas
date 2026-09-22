@@ -33,7 +33,7 @@ from use_cases.voice_conversation import (
 )
 from core.execution_supervisor import ExecutionState, ExecutionSupervisor
 from ui.atlas_bridge import AtlasUiBridge
-from ui.orbe_app import create_application, create_orb_window
+from ui.orbe_app import create_application, create_orb_window, create_transcript_panel
 
 
 @pytest.fixture(scope="module")
@@ -228,6 +228,60 @@ def test_transcript_panel_hides_repetitive_voice_states_without_session_logic(qa
     panel.append_message("Aviso de sistema visible")
     assert "LISTENING" not in panel._view.toPlainText()
     assert "Aviso de sistema visible" in panel._view.toPlainText()
+    panel.close()
+
+
+def test_chat_dictation_stop_finalizes_and_inserts_transcript(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+
+    entered = threading.Event()
+
+    class FakeAtlas:
+        def transcribe_once(self, *, stop_event, finalize_event, stage_sink):
+            entered.set()
+            while not stop_event.is_set() and not finalize_event.is_set():
+                finalize_event.wait(0.01)
+            return SimpleNamespace(
+                cancelled=stop_event.is_set(), text="texto final", warnings=()
+            )
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+    panel._dictation_button.click()
+    assert entered.wait(timeout=1)
+    panel._dictation_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert panel._input.text() == "texto final"
+    orb.close()
+    panel.close()
+
+
+def test_hiding_chat_cancels_dictation_without_inserting_result(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+
+    entered = threading.Event()
+
+    class FakeAtlas:
+        def transcribe_once(self, *, stop_event, finalize_event, stage_sink):
+            entered.set()
+            while not stop_event.is_set() and not finalize_event.is_set():
+                finalize_event.wait(0.01)
+            return SimpleNamespace(cancelled=stop_event.is_set(), text="descartado", warnings=())
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel)
+    panel._dictation_button.click()
+    assert entered.wait(timeout=1)
+    controller.hide_chat()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert panel._input.text() == ""
+    orb.close()
     panel.close()
 
 

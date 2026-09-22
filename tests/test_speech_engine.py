@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -94,6 +95,34 @@ class FakeProvider:
         )
 
 
+class StageCapture(FakeCapture):
+    def capture_phrase(self, settings=None, stop_event=None, stage_sink=None):
+        if stage_sink is not None:
+            stage_sink("recording")
+        return self.result
+
+
+class ExplicitStopCapture(FakeCapture):
+    def capture_phrase(self, settings=None, stop_event=None, stage_sink=None):
+        if stage_sink is not None:
+            stage_sink("recording")
+        return AudioCaptureResult(
+            samples=np.array([], dtype=np.float32),
+            sample_rate=16_000,
+            duration_seconds=0.0,
+            microphone_name="Fake Mic",
+            completed=False,
+            cancelled=stop_event is not None and stop_event.is_set(),
+        )
+
+
+class FinalizeCapture(FakeCapture):
+    def capture_phrase(self, settings=None, stop_event=None, stage_sink=None, finalize_event=None):
+        assert finalize_event is not None
+        assert finalize_event.is_set()
+        return self.result
+
+
 def test_lists_devices_default_and_selects_valid_index() -> None:
     capture = FakeCapture()
     engine = SpeechEngineUseCase(capture, FakeProvider())
@@ -106,6 +135,114 @@ def test_lists_devices_default_and_selects_valid_index() -> None:
     assert default.index == 0
     assert selected.name == "Second Mic"
     assert capture.selected_index == 2
+
+
+def test_chat_dictation_reports_preparing_then_recording_without_wait() -> None:
+    stages: list[str] = []
+    engine = SpeechEngineUseCase(StageCapture(), FakeProvider())
+
+    result = engine.transcribe_once(stage_sink=stages.append)
+
+    assert result.text == "Atlas abre Visual Studio Code"
+    assert stages == ["preparing", "recording", "transcribing"]
+
+
+def test_manual_capture_does_not_finish_on_silence() -> None:
+    capture = SoundDeviceAudioCapture(
+        max_duration=0.8,
+        initial_silence_timeout=0.2,
+        trailing_silence=0.1,
+        chunk_duration=0.1,
+        speech_threshold=0.01,
+        minimum_audio_duration=0.1,
+    )
+    voice = np.ones((1600, 1), dtype=np.float32) * 0.2
+    silence = np.zeros((1600, 1), dtype=np.float32)
+
+    result = capture.capture_from_chunks(
+        [voice, voice, voice, silence, silence, voice, voice, voice],
+        stop_on_silence=False,
+    )
+
+    assert result.completed is True
+    assert result.end_reason != "silencio posterior detectado"
+
+
+def test_manual_capture_transcribes_only_after_explicit_stop() -> None:
+    stop_event = threading.Event()
+    stop_event.set()
+
+    result = SpeechEngineUseCase(
+        ExplicitStopCapture(), FakeProvider()
+    ).transcribe_once(stop_event=stop_event)
+
+    assert result.cancelled is True
+    assert result.text == ""
+
+
+def test_explicit_stop_finalizes_audio_and_reaches_stt() -> None:
+    finalize_event = threading.Event()
+    finalize_event.set()
+    provider = FakeProvider()
+
+    result = SpeechEngineUseCase(FinalizeCapture(), provider).transcribe_once(
+        stop_event=threading.Event(), finalize_event=finalize_event
+    )
+
+    assert result.cancelled is False
+    assert result.text == "Atlas abre Visual Studio Code"
+    assert provider.calls == 1
+
+
+def test_dictation_disables_silence_stop_and_restores_normal_voice_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = SoundDeviceAudioCapture(
+        sample_rate=10,
+        max_duration=0.8,
+        initial_silence_timeout=0.2,
+        trailing_silence=0.3,
+        chunk_duration=0.1,
+        speech_threshold=0.01,
+        minimum_audio_duration=0.1,
+    )
+    voice = np.ones((1, 1), dtype=np.float32) * 0.2
+    silence = np.zeros((1, 1), dtype=np.float32)
+    chunks = [voice, voice, voice, silence, silence, silence, voice, voice]
+    reads: list[int] = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _frames):
+            reads.append(1)
+            return chunks[len(reads) - 1], False
+
+    fake_sd = SimpleNamespace(
+        default=SimpleNamespace(device=(0, None)),
+        query_hostapis=lambda: [{"name": "MME"}],
+        query_devices=lambda: [{"name": "Physical Mic", "max_input_channels": 1, "hostapi": 0}],
+        InputStream=lambda **_kwargs: Stream(),
+    )
+    monkeypatch.setattr(capture, "_sounddevice", lambda: fake_sd)
+    engine = SpeechEngineUseCase(capture, FakeProvider())
+
+    dictation = engine.transcribe_once(SpeechCaptureSettings(stop_on_silence=False))
+
+    assert dictation.completed is True
+    assert dictation.capture_end_reason != "silencio posterior detectado"
+    assert len(reads) == len(chunks)
+    assert capture._stop_on_silence is True
+
+    reads.clear()
+    voice_mode = engine.transcribe_once(SpeechCaptureSettings(stop_on_silence=True))
+
+    assert voice_mode.completed is True
+    assert len(reads) < len(chunks)
 
 
 def test_rejects_invalid_index_and_empty_device_list() -> None:

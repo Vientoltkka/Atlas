@@ -299,6 +299,21 @@ class VoiceConversationUseCase:
             Callable[[VoiceConversationState], None] | None
         ) = None
 
+    def transcribe_once(
+        self, stop_event=None, stage_sink=None, finalize_event=None
+    ) -> SpeechTranscriptionResult:
+        """Expose the shared STT capture for text-chat dictation only."""
+        return self._speech_engine.transcribe_once(
+            replace(
+                self._turn_capture_settings,
+                stop_on_silence=False,
+                max_duration=max(self._turn_capture_settings.max_duration or 0.0, 120.0),
+            ),
+            stage_sink=stage_sink,
+            stop_event=stop_event,
+            finalize_event=finalize_event,
+        )
+
     def execute(
         self,
         prompt: str,

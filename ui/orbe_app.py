@@ -2014,6 +2014,8 @@ def create_transcript_panel():
         voice_start_requested = Signal()
         voice_stop_requested = Signal()
         voice_retry_requested = Signal()
+        dictation_toggle_requested = Signal()
+        clear_requested = Signal()
         _VOICE_STATUS = {"STARTING": "Iniciando voz", "LISTENING": "Escuchando", "TRANSCRIBING": "STT", "PROCESSING": "Procesando", "SPEAKING": "TTS", "RECOVERING": "Reintentando", "DEGRADED": "Error", "ERROR": "Error", "STOPPING": "Deteniendo", "STOPPED": "Desconectado"}
         _HIDDEN_SYSTEM_MESSAGES = frozenset(
             {
@@ -2070,13 +2072,23 @@ def create_transcript_panel():
                 "border: 1px solid rgba(80, 150, 220, 110); border-radius: 10px;"
                 "padding: 3px 10px; font-size: 11px; font-weight: 600;"
             )
+            self._dictation_status = QLabel("Dictado: Listo", card)
+            self._dictation_status.setStyleSheet(
+                "color: #bfe3ff; background: transparent; font-size: 11px;"
+            )
             self._close_button = QPushButton("—", card)
             self._close_button.setToolTip("Cerrar conversación")
             self._close_button.setFixedSize(30, 26)
             self._close_button.clicked.connect(self.close_requested.emit)
+            self._clear_button = QPushButton("Limpiar", card)
+            self._clear_button.setToolTip("Limpiar transcript y borrador visibles")
+            self._clear_button.setAccessibleName("Limpiar conversación visible")
+            self._clear_button.clicked.connect(self.clear_chat)
+            self._clear_button.clicked.connect(self.clear_requested.emit)
             header.addWidget(self._brand)
             header.addStretch(1)
             header.addWidget(self._voice_status)
+            header.addWidget(self._clear_button)
             header.addWidget(self._close_button)
             header_frame = QFrame(card)
             header_frame.setLayout(header)
@@ -2133,6 +2145,7 @@ def create_transcript_panel():
             attachment_layout.addWidget(self._attachment_remove_button)
             self._attachment_preview.hide()
             layout.addWidget(self._attachment_preview)
+            layout.addWidget(self._dictation_status)
             input_layout = QHBoxLayout()
             input_layout.setSpacing(6)
             self._attachment_button = QPushButton("+", card)
@@ -2147,6 +2160,10 @@ def create_transcript_panel():
                 "border: 1px solid rgba(70, 130, 190, 120); border-radius: 10px;"
                 "font-size: 15px; padding: 8px; }"
             )
+            self._dictation_button = QPushButton("Mic", card)
+            self._dictation_button.setToolTip("Iniciar dictado")
+            self._dictation_button.setFixedWidth(42)
+            self._dictation_button.clicked.connect(self.dictation_toggle_requested.emit)
             self._send_button = QPushButton("Enviar", card)
             self._send_button.setStyleSheet(
                 "QPushButton { background: rgba(20, 90, 190, 200); color: #f2fbff;"
@@ -2159,6 +2176,7 @@ def create_transcript_panel():
             self._input.submit_requested.connect(self._submit_input)
             self._send_button.clicked.connect(self._submit_input)
             input_layout.addWidget(self._attachment_button)
+            input_layout.addWidget(self._dictation_button)
             input_layout.addWidget(self._input, 1)
             input_layout.addWidget(self._send_button)
             layout.addLayout(input_layout)
@@ -2258,11 +2276,44 @@ def create_transcript_panel():
             self._input.setText(str(text))
             self._input.setFocus()
 
+        def insert_transcription(self, text: str) -> None:
+            """Insert dictation without submitting the composer."""
+            value = str(text).strip()
+            if not value:
+                return
+            current = self._input.text().rstrip()
+            self._input.setText(f"{current} {value}".strip())
+            self._input.setFocus()
+
+        def clear_chat(self) -> None:
+            """Clear only the visible transcript and the current composer draft."""
+            self._view.clear()
+            self._input.clear()
+            self._clear_attachment()
+
+        def set_dictation_state(self, state: str, detail: str = "") -> None:
+            labels = {
+                "READY": "Listo",
+                "PREPARING": "Preparando micrófono",
+                "RECORDING": "Grabando",
+                "TRANSCRIBING": "Transcribiendo",
+                "ERROR": "Error",
+                "CANCELLED": "Cancelado",
+            }
+            label = labels.get(str(state), str(state))
+            self._dictation_button.setText("Stop" if state == "RECORDING" else "Mic")
+            self._dictation_button.setToolTip(
+                "Detener y transcribir" if state == "RECORDING" else "Iniciar dictado"
+            )
+            self._dictation_button.setAccessibleName(f"Micrófono: {label}")
+            self._dictation_status.setText(f"Dictado: {detail or label}")
+
         def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
             if self._hide_on_close:
                 self.close_requested.emit()
                 event.ignore()
                 return
+            self.close_requested.emit()
             super().closeEvent(event)
 
         def set_voice_state(self, state: str) -> None:

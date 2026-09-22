@@ -27,6 +27,17 @@ _IMPROVEMENT = re.compile(
     r"\b(?:automejora(?:r|rte)?|mejora|mejorar|corrige|corregir|repara|reparar|optimiza|optimizar|haz que puedas|crea (?:la|una) capacidad(?:es)? para)\b",
     re.IGNORECASE,
 )
+_SELF_DIAGNOSIS_PHRASES = frozenset(
+    {
+        "que mejora te falta tener",
+        "que herramientas necesitas para ser mejor",
+        "que te falta para mejorar de cara al futuro",
+    }
+)
+_SYSTEM_OPERATING_QUESTION = re.compile(
+    r"\bque\s+(?:mejor(?:arias|ar)|mejor\s+irias?)\s+(?:en|de)\s+tu\s+sistema\s+operativo\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +186,8 @@ class SelfImprovementConversation:
         if pending is not None:
             return pending
         if self.is_self_diagnosis_request(prompt):
+            if self.is_system_operating_question(prompt):
+                return self._present_system_operating_limits()
             return self._present_self_diagnosis()
         if not self.is_self_improvement_request(prompt):
             return None
@@ -207,6 +220,10 @@ class SelfImprovementConversation:
         if not isinstance(prompt, str):
             return False
         text = _normal(prompt)
+        if any(phrase in text for phrase in _SELF_DIAGNOSIS_PHRASES):
+            return True
+        if SelfImprovementConversation.is_system_operating_question(prompt):
+            return True
         asks_analysis = any(
             term in text
             for term in (
@@ -220,12 +237,30 @@ class SelfImprovementConversation:
         )
         return asks_analysis and ("atlas" in text or "ti" in text or "en que puedes" in text)
 
+    @staticmethod
+    def is_system_operating_question(prompt: str) -> bool:
+        """Recognize the explicit, human-directed operating-system question."""
+        if not isinstance(prompt, str):
+            return False
+        text = _normal(prompt)
+        return "atlas" in text and bool(_SYSTEM_OPERATING_QUESTION.search(text))
+
+    @staticmethod
+    def _present_system_operating_limits() -> str:
+        return (
+            "Puedo mejorar de forma verificable capacidades acotadas de Atlas: "
+            "diagnosticar fallos con evidencia, proponer cambios y preparar pruebas. "
+            "Una persona debe autorizar y validar cualquier aplicación. "
+            "No puedo reescribir por mi cuenta el sistema operativo, el kernel, "
+            "los permisos, los modelos, la memoria o los datos, ni prometer latencia o errores cero."
+        )
+
     def _present_self_diagnosis(self) -> str:
         service = self._self_diagnosis_service
         if service is None:
             return (
-                "Puedo diagnosticar oportunidades con evidencia operativa disponible "
-                "y preparar propuestas acotadas con pruebas focalizadas. "
+                "Puedo usar mis capacidades actuales para diagnosticar oportunidades "
+                "con evidencia operativa y preparar propuestas acotadas con pruebas focalizadas. "
                 "Toda aplicacion de cambios requiere autorizacion humana y validacion. "
                 "No me automejoro por mi cuenta: no modifico codigo, permisos, memoria, "
                 "modelos ni datos sin ese mecanismo autorizado."
@@ -266,9 +301,15 @@ class SelfImprovementConversation:
 
     @staticmethod
     def is_self_improvement_request(prompt: str) -> bool:
-        if not isinstance(prompt, str) or not _IMPROVEMENT.search(prompt):
+        if not isinstance(prompt, str):
             return False
         text = _normal(prompt)
+        if SelfImprovementConversation.is_system_operating_question(prompt):
+            return True
+        if any(phrase in text for phrase in _SELF_DIAGNOSIS_PHRASES):
+            return True
+        if not _IMPROVEMENT.search(prompt):
+            return False
         # A normal editing request has neither Atlas nor one of its own surfaces.
         return any(term in text for term in ("atlas", "voz", "voice", "control pc", "desktop", "puedas", "automejor", "mejorar de ti", "capacidad"))
 

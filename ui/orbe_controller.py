@@ -59,6 +59,8 @@ class _VoiceSessionBridge(QObject):
 
     state_received = Signal(int, object)
     message_received = Signal(int, object)
+    dictation_state_received = Signal(int, str)
+    dictation_finished = Signal(int, object)
 
 
 def _stage_v2_requested() -> bool:
@@ -184,6 +186,11 @@ class OrbeController:
         self._session_thread = None
         self._session_generation = 0
         self._chat_threads: set[threading.Thread] = set()
+        self._dictation_lock = threading.Lock()
+        self._dictation_thread = None
+        self._dictation_stop_event = None
+        self._dictation_finalize_event = None
+        self._dictation_generation = 0
         self._hotkey_factory = hotkey_factory
         self._chat_hotkey = None
         # Ctrl+Espacio now TOGGLES: visible -> hide everything, hidden -> show.
@@ -200,6 +207,8 @@ class OrbeController:
         self._voice_session_bridge = _VoiceSessionBridge()
         self._voice_session_bridge.state_received.connect(self._on_voice_state)
         self._voice_session_bridge.message_received.connect(self._on_voice_message)
+        self._voice_session_bridge.dictation_state_received.connect(self._on_dictation_state)
+        self._voice_session_bridge.dictation_finished.connect(self._on_dictation_finished)
         self._last_voice_visual_state = OrbVisualState.IDLE
         self._supervision_visual_override = None
         self._bridge.voice_visual_state_changed.connect(self._apply_voice_visual_state)
@@ -236,6 +245,8 @@ class OrbeController:
         self._transcript_panel.voice_start_requested.connect(self.start_voice)
         self._transcript_panel.voice_stop_requested.connect(self.stop)
         self._transcript_panel.voice_retry_requested.connect(self.retry_voice)
+        self._transcript_panel.dictation_toggle_requested.connect(self.toggle_dictation)
+        self._transcript_panel.clear_requested.connect(self._clear_visible_chat)
 
     @property
     def bridge(self):
@@ -379,6 +390,7 @@ class OrbeController:
         AUTOMATION, AUTHORIZATION, ERROR) porque solo toca visibilidad de
         ventanas; nunca depende de la voz ni de un worker.
         """
+        self.cancel_dictation()
         self._hide_stage()
         if self._master_hud is not None:
             self._master_hud.hide()
@@ -481,6 +493,7 @@ class OrbeController:
 
     def hide_chat(self) -> None:
         """Cerrar el chat: volver al MASTER cuando es la interfaz activa."""
+        self.cancel_dictation()
         self._transcript_panel.hide()
         self._orb.hide()
         self._hide_stage()
@@ -493,6 +506,92 @@ class OrbeController:
         self._set_escape_hotkey(
             self._master_hud is not None and self._master_hud.isVisible()
         )
+
+    def toggle_dictation(self) -> None:
+        """Toggle one isolated chat dictation recording."""
+        with self._dictation_lock:
+            thread = self._dictation_thread
+            if thread is not None and thread.is_alive():
+                self._transcript_panel.set_dictation_state("TRANSCRIBING")
+                if self._dictation_finalize_event is not None:
+                    self._dictation_finalize_event.set()
+                return
+            if self._session_thread is not None and self._session_thread.is_alive():
+                self._transcript_panel.set_dictation_state("ERROR", "Voz activa")
+                return
+            self._dictation_generation += 1
+            generation = self._dictation_generation
+            stop_event = threading.Event()
+            finalize_event = threading.Event()
+            self._dictation_stop_event = stop_event
+            self._dictation_finalize_event = finalize_event
+            self._transcript_panel.set_dictation_state("PREPARING", "Preparando micrófono")
+            thread = threading.Thread(
+                target=self._run_dictation,
+                args=(generation, stop_event, finalize_event),
+                daemon=True,
+                name="atlas-chat-dictation",
+            )
+            self._dictation_thread = thread
+            thread.start()
+
+    def cancel_dictation(self) -> None:
+        """Stop a pending capture and invalidate its UI result."""
+        with self._dictation_lock:
+            self._dictation_generation += 1
+            if self._dictation_stop_event is not None:
+                self._dictation_stop_event.set()
+            self._dictation_finalize_event = None
+            self._dictation_thread = None
+            self._dictation_stop_event = None
+        self._transcript_panel.set_dictation_state("CANCELLED")
+
+    def _run_dictation(self, generation: int, stop_event, finalize_event) -> None:
+        def stage_sink(state: str) -> None:
+            self._voice_session_bridge.dictation_state_received.emit(generation, state.upper())
+
+        try:
+            result = self._atlas.transcribe_once(
+                stop_event=stop_event,
+                stage_sink=stage_sink,
+                finalize_event=finalize_event,
+            )
+            self._voice_session_bridge.dictation_finished.emit(generation, result)
+        except Exception as error:
+            self._voice_session_bridge.dictation_finished.emit(generation, error)
+
+    def _on_dictation_state(self, generation: int, state: str) -> None:
+        if generation == self._dictation_generation:
+            self._transcript_panel.set_dictation_state(state)
+
+    def _on_dictation_finished(self, generation: int, result) -> None:
+        if generation != self._dictation_generation:
+            return
+        with self._dictation_lock:
+            self._dictation_thread = None
+            self._dictation_stop_event = None
+            self._dictation_finalize_event = None
+        if isinstance(result, Exception):
+            self._transcript_panel.set_dictation_state("ERROR", "No disponible")
+            self._transcript_panel.append_error("No se pudo transcribir el dictado.")
+            return
+        if result.cancelled:
+            self._transcript_panel.set_dictation_state("CANCELLED")
+        elif result.text:
+            self._transcript_panel.insert_transcription(result.text)
+            detail = (
+                "Listo (límite de seguridad alcanzado)"
+                if any("Duracion maxima" in warning for warning in result.warnings)
+                else "Listo"
+            )
+            self._transcript_panel.set_dictation_state("READY", detail)
+        else:
+            detail = (
+                "Límite de seguridad alcanzado"
+                if any("Duracion maxima" in warning for warning in result.warnings)
+                else "Sin audio"
+            )
+            self._transcript_panel.set_dictation_state("ERROR", detail)
 
     def start_voice(self) -> None:
         """Start a new voice session only when no prior session is running."""
@@ -566,6 +665,10 @@ class OrbeController:
         )
         self._chat_threads.add(worker)
         worker.start()
+
+    def _clear_visible_chat(self) -> None:
+        """Clear only panel-owned visible state; never touch Atlas persistence."""
+        self._transcript_panel.clear_chat()
 
     def submit_attachment_notice(self, prompt: str, attachment) -> None:
         """Keep attachment handling local until chat attachment analysis is wired."""

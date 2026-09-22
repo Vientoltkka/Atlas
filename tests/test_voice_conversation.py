@@ -2248,6 +2248,41 @@ def test_orchestrator_routes_voice_time_before_model() -> None:
     assert response == "Son las seis y doce de la tarde."
 
 
+def test_voice_self_improvement_reuses_written_detector_and_response() -> None:
+    prompt = "Atlas, qué mejorarías de tu sistema operativo"
+    orchestrator = AtlasOrchestrator(
+        planner=SimpleNamespace(
+            create_plan=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("self-improvement must not reach the model")
+            )
+        ),
+        router=Router(),
+        model_manager=SimpleNamespace(choose_model=lambda _agent: "unused"),
+        memory=ConversationMemory(),
+        registry=AgentRegistry(),
+        write_file=SimpleNamespace(execute=lambda *_args: "unused"),
+    )
+
+    written_response = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
+    voice_response = orchestrator.process_voice_prompt(
+        f"{prompt}\n\nResponde en español, de forma natural y concisa.",
+        confirm=lambda _prompt: "",
+    )
+    voice_session = make_use_case(
+        FakeSpeechEngine([speech_result(prompt), speech_result("salir")]),
+        diagnostics_enabled=False,
+    ).execute_manual(
+        process_text=lambda text: orchestrator.process_voice_prompt(
+            text,
+            confirm=lambda _prompt: "",
+        )
+    )
+
+    assert voice_response == written_response
+    assert voice_session.session.response_history == [written_response]
+    assert "No puedo reescribir por mi cuenta el sistema operativo" in voice_response
+
+
 @pytest.mark.parametrize(
     ("prompt", "expected"),
     [

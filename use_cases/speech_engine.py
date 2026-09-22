@@ -83,6 +83,7 @@ class SpeechCaptureSettings:
     chunk_duration: float | None = None
     speech_threshold: float | None = None
     minimum_audio_duration: float | None = None
+    stop_on_silence: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -363,6 +364,7 @@ class SoundDeviceAudioCapture:
             else _read_float("ATLAS_VOICE_RMS_THRESHOLD", 0.004, 0.001, 0.05)
         )
         self.minimum_audio_duration = minimum_audio_duration
+        self._stop_on_silence = True
         self._selected_index: int | None = None
         self._last_voice_microphone_index: int | None = None
         self._microphone_signal_failures: dict[int, int] = {}
@@ -598,6 +600,9 @@ class SoundDeviceAudioCapture:
     def capture_phrase(
         self,
         settings: SpeechCaptureSettings | None = None,
+        stop_event=None,
+        stage_sink: Callable[[str], None] | None = None,
+        finalize_event=None,
     ) -> AudioCaptureResult:
         """Capture one phrase from a fresh stream on the affinity microphone."""
         original = self._snapshot_settings()
@@ -610,7 +615,9 @@ class SoundDeviceAudioCapture:
             frames = int(self.sample_rate * self.chunk_duration)
 
             try:
-                return self._capture_open_stream(sd, microphone, frames)
+                return self._capture_open_stream(
+                    sd, microphone, frames, stop_event, stage_sink, finalize_event
+                )
             except KeyboardInterrupt:
                 return AudioCaptureResult(
                     samples=np.array([], dtype=np.float32),
@@ -634,7 +641,9 @@ class SoundDeviceAudioCapture:
                     f"fallo real de apertura: {alternative.index} - {alternative.name}"
                 )
                 try:
-                    return self._capture_open_stream(sd, alternative, frames)
+                    return self._capture_open_stream(
+                        sd, alternative, frames, stop_event, stage_sink, finalize_event
+                    )
                 except Exception as fallback_error:
                     raise RuntimeError(
                         "Fallo al abrir o leer el stream del microfono de fallback: "
@@ -743,6 +752,9 @@ class SoundDeviceAudioCapture:
         sd,
         microphone: MicrophoneInfo,
         frames: int,
+        stop_event=None,
+        stage_sink: Callable[[str], None] | None = None,
+        finalize_event=None,
     ) -> AudioCaptureResult:
         """Capture with one fresh stream; closing the context releases it."""
         with sd.InputStream(
@@ -751,8 +763,14 @@ class SoundDeviceAudioCapture:
             dtype="float32",
             device=microphone.index,
         ) as stream:
-            chunks, diagnostics = self._read_stream_chunks(stream, frames, 0)
-            capture = self.capture_from_chunks(chunks, microphone.name)
+            if stage_sink is not None:
+                stage_sink("recording")
+            chunks, diagnostics = self._read_stream_chunks(
+                stream, frames, 0, stop_event, self._stop_on_silence, finalize_event,
+            )
+            capture = self.capture_from_chunks(
+                chunks, microphone.name, stop_on_silence=self._stop_on_silence
+            )
             self._print_stream_read_diagnostic(diagnostics, capture, chunks)
             self._record_microphone_capture(microphone, capture, chunks)
             return capture
@@ -829,6 +847,7 @@ class SoundDeviceAudioCapture:
         self,
         chunks: list[np.ndarray],
         microphone_name: str = "fake microphone",
+        stop_on_silence: bool = True,
     ) -> AudioCaptureResult:
         """Capture a phrase from controlled audio chunks."""
         captured: list[np.ndarray] = []
@@ -901,7 +920,7 @@ class SoundDeviceAudioCapture:
                         pending_voice_blocks = 0
                         accumulated_voice = 0.0
 
-                if not voice_started and elapsed >= self.initial_silence_timeout:
+                if stop_on_silence and not voice_started and elapsed >= self.initial_silence_timeout:
                     return self._no_speech_result(
                         microphone_name,
                         elapsed,
@@ -920,7 +939,7 @@ class SoundDeviceAudioCapture:
 
                 captured_duration = sum(len(item) for item in captured) / self.sample_rate
 
-                if (
+                if stop_on_silence and (
                     silence_after_voice + 1e-9 >= trailing_silence
                     and captured_duration >= self.minimum_audio_duration
                     and self._has_complete_voice(accumulated_voice, voice_blocks)
@@ -990,13 +1009,17 @@ class SoundDeviceAudioCapture:
             return self._no_speech_result(
                 microphone_name,
                 elapsed,
-                "No se detecto ninguna frase.",
+                "Duracion maxima alcanzada."
+                if end_reason == "duracion maxima alcanzada"
+                else "No se detecto ninguna frase.",
                 voice_threshold=voice_threshold,
                 noise_floor=noise_floor,
             )
 
         if not self._has_complete_voice(accumulated_voice, voice_blocks):
             warnings.append("Voz demasiado breve para formar una frase completa.")
+            if end_reason == "duracion maxima alcanzada":
+                warnings.append("Duracion maxima alcanzada.")
             return AudioCaptureResult(
                 samples=np.array([], dtype=np.float32),
                 sample_rate=self.sample_rate,
@@ -1030,6 +1053,9 @@ class SoundDeviceAudioCapture:
         stream,
         frames: int,
         drained_block_length: int = 0,
+        stop_event=None,
+        stop_on_silence: bool = True,
+        finalize_event=None,
     ) -> tuple[list[np.ndarray], StreamReadDiagnostics]:
         chunks: list[np.ndarray] = []
         block_lengths: list[int] = []
@@ -1044,13 +1070,19 @@ class SoundDeviceAudioCapture:
             if overflowed:
                 overflow_count += 1
 
-            partial = self.capture_from_chunks(chunks)
-            if partial.completed and partial.end_reason in {
+            if stop_event is not None and stop_event.is_set():
+                break
+
+            if finalize_event is not None and finalize_event.is_set():
+                break
+
+            partial = self.capture_from_chunks(chunks, stop_on_silence=stop_on_silence)
+            if stop_on_silence and partial.completed and partial.end_reason in {
                 "silencio posterior detectado",
                 "short utterance por contraste",
             }:
                 break
-            if partial.warnings == (self._INITIAL_SILENCE_TIMEOUT_WARNING,):
+            if stop_on_silence and partial.warnings == (self._INITIAL_SILENCE_TIMEOUT_WARNING,):
                 break
 
         total_buffer_length = sum(block_lengths)
@@ -1575,6 +1607,7 @@ class SoundDeviceAudioCapture:
             "chunk_duration": self.chunk_duration,
             "speech_threshold": self.speech_threshold,
             "minimum_audio_duration": self.minimum_audio_duration,
+            "stop_on_silence": self._stop_on_silence,
         }
 
     def _apply_settings(
@@ -1588,14 +1621,14 @@ class SoundDeviceAudioCapture:
             value = getattr(settings, name)
 
             if value is not None:
-                setattr(self, name, value)
+                setattr(self, "_stop_on_silence" if name == "stop_on_silence" else name, value)
 
     def _restore_settings(
         self,
         settings: dict[str, float],
     ) -> None:
         for name, value in settings.items():
-            setattr(self, name, value)
+            setattr(self, "_stop_on_silence" if name == "stop_on_silence" else name, value)
 
     def _default_input_index(
         self,
@@ -1852,15 +1885,30 @@ class SpeechEngineUseCase:
         self,
         capture_settings: SpeechCaptureSettings | None = None,
         stage_sink: Callable[[str], None] | None = None,
+        stop_event=None,
+        finalize_event=None,
     ) -> SpeechTranscriptionResult:
         """Capture one phrase and transcribe it."""
         started = time.monotonic()
 
         try:
+            if stage_sink is not None:
+                stage_sink("preparing")
             try:
-                capture = self._capture.capture_phrase(capture_settings)
+                capture = self._capture.capture_phrase(
+                    capture_settings, stop_event, stage_sink, finalize_event,
+                )
             except TypeError:
-                capture = self._capture.capture_phrase()
+                try:
+                    capture = self._capture.capture_phrase(capture_settings, stop_event, stage_sink)
+                except TypeError:
+                    try:
+                        capture = self._capture.capture_phrase(capture_settings, stop_event)
+                    except TypeError:
+                        try:
+                            capture = self._capture.capture_phrase(capture_settings)
+                        except TypeError:
+                            capture = self._capture.capture_phrase()
         except Exception as error:
             return self._failed_result(
                 str(error),
