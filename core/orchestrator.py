@@ -2609,6 +2609,13 @@ class AtlasOrchestrator:
         voice_prompt = prompt
         prompt = _strip_voice_invocation_prefix(prompt)
         request = self._request_gateway.from_voice(prompt)
+        if (
+            self._execution_conversation is not None
+            and self._execution_conversation.pending_confirmation_id is not None
+        ):
+            pending_confirmation = _voice_pending_confirmation_token(request.content)
+            if pending_confirmation is not None:
+                return self.process_prompt(pending_confirmation, confirm=confirm)
         routing_text = self._voice_routing_text(request.content)
         route_voice_command = getattr(self._router, "route_voice_command", None)
         voice_route = (
@@ -3747,6 +3754,19 @@ _ASYNC_APPROVAL_NO_TOKENS = {
 def _is_bare_confirmation_token(prompt: str) -> bool:
     """Recognize stray confirmation words that belong to the supervised flow."""
     return _normalize_confirmation_text(prompt) in _BARE_CONFIRMATION_TOKENS
+
+
+def _voice_pending_confirmation_token(prompt: str) -> str | None:
+    """Keep an unequivocal voice confirmation on the supervised text path."""
+    normalized = _normalize_confirmation_text(prompt)
+    if normalized == "":
+        return None
+    first_token = normalized.split()[0]
+    if first_token in {"si", "s"}:
+        return "si"
+    if first_token in {"no", "n"}:
+        return "no"
+    return None
 
 
 def _with_message_prefix(

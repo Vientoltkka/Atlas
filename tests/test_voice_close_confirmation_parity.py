@@ -255,6 +255,32 @@ def test_voice_close_rejected_on_no_without_closing():
     assert conversation.pending_confirmation_id is None
 
 
+def test_voice_confirmation_prefix_closes_pending_application_once():
+    controller = FakeController()
+    orchestrator, conversation = build_real_wired_orchestrator(controller)
+
+    run_voice_turn(orchestrator, "cierra la calculadora")
+    response = run_voice_turn(orchestrator, "sí, cierra la calculadora")
+
+    assert "confirm" not in response.lower()
+    assert controller.close_window_requests == [555]
+    assert conversation.pending_confirmation_id is None
+
+
+def test_voice_confirmation_without_pending_keeps_normal_flow():
+    controller = FakeController()
+    orchestrator, conversation = build_real_wired_orchestrator(controller)
+
+    response = orchestrator.process_voice_prompt("sí", confirm=lambda _prompt: "")
+
+    assert response == (
+        "No puedo controlar la pantalla de tu dispositivo. "
+        "Solo puedo conversar contigo."
+    )
+    assert controller.close_window_requests == []
+    assert conversation.pending_confirmation_id is None
+
+
 def test_voice_close_scans_processes_once_and_never_prompts_interactively():
     """Regression: the voice close turn used to route the close request twice
     (process_voice_prompt + process_prompt) and could fall back into the
