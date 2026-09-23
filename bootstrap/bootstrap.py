@@ -180,6 +180,7 @@ from tools.desktop.desktop_tools import (
     OpenApplicationTool,
     OpenFileTool,
     OpenFolderTool,
+    OpenUrlTool,
     PasteClipboardTool,
     PressHotkeyTool,
     ReadClipboardTextTool,
@@ -346,6 +347,7 @@ class Bootstrap:
         tool_registry.register(RenamePathTool())
         tool_registry.register(DeletePathTool())
         tool_registry.register(open_file_tool)
+        tool_registry.register(OpenUrlTool())
         tool_registry.register(
             CreateTrainingPdfTool(CreateTrainingPdfUseCase(PdfService(), open_file_tool)),
             arguments_schema=ToolArgumentsSchema(
@@ -414,6 +416,7 @@ class Bootstrap:
             ("desktop.filesystem.rename", "desktop.rename_path"),
             ("desktop.filesystem.delete", "desktop.delete_path"),
             ("desktop.file.open", "desktop.open_file"),
+            ("desktop.url.open", "desktop.open_url"),
             ("desktop.text.type", "desktop.type_text"),
             ("desktop.clipboard.copy", "desktop.copy_clipboard_text"),
             ("desktop.clipboard.paste", "desktop.paste_clipboard"),
@@ -638,6 +641,12 @@ class Bootstrap:
                         description="Optional application name.",
                     ),
                 ),
+            )
+        )
+        schema_registry.register(
+            ArgumentSchema(
+                "desktop.url.open",
+                (ArgumentField("url", str, required=True, description="Validated URL."),),
             )
         )
         schema_registry.register(ArgumentSchema("desktop.filesystem.create_folder", (ArgumentField("path", str, required=True, description="Absolute folder path."),)))

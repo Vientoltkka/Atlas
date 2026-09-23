@@ -40,6 +40,9 @@ class DesktopController(Protocol):
     def open_file(self, path: Path, application: str | None = None) -> None:
         """Open an existing file."""
 
+    def open_url(self, url: str) -> None:
+        """Open a validated URL in the default browser."""
+
 
     def create_folder(self, path: Path) -> bool:
         """Create a folder and return whether it was newly created."""
@@ -485,6 +488,10 @@ class WindowsDesktopController:
             return
 
         os.startfile(str(path))
+
+    def open_url(self, url: str) -> None:
+        """Open a validated URL in the default browser."""
+        os.startfile(url)
 
 
     def create_folder(self, path: Path) -> bool:

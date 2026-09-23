@@ -418,6 +418,30 @@ class OpenFileTool(DesktopTool):
         return f"Archivo abierto: {path}"
 
 
+class OpenUrlTool(DesktopTool):
+    """Open one URL that was validated by the caller."""
+
+    @property
+    def name(self) -> str:
+        return "desktop.open_url"
+
+    @property
+    def description(self) -> str:
+        return "Open a validated URL in the default browser."
+
+    @property
+    def required_permissions(self) -> tuple[str, ...]:
+        return ()
+
+    def execute(self, context: ToolContext) -> str:
+        url = context.parameters.get("url")
+        if url != "https://www.google.com":
+            raise ValueError("URL no permitida.")
+
+        self._controller.open_url(url)
+        return f"URL abierta: {url}"
+
+
 
 class FileSystemTool(DesktopTool):
     """Base class for supervised explicit filesystem changes."""

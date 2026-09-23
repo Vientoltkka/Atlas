@@ -1152,7 +1152,7 @@ class DesktopInteractionUseCase:
         self,
         target: str,
     ) -> str:
-        """Open an application, folder, or file."""
+        """Open Google, an application, folder, or file."""
         expected_kind = self._open_target_kind(target)
         target = self._clean_open_target(target)
         target, application = self._open_file_application(target)
@@ -1160,6 +1160,18 @@ class DesktopInteractionUseCase:
 
         if not target:
             raise ValueError("Falta el objetivo a abrir.")
+
+        if self._normalize(target) == "google":
+            if application is not None:
+                raise ValueError("Petición ambigua: Google no admite una aplicación adicional.")
+            return self._run(
+                "desktop.open_url",
+                {"url": "https://www.google.com"},
+                "Abriendo Google.",
+            )
+
+        if self._normalize(target).startswith("google "):
+            raise ValueError("Petición ambigua: usa exactamente 'abre Google'.")
 
         path = self._resolve_path(target)
 
