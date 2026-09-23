@@ -248,22 +248,42 @@ def test_transcript_autoscrolls_only_when_reader_is_at_the_end(qapp) -> None:
     panel.close()
 
 
-def test_attachment_selection_shows_preview_and_remove_clears_it(qapp, tmp_path, monkeypatch) -> None:
+def test_attachment_selection_accepts_two_images_and_remove_clears_one(qapp, tmp_path, monkeypatch) -> None:
     from PySide6.QtWidgets import QFileDialog
 
-    attachment = tmp_path / "nota.txt"
-    attachment.write_text("contenido", encoding="utf-8")
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(attachment), ""))
+    first = tmp_path / "bio-1.jpg"
+    second = tmp_path / "bio-2.webp"
+    first.write_bytes(b"jpg")
+    second.write_bytes(b"webp")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *_args, **_kwargs: ([str(first), str(second)], ""))
     panel = orbe_app.create_transcript_panel()
     panel._choose_attachment()
-    assert panel._pending_attachment.name == "nota.txt"
-    assert panel._pending_attachment.media_type == "text/plain"
-    assert panel._pending_attachment.size_bytes == len("contenido")
-    assert "nota.txt" in panel._attachment_details.text()
-    assert "text/plain" in panel._attachment_details.text()
+    assert [item.name for item in panel._pending_attachments] == ["bio-1.jpg", "bio-2.webp"]
+    assert not panel._attachment_preview.isHidden()
+    panel._remove_attachment(0)
+    assert [item.name for item in panel._pending_attachments] == ["bio-2.webp"]
     panel._clear_attachment()
-    assert panel._pending_attachment is None
+    assert panel._pending_attachments == []
     assert panel._attachment_preview.isHidden()
+    panel.close()
+
+
+def test_attachment_selection_rejects_third_and_non_image(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    paths = [tmp_path / name for name in ("one.png", "two.jpeg", "three.gif", "four.txt")]
+    for path in paths:
+        path.write_bytes(b"data")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        lambda *_args, **_kwargs: ([str(path) for path in paths], ""),
+    )
+    panel = orbe_app.create_transcript_panel()
+    panel._choose_attachment()
+    assert [item.name for item in panel._pending_attachments] == ["one.png", "two.jpeg"]
+    assert "three.gif" in panel._attachment_status.text()
+    assert "four.txt" in panel._attachment_status.text()
     panel.close()
 
 def test_drag_moves_window(qapp, orb) -> None:

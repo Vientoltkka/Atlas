@@ -2126,6 +2126,9 @@ def create_transcript_panel():
                 "font-size: 15px; padding: 8px; selection-background-color: #1d3f6b; }"
             )
             layout.addWidget(self._view, 1)
+            self._pending_attachments = []
+            # Kept as a compatibility view for callers/tests that used the old
+            # single-attachment field. The signal now emits all attachments.
             self._pending_attachment = None
             self._attachment_preview = QFrame(card)
             self._attachment_preview.setFrameShape(QFrame.Shape.StyledPanel)
@@ -2133,18 +2136,12 @@ def create_transcript_panel():
                 "QFrame { background: rgba(16, 38, 66, 190);"
                 "border: 1px solid rgba(80, 150, 220, 130); border-radius: 8px; }"
             )
-            attachment_layout = QHBoxLayout(self._attachment_preview)
-            self._attachment_icon = QLabel("[archivo]", self._attachment_preview)
-            self._attachment_details = QLabel(self._attachment_preview)
-            self._attachment_remove_button = QPushButton("X", self._attachment_preview)
-            self._attachment_remove_button.setToolTip("Quitar adjunto")
-            self._attachment_remove_button.setFixedWidth(30)
-            self._attachment_remove_button.clicked.connect(self._clear_attachment)
-            attachment_layout.addWidget(self._attachment_icon)
-            attachment_layout.addWidget(self._attachment_details, 1)
-            attachment_layout.addWidget(self._attachment_remove_button)
+            self._attachment_layout = QHBoxLayout(self._attachment_preview)
             self._attachment_preview.hide()
             layout.addWidget(self._attachment_preview)
+            self._attachment_status = QLabel(self._attachment_preview)
+            self._attachment_status.hide()
+            layout.addWidget(self._attachment_status)
             layout.addWidget(self._dictation_status)
             input_layout = QHBoxLayout()
             input_layout.setSpacing(6)
@@ -2218,37 +2215,86 @@ def create_transcript_panel():
             if not text:
                 return
             self._input.clear()
-            if self._pending_attachment is not None:
-                attachment = self._pending_attachment
+            if self._pending_attachments:
+                attachments = tuple(self._pending_attachments)
                 self._clear_attachment()
-                self.attachment_send_requested.emit(text, attachment)
+                self.attachment_send_requested.emit(text, attachments)
                 return
             self.send_requested.emit(text)
 
         def _choose_attachment(self) -> None:
-            path, _selected_filter = QFileDialog.getOpenFileName(self, "Seleccionar archivo")
-            if not path:
+            paths, _selected_filter = QFileDialog.getOpenFileNames(
+                self,
+                "Seleccionar imágenes",
+                filter="Imágenes (*.jpg *.jpeg *.png *.webp)",
+            )
+            if not paths:
                 return
             from pathlib import Path
             from core.request_gateway import RequestAttachment
 
-            file_path = Path(path)
-            try:
-                size_bytes = file_path.stat().st_size
-            except OSError:
-                return
-            media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-            self._pending_attachment = RequestAttachment(
-                attachment_id=uuid.uuid4().hex,
-                name=file_path.name,
-                media_type=media_type,
-                size_bytes=size_bytes,
-                local_reference=str(file_path),
-            )
-            self._attachment_details.setText(
-                f"{file_path.name}\n{media_type} · {self._format_size(size_bytes)}"
-            )
-            self._attachment_preview.show()
+            allowed_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+            accepted = []
+            rejected = []
+            for path in paths:
+                file_path = Path(path)
+                if file_path.suffix.casefold() not in allowed_extensions:
+                    rejected.append(file_path.name)
+                    continue
+                if len(self._pending_attachments) + len(accepted) >= 2:
+                    rejected.append(file_path.name)
+                    continue
+                try:
+                    size_bytes = file_path.stat().st_size
+                except OSError:
+                    continue
+                media_type = mimetypes.guess_type(str(file_path))[0]
+                if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+                    rejected.append(file_path.name)
+                    continue
+                accepted.append(
+                    RequestAttachment(
+                        attachment_id=uuid.uuid4().hex,
+                        name=file_path.name,
+                        media_type=media_type,
+                        size_bytes=size_bytes,
+                        local_reference=str(file_path),
+                    )
+                )
+            self._pending_attachments.extend(accepted)
+            self._pending_attachment = self._pending_attachments[0] if self._pending_attachments else None
+            self._render_attachment_preview()
+            if rejected:
+                self._attachment_status.setText(
+                    "No admitidos: " + ", ".join(rejected) + ". Solo hasta 2 imágenes JPG, PNG o WEBP."
+                )
+                self._attachment_status.show()
+
+        def _render_attachment_preview(self) -> None:
+            while self._attachment_layout.count():
+                item = self._attachment_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            for index, attachment in enumerate(self._pending_attachments):
+                details = QLabel(
+                    f"{index + 1}. {attachment.name}\n"
+                    f"{attachment.media_type} · {self._format_size(attachment.size_bytes or 0)}",
+                    self._attachment_preview,
+                )
+                remove = QPushButton("X", self._attachment_preview)
+                remove.setToolTip(f"Quitar {attachment.name}")
+                remove.setFixedWidth(30)
+                remove.clicked.connect(lambda _checked=False, i=index: self._remove_attachment(i))
+                self._attachment_layout.addWidget(details, 1)
+                self._attachment_layout.addWidget(remove)
+            self._attachment_preview.setVisible(bool(self._pending_attachments))
+
+        def _remove_attachment(self, index: int) -> None:
+            if 0 <= index < len(self._pending_attachments):
+                self._pending_attachments.pop(index)
+            self._pending_attachment = self._pending_attachments[0] if self._pending_attachments else None
+            self._render_attachment_preview()
 
         @staticmethod
         def _format_size(size_bytes: int) -> str:
@@ -2259,9 +2305,11 @@ def create_transcript_panel():
             return f"{size_bytes / (1024 * 1024):.1f} MB"
 
         def _clear_attachment(self) -> None:
+            self._pending_attachments.clear()
             self._pending_attachment = None
-            self._attachment_details.clear()
-            self._attachment_preview.hide()
+            self._attachment_status.clear()
+            self._attachment_status.hide()
+            self._render_attachment_preview()
 
         def set_hide_on_close(self, enabled: bool) -> None:
             """Configure the chat-only close behavior without changing voice UI."""

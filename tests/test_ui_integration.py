@@ -429,14 +429,19 @@ def test_text_chat_submits_without_blocking_and_renders_response(qapp) -> None:
     panel.close()
 
 
-def test_text_chat_with_attachment_renders_notice_without_calling_backend(qapp, tmp_path, monkeypatch) -> None:
+def test_text_chat_with_two_images_renders_honest_notice_without_calling_backend(qapp, tmp_path, monkeypatch) -> None:
     from PySide6.QtWidgets import QFileDialog
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel
 
-    attachment = tmp_path / "datos.csv"
-    attachment.write_text("valor\n1\n", encoding="utf-8")
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(attachment), ""))
+    attachments = [tmp_path / name for name in ("bio-1.jpg", "bio-2.png")]
+    for attachment in attachments:
+        attachment.write_bytes(b"image")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        lambda *_args, **_kwargs: ([str(path) for path in attachments], ""),
+    )
 
     class FakeAtlas:
         def __init__(self) -> None:
@@ -458,8 +463,9 @@ def test_text_chat_with_attachment_renders_notice_without_calling_backend(qapp, 
     content = panel._view.toPlainText()
     assert atlas.calls == []
     assert "Usuario: revisa esto" in content
-    assert "Archivo adjunto: datos.csv." in content
-    assert "análisis de archivos" in content
+    assert "Imágenes adjuntas: bio-1.jpg, bio-2.png." in content
+    assert "ruta multimodal" in content
+    assert "no se han guardado ni enviado al modelo" in content
     assert "No se pudo procesar el mensaje textual." not in content
     assert panel._pending_attachment is None
     orb.close()

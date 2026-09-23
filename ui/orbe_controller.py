@@ -672,15 +672,20 @@ class OrbeController:
         """Clear only panel-owned visible state; never touch Atlas persistence."""
         self._transcript_panel.clear_chat()
 
-    def submit_attachment_notice(self, prompt: str, attachment) -> None:
-        """Keep attachment handling local until chat attachment analysis is wired."""
+    def submit_attachment_notice(self, prompt: str, attachments) -> None:
+        """Report the exact multimodal limitation without pretending to analyze."""
         text = str(prompt).strip()
         if not text:
             return
+        if not isinstance(attachments, (tuple, list)):
+            attachments = (attachments,)
         self._bridge.on_user_message(text)
+        names = ", ".join(str(item.name) for item in attachments)
         self._bridge.on_response(
-            f"Archivo adjunto: {attachment.name}. "
-            "El análisis de archivos desde el chat todavía no está habilitado."
+            f"Imágenes adjuntas: {names}. "
+            "No puedo analizarlas todavía: el proveedor/modelo actual no tiene una ruta "
+            "multimodal habilitada (el adaptador solo acepta mensajes de texto). "
+            "Las imágenes no se han guardado ni enviado al modelo."
         )
 
     def join(self, timeout: float = 8.0) -> None:
