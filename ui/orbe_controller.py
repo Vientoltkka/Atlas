@@ -210,6 +210,7 @@ class OrbeController:
         self._voice_session_bridge.dictation_state_received.connect(self._on_dictation_state)
         self._voice_session_bridge.dictation_finished.connect(self._on_dictation_finished)
         self._last_voice_visual_state = OrbVisualState.IDLE
+        self._voice_spoke_in_session = False
         self._supervision_visual_override = None
         self._bridge.voice_visual_state_changed.connect(self._apply_voice_visual_state)
         self._bridge.supervision_visual_state_changed.connect(self._apply_supervision_visual_state)
@@ -601,6 +602,7 @@ class OrbeController:
         self._set_stage_voice_active(True)
         self._stop_event = threading.Event()
         self._session_generation += 1
+        self._voice_spoke_in_session = False
         generation = self._session_generation
         self._apply_voice_visual_state(OrbVisualState.STARTING)
         self._transcript_panel.set_voice_state("STARTING")
@@ -721,6 +723,13 @@ class OrbeController:
     def _on_voice_state(self, generation: int, state) -> None:
         if generation == self._session_generation:
             self._bridge.on_state(state)
+            state_value = str(getattr(state, "value", state))
+            if state_value == "SPEAKING":
+                self._voice_spoke_in_session = True
+            elif state_value == "READY" and self._voice_spoke_in_session:
+                # A completed TTS turn must end the UI voice session instead
+                # of falling through into another automatic capture.
+                self.stop()
 
     def _on_voice_message(self, generation: int, message) -> None:
         if generation == self._session_generation:

@@ -807,6 +807,73 @@ def test_voice_controls_stop_and_retry_without_touching_chat(qapp) -> None:
     panel.close()
 
 
+def test_tts_completion_returns_to_idle_without_automatic_capture(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    entered = threading.Event()
+
+    class FakeAtlas:
+        def start_voice(self, *, state_listener, status_sink, typed_input) -> None:
+            state_listener(VoiceConversationState.SPEAKING)
+            state_listener(VoiceConversationState.READY)
+            entered.set()
+            while typed_input() is None:
+                threading.Event().wait(0.01)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    controller.start()
+    assert entered.wait(timeout=1)
+    _drain_events(qapp)
+
+    assert orb.state is OrbVisualState.IDLE
+    assert panel._voice_start_button.isEnabled()
+    assert panel._voice_status.text() == "Desconectado"
+
+    controller.join(timeout=2)
+    orb.close()
+    panel.close()
+
+
+def test_tts_error_or_cancellation_returns_to_idle_and_reenables_start(qapp) -> None:
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+    from use_cases.ui_state_mapper import OrbVisualState
+
+    entered = threading.Event()
+
+    class FakeAtlas:
+        def start_voice(self, *, state_listener, status_sink, typed_input) -> None:
+            state_listener(VoiceConversationState.SPEAKING)
+            state_listener(VoiceConversationState.DEGRADED)
+            state_listener(VoiceConversationState.READY)
+            entered.set()
+            while typed_input() is None:
+                threading.Event().wait(0.01)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=FakeAtlas(), application=qapp, orb=orb, transcript_panel=panel
+    )
+    controller.start()
+    assert entered.wait(timeout=1)
+    _drain_events(qapp)
+
+    assert orb.state is OrbVisualState.IDLE
+    assert panel._voice_start_button.isEnabled()
+    assert panel._voice_status.text() == "Desconectado"
+
+    controller.join(timeout=2)
+    orb.close()
+    panel.close()
+
+
 def test_stop_acknowledges_ui_before_a_blocked_voice_worker_returns(qapp) -> None:
     from ui.orbe_controller import OrbeController
     from ui.orbe_app import create_transcript_panel
