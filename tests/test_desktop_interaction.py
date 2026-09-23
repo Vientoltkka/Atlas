@@ -220,6 +220,19 @@ def test_desktop_interaction_voice_suffix_open_matches_text() -> None:
     ]
 
 
+def test_desktop_interaction_voice_open_code_uses_desktop_route() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    result = use_case.execute(
+        "Atlas, abre Open Code\n\nResponde en español, de forma natural y concisa."
+    )
+
+    assert result == "✓ Abriendo Open Code."
+    assert [call[0] for call in executor.calls] == ["desktop.open_application"]
+    assert executor.calls[0][1].parameters == {"application": "Open Code"}
+
+
 def test_desktop_interaction_voice_suffix_maximize_matches_text() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)

@@ -352,6 +352,8 @@ class WindowsDesktopController:
         "notepad": ("notepad",),
         "calculadora": ("calc",),
         "calculator": ("calc",),
+        "opencode": ("opencode",),
+        "open code": ("opencode",),
     }
     _KNOWN_PROCESS_NAMES: dict[str, tuple[str, ...]] = {
         "chrome": ("chrome.exe",),
@@ -433,6 +435,30 @@ class WindowsDesktopController:
     def open_application(self, application: str) -> int | None:
         """Open an installed application."""
         executable = self._resolve_application(application)
+        if application.strip().lower() in {"opencode", "open code"}:
+            windows_terminal = shutil.which("wt.exe")
+
+            if not windows_terminal:
+                raise FileNotFoundError(
+                    "No se encontro Windows Terminal (wt.exe) en PATH."
+                )
+
+            process = subprocess.Popen(
+                [
+                    windows_terminal,
+                    "new-tab",
+                    "cmd.exe",
+                    "/d",
+                    "/s",
+                    "/k",
+                    f'"{executable}"',
+                ],
+                stdout=None,
+                stderr=None,
+                shell=False,
+            )
+            return process.pid
+
         process = subprocess.Popen(
             [executable],
             stdout=subprocess.DEVNULL,
@@ -968,6 +994,9 @@ class WindowsDesktopController:
 
             if found:
                 return found
+
+            if normalized in {"opencode", "open code"}:
+                continue
 
             path = Path(candidate)
 

@@ -1398,6 +1398,47 @@ def test_windows_controller_open_application_uses_popen_without_shell(
     assert result == 1234
     assert calls[0]["args"] == [str(executable)]
     assert calls[0]["shell"] is False
+    assert calls[0]["stdout"] is subprocess.DEVNULL
+    assert calls[0]["stderr"] is subprocess.DEVNULL
+
+
+def test_windows_controller_opens_normal_cmd_application_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "demo.cmd"
+    executable.write_text("", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        pid = 1234
+
+        def __init__(self, args, stdout, stderr, shell=False):
+            calls.append(
+                {
+                    "args": args,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "shell": shell,
+                }
+            )
+
+    monkeypatch.setattr(
+        "tools.desktop.windows_controller.subprocess.Popen",
+        FakePopen,
+    )
+
+    result = WindowsDesktopController().open_application(str(executable))
+
+    assert result == 1234
+    assert calls == [
+        {
+            "args": [str(executable)],
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "shell": False,
+        }
+    ]
 
 
 def test_windows_controller_resolves_powershell_alias_deterministically(
@@ -1413,6 +1454,134 @@ def test_windows_controller_resolves_powershell_alias_deterministically(
 
     assert controller._resolve_application("PowerShell") == expected
     assert controller._process_names_for_query("PowerShell") == ("powershell.exe",)
+
+
+@pytest.mark.parametrize(
+    ("alias", "resolved_path", "expected_args"),
+    [
+        (
+            "OpenCode",
+            r"C:\tools\opencode.cmd",
+            [
+                r"C:\tools\wt.exe",
+                "new-tab",
+                "cmd.exe",
+                "/d",
+                "/s",
+                "/k",
+                r'"C:\tools\opencode.cmd"',
+            ],
+        ),
+        (
+            "Open Code",
+            r"C:\tools\opencode.bat",
+            [
+                r"C:\tools\wt.exe",
+                "new-tab",
+                "cmd.exe",
+                "/d",
+                "/s",
+                "/k",
+                r'"C:\tools\opencode.bat"',
+            ],
+        ),
+        (
+            "Open Code",
+            r"C:\tools\opencode.exe",
+            [
+                r"C:\tools\wt.exe",
+                "new-tab",
+                "cmd.exe",
+                "/d",
+                "/s",
+                "/k",
+                r'"C:\tools\opencode.exe"',
+            ],
+        ),
+    ],
+)
+def test_windows_controller_launches_opencode_in_windows_terminal_safely(
+    alias: str,
+    resolved_path: str,
+    expected_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = WindowsDesktopController()
+    calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, args, stdout, stderr, shell=False, creationflags=0):
+            calls.append(
+                {
+                    "args": args,
+                    "shell": shell,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "creationflags": creationflags,
+                }
+            )
+
+    def fake_which(candidate: str) -> str | None:
+        if candidate == "opencode":
+            return resolved_path
+        if candidate == "wt.exe":
+            return r"C:\tools\wt.exe"
+        return None
+
+    monkeypatch.setattr("tools.desktop.windows_controller.shutil.which", fake_which)
+    monkeypatch.setattr("tools.desktop.windows_controller.subprocess.Popen", FakePopen)
+
+    assert controller._application_candidates("opencode", alias) == ("opencode",)
+    assert controller._application_candidates("open code", alias) == ("opencode",)
+    assert controller.open_application(alias) == 4321
+    assert calls == [
+        {
+            "args": expected_args,
+            "shell": False,
+            "stdout": None,
+            "stderr": None,
+            "creationflags": 0,
+        }
+    ]
+
+
+def test_windows_controller_reports_missing_windows_terminal_for_opencode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = WindowsDesktopController()
+
+    def fake_which(candidate: str) -> str | None:
+        return r"C:\tools\opencode.cmd" if candidate == "opencode" else None
+
+    monkeypatch.setattr("tools.desktop.windows_controller.shutil.which", fake_which)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("Popen no debe ejecutarse")
+
+    monkeypatch.setattr("tools.desktop.windows_controller.subprocess.Popen", fail_if_called)
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"Windows Terminal \(wt\.exe\).*PATH",
+    ):
+        controller.open_application("Open Code")
+
+
+def test_windows_controller_does_not_launch_unresolved_opencode_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = WindowsDesktopController()
+    monkeypatch.setattr("tools.desktop.windows_controller.shutil.which", lambda _: None)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("Popen no debe ejecutarse")
+
+    monkeypatch.setattr("tools.desktop.windows_controller.subprocess.Popen", fail_if_called)
+
+    with pytest.raises(FileNotFoundError):
+        controller.open_application("opencode")
 
 
 def test_windows_controller_rejects_arbitrary_application_command() -> None:
