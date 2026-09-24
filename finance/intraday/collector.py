@@ -91,6 +91,8 @@ class IntradayResearchCollector:
         for record in self._ledger.records():
             if record.get("strategy_version") != self._ledger.strategy_version:
                 continue
+            if record.get("capture_id") != self._ledger.capture_id:
+                continue
             record_type = record.get("type")
 
             if record_type == "OBSERVATION":

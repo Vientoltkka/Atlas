@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from finance.intraday.evaluation import (
     EventOutcome,
@@ -38,6 +40,7 @@ class IntradayResearchLedger:
         path: str | Path,
         *,
         strategy_version: str = DEFAULT_STRATEGY_VERSION,
+        capture_id: str | None = None,
     ) -> None:
         version = strategy_version.strip()
         if not version:
@@ -45,6 +48,24 @@ class IntradayResearchLedger:
 
         self._path = Path(path)
         self._strategy_version = version
+        existing_capture_ids = {
+            record["capture_id"]
+            for record in self.records()
+            if record.get("strategy_version") == version
+            and isinstance(record.get("capture_id"), str)
+            and record["capture_id"].strip()
+        }
+        if capture_id is None:
+            if len(existing_capture_ids) > 1:
+                raise ValueError(
+                    "capture_id is required for a ledger with multiple captures: "
+                    + ", ".join(sorted(existing_capture_ids))
+                )
+            capture_id = next(iter(existing_capture_ids), None) or str(uuid4())
+        capture_id = capture_id.strip()
+        if not capture_id:
+            raise ValueError("capture_id is required")
+        self._capture_id = capture_id
 
     @property
     def path(self) -> Path:
@@ -54,7 +75,28 @@ class IntradayResearchLedger:
     def strategy_version(self) -> str:
         return self._strategy_version
 
+    @property
+    def capture_id(self) -> str:
+        return self._capture_id
+
+    def _metadata(self) -> dict[str, str]:
+        return {
+            "strategy_version": self._strategy_version,
+            "capture_id": self._capture_id,
+        }
+
+    def available_capture_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({
+            record["capture_id"]
+            for record in self.records()
+            if record.get("strategy_version") == self._strategy_version
+            and isinstance(record.get("capture_id"), str)
+            and record["capture_id"].strip()
+        }))
+
     def _append(self, record: dict) -> None:
+        record.setdefault("strategy_version", self._strategy_version)
+        record.setdefault("capture_id", self._capture_id)
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
         payload = json.dumps(
@@ -80,24 +122,42 @@ class IntradayResearchLedger:
         self._append(
             {
                 "type": "OBSERVATION",
-                "strategy_version": self._strategy_version,
+                **self._metadata(),
                 **asdict(observation),
             }
         )
 
     def ensure_configuration(self, configuration: dict) -> None:
         """Persist the effective research configuration once per strategy."""
-        if any(
-            record.get("type") == "CONFIGURATION"
-            and record.get("strategy_version") == self._strategy_version
-            for record in self.records()
-        ):
-            return
+        expected = json.dumps(
+            configuration,
+            default=_json_value,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for record in self.records():
+            if (
+                record.get("type") == "CONFIGURATION"
+                and record.get("strategy_version") == self._strategy_version
+                and record.get("capture_id") == self._capture_id
+            ):
+                actual = json.dumps(
+                    record.get("configuration"),
+                    default=_json_value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if actual != expected:
+                    raise ValueError(
+                        "configuration snapshot differs for capture_id: "
+                        f"{self._capture_id}"
+                    )
+                return
         self._append(
             {
                 "type": "CONFIGURATION",
-                "strategy_version": self._strategy_version,
-                "configuration": configuration,
+                **self._metadata(),
+                "configuration": deepcopy(configuration),
             }
         )
 
@@ -116,7 +176,7 @@ class IntradayResearchLedger:
 
         record = {
                 "type": "SIGNAL",
-                "strategy_version": self._strategy_version,
+                **self._metadata(),
                 "symbol": signal.symbol,
                 "timestamp": signal.timestamp,
                 "action": signal.action,
@@ -152,14 +212,14 @@ class IntradayResearchLedger:
     def record_event(self, event: IndependentSignalEvent) -> None:
         self._append({
             "type": "EVENT",
-            "strategy_version": self._strategy_version,
+            **self._metadata(),
             **self._event_payload(event),
         })
 
     def record_event_update(self, event: IndependentSignalEvent) -> None:
         self._append({
             "type": "EVENT_UPDATE",
-            "strategy_version": self._strategy_version,
+            **self._metadata(),
             **self._event_payload(event),
         })
 
@@ -201,7 +261,7 @@ class IntradayResearchLedger:
         self._append(
             {
                 "type": "OUTCOME",
-                "strategy_version": self._strategy_version,
+                **self._metadata(),
                 **asdict(outcome),
             }
         )

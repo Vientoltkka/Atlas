@@ -103,6 +103,7 @@ class ResearchEventReport:
     by_source: dict[str, "ResearchEventGroup"] | None = None
     by_signal_source: dict[str, "ResearchEventGroup"] | None = None
     strategy_version: str | None = None
+    capture_id: str | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -305,6 +306,7 @@ def report_to_dict(report: ResearchEventReport) -> dict:
     """Return a JSON-stable representation; returns remain decimal strings."""
     result = {
         "strategy_version": report.strategy_version,
+        "capture_id": report.capture_id,
         "independent_events": report.total_events,
         "candidate_observations": report.candidate_observations,
         "aggregated_by_cooldown": report.aggregated_by_cooldown,
@@ -353,6 +355,7 @@ def load_research_event_report(
     path: str | Path,
     *,
     strategy_version: str,
+    capture_id: str | None = None,
 ) -> ResearchEventReport:
     """Read and aggregate one strategy from an existing append-only ledger."""
     requested_version = strategy_version.strip()
@@ -364,6 +367,27 @@ def load_research_event_report(
         raise FileNotFoundError(f"ledger does not exist: {ledger_path}")
 
     from finance.intraday.persistence import IntradayResearchLedger
+
+    raw_records = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    available_capture_ids = {
+        record["capture_id"] for record in raw_records
+        if record.get("strategy_version") == requested_version
+        and isinstance(record.get("capture_id"), str)
+        and record["capture_id"].strip()
+    }
+    if capture_id is None and len(available_capture_ids) > 1:
+        raise ValueError(
+            "capture_id must be selected; available capture IDs: "
+            + ", ".join(sorted(available_capture_ids))
+        )
+    if capture_id is None and len(available_capture_ids) == 1:
+        capture_id = next(iter(available_capture_ids))
+    if capture_id is not None and capture_id not in available_capture_ids:
+        raise ValueError(f"unknown capture_id: {capture_id}")
 
     snapshots: dict[str, object] = {}
     candidate_observations = 0
@@ -383,6 +407,9 @@ def load_research_event_report(
                     raise ValueError(f"invalid JSONL at line {line_number}: object required")
                 if record.get("strategy_version") != requested_version:
                     continue
+                if record.get("capture_id") != capture_id:
+                    if capture_id is not None or record.get("capture_id") is not None:
+                        continue
                 if record.get("type") == "SIGNAL" and record.get("action") == "CANDIDATE":
                     candidate_observations += 1
                     event_id = record.get("event_id")
@@ -414,14 +441,15 @@ def load_research_event_report(
         warnings.insert(0, "Sin eventos EVENT para la strategy_version solicitada.")
     return ResearchEventReport(
         **{field: getattr(report, field) for field in report.__dataclass_fields__
-           if field not in {
-               "strategy_version", "warnings", "candidate_observations",
+               if field not in {
+                   "strategy_version", "capture_id", "warnings", "candidate_observations",
                "event_backed_candidate_observations", "unlinked_candidate_observations",
            }},
         candidate_observations=candidate_observations,
         event_backed_candidate_observations=linked_candidate_observations,
         unlinked_candidate_observations=unlinked_candidates,
         strategy_version=requested_version,
+        capture_id=capture_id,
         warnings=tuple(warnings),
     )
 
@@ -435,6 +463,7 @@ def format_report_text(report: ResearchEventReport) -> str:
         "ATLAS INTRADAY RESEARCH EVENT REPORT V2",
         "RESEARCH ONLY - READ-ONLY; NO EXECUTION",
         f"strategy_version: {report.strategy_version}",
+        f"capture_id: {report.capture_id or 'legacy'}",
         f"independent_events: {report.total_events}",
         f"candidate_observations: {report.candidate_observations}",
         "event_backed_candidate_observations: "
@@ -465,6 +494,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only V2 event outcome report")
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--strategy-version", required=True)
+    parser.add_argument("--capture-id")
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -503,6 +533,7 @@ def main(argv: Sequence[str] | None = None) -> int | None:
         report = load_research_event_report(
             args.ledger,
             strategy_version=args.strategy_version,
+            capture_id=args.capture_id,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}")

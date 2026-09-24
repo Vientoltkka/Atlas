@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from finance.intraday.collector import IntradayResearchCollector
 from finance.intraday.evaluation import IntradaySignalEvaluator
 from finance.intraday.models import (
@@ -13,6 +15,7 @@ from finance.intraday.service import TimeBasedIntradaySignalService
 from finance.intraday.signal_engine import IntradaySignalEngine
 from finance.intraday.time_features import TimeBasedIntradayFeatureEngine
 from finance.intraday.time_replay import TIME_BASED_STRATEGY_VERSION, load_observations
+from finance.intraday.outcome_analysis import load_research_event_report
 from finance.market_data.models import Quote
 
 
@@ -111,11 +114,15 @@ def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
     assert signals
     assert signals[-1]["strategy_version"] == TIME_BASED_STRATEGY_VERSION
     assert signals[-1]["direction"] == "LONG"
-    assert configurations == [
-        {
-            "type": "CONFIGURATION",
-            "strategy_version": TIME_BASED_STRATEGY_VERSION,
-            "configuration": {
+    assert len(configurations) == 1
+    assert configurations[0]["capture_id"] == ledger.capture_id
+    assert {
+        key: configurations[0][key]
+        for key in ("type", "strategy_version", "configuration")
+    } == {
+        "type": "CONFIGURATION",
+        "strategy_version": TIME_BASED_STRATEGY_VERSION,
+        "configuration": {
                 "short_minutes": 1.0,
                 "long_minutes": 5.0,
                 "maximum_reference_lateness_seconds": 30,
@@ -125,9 +132,8 @@ def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
                 "minimum_acceleration": "0",
                 "maximum_volatility": "0.0100",
                 "maximum_relative_spread": "0.0030",
-            },
-        }
-    ]
+        },
+    }
 
 
 def test_v2_persists_no_action_but_not_insufficient_history(tmp_path):
@@ -382,3 +388,76 @@ def test_v2_restored_resolved_event_does_not_duplicate_update(tmp_path):
 
     assert ledger.records() == before
     assert restarted._events[next(iter(restarted._events))].outcome_1m.future_price == Decimal("101")
+
+
+def test_v2_capture_ids_isolate_observations_and_reports(tmp_path):
+    path = tmp_path / "isolated.jsonl"
+    first_ledger = IntradayResearchLedger(
+        path, strategy_version=TIME_BASED_STRATEGY_VERSION, capture_id="capture-a"
+    )
+    second_ledger = IntradayResearchLedger(
+        path, strategy_version=TIME_BASED_STRATEGY_VERSION, capture_id="capture-b"
+    )
+    first = IntradayResearchCollector.for_time_based_v2(
+        ledger=first_ledger, signal_service=CandidateService()
+    )
+    second = IntradayResearchCollector.for_time_based_v2(
+        ledger=second_ledger, signal_service=CandidateService()
+    )
+    first.ingest_quote(quote(0, "100"))
+    second.ingest_quote(quote(0, "200"))
+
+    with pytest.raises(ValueError, match="capture-a.*capture-b"):
+        load_observations(path)
+    assert load_observations(path, capture_id="capture-a")[0].price == Decimal("100")
+    assert load_observations(path, capture_id="capture-b")[0].price == Decimal("200")
+
+    with pytest.raises(ValueError, match="capture_id must be selected"):
+        load_research_event_report(
+            path, strategy_version=TIME_BASED_STRATEGY_VERSION
+        )
+    assert load_research_event_report(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+        capture_id="capture-a",
+    ).capture_id == "capture-a"
+
+
+def test_v2_capture_configuration_is_snapshot_per_capture(tmp_path):
+    path = tmp_path / "configuration.jsonl"
+    ledger = IntradayResearchLedger(
+        path, strategy_version=TIME_BASED_STRATEGY_VERSION, capture_id="capture-a"
+    )
+    configuration = {"minimum_long_return": "0.0020", "nested": {"x": 1}}
+    ledger.ensure_configuration(configuration)
+    configuration["nested"]["x"] = 99
+    stored = next(item for item in ledger.records() if item["type"] == "CONFIGURATION")
+    assert stored["capture_id"] == "capture-a"
+    assert stored["configuration"]["nested"]["x"] == 1
+
+
+def test_legacy_ledger_remains_readable_without_inventing_capture_id(tmp_path):
+    path = tmp_path / "legacy.jsonl"
+    path.write_text(
+        "{\"type\":\"OBSERVATION\",\"strategy_version\":\"v2\","
+        "\"symbol\":\"BTC-USD\",\"price\":\"100\","
+        "\"bid\":\"99.99\",\"ask\":\"100.01\","
+        "\"timestamp\":\"2026-09-19T12:00:00+00:00\"}\n",
+        encoding="utf-8",
+    )
+
+    observations = load_observations(path)
+
+    assert len(observations) == 1
+    assert observations[0].price == Decimal("100")
+
+
+def test_capture_configuration_cannot_be_reused_with_different_snapshot(tmp_path):
+    path = tmp_path / "configuration.jsonl"
+    ledger = IntradayResearchLedger(
+        path, strategy_version=TIME_BASED_STRATEGY_VERSION, capture_id="capture-a"
+    )
+    ledger.ensure_configuration({"threshold": "0.001"})
+
+    with pytest.raises(ValueError, match="configuration snapshot differs"):
+        ledger.ensure_configuration({"threshold": "0.002"})

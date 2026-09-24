@@ -101,6 +101,7 @@ def load_snapshots(
     path: str | Path,
     *,
     strategy_version: str,
+    capture_id: str | None = None,
 ) -> tuple[list[IntradayObservation], list[FeatureSnapshot], tuple[str, ...]]:
     """Read only observations and signal feature snapshots from one JSONL."""
     observations: list[IntradayObservation] = []
@@ -115,6 +116,7 @@ def load_snapshots(
         raise FileNotFoundError(f"ledger does not exist: {ledger_path}")
 
     try:
+        records = []
         with ledger_path.open("r", encoding="utf-8-sig") as handle:
             for line_number, line in enumerate(handle, 1):
                 if not line.strip():
@@ -123,17 +125,42 @@ def load_snapshots(
                     record = json.loads(line)
                     if not isinstance(record, dict):
                         raise ValueError("object required")
-                    if record.get("strategy_version") != requested:
-                        continue
-                    record_type = record.get("type")
-                    if record_type == "OBSERVATION":
-                        observations.append(_observation(record))
-                    elif record_type == "SIGNAL":
-                        snapshots.append(_snapshot(record))
+                    records.append(record)
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     warnings.append(f"línea {line_number} omitida: {exc}")
     except OSError as exc:
         raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
+
+    available_capture_ids = sorted({
+        record["capture_id"] for record in records
+        if record.get("strategy_version") == requested
+        and isinstance(record.get("capture_id"), str)
+        and record["capture_id"].strip()
+    })
+    if len(available_capture_ids) > 1 and capture_id is None:
+        raise ValueError(
+            "capture_id must be selected; available capture IDs: "
+            + ", ".join(available_capture_ids)
+        )
+    if capture_id is None and len(available_capture_ids) == 1:
+        capture_id = available_capture_ids[0]
+    if capture_id is not None and capture_id not in available_capture_ids:
+        raise ValueError(f"unknown capture_id: {capture_id}")
+    for record in records:
+        if record.get("strategy_version") != requested:
+            continue
+        if capture_id is not None:
+            if record.get("capture_id") != capture_id:
+                continue
+        elif record.get("capture_id") is not None:
+            continue
+        try:
+            if record.get("type") == "OBSERVATION":
+                observations.append(_observation(record))
+            elif record.get("type") == "SIGNAL":
+                snapshots.append(_snapshot(record))
+        except (KeyError, TypeError, ValueError) as exc:
+            warnings.append(f"registro omitido: {exc}")
 
     observations.sort(key=lambda item: (item.timestamp, item.symbol))
     snapshots.sort(key=lambda item: (item.features.timestamp, item.features.symbol, item.action))
@@ -162,6 +189,7 @@ def analyze_snapshots(
     thresholds: PolicyThresholds,
     *,
     strategy_version: str,
+    capture_id: str | None = None,
 ) -> SensitivityResult:
     """Evaluate one fixed threshold pair entirely in memory."""
     detector = EventDetector(
@@ -197,10 +225,11 @@ def analyze_snapshots(
             **{
                 field: getattr(report, field)
                 for field in report.__dataclass_fields__
-                if field not in {"candidate_observations", "strategy_version"}
+                if field not in {"candidate_observations", "strategy_version", "capture_id"}
             },
             candidate_observations=candidate_count,
             strategy_version=strategy_version,
+            capture_id=capture_id,
         ),
     )
 
@@ -209,9 +238,10 @@ def analyze_ledger(
     path: str | Path,
     *,
     strategy_version: str,
+    capture_id: str | None = None,
 ) -> tuple[tuple[SensitivityResult, ...], tuple[str, ...]]:
     observations, snapshots, warnings = load_snapshots(
-        path, strategy_version=strategy_version
+        path, strategy_version=strategy_version, capture_id=capture_id
     )
     results = tuple(
         analyze_snapshots(
@@ -219,6 +249,7 @@ def analyze_ledger(
             snapshots,
             PolicyThresholds(short, long),
             strategy_version=strategy_version,
+            capture_id=capture_id,
         )
         for short in SHORT_THRESHOLDS
         for long in LONG_THRESHOLDS
@@ -238,6 +269,7 @@ def format_results(
         "V2 OFFLINE POLICY SENSITIVITY SCAN",
         "IN-SAMPLE EXPLORATORY — NOT A TRADING RECOMMENDATION",
         "READ-ONLY: SIGNAL/OBSERVATION snapshots only; active V2 policy unchanged",
+        f"capture_id: {results[0].report.capture_id if results else 'legacy'}",
         "matrix: short in {0.00025, 0.00050, 0.00100}; long in {0.00050, 0.00100, 0.00200}; "
         "acceleration > 0; volatility <= 0.0100; spread <= 0.0030",
         "cooldown_minutes: 15; research_cost: 0.0010",
@@ -272,6 +304,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only V2 policy sensitivity scan")
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--strategy-version", required=True)
+    parser.add_argument("--capture-id")
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -280,7 +313,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         results, warnings = analyze_ledger(
-            args.ledger, strategy_version=args.strategy_version
+            args.ledger,
+            strategy_version=args.strategy_version,
+            capture_id=args.capture_id,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}")

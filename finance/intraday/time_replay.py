@@ -33,16 +33,39 @@ CONFIGURATIONS = (
 )
 
 
-def load_observations(path: Path) -> list[IntradayObservation]:
+def load_observations(
+    path: Path,
+    *,
+    capture_id: str | None = None,
+) -> list[IntradayObservation]:
     observations = []
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if line.strip()
+    ]
+    capture_ids = sorted({
+        record["capture_id"]
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("capture_id"), str)
+        and record["capture_id"].strip()
+    })
+    if capture_id is None and len(capture_ids) > 1:
+        raise ValueError(
+            "capture_id must be selected; available capture IDs: "
+            + ", ".join(capture_ids)
+        )
+    if capture_id is None and len(capture_ids) == 1:
+        capture_id = capture_ids[0]
+    if capture_id is not None and capture_id not in capture_ids:
+        raise ValueError(f"unknown capture_id: {capture_id}")
 
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-
-        record = json.loads(line)
+    for record in records:
 
         if record.get("type") != "OBSERVATION":
+            continue
+        if capture_id is not None and record.get("capture_id") != capture_id:
             continue
 
         observations.append(

@@ -1,5 +1,7 @@
 ﻿from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -314,6 +316,26 @@ def test_v2_parser_and_runner_use_time_based_collector(tmp_path):
         record["type"] == "CONFIGURATION"
         for record in ledger.records()
     )
+    assert all(
+        record["capture_id"] == ledger.capture_id
+        for record in ledger.records()
+    )
+
+
+def test_runner_starts_a_new_capture_on_each_execution(tmp_path):
+    path = tmp_path / "v2.jsonl"
+    first = LiveIntradayResearchRunner(
+        symbol="BTC-USD", duration_seconds=600, poll_seconds=5,
+        ledger_path=path, strategy_version=TIME_BASED_STRATEGY_VERSION,
+        provider=FakeProvider([]),
+    )
+    second = LiveIntradayResearchRunner(
+        symbol="BTC-USD", duration_seconds=600, poll_seconds=5,
+        ledger_path=path, strategy_version=TIME_BASED_STRATEGY_VERSION,
+        provider=FakeProvider([]),
+    )
+
+    assert first._collector._ledger.capture_id != second._collector._ledger.capture_id
 
 
 def test_v2_default_ledger_path():
@@ -356,3 +378,45 @@ def test_v2_without_ledger_uses_v2_default(monkeypatch, tmp_path):
     )
 
     assert runner._collector._ledger.path == default_path
+
+
+def test_main_displays_the_runner_capture_id_in_header_and_summary(
+    monkeypatch,
+    capsys,
+):
+    import finance.intraday.research_runner as module
+
+    capture_id = "capture-for-display"
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self):
+            return SimpleNamespace(
+                polls=0,
+                quotes_received=0,
+                quotes_accepted=0,
+                quotes_rejected_quality=0,
+                quotes_rejected_duplicate=0,
+                signals=0,
+                candidates=0,
+                outcomes=0,
+                provider_errors=0,
+                provider_errors_finales=0,
+                provider_retries_recovered=0,
+                provider_retry_attempts=0,
+            )
+
+    FakeRunner.capture_id = capture_id
+    monkeypatch.setattr(module, "LiveIntradayResearchRunner", FakeRunner)
+    monkeypatch.setattr(sys, "argv", ["research_runner"])
+
+    assert module.main() == 0
+
+    output = capsys.readouterr().out
+    assert (
+        f"Atlas Live Research | BTC-USD | 60 min | poll=5s | "
+        f"capture_id={capture_id}"
+    ) in output
+    assert f"capture_id: {capture_id}" in output

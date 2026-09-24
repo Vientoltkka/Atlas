@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from finance.intraday.collector import IntradayResearchCollector
 from finance.intraday.persistence import IntradayResearchLedger
@@ -136,6 +137,7 @@ class LiveIntradayResearchRunner:
             ledger = IntradayResearchLedger(
                 ledger_path,
                 strategy_version=strategy_version,
+                capture_id=str(uuid4()),
             )
             existing_versions = {
                 record.get("strategy_version")
@@ -168,6 +170,10 @@ class LiveIntradayResearchRunner:
         self._sleep = sleep_fn
         self._monotonic = monotonic_fn
         self._now = now_fn
+
+    @property
+    def capture_id(self) -> str:
+        return self._collector._ledger.capture_id
 
     def run(self) -> LiveResearchStats:
         stats = LiveResearchStats()
@@ -352,13 +358,15 @@ def main() -> int:
     print(
         f"Atlas Live Research | {args.symbol} | "
         f"{args.minutes:g} min | "
-        f"poll={args.poll_seconds:g}s"
+        f"poll={args.poll_seconds:g}s | "
+        f"capture_id={runner.capture_id}"
     )
     print("READ-ONLY: no orders, no account access.\n")
 
     stats = runner.run()
 
     print("\n=== LIVE RESEARCH SUMMARY ===")
+    print(f"capture_id: {runner.capture_id}")
     print(f"polls: {stats.polls}")
     print(f"quotes_received: {stats.quotes_received}")
     print(f"quotes_accepted: {stats.quotes_accepted}")
