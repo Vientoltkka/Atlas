@@ -5,7 +5,6 @@ Research-only. No orders, no broker access, no execution.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +14,7 @@ from statistics import mean, median
 TIME_BASED_STRATEGY_VERSION = "intraday-time-research-v2"
 
 from finance.intraday.models import IntradayObservation
+from finance.intraday.persistence import read_jsonl_records
 from finance.intraday.time_features import (
     TimeBasedIntradayFeatureEngine,
 )
@@ -36,19 +36,21 @@ CONFIGURATIONS = (
 def load_observations(
     path: Path,
     *,
+    strategy_version: str = TIME_BASED_STRATEGY_VERSION,
     capture_id: str | None = None,
 ) -> list[IntradayObservation]:
     observations = []
-    records = [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8-sig").splitlines()
-        if line.strip()
+    records = read_jsonl_records(path)
+    version_records = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and record.get("strategy_version") == strategy_version
     ]
     capture_ids = sorted({
         record["capture_id"]
-        for record in records
-        if isinstance(record, dict)
-        and isinstance(record.get("capture_id"), str)
+        for record in version_records
+        if isinstance(record.get("capture_id"), str)
         and record["capture_id"].strip()
     })
     if capture_id is None and len(capture_ids) > 1:
@@ -59,13 +61,20 @@ def load_observations(
     if capture_id is None and len(capture_ids) == 1:
         capture_id = capture_ids[0]
     if capture_id is not None and capture_id not in capture_ids:
-        raise ValueError(f"unknown capture_id: {capture_id}")
+        raise ValueError(
+            f"unknown capture_id for strategy_version {strategy_version}: "
+            f"{capture_id}"
+        )
 
     for record in records:
 
         if record.get("type") != "OBSERVATION":
             continue
+        if record.get("strategy_version") != strategy_version:
+            continue
         if capture_id is not None and record.get("capture_id") != capture_id:
+            continue
+        if capture_id is None and record.get("capture_id") is not None:
             continue
 
         observations.append(

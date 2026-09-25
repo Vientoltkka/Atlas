@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -14,7 +15,12 @@ from finance.intraday.persistence import IntradayResearchLedger
 from finance.intraday.service import TimeBasedIntradaySignalService
 from finance.intraday.signal_engine import IntradaySignalEngine
 from finance.intraday.time_features import TimeBasedIntradayFeatureEngine
-from finance.intraday.time_replay import TIME_BASED_STRATEGY_VERSION, load_observations
+from finance.intraday.time_replay import (
+    ReplayConfiguration,
+    TIME_BASED_STRATEGY_VERSION,
+    load_observations,
+    replay,
+)
 from finance.intraday.outcome_analysis import load_research_event_report
 from finance.market_data.models import Quote
 
@@ -525,6 +531,158 @@ def test_v2_capture_ids_isolate_observations_and_reports(tmp_path):
     ).capture_id == "capture-a"
 
 
+def test_replay_isolates_strategy_version_and_capture_pair(tmp_path):
+    path = tmp_path / "versions.jsonl"
+    records = []
+    for version, price in (
+        (TIME_BASED_STRATEGY_VERSION, "100"),
+        ("intraday-momentum-v1", "200"),
+    ):
+        records.append({
+            "type": "OBSERVATION",
+            "strategy_version": version,
+            "capture_id": "shared-capture",
+            "symbol": "BTC-USD",
+            "price": price,
+            "bid": price,
+            "ask": price,
+            "timestamp": "2026-09-19T12:00:00+00:00",
+        })
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    observations = load_observations(path)
+
+    assert [item.price for item in observations] == [Decimal("100")]
+
+
+def test_replay_receives_only_selected_observations(tmp_path):
+    path = tmp_path / "replay-input.jsonl"
+    records = []
+    for version, prices in (
+        (TIME_BASED_STRATEGY_VERSION, ("100", "101", "102")),
+        ("other-version", ("1000", "1100", "1200")),
+    ):
+        for minute, price in enumerate(prices):
+            records.append({
+                "type": "OBSERVATION",
+                "strategy_version": version,
+                "capture_id": "shared-capture",
+                "symbol": "BTC-USD",
+                "price": price,
+                "bid": price,
+                "ask": price,
+                "timestamp": (
+                    START + timedelta(minutes=minute)
+                ).isoformat(),
+            })
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    features, rejected = replay(
+        load_observations(path),
+        configuration=ReplayConfiguration(short_minutes=1, long_minutes=2),
+    )
+
+    assert rejected == 1
+    assert len(features) == 1
+    assert features[0].return_long == Decimal("0.02")
+
+
+def test_replay_capture_selection_ignores_other_strategy_versions(tmp_path):
+    path = tmp_path / "automatic-selection.jsonl"
+    records = [
+        {
+            "type": "OBSERVATION",
+            "strategy_version": TIME_BASED_STRATEGY_VERSION,
+            "capture_id": "v2-capture",
+            "symbol": "BTC-USD",
+            "price": "100",
+            "bid": "100",
+            "ask": "100",
+            "timestamp": "2026-09-19T12:00:00+00:00",
+        },
+        {
+            "type": "OBSERVATION",
+            "strategy_version": "other-version",
+            "capture_id": "other-capture",
+            "symbol": "BTC-USD",
+            "price": "200",
+            "bid": "200",
+            "ask": "200",
+            "timestamp": "2026-09-19T12:01:00+00:00",
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    assert [item.price for item in load_observations(path)] == [Decimal("100")]
+
+
+def test_replay_rejects_capture_missing_for_requested_strategy_version(tmp_path):
+    path = tmp_path / "missing-capture.jsonl"
+    path.write_text(
+        json.dumps({
+            "type": "OBSERVATION",
+            "strategy_version": TIME_BASED_STRATEGY_VERSION,
+            "capture_id": "v2-capture",
+            "symbol": "BTC-USD",
+            "price": "100",
+            "bid": "100",
+            "ask": "100",
+            "timestamp": "2026-09-19T12:00:00+00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown capture_id.*missing-capture"):
+        load_observations(
+            path,
+            strategy_version=TIME_BASED_STRATEGY_VERSION,
+            capture_id="missing-capture",
+        )
+
+
+def test_replay_legacy_observations_do_not_cross_strategy_versions(tmp_path):
+    path = tmp_path / "legacy-versions.jsonl"
+    records = [
+        {
+            "type": "OBSERVATION",
+            "strategy_version": TIME_BASED_STRATEGY_VERSION,
+            "symbol": "BTC-USD",
+            "price": "100",
+            "bid": "100",
+            "ask": "100",
+            "timestamp": "2026-09-19T12:00:00+00:00",
+        },
+        {
+            "type": "OBSERVATION",
+            "strategy_version": "other-version",
+            "symbol": "BTC-USD",
+            "price": "200",
+            "bid": "200",
+            "ask": "200",
+            "timestamp": "2026-09-19T12:01:00+00:00",
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    assert [item.price for item in load_observations(path)] == [Decimal("100")]
+    assert [
+        item.price
+        for item in load_observations(path, strategy_version="other-version")
+    ] == [Decimal("200")]
+
+
 def test_v2_capture_configuration_is_snapshot_per_capture(tmp_path):
     path = tmp_path / "configuration.jsonl"
     ledger = IntradayResearchLedger(
@@ -548,7 +706,7 @@ def test_legacy_ledger_remains_readable_without_inventing_capture_id(tmp_path):
         encoding="utf-8",
     )
 
-    observations = load_observations(path)
+    observations = load_observations(path, strategy_version="v2")
 
     assert len(observations) == 1
     assert observations[0].price == Decimal("100")
