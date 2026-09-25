@@ -189,3 +189,105 @@ def test_policy_analysis_rejects_intermediate_json_corruption(tmp_path):
 
     with pytest.raises(ValueError, match="invalid JSONL at line 2"):
         load_snapshots(path, strategy_version=VERSION)
+
+
+def configuration(capture_id: str, **values) -> dict:
+    return {
+        "type": "CONFIGURATION",
+        "strategy_version": VERSION,
+        "capture_id": capture_id,
+        "configuration": values,
+    }
+
+
+def test_analysis_displays_the_captured_active_v2_configuration(tmp_path):
+    path = tmp_path / "research.jsonl"
+    write_ledger(
+        path,
+        [
+            configuration(
+                "capture-a",
+                minimum_short_return="0.123",
+                minimum_long_return="0.456",
+            ),
+            {**observation(0, "100"), "capture_id": "capture-a"},
+            {**signal(0, short="0.001", long="0.002"), "capture_id": "capture-a"},
+        ],
+    )
+
+    results, warnings = analyze_ledger(
+        path, strategy_version=VERSION, capture_id="capture-a"
+    )
+    text = format_results(results, warnings)
+
+    assert results[0].captured_configuration == {
+        "minimum_long_return": "0.456",
+        "minimum_short_return": "0.123",
+    }
+    assert results[0].report.capture_id == "capture-a"
+    assert "captured active V2 configuration" in text
+    assert "configuración activa registrada de la captura" in text
+    assert '"minimum_short_return":"0.123"' in text
+
+
+def test_analysis_warns_when_capture_has_no_configuration(tmp_path):
+    path = tmp_path / "research.jsonl"
+    write_ledger(
+        path,
+        [
+            {**observation(0, "100"), "capture_id": "capture-a"},
+            {**signal(0, short="0.001", long="0.002"), "capture_id": "capture-a"},
+        ],
+    )
+
+    results, warnings = analyze_ledger(
+        path, strategy_version=VERSION, capture_id="capture-a"
+    )
+    text = format_results(results, warnings)
+
+    assert any("Missing CONFIGURATION" in warning for warning in warnings)
+    assert "no configuration values invented" in warnings[-1]
+    assert "MISSING; no se inventan valores" in text
+
+
+def test_analysis_rejects_incompatible_configurations_for_capture(tmp_path):
+    path = tmp_path / "research.jsonl"
+    write_ledger(
+        path,
+        [
+            configuration("capture-a", threshold="0.001"),
+            configuration("capture-a", threshold="0.002"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="incompatible CONFIGURATION snapshots"):
+        analyze_ledger(path, strategy_version=VERSION, capture_id="capture-a")
+
+
+def test_sensitivity_matrix_remains_independent_of_captured_configuration(tmp_path):
+    path = tmp_path / "research.jsonl"
+    write_ledger(
+        path,
+        [
+            configuration(
+                "capture-a",
+                minimum_short_return="999",
+                minimum_long_return="999",
+                cooldown_minutes=999,
+                estimated_round_trip_cost="999",
+            ),
+            {**observation(0, "100"), "capture_id": "capture-a"},
+            {
+                **signal(0, short="0.00050", long="0.00100"),
+                "capture_id": "capture-a",
+            },
+        ],
+    )
+
+    results, _ = analyze_ledger(
+        path, strategy_version=VERSION, capture_id="capture-a"
+    )
+
+    assert results[0].captured_configuration["minimum_short_return"] == "999"
+    assert result_for(results, "0.00025", "0.00050").candidate_observations == 1
+    assert result_for(results, "0.00100", "0.00200").candidate_observations == 0

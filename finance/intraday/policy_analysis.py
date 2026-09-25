@@ -7,6 +7,7 @@ updates the append-only ledger and does not participate in the active policy.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import sys
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ class SensitivityResult:
     thresholds: PolicyThresholds
     candidate_observations: int
     report: ResearchEventReport
+    captured_configuration: dict | None = None
 
 
 def _decimal(value: object) -> Decimal:
@@ -158,6 +160,37 @@ def load_snapshots(
     return observations, snapshots, tuple(warnings)
 
 
+def _load_captured_configuration(
+    records: Sequence[dict],
+    *,
+    strategy_version: str,
+    capture_id: str | None,
+) -> dict | None:
+    configurations = [
+        record.get("configuration")
+        for record in records
+        if record.get("type") == "CONFIGURATION"
+        and record.get("strategy_version") == strategy_version
+        and record.get("capture_id") == capture_id
+    ]
+    if not configurations:
+        return None
+    if any(not isinstance(configuration, dict) for configuration in configurations):
+        raise ValueError(
+            "invalid CONFIGURATION snapshot for the selected strategy_version + capture_id"
+        )
+    encoded = {
+        json.dumps(configuration, sort_keys=True, separators=(",", ":"))
+        for configuration in configurations
+    }
+    if len(encoded) > 1:
+        raise ValueError(
+            "incompatible CONFIGURATION snapshots for the selected "
+            "strategy_version + capture_id"
+        )
+    return deepcopy(configurations[0])
+
+
 def _matches(features: IntradayFeatures, thresholds: PolicyThresholds) -> bool:
     # Keep the active V2 semantics: acceleration must be strictly positive
     # when its configured minimum is zero.
@@ -230,16 +263,46 @@ def analyze_ledger(
     observations, snapshots, warnings = load_snapshots(
         path, strategy_version=strategy_version, capture_id=capture_id
     )
+    records = read_jsonl_records(path)
+    selected_capture_id = capture_id
+    if selected_capture_id is None:
+        available_capture_ids = sorted({
+            record["capture_id"] for record in records
+            if record.get("strategy_version") == strategy_version
+            and isinstance(record.get("capture_id"), str)
+            and record["capture_id"].strip()
+        })
+        if len(available_capture_ids) == 1:
+            selected_capture_id = available_capture_ids[0]
+    captured_configuration = _load_captured_configuration(
+        records,
+        strategy_version=strategy_version,
+        capture_id=selected_capture_id,
+    )
+    if captured_configuration is None:
+        warnings = warnings + (
+            "Missing CONFIGURATION for the selected strategy_version + capture_id; "
+            "no configuration values invented / falta CONFIGURATION y no se inventan valores.",
+        )
     results = tuple(
         analyze_snapshots(
             observations,
             snapshots,
             PolicyThresholds(short, long),
             strategy_version=strategy_version,
-            capture_id=capture_id,
+            capture_id=selected_capture_id,
         )
         for short in SHORT_THRESHOLDS
         for long in LONG_THRESHOLDS
+    )
+    results = tuple(
+        SensitivityResult(
+            thresholds=result.thresholds,
+            candidate_observations=result.candidate_observations,
+            report=result.report,
+            captured_configuration=deepcopy(captured_configuration),
+        )
+        for result in results
     )
     return results, warnings
 
@@ -257,10 +320,22 @@ def format_results(
         "IN-SAMPLE EXPLORATORY — NOT A TRADING RECOMMENDATION",
         "READ-ONLY: SIGNAL/OBSERVATION snapshots only; active V2 policy unchanged",
         f"capture_id: {results[0].report.capture_id if results else 'legacy'}",
+        "SENSITIVITY MATRIX: IN-SAMPLE EXPLORATORY ONLY; NOT THE ACTIVE POLICY",
         "matrix: short in {0.00025, 0.00050, 0.00100}; long in {0.00050, 0.00100, 0.00200}; "
         "acceleration > 0; volatility <= 0.0100; spread <= 0.0030",
         "cooldown_minutes: 15; research_cost: 0.0010",
     ]
+    configuration = results[0].captured_configuration if results else None
+    if configuration is None:
+        lines.append(
+            "captured active V2 configuration / configuración activa registrada de la captura: "
+            "MISSING; no se inventan valores"
+        )
+    else:
+        lines.append(
+            "captured active V2 configuration / configuración activa registrada de la captura: "
+            + json.dumps(configuration, sort_keys=True, separators=(",", ":"))
+        )
     lines.extend(f"WARNING: {warning}" for warning in warnings)
     for result in results:
         report = result.report
@@ -311,6 +386,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.as_json:
         payload = {
             "warning": "IN-SAMPLE EXPLORATORY — NOT A TRADING RECOMMENDATION",
+            "sensitivity_scope": "in-sample exploratory; not the active policy",
+            "captured_active_v2_configuration": (
+                results[0].captured_configuration if results else None
+            ),
             "results": [
                 {
                     "minimum_short_return": str(result.thresholds.minimum_short_return),
