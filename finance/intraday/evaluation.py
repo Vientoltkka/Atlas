@@ -264,6 +264,7 @@ class EventDetector:
         self.cooldown_minutes = cooldown_minutes
         self.estimated_round_trip_cost = estimated_round_trip_cost
         self._active: dict[tuple[str, str, str, str], IndependentSignalEvent] = {}
+        self._pending: dict[str, IndependentSignalEvent] = {}
         self._last_observation_timestamps: dict[
             tuple[str, str, str, str], datetime
         ] = {}
@@ -310,6 +311,7 @@ class EventDetector:
             estimated_round_trip_cost=self.estimated_round_trip_cost,
         )
         self._active[key] = event
+        self._pending[event.id] = event
         self._last_observation_timestamps[key] = timestamp
         return event
 
@@ -321,6 +323,7 @@ class EventDetector:
         if previous is not None and last_timestamp < previous:
             raise ValueError("event observation timestamp cannot move backwards")
         self._active[key] = event
+        self._pending[event.id] = event
         self._last_observation_timestamps[key] = last_timestamp
 
     def update_pending(
@@ -336,9 +339,16 @@ class EventDetector:
         """
         normalized_symbol = symbol.strip().upper() if symbol is not None else None
         changed: list[IndependentSignalEvent] = []
-        for event in self._active.values():
+        # Cooldown selects the active event; every open event still needs its
+        # own forward horizons evaluated after a newer event replaces it.
+        for event_id, event in list(self._pending.items()):
             if normalized_symbol is not None and event.symbol != normalized_symbol:
                 continue
             if event.calculate_outcomes(observations):
                 changed.append(event)
+            if all(
+                getattr(event, f"outcome_{horizon}m").future_price is not None
+                for horizon in INDEPENDENT_EVENT_HORIZONS
+            ):
+                self._pending.pop(event_id, None)
         return tuple(changed)

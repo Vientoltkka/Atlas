@@ -141,6 +141,80 @@ def test_pending_updates_only_report_newly_resolved_horizons() -> None:
     assert event.outcome_1m.net_return == Decimal("0.0090")
 
 
+def test_event_after_cooldown_does_not_drop_previous_pending_event() -> None:
+    detector = EventDetector(cooldown_minutes=15)
+    first = detect(detector, 0)
+    second = detect(detector, 16)
+
+    assert second.id != first.id
+    assert detector.update_pending(
+        [
+            observation(1, "101"),
+            observation(5, "102"),
+            observation(15, "103"),
+            observation(17, "111"),
+            observation(21, "112"),
+        ]
+    ) == (first, second)
+    assert first.outcome_1m.future_price == Decimal("101")
+    assert first.outcome_15m.future_price == Decimal("103")
+    assert set(detector._pending) == {first.id, second.id}
+
+    assert detector.update_pending(
+        [
+            observation(1, "101"),
+            observation(5, "102"),
+            observation(15, "103"),
+            observation(17, "111"),
+            observation(21, "112"),
+            observation(30, "104"),
+        ]
+    ) == (first,)
+    assert first.outcome_30m.future_price == Decimal("104")
+    assert set(detector._pending) == {second.id}
+
+    assert detector.update_pending(
+        [
+            observation(1, "101"),
+            observation(5, "102"),
+            observation(15, "103"),
+            observation(17, "111"),
+            observation(21, "112"),
+            observation(30, "104"),
+            observation(31, "113"),
+        ]
+    ) == (second,)
+    assert second.outcome_15m.future_price == Decimal("113")
+    assert set(detector._pending) == {second.id}
+
+    assert detector.update_pending(
+        [
+            observation(1, "101"),
+            observation(5, "102"),
+            observation(15, "103"),
+            observation(17, "111"),
+            observation(21, "112"),
+            observation(30, "104"),
+            observation(31, "113"),
+            observation(46, "114"),
+        ]
+    ) == (second,)
+    assert not detector._pending
+    assert detector.update_pending(
+        [
+            observation(1, "101"),
+            observation(5, "102"),
+            observation(15, "103"),
+            observation(17, "111"),
+            observation(21, "112"),
+            observation(30, "104"),
+            observation(31, "113"),
+            observation(46, "114"),
+            observation(47, "115"),
+        ]
+    ) == ()
+
+
 def test_late_observations_do_not_report_repeated_or_material_updates() -> None:
     detector = EventDetector()
     event = detect(detector, 0)

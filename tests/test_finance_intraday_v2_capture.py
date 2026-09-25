@@ -100,6 +100,25 @@ class CandidateThenNoActionService(CandidateService):
         )
 
 
+class CandidatesAtCalls(CandidateService):
+    def __init__(self, candidate_calls: set[int]) -> None:
+        self._candidate_calls = candidate_calls
+        self._calls = 0
+
+    def ingest(self, observation):
+        self._calls += 1
+        signal = super().ingest(observation)
+        if self._calls in self._candidate_calls:
+            return signal
+        return IntradaySignal(
+            symbol=signal.symbol,
+            timestamp=signal.timestamp,
+            action=IntradaySignalAction.NO_ACTION,
+            reasons=("TEST_POLICY",),
+            features=signal.features,
+        )
+
+
 def test_v2_capture_persists_observation_features_signal_and_config(tmp_path):
     collector, ledger = make_v2(tmp_path / "research.jsonl")
 
@@ -302,6 +321,58 @@ def test_v2_event_restores_open_cooldown_without_duplication(tmp_path):
     ]
     assert len(events) == 1
     assert restarted._events[next(iter(restarted._events))].observation_count == 2
+
+
+def test_v2_events_after_cooldown_both_receive_pending_outcomes_once(tmp_path):
+    path = tmp_path / "replaced-events.jsonl"
+    ledger = IntradayResearchLedger(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+    )
+    collector = IntradayResearchCollector.for_time_based_v2(
+        ledger=ledger,
+        signal_service=CandidatesAtCalls({1, 5}),
+    )
+
+    prices = {
+        0: "100",
+        1: "101",
+        5: "102",
+        15: "103",
+        16: "110",
+        17: "111",
+        21: "112",
+        30: "104",
+        31: "113",
+        46: "114",
+    }
+    for minute, price in prices.items():
+        collector.ingest_quote(quote(minute, price))
+
+    events = {
+        record["id"]: record
+        for record in ledger.records()
+        if record["type"] in {"EVENT", "EVENT_UPDATE"}
+    }
+    assert len(events) == 2
+    by_timestamp = {
+        record["timestamp"]: record for record in events.values()
+    }
+    first = by_timestamp[(START + timedelta(minutes=0)).isoformat()]
+    second = by_timestamp[(START + timedelta(minutes=16)).isoformat()]
+    assert Decimal(first["outcomes"]["1"]["future_price"]) == Decimal("101")
+    assert Decimal(first["outcomes"]["30"]["future_price"]) == Decimal("104")
+    assert Decimal(second["outcomes"]["15"]["future_price"]) == Decimal("113")
+    assert not collector._event_detector._pending
+
+    updates_before = [
+        record for record in ledger.records() if record["type"] == "EVENT_UPDATE"
+    ]
+    collector.ingest_quote(quote(47, "113"))
+    updates_after = [
+        record for record in ledger.records() if record["type"] == "EVENT_UPDATE"
+    ]
+    assert len(updates_after) == len(updates_before)
 
 
 def test_v2_no_action_observations_complete_one_event_once(tmp_path):
