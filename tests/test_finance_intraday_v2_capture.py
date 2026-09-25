@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
@@ -232,15 +234,92 @@ def test_v2_replay_from_jsonl_matches_capture(tmp_path):
 
 
 def test_v2_modules_have_no_execution_dependency():
-    import finance.intraday.collector as collector
-    import finance.intraday.service as service
+    root = Path(__file__).parents[1]
+    finance_root = root / "finance"
+    intraday_root = finance_root / "intraday"
+    module_paths = {
+        ".".join(path.relative_to(root).with_suffix("").parts): path
+        for path in intraday_root.rglob("*.py")
+    }
+    finance_paths = {
+        ".".join(path.relative_to(root).with_suffix("").parts): path
+        for path in finance_root.rglob("*.py")
+    }
 
-    for module in (collector, service):
-        source = open(module.__file__, encoding="utf-8").read()
-        assert "finance.execution" not in source
-        assert "ExecutionIntent" not in source
-        assert "BrokerAdapter" not in source
-        assert "PaperFinanceService" not in source
+    forbidden_modules = ("finance.paper", "finance.execution")
+    forbidden_symbols = {
+        "ExecutionIntent",
+        "ExecutionService",
+        "PaperFinanceService",
+        "PaperOrder",
+        "BrokerAdapter",
+    }
+
+    def imported_modules(module_name, node):
+        if isinstance(node, ast.Import):
+            return [(alias.name, None) for alias in node.names]
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = ".".join(module_name.split(".")[: -node.level])
+                module = ".".join(
+                    item for item in (base, node.module or "") if item
+                )
+            else:
+                module = node.module or ""
+            return [(module, alias.name) for alias in node.names]
+        return []
+
+    def imported_modules_for(module_name, tree):
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            yield from imported_modules(module_name, node)
+
+    pending = list(module_paths)
+    visited = set()
+    violations = []
+    while pending:
+        module_name = pending.pop()
+        if module_name in visited:
+            continue
+        visited.add(module_name)
+        tree = ast.parse(
+            finance_paths[module_name].read_text(encoding="utf-8-sig"),
+            filename=str(finance_paths[module_name]),
+        )
+        for imported_module, symbol in imported_modules_for(module_name, tree):
+            if (
+                any(
+                    imported_module == forbidden
+                    or imported_module.startswith(forbidden + ".")
+                    for forbidden in forbidden_modules
+                )
+                or ".adapters" in imported_module
+                or ".broker" in imported_module
+                or symbol in forbidden_symbols
+            ):
+                violations.append(
+                    f"{module_name}: {imported_module}"
+                    + (f" import {symbol}" if symbol else "")
+                )
+
+            imported_local_modules = [imported_module]
+            if symbol:
+                imported_local_modules.append(f"{imported_module}.{symbol}")
+            pending.extend(
+                candidate
+                for candidate in imported_local_modules
+                if candidate in finance_paths and candidate not in visited
+            )
+
+    assert set(module_paths) == {
+        module_name
+        for module_name in visited
+        if module_name.startswith("finance.intraday.")
+    }
+    assert not violations, "execution dependencies found:\n" + "\n".join(
+        sorted(violations)
+    )
 
 
 def test_v2_candidates_within_cooldown_are_one_durable_event(tmp_path):
