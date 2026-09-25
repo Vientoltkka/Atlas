@@ -105,6 +105,7 @@ class ResearchEventReport:
     strategy_version: str | None = None
     capture_id: str | None = None
     warnings: tuple[str, ...] = ()
+    orphan_event_records: int = 0
 
     @property
     def estimated_round_trip_cost(self) -> Decimal | None:
@@ -312,6 +313,7 @@ def report_to_dict(report: ResearchEventReport) -> dict:
         "aggregated_by_cooldown": report.aggregated_by_cooldown,
         "event_backed_candidate_observations": report.event_backed_candidate_observations,
         "unlinked_candidate_observations": report.unlinked_candidate_observations,
+        "orphan_event_records": report.orphan_event_records,
         "cooldown_minutes": list(report.cooldown_minutes),
         "estimated_round_trip_costs": [
             str(value) for value in report.estimated_round_trip_costs
@@ -366,13 +368,12 @@ def load_research_event_report(
     if not ledger_path.exists():
         raise FileNotFoundError(f"ledger does not exist: {ledger_path}")
 
-    from finance.intraday.persistence import IntradayResearchLedger
+    from finance.intraday.persistence import (
+        IntradayResearchLedger,
+        read_jsonl_records,
+    )
 
-    raw_records = [
-        json.loads(line)
-        for line in ledger_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    raw_records = read_jsonl_records(ledger_path)
     available_capture_ids = {
         record["capture_id"] for record in raw_records
         if record.get("strategy_version") == requested_version
@@ -392,42 +393,36 @@ def load_research_event_report(
     snapshots: dict[str, object] = {}
     candidate_observations = 0
     candidate_event_ids: list[str | None] = []
-    try:
-        with ledger_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"invalid JSONL at line {line_number}: {exc.msg}"
-                    ) from exc
-                if not isinstance(record, dict):
-                    raise ValueError(f"invalid JSONL at line {line_number}: object required")
-                if record.get("strategy_version") != requested_version:
-                    continue
-                if record.get("capture_id") != capture_id:
-                    if capture_id is not None or record.get("capture_id") is not None:
-                        continue
-                if record.get("type") == "SIGNAL" and record.get("action") == "CANDIDATE":
-                    candidate_observations += 1
-                    event_id = record.get("event_id")
-                    candidate_event_ids.append(
-                        event_id if isinstance(event_id, str) and event_id.strip() else None
-                    )
-                elif record.get("type") in {"EVENT", "EVENT_UPDATE"}:
-                    try:
-                        event = IntradayResearchLedger.event_from_record(record)
-                    except (KeyError, TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"invalid event record at line {line_number}: {exc}"
-                        ) from exc
-                    snapshots[str(record.get("id", event.id))] = event
-    except OSError as exc:
-        raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
+    for line_number, record in enumerate(raw_records, 1):
+        if record.get("strategy_version") != requested_version:
+            continue
+        if record.get("capture_id") != capture_id:
+            if capture_id is not None or record.get("capture_id") is not None:
+                continue
+        if record.get("type") == "SIGNAL" and record.get("action") == "CANDIDATE":
+            candidate_observations += 1
+            event_id = record.get("event_id")
+            candidate_event_ids.append(
+                event_id if isinstance(event_id, str) and event_id.strip() else None
+            )
+        elif record.get("type") in {"EVENT", "EVENT_UPDATE"}:
+            try:
+                event = IntradayResearchLedger.event_from_record(record)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid event record at line {line_number}: {exc}"
+                ) from exc
+            snapshots[str(record.get("id", event.id))] = event
 
-    report = aggregate_event_report(snapshots.values())
+    linked_event_ids = {
+        event_id for event_id in candidate_event_ids if event_id is not None
+    }
+    orphan_event_records = sum(
+        event_id not in linked_event_ids for event_id in snapshots
+    )
+    report = aggregate_event_report(
+        event for event_id, event in snapshots.items() if event_id in linked_event_ids
+    )
     linked_candidate_observations = sum(
         event_id is not None and event_id in snapshots
         for event_id in candidate_event_ids
@@ -437,17 +432,25 @@ def load_research_event_report(
         0,
     )
     warnings = list(_report_warnings(report.total_events, unlinked_candidates))
+    if orphan_event_records:
+        warnings.insert(
+            0,
+            f"{orphan_event_records} EVENT huérfano(s) sin SIGNAL enlazado; "
+            "no se usan para retornos independientes.",
+        )
     if not report.total_events:
         warnings.insert(0, "Sin eventos EVENT para la strategy_version solicitada.")
     return ResearchEventReport(
         **{field: getattr(report, field) for field in report.__dataclass_fields__
-               if field not in {
-                   "strategy_version", "capture_id", "warnings", "candidate_observations",
-               "event_backed_candidate_observations", "unlinked_candidate_observations",
-           }},
+                   if field not in {
+                       "strategy_version", "capture_id", "warnings", "candidate_observations",
+                   "event_backed_candidate_observations", "unlinked_candidate_observations",
+                   "orphan_event_records",
+               }},
         candidate_observations=candidate_observations,
         event_backed_candidate_observations=linked_candidate_observations,
         unlinked_candidate_observations=unlinked_candidates,
+        orphan_event_records=orphan_event_records,
         strategy_version=requested_version,
         capture_id=capture_id,
         warnings=tuple(warnings),
@@ -470,6 +473,7 @@ def format_report_text(report: ResearchEventReport) -> str:
         f"{report.event_backed_candidate_observations}",
         "unlinked_candidate_observations: "
         f"{report.unlinked_candidate_observations}",
+        f"orphan_event_records: {report.orphan_event_records}",
         f"aggregated_by_cooldown: {report.aggregated_by_cooldown}",
         f"cooldown_minutes: {', '.join(map(str, report.cooldown_minutes)) or 'n/a'}",
         "estimated_round_trip_costs (decimal): "

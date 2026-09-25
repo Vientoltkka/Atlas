@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
@@ -30,6 +31,46 @@ def _json_value(value):
     if hasattr(value, "value"):
         return value.value
     raise TypeError(f"unsupported JSON value: {type(value)!r}")
+
+
+def read_jsonl_records(path: str | Path) -> tuple[dict, ...]:
+    """Read complete JSONL records, recovering only a truncated final line."""
+    ledger_path = Path(path)
+    if not ledger_path.exists():
+        return ()
+
+    result: list[dict] = []
+    invalid: tuple[int, json.JSONDecodeError] | None = None
+    try:
+        with ledger_path.open("r", encoding="utf-8-sig") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                if invalid is not None:
+                    raise ValueError(
+                        f"invalid JSONL at line {invalid[0]}: {invalid[1].msg}"
+                    ) from invalid[1]
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    invalid = (line_number, exc)
+                    continue
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"invalid JSONL at line {line_number}: object required"
+                    )
+                result.append(record)
+    except OSError as exc:
+        raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
+
+    if invalid is not None:
+        warnings.warn(
+            "JSONL recovery: ignored invalid final non-empty line "
+            f"at line {invalid[0]} ({invalid[1].msg}); complete records preserved",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return tuple(result)
 
 
 class IntradayResearchLedger:
@@ -267,18 +308,4 @@ class IntradayResearchLedger:
         )
 
     def records(self) -> tuple[dict, ...]:
-        if not self._path.exists():
-            return ()
-
-        result: list[dict] = []
-
-        with self._path.open(
-            "r",
-            encoding="utf-8",
-        ) as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    result.append(json.loads(line))
-
-        return tuple(result)
+        return read_jsonl_records(self._path)

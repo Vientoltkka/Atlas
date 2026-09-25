@@ -146,11 +146,12 @@ def test_ledger_reconstructs_event_updates_as_one_event(tmp_path) -> None:
     ledger.record_event(item)
     ledger.record_event_update(item)
     ledger.record_event_update(item)
+    ledger._append({"type": "SIGNAL", "action": "CANDIDATE", "event_id": item.id})
 
     report = load_research_event_report(path, strategy_version="v2")
 
     assert report.total_events == 1
-    assert report.candidate_observations == 0
+    assert report.candidate_observations == 1
     assert report.aggregated_by_cooldown == 2
 
 
@@ -167,11 +168,12 @@ def test_ledger_counts_candidates_and_filters_strategy_version(tmp_path) -> None
 
     report = load_research_event_report(path, strategy_version="v2")
 
-    assert report.total_events == 1
+    assert report.total_events == 0
     assert report.candidate_observations == 16
     assert report.event_backed_candidate_observations == 0
     assert report.unlinked_candidate_observations == 16
-    assert report.aggregated_by_cooldown == 3
+    assert report.orphan_event_records == 1
+    assert report.aggregated_by_cooldown == 0
     assert "Candidatos sin EVENT asociado no se usan para retornos independientes." in report.warnings
 
 
@@ -203,6 +205,8 @@ def test_ledger_report_has_resolved_pending_median_and_win_rate(tmp_path) -> Non
     second.calculate_outcomes([observation(1, "99"), observation(5, "104")])
     ledger.record_event(first)
     ledger.record_event(second)
+    ledger._append({"type": "SIGNAL", "action": "CANDIDATE", "event_id": first.id})
+    ledger._append({"type": "SIGNAL", "action": "CANDIDATE", "event_id": second.id})
 
     horizon = load_research_event_report(path, strategy_version="v2").horizons[1]
 
@@ -212,6 +216,19 @@ def test_ledger_report_has_resolved_pending_median_and_win_rate(tmp_path) -> Non
     assert horizon.median_gross_return == Decimal("0")
     assert horizon.net_win_rate == Decimal("0.5")
     assert load_research_event_report(path, strategy_version="v2").horizons[15].pending_events == 2
+
+
+def test_ledger_excludes_event_without_linked_signal(tmp_path) -> None:
+    path = tmp_path / "orphan.jsonl"
+    ledger = IntradayResearchLedger(path, strategy_version="v2", capture_id="capture")
+    ledger.record_event(event())
+    ledger._append({"type": "SIGNAL", "action": "CANDIDATE", "event_id": "missing"})
+
+    report = load_research_event_report(path, strategy_version="v2", capture_id="capture")
+
+    assert report.total_events == 0
+    assert report.orphan_event_records == 1
+    assert report.unlinked_candidate_observations == 1
 
 
 def test_empty_ledger_is_safe_and_cli_json_does_not_write(tmp_path) -> None:

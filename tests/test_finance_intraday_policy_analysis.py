@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from finance.intraday.policy_analysis import (
     PolicyThresholds,
     analyze_ledger,
@@ -176,3 +178,14 @@ def test_policy_analysis_module_has_no_prohibited_dependencies():
     assert "ExecutionIntent" not in source
     assert "BrokerAdapter" not in source
     assert "PaperFinanceService" not in source
+
+
+def test_policy_analysis_rejects_intermediate_json_corruption(tmp_path):
+    path = tmp_path / "corrupt.jsonl"
+    path.write_text(
+        json.dumps(observation(0, "100")) + "\n{broken\n" + json.dumps(signal(1, short="0.001", long="0.002")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid JSONL at line 2"):
+        load_snapshots(path, strategy_version=VERSION)

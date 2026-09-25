@@ -461,6 +461,37 @@ def test_v2_restored_resolved_event_does_not_duplicate_update(tmp_path):
     assert restarted._events[next(iter(restarted._events))].outcome_1m.future_price == Decimal("101")
 
 
+def test_v2_restart_restores_complete_queue_before_truncated_line(tmp_path):
+    path = tmp_path / "truncated-queue.jsonl"
+    ledger = IntradayResearchLedger(
+        path,
+        strategy_version=TIME_BASED_STRATEGY_VERSION,
+        capture_id="capture-a",
+    )
+    collector = IntradayResearchCollector.for_time_based_v2(
+        ledger=ledger,
+        signal_service=CandidateService(),
+    )
+    collector.ingest_quote(quote(0, "100"))
+    collector.ingest_quote(quote(1, "101"))
+    complete = ledger.records()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"type":"EVENT_UPDATE"')
+
+    with pytest.warns(RuntimeWarning, match="ignored invalid final non-empty line"):
+        restarted = IntradayResearchCollector.for_time_based_v2(
+            ledger=IntradayResearchLedger(
+                path,
+                strategy_version=TIME_BASED_STRATEGY_VERSION,
+                capture_id="capture-a",
+            ),
+            signal_service=CandidateService(),
+        )
+
+    assert restarted._events
+    assert restarted._ledger.records()[:len(complete)] == complete
+
+
 def test_v2_capture_ids_isolate_observations_and_reports(tmp_path):
     path = tmp_path / "isolated.jsonl"
     first_ledger = IntradayResearchLedger(

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from finance.intraday.evaluation import (
     IntradaySignalEvaluator,
 )
@@ -158,3 +160,22 @@ def test_ledger_records_strategy_version(tmp_path) -> None:
         records[1]["strategy_version"]
         == "intraday-momentum-v1-test"
     )
+
+
+def test_ledger_recovers_complete_records_before_truncated_final_line(tmp_path) -> None:
+    path = tmp_path / "truncated.jsonl"
+    path.write_text('{"type":"OBSERVATION"}\n{"type":"SIGNAL"', encoding="utf-8")
+    ledger = IntradayResearchLedger(path)
+
+    with pytest.warns(RuntimeWarning, match="ignored invalid final non-empty line"):
+        records = ledger.records()
+
+    assert records == ({"type": "OBSERVATION"},)
+
+
+def test_ledger_rejects_corrupt_intermediate_line(tmp_path) -> None:
+    path = tmp_path / "corrupt.jsonl"
+    path.write_text('{"type":"OBSERVATION"}\n{broken\n{"type":"SIGNAL"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid JSONL at line 2"):
+        IntradayResearchLedger(path).records()

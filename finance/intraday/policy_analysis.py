@@ -27,6 +27,7 @@ from finance.intraday.outcome_analysis import (
     aggregate_event_report,
     report_to_dict,
 )
+from finance.intraday.persistence import read_jsonl_records
 
 
 SHORT_THRESHOLDS = (Decimal("0.00025"), Decimal("0.00050"), Decimal("0.00100"))
@@ -115,21 +116,7 @@ def load_snapshots(
     if not ledger_path.exists():
         raise FileNotFoundError(f"ledger does not exist: {ledger_path}")
 
-    try:
-        records = []
-        with ledger_path.open("r", encoding="utf-8-sig") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                    if not isinstance(record, dict):
-                        raise ValueError("object required")
-                    records.append(record)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    warnings.append(f"línea {line_number} omitida: {exc}")
-    except OSError as exc:
-        raise ValueError(f"cannot read ledger: {ledger_path}: {exc}") from exc
+    records = read_jsonl_records(ledger_path)
 
     available_capture_ids = sorted({
         record["capture_id"] for record in records
