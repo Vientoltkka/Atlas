@@ -1,5 +1,6 @@
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -101,13 +102,13 @@ class SpyAdapter:
 def test_service_enforces_gate_kill_switch_and_audits(tmp_path: Path):
     adapter = SpyAdapter()
     service = ExecutionService(adapter, policy_store=RiskPolicyStore(tmp_path / "policy.json"), ledger=ExecutionLedger(tmp_path / "ledger.jsonl"))
-    rejected = service.submit(intent(mode=ExecutionMode.REAL), state())
+    rejected = service.submit(intent(mode=ExecutionMode.REAL), state(), human_authorized=True)
     assert rejected.status is ExecutionStatus.REJECTED and adapter.calls == 0 and rejected.reason == "REAL_EXECUTION_DISABLED"
     service.set_kill_switch(True)
-    killed = service.submit(intent(), state())
+    killed = service.submit(intent(), state(), human_authorized=True)
     assert "KILL_SWITCH_ACTIVE" in killed.reason and adapter.calls == 0
     service.set_kill_switch(False)
-    approved = service.submit(intent(), state())
+    approved = service.submit(intent(), state(), human_authorized=True)
     assert approved.status is ExecutionStatus.FILLED and adapter.calls == 1
     entries = service._ledger.entries()
     assert [entry["kind"] for entry in entries] == ["EXECUTION_INTENT", "RISK_DECISION", "EXECUTION_RESULT"] * 3
@@ -118,9 +119,93 @@ def test_paper_adapter_only_runs_after_approved_service_path(tmp_path: Path):
     paper = PaperFinanceService(PaperStore(tmp_path / "paper"))
     paper.record_market_event(MarketEvent(symbol="AAPL", price=Decimal("100")))
     service = ExecutionService(PaperExecutionAdapter(paper), policy_store=RiskPolicyStore(tmp_path / "policy.json"), ledger=ExecutionLedger(tmp_path / "ledger.jsonl"))
-    assert service.submit(intent(), state()).status is ExecutionStatus.FILLED
-    assert service.submit(intent(mode=ExecutionMode.REAL), state()).status is ExecutionStatus.REJECTED
+    assert service.submit(intent(), state(), human_authorized=True).status is ExecutionStatus.FILLED
+    assert service.submit(intent(mode=ExecutionMode.REAL), state(), human_authorized=True).status is ExecutionStatus.REJECTED
     assert len(paper.fills()) == 1
+
+
+def test_integrated_paper_path_requires_human_authorization(tmp_path: Path):
+    paper = PaperFinanceService(PaperStore(tmp_path / "paper"))
+    paper.record_market_event(MarketEvent(symbol="AAPL", price=Decimal("100")))
+    service = ExecutionService(
+        PaperExecutionAdapter(paper),
+        policy_store=RiskPolicyStore(tmp_path / "policy.json"),
+        ledger=ExecutionLedger(tmp_path / "ledger.jsonl"),
+    )
+    item = intent(intent_id="paper-human-auth")
+
+    unauthorized = service.submit(item, state())
+    assert unauthorized.status is ExecutionStatus.REJECTED
+    assert unauthorized.reason == "HUMAN_AUTHORIZATION_REQUIRED"
+    assert paper.fills() == ()
+
+    authorized = service.submit(item, state(), human_authorized=True)
+    retry = service.submit(item, state(), human_authorized=True)
+    assert authorized.status is ExecutionStatus.FILLED
+    assert retry == authorized
+    assert len(paper.fills()) == 1
+
+
+def test_service_is_idempotent_for_same_intent_id(tmp_path: Path):
+    adapter = SpyAdapter()
+    service = ExecutionService(adapter, policy_store=RiskPolicyStore(tmp_path / "policy.json"), ledger=ExecutionLedger(tmp_path / "ledger.jsonl"))
+    original = intent(intent_id="intent-idempotent")
+
+    first = service.submit(original, state(), human_authorized=True)
+    retry = service.submit(original, state(), human_authorized=True)
+
+    assert retry == first
+    assert adapter.calls == 1
+
+
+def test_service_rejects_same_intent_id_with_different_content(tmp_path: Path):
+    adapter = SpyAdapter()
+    service = ExecutionService(adapter, policy_store=RiskPolicyStore(tmp_path / "policy.json"), ledger=ExecutionLedger(tmp_path / "ledger.jsonl"))
+    original = intent(intent_id="intent-content-bound")
+
+    first = service.submit(original, state(), human_authorized=True)
+    rejected = service.submit(intent(intent_id=original.intent_id, quantity=Decimal("2")), state(), human_authorized=True)
+    retry = service.submit(original, state(), human_authorized=True)
+
+    assert rejected.status is ExecutionStatus.REJECTED
+    assert rejected.reason == "DUPLICATE_INTENT_CONTENT_MISMATCH"
+    assert retry == first
+    assert adapter.calls == 1
+    assert [entry["kind"] for entry in service._ledger.entries()] == ["EXECUTION_INTENT", "RISK_DECISION", "EXECUTION_RESULT", "EXECUTION_INTENT_CONFLICT"]
+
+
+def test_service_serializes_concurrent_submissions_for_same_intent(tmp_path: Path):
+    class BlockingAdapter(SpyAdapter):
+        def __init__(self):
+            super().__init__()
+            self.started = Event()
+            self.release = Event()
+
+        def _execute_approved(self, item):
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return super()._execute_approved(item)
+
+    adapter = BlockingAdapter()
+    service = ExecutionService(adapter, policy_store=RiskPolicyStore(tmp_path / "policy.json"), ledger=ExecutionLedger(tmp_path / "ledger.jsonl"))
+    original = intent(intent_id="intent-concurrent")
+    results = []
+
+    first_thread = Thread(target=lambda: results.append(service.submit(original, state(), human_authorized=True)))
+    second_thread = Thread(target=lambda: results.append(service.submit(original, state(), human_authorized=True)))
+    first_thread.start()
+    assert adapter.started.wait(timeout=5)
+    second_thread.start()
+    second_thread.join(timeout=0.1)
+    assert second_thread.is_alive()
+    adapter.release.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert adapter.calls == 1
 
 
 def test_discovery_candidate_does_not_import_or_create_execution_intent():

@@ -254,6 +254,64 @@ class PaperFinanceService:
     def fills(self) -> tuple:
         return self._state_for(self._active_mode).engine.fills
 
+    def execution_risk_state(self):
+        """Build the common execution risk snapshot from paper state only."""
+        from finance.execution.risk_gate import PortfolioRiskState
+
+        state = self._state_for(self._active_mode)
+        engine = state.engine
+        today = utc_now().date()
+        positions = {
+            symbol: position.qty
+            for symbol, position in engine.portfolio.positions.items()
+        }
+        fills = engine.fills
+        daily_fills = [fill for fill in fills if fill.timestamp.date() == today]
+        realized_loss = Decimal("0")
+        average_costs: dict[str, Decimal] = {}
+        for fill in fills:
+            if fill.side.value == "BUY":
+                previous_qty = sum(
+                    item.qty
+                    for item in fills
+                    if item.symbol == fill.symbol
+                    and item.timestamp <= fill.timestamp
+                    and item is not fill
+                    and item.side.value == "BUY"
+                )
+                prior_sells = sum(
+                    item.qty
+                    for item in fills
+                    if item.symbol == fill.symbol
+                    and item.timestamp <= fill.timestamp
+                    and item is not fill
+                    and item.side.value == "SELL"
+                )
+                held_before = previous_qty - prior_sells
+                prior_cost = average_costs.get(fill.symbol, Decimal("0"))
+                total_before = prior_cost * held_before
+                average_costs[fill.symbol] = (
+                    (total_before + fill.price * fill.qty + fill.commission)
+                    / (held_before + fill.qty)
+                )
+            elif fill.timestamp.date() == today:
+                cost = average_costs.get(fill.symbol, Decimal("0"))
+                pnl = (fill.price - cost) * fill.qty - fill.commission
+                if pnl < 0:
+                    realized_loss -= pnl
+            if fill.side.value == "SELL":
+                average_costs[fill.symbol] = average_costs.get(
+                    fill.symbol, Decimal("0")
+                )
+        return PortfolioRiskState(
+            nav=engine.nav(),
+            cash=engine.portfolio.cash,
+            positions=positions,
+            prices=engine.last_prices(),
+            daily_trade_count=len(daily_fills),
+            daily_realized_loss=realized_loss,
+        )
+
     def _validate(self, state: _ModeState, order: PaperOrder) -> None:
         defaults = state.engine.defaults()
         validate_order(

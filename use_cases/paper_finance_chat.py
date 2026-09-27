@@ -27,6 +27,9 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from finance.execution.adapters import PaperExecutionAdapter
+from finance.execution.models import ExecutionIntent, ExecutionMode, ExecutionResult
+from finance.execution.service import ExecutionService
 from finance.paper.models import (
     EventType,
     MarketEvent,
@@ -140,10 +143,14 @@ class PaperFinanceChat:
         *,
         market_client: AlphaVantageClient | None = None,
         market_client_factory=None,
+        execution_service: ExecutionService | None = None,
     ) -> None:
         self._service = service
         self._market_client = market_client
         self._market_client_factory = market_client_factory
+        self._execution = execution_service or ExecutionService(
+            PaperExecutionAdapter(service)
+        )
         self._pending: "PendingPaperProposal | PendingPaperImport | None" = None
 
     @property
@@ -265,8 +272,10 @@ class PaperFinanceChat:
             f"para ejecutarla o \"no\" para cancelarla. {PAPER_LABEL}"
         )
 
-    def execute_pending(self) -> str:
+    def execute_pending(self, *, confirmed: bool = False) -> str:
         """Execute the confirmed pending state (order or import), or expire it."""
+        if not confirmed:
+            return self.describe_pending()
         pending = self.pending_state
         if pending is None:
             return self._discarded_message()
@@ -279,8 +288,28 @@ class PaperFinanceChat:
             return self._execute_import(pending)
         self._pending = replace(pending, status="CONSUMED")
         order = pending.order
+        reference_price = (
+            order.limit_price
+            if order.order_type is OrderType.LIMIT
+            else self._service.engine.last_prices().get(order.symbol)
+        )
+        intent = ExecutionIntent(
+            intent_id=f"paper-order-{order.order_id}",
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.qty,
+            order_type=order.order_type,
+            mode=ExecutionMode.PAPER,
+            reference_price=reference_price,
+            strategy="paper_chat",
+            currency="EUR",
+        )
         try:
-            decision = self._service.execute_confirmed_order(order)
+            result = self._execution.submit(
+                intent,
+                self._service.execution_risk_state(),
+                human_authorized=confirmed,
+            )
         except ValueError as error:
             return (
                 f"{PAPER_LABEL} Orden paper no ejecutada: {error} "
@@ -290,31 +319,30 @@ class PaperFinanceChat:
             f"{PAPER_LABEL} Orden paper ejecutada con tu confirmacion "
             f"(simulacion, modo {self._service.mode().value}):"
         )
-        if decision.filled and decision.fill is not None:
-            fill = decision.fill
-            side = "COMPRA" if fill.side is Side.BUY else "VENTA"
+        if result.status.value == "FILLED":
+            side = "COMPRA" if result.side is Side.BUY else "VENTA"
             return (
                 f"{header}\n"
-                f"- Orden: {decision.order_id} · Estado: FILLED\n"
-                f"- {side} {fill.qty} {fill.symbol} a {_fmt_price(fill.price)}\n"
-                f"- Comision: {_fmt_money(fill.commission)} · "
-                f"Slippage: {fill.slippage_bps} bps\n\n"
+                f"- Orden: {result.execution_id} · Estado: FILLED\n"
+                f"- {side} {result.quantity} {result.symbol} a "
+                f"{_fmt_price(result.price or reference_price)}\n"
+                f"- Comision: {_fmt_money(result.commission or Decimal('0'))}\n\n"
                 f"Cartera paper actualizada. Etiqueta: PAPER, sin dinero "
                 f"real. {PAPER_LABEL}"
             )
-        if decision.pending:
+        if result.status.value == "PENDING":
             return (
                 f"{header}\n"
-                f"- Orden: {decision.order_id} · Estado: PENDING\n"
-                f"- Motivo: {decision.reason}\n\n"
+                f"- Orden: {result.execution_id} · Estado: PENDING\n"
+                f"- Motivo: {result.reason}\n\n"
                 f"La orden paper queda registrada en el motor y se evaluara con "
                 f"los ticks paper que declares. Etiqueta: PAPER. {PAPER_LABEL}"
             )
         return (
             f"{PAPER_LABEL} Orden paper no ejecutada (simulacion, modo "
             f"{self._service.mode().value}):\n"
-            f"- Orden: {decision.order_id} · Estado: {decision.status.value}\n"
-            f"- Motivo: {decision.reason}\n\n"
+            f"- Orden: {result.execution_id} · Estado: {result.status.value}\n"
+            f"- Motivo: {result.reason}\n\n"
             f"La cartera paper no se ha modificado. Etiqueta: PAPER. {PAPER_LABEL}"
         )
 

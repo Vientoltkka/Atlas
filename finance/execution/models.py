@@ -20,9 +20,24 @@ class ExecutionMode(Enum):
 
 
 class ExecutionStatus(Enum):
+    ACCEPTED = "ACCEPTED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     PENDING = "PENDING"
+    CANCEL_PENDING = "CANCEL_PENDING"
+    CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class ExecutionError:
+    """Stable error envelope that retains the provider error as its cause."""
+
+    code: str
+    message: str
+    original_error: BaseException | None = None
 
 
 @dataclass(frozen=True)
@@ -85,3 +100,4 @@ class ExecutionResult:
     commission: Decimal | None = None
     currency: str | None = None
     reason: str = ""
+    error: ExecutionError | None = None

@@ -1607,7 +1607,7 @@ class AtlasOrchestrator:
             return None
         intent = _classify_structured_confirmation_intent(prompt)
         if intent == "confirm":
-            response = paper_chat.execute_pending()
+            response = paper_chat.execute_pending(confirmed=True)
         elif intent == "cancel":
             response = paper_chat.cancel_pending()
         elif intent == "show":

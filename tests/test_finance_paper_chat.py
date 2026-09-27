@@ -18,6 +18,10 @@ from agents.finance_agent import FinanceAgent
 from bootstrap.bootstrap import Bootstrap
 from core.atlas import Atlas
 from core.model_inference import ModelInferenceRunner
+from finance.execution.adapters import PaperExecutionAdapter
+from finance.execution.ledger import ExecutionLedger
+from finance.execution.policy import RiskPolicyStore
+from finance.execution.service import ExecutionService
 from finance.paper.service import PaperFinanceService
 from finance.paper.store import PaperStore
 from use_cases.paper_finance_chat import PENDING_ORDER_TTL, PaperFinanceChat
@@ -33,7 +37,13 @@ def orchestrator(tmp_path: Path):
     finance = orchestrator._registry.get("finance")
     assert isinstance(finance, FinanceAgent)
     store = PaperStore(tmp_path / "finance_paper")
-    finance.paper_chat = PaperFinanceChat(PaperFinanceService(store))
+    paper_service = PaperFinanceService(store)
+    execution = ExecutionService(
+        PaperExecutionAdapter(paper_service),
+        policy_store=RiskPolicyStore(tmp_path / "risk_policy.json"),
+        ledger=ExecutionLedger(tmp_path / "execution_ledger.jsonl"),
+    )
+    finance.paper_chat = PaperFinanceChat(paper_service, execution_service=execution)
     return orchestrator
 
 
@@ -234,7 +244,13 @@ def atlas(tmp_path: Path, monkeypatch):
     finance = atlas._orchestrator._registry.get("finance")
     assert isinstance(finance, FinanceAgent)
     store = PaperStore(tmp_path / "finance_paper")
-    finance.paper_chat = PaperFinanceChat(PaperFinanceService(store))
+    paper_service = PaperFinanceService(store)
+    execution = ExecutionService(
+        PaperExecutionAdapter(paper_service),
+        policy_store=RiskPolicyStore(tmp_path / "risk_policy.json"),
+        ledger=ExecutionLedger(tmp_path / "execution_ledger.jsonl"),
+    )
+    finance.paper_chat = PaperFinanceChat(paper_service, execution_service=execution)
     _forbid_llm(monkeypatch)
     return atlas
 
@@ -364,3 +380,165 @@ def test_atlas_ui_chat_unmatched_paper_command_gets_deterministic_guidance(atlas
     summary = chat.service.portfolio_summary()
     assert summary["cash"] == "10000.00"
     assert summary["positions"] == {}
+
+
+def test_paper_proposal_without_confirmation_or_after_rejection_does_not_submit(
+    orchestrator, monkeypatch
+) -> None:
+    finance = _finance(orchestrator)
+    chat = finance.paper_chat
+    assert chat is not None
+    submits: list[object] = []
+
+    def record_submit(*args, **kwargs):
+        submits.append((args, kwargs))
+        raise AssertionError("una propuesta sin confirmacion no debe enviarse")
+
+    monkeypatch.setattr(chat._execution, "submit", record_submit)
+    orchestrator.process_prompt("Registra precio paper SYNTH 25", confirm=_noop_confirm)
+    proposal = orchestrator.process_prompt(
+        "Compra paper 2 de SYNTH a mercado", confirm=_noop_confirm
+    )
+
+    assert "no ejecutada todavia" in proposal.casefold()
+    assert submits == []
+    assert chat.service.fills() == ()
+
+    rejection = orchestrator.process_prompt("no", confirm=_noop_confirm)
+
+    assert "descartada" in rejection.casefold()
+    assert submits == []
+    assert chat.service.fills() == ()
+
+
+def test_affirmative_orchestrator_confirmation_traverses_execution_chain(
+    orchestrator, monkeypatch
+) -> None:
+    finance = _finance(orchestrator)
+    chat = finance.paper_chat
+    assert chat is not None
+    execution = chat._execution
+    events: list[str] = []
+
+    original_submit = execution.submit
+    original_evaluate = execution._gate.evaluate
+    original_adapter_execute = execution._adapter._execute_approved
+    original_paper_execute = chat.service.execute_confirmed_order
+
+    def submit_spy(*args, **kwargs):
+        events.append("ExecutionService.submit")
+        return original_submit(*args, **kwargs)
+
+    def evaluate_spy(*args, **kwargs):
+        events.append("RiskGate")
+        return original_evaluate(*args, **kwargs)
+
+    def adapter_spy(*args, **kwargs):
+        events.append("PaperExecutionAdapter")
+        return original_adapter_execute(*args, **kwargs)
+
+    def paper_service_spy(*args, **kwargs):
+        events.append("PaperFinanceService")
+        return original_paper_execute(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "submit", submit_spy)
+    monkeypatch.setattr(execution._gate, "evaluate", evaluate_spy)
+    monkeypatch.setattr(execution._adapter, "_execute_approved", adapter_spy)
+    monkeypatch.setattr(chat.service, "execute_confirmed_order", paper_service_spy)
+
+    orchestrator.process_prompt("Registra precio paper SYNTH 25", confirm=_noop_confirm)
+    orchestrator.process_prompt(
+        "Compra paper 2 de SYNTH a mercado", confirm=_noop_confirm
+    )
+    confirmation = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+
+    assert "FILLED" in confirmation
+    assert events == [
+        "ExecutionService.submit",
+        "RiskGate",
+        "PaperExecutionAdapter",
+        "PaperFinanceService",
+    ]
+    assert len(chat.service.fills()) == 1
+
+
+def test_risk_gate_rejection_from_confirmed_chat_order_creates_no_fill(
+    orchestrator, monkeypatch
+) -> None:
+    finance = _finance(orchestrator)
+    chat = finance.paper_chat
+    assert chat is not None
+    execution = chat._execution
+    events: list[str] = []
+    original_submit = execution.submit
+    original_evaluate = execution._gate.evaluate
+    original_adapter_execute = execution._adapter._execute_approved
+
+    def submit_spy(*args, **kwargs):
+        events.append("ExecutionService.submit")
+        return original_submit(*args, **kwargs)
+
+    def evaluate_spy(*args, **kwargs):
+        events.append("RiskGate")
+        return original_evaluate(*args, **kwargs)
+
+    def adapter_spy(*args, **kwargs):
+        events.append("PaperExecutionAdapter")
+        return original_adapter_execute(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "submit", submit_spy)
+    monkeypatch.setattr(execution._gate, "evaluate", evaluate_spy)
+    monkeypatch.setattr(execution._adapter, "_execute_approved", adapter_spy)
+
+    orchestrator.process_prompt("Registra precio paper SYNTH 25", confirm=_noop_confirm)
+    orchestrator.process_prompt(
+        "Compra paper 2 de SYNTH a mercado", confirm=_noop_confirm
+    )
+    execution.set_kill_switch(True)
+    response = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+
+    assert "no ejecutada" in response.casefold()
+    assert events == ["ExecutionService.submit", "RiskGate"]
+    assert chat.service.fills() == ()
+
+
+def test_retrying_same_confirmed_proposal_is_idempotent_and_does_not_duplicate_fill(
+    orchestrator, monkeypatch
+) -> None:
+    finance = _finance(orchestrator)
+    chat = finance.paper_chat
+    assert chat is not None
+    execution = chat._execution
+    submitted: list[tuple[object, object]] = []
+    adapter_calls = 0
+    original_submit = execution.submit
+    original_adapter_execute = execution._adapter._execute_approved
+
+    def submit_spy(intent, state, **kwargs):
+        result = original_submit(intent, state, **kwargs)
+        submitted.append((intent, result))
+        return result
+
+    def adapter_spy(*args, **kwargs):
+        nonlocal adapter_calls
+        adapter_calls += 1
+        return original_adapter_execute(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "submit", submit_spy)
+    monkeypatch.setattr(execution._adapter, "_execute_approved", adapter_spy)
+
+    orchestrator.process_prompt("Registra precio paper SYNTH 25", confirm=_noop_confirm)
+    orchestrator.process_prompt(
+        "Compra paper 2 de SYNTH a mercado", confirm=_noop_confirm
+    )
+    first_response = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+    assert "FILLED" in first_response
+    assert len(submitted) == 1
+
+    retry = execution.submit(
+        submitted[0][0], chat.service.execution_risk_state(), human_authorized=True
+    )
+
+    assert retry.execution_id == submitted[0][1].execution_id
+    assert adapter_calls == 1
+    assert len(chat.service.fills()) == 1

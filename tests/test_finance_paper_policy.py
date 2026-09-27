@@ -15,6 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from finance.execution.adapters import PaperExecutionAdapter
+from finance.execution.ledger import ExecutionLedger
+from finance.execution.policy import RiskPolicyStore
+from finance.execution.service import ExecutionService
 from finance.paper.models import (
     EventType,
     MarketEvent,
@@ -49,7 +53,14 @@ def _service(tmp_path: Path, **kwargs) -> PaperFinanceService:
 
 
 def _chat(service: PaperFinanceService) -> PaperFinanceChat:
-    return PaperFinanceChat(service)
+    test_directory = service._store.state_path.parent
+    execution = ExecutionService(
+        PaperExecutionAdapter(service),
+        policy_store=RiskPolicyStore(test_directory / "risk_policy.json"),
+        ledger=ExecutionLedger(test_directory / "execution_ledger.jsonl"),
+    )
+    execution.set_kill_switch(False)
+    return PaperFinanceChat(service, execution_service=execution)
 
 
 def _register_tick(service: PaperFinanceService, symbol: str, price: str) -> None:
@@ -271,7 +282,7 @@ def test_order_blocked_by_max_open_positions_rule(tmp_path: Path) -> None:
     proposal = chat.handle("compra paper 1 de AAPL a mercado")
     assert "MAX_OPEN_POSITIONS" not in proposal
 
-    confirmation = chat.execute_pending()
+    confirmation = chat.execute_pending(confirmed=True)
     assert "FILLED" in confirmation
 
     chat.handle("registra precio paper MSFT 200")
@@ -304,7 +315,7 @@ def test_order_blocked_by_max_exposure_per_asset_rule_without_rounding(tmp_path:
     assert "Propuesta de orden paper" in exact
     assert chat.pending_proposal is not None
 
-    confirmation = chat.execute_pending()
+    confirmation = chat.execute_pending(confirmed=True)
     assert "FILLED" in confirmation
     assert service.portfolio_summary()["cash"] == "9500.00"
 
@@ -318,7 +329,7 @@ def test_order_blocked_by_max_total_exposure_rule(tmp_path: Path) -> None:
 
     within = chat.handle("compra paper 8 de AAPL a mercado")  # 800 <= 1000
     assert "Propuesta de orden paper" in within
-    assert "FILLED" in chat.execute_pending()
+    assert "FILLED" in chat.execute_pending(confirmed=True)
 
     blocked = chat.handle("compra paper 5 de MSFT a mercado")  # 800 + 250 > 1000
 
@@ -370,7 +381,7 @@ def test_allowed_order_proposal_shows_mode_and_fills_after_confirmation(tmp_path
     assert chat.pending_proposal is not None
     assert service.portfolio_summary()["cash"] == "10000.00"
 
-    confirmation = chat.execute_pending()
+    confirmation = chat.execute_pending(confirmed=True)
 
     assert "modo core" in confirmation.casefold()
     assert "FILLED" in confirmation
@@ -542,7 +553,7 @@ def test_pending_order_is_revalidated_against_policy_at_confirmation(tmp_path: P
     assert chat.pending_proposal is not None
 
     service.update_policy(max_exposure_per_asset=Decimal("0.05"))  # 500 < coste 1000
-    confirmation = chat.execute_pending()
+    confirmation = chat.execute_pending(confirmed=True)
 
     casefolded = confirmation.casefold()
     assert "orden paper no ejecutada" in casefolded
