@@ -218,6 +218,96 @@ def test_ledger_report_has_resolved_pending_median_and_win_rate(tmp_path) -> Non
     assert load_research_event_report(path, strategy_version="v2").horizons[15].pending_events == 2
 
 
+def test_ledger_reconciles_outcome_evidence_with_latest_event_snapshot(tmp_path) -> None:
+    path = tmp_path / "outcome-evidence.jsonl"
+    ledger = IntradayResearchLedger(
+        path, strategy_version="v2", capture_id="capture-a"
+    )
+    item = event()
+    item.entry_price = Decimal("2699.48")
+    item.timestamp = datetime(2026, 9, 25, 9, 8, 9, 619000, tzinfo=timezone.utc)
+    item.last_observation_timestamp = item.timestamp
+    ledger.record_event(item)
+    ledger.record_event_update(item)
+    censored = event()
+    censored.entry_price = Decimal("2702.095")
+    censored.timestamp = datetime(
+        2026, 9, 25, 9, 26, 22, 964000, tzinfo=timezone.utc
+    )
+    censored.last_observation_timestamp = censored.timestamp
+    ledger.record_event(censored)
+    ledger._append({
+        "type": "SIGNAL",
+        "strategy_version": "v2",
+        "capture_id": "capture-a",
+        "action": "CANDIDATE",
+        "event_id": item.id,
+    })
+    ledger._append({
+        "type": "SIGNAL",
+        "strategy_version": "v2",
+        "capture_id": "capture-a",
+        "action": "CANDIDATE",
+        "event_id": censored.id,
+    })
+    ledger._append({
+        "type": "OUTCOME",
+        "strategy_version": "v2",
+        "capture_id": "capture-a",
+        "symbol": "BTC-USD",
+        "signal_timestamp": item.timestamp.isoformat(),
+        "horizon_minutes": 30,
+        "entry_price": "2699.48",
+        "exit_price": "2708.12",
+    })
+
+    report = load_research_event_report(path, strategy_version="v2")
+
+    assert report.total_events == 2
+    assert report.horizons[30].resolved_events == 1
+    assert report.horizons[30].pending_events == 1
+    assert report.horizons[30].mean_net_return == Decimal(
+        "0.002200616415013261813386281802"
+    )
+
+
+def test_ledger_does_not_mix_outcome_evidence_between_captures(tmp_path) -> None:
+    path = tmp_path / "isolated-outcomes.jsonl"
+    target = IntradayResearchLedger(
+        path, strategy_version="v2", capture_id="target"
+    )
+    other = IntradayResearchLedger(
+        path, strategy_version="v2", capture_id="other"
+    )
+    item = event()
+    target.record_event(item)
+    target._append({
+        "type": "SIGNAL",
+        "strategy_version": "v2",
+        "capture_id": "target",
+        "action": "CANDIDATE",
+        "event_id": item.id,
+    })
+    other._append({
+        "type": "OUTCOME",
+        "strategy_version": "v2",
+        "capture_id": "other",
+        "symbol": item.symbol,
+        "signal_timestamp": item.timestamp.isoformat(),
+        "horizon_minutes": 30,
+        "entry_price": str(item.entry_price),
+        "exit_price": "110",
+    })
+
+    report = load_research_event_report(
+        path, strategy_version="v2", capture_id="target"
+    )
+
+    assert report.total_events == 1
+    assert report.horizons[30].resolved_events == 0
+    assert report.horizons[30].pending_events == 1
+
+
 def test_ledger_excludes_event_without_linked_signal(tmp_path) -> None:
     path = tmp_path / "orphan.jsonl"
     ledger = IntradayResearchLedger(path, strategy_version="v2", capture_id="capture")

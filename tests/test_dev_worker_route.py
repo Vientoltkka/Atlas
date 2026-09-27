@@ -10,6 +10,7 @@ from core.dev_worker_route import (
     DevWorkerRoute,
 )
 from core.orchestrator import AtlasOrchestrator
+from core.router import Router
 
 _ROOT = Path(__file__).resolve().parents[1]
 _E2E_PROMPT = (
@@ -168,7 +169,12 @@ class _Memory:
 
 class _Registry:
     def get(self, _name: str):
-        return None
+        return _ChatAgent()
+
+
+class _ChatAgent:
+    def run(self, **_kwargs) -> str:
+        return "respuesta conversacional"
 
 
 class _WriteFile:
@@ -176,48 +182,41 @@ class _WriteFile:
         return "ok"
 
 
-def test_process_prompt_routes_the_bounded_goal_through_dev_worker(
+class _SpyWorker:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, _goal, _steps):
+        self.calls += 1
+        raise AssertionError("process_prompt must not execute the dev worker")
+
+
+def test_process_prompt_does_not_run_worker_without_supervised_authorization(
     tmp_path: Path,
 ) -> None:
     project = _tmp_project(tmp_path, correct=False)
+    worker = _SpyWorker()
     orchestrator = AtlasOrchestrator(
         planner=_Planner(),
-        router=_Router(),
+        router=Router(),
         model_manager=_ModelManager(),
         memory=_Memory(),
         registry=_Registry(),
         write_file=_WriteFile(),
         project_root=project,
-        dev_worker_route=DevWorkerRoute(project),
+        dev_worker_route=DevWorkerRoute(project, worker=worker),
     )
 
-    response = orchestrator.process_prompt(_E2E_PROMPT, confirm=lambda _prompt: "")
-
-    assert "STATUS: DONE" in response
-    assert "PASS" in response
-    control = project / CONTROL_FILE_RELATIVE
-    assert 'CONTROL_VALUE = "valor-correcto"' in control.read_text(encoding="utf-8")
-
-
-def test_process_prompt_routes_the_real_voice_variant_through_dev_worker(
-    tmp_path: Path,
-) -> None:
-    project = _tmp_project(tmp_path, correct=True)
-    orchestrator = AtlasOrchestrator(
-        planner=_Planner(),
-        router=_Router(),
-        model_manager=_ModelManager(),
-        memory=_Memory(),
-        registry=_Registry(),
-        write_file=_WriteFile(),
-        project_root=project,
-        dev_worker_route=DevWorkerRoute(project),
+    prompts = (
+        "Revisa el archivo de prueba controlado del Computer Worker.",
+        "Atlas no corrige el archivo de prueba controlado del Computer Worker "
+        "ni ejecuta su test focal.",
+        _E2E_PROMPT,
     )
+    for prompt in prompts:
+        response = orchestrator.process_prompt(prompt, confirm=lambda _prompt: "")
 
-    response = orchestrator.process_prompt(_STT_VARIANT_PROMPT, confirm=lambda _prompt: "")
-
-    assert "STATUS: DONE" in response
-    assert "PASS" in response
-    steps = orchestrator._dev_worker_route.plan(_STT_VARIANT_PROMPT)
-    assert steps is not None
-    assert [step.action for step in steps] == [DevWorkerAction.READ, DevWorkerAction.TEST]
+        assert "STATUS: DONE" not in response
+        assert worker.calls == 0
+        control = project / CONTROL_FILE_RELATIVE
+        assert 'CONTROL_VALUE = "valor-incorrecto"' in control.read_text(encoding="utf-8")

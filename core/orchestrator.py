@@ -1060,12 +1060,6 @@ class AtlasOrchestrator:
         explicit_skill_response = self._explicit_skill_use_response(prompt)
         if explicit_skill_response is not None:
             return explicit_skill_response
-        # The bounded Computer Worker goal is checked before the
-        # self-improvement gate, whose "corrige" detector would otherwise stop
-        # this dev-worker request with a clarification.
-        dev_worker_response = self._dev_worker_route.handle(prompt)
-        if dev_worker_response is not None:
-            return dev_worker_response
         self_improvement_response = self._self_improvement_conversation.handle(prompt)
         if self_improvement_response is not None:
             return self_improvement_response

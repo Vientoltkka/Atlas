@@ -15,13 +15,13 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 from typing import Iterable, Sequence
 
-from finance.intraday.evaluation import IndependentSignalEvent
+from finance.intraday.evaluation import EventOutcome, IndependentSignalEvent
 from finance.intraday.models import IntradayObservation
 from finance.intraday.time_features import (
     TimeBasedIntradayFeatureEngine,
@@ -391,6 +391,7 @@ def load_research_event_report(
         raise ValueError(f"unknown capture_id: {capture_id}")
 
     snapshots: dict[str, object] = {}
+    outcome_evidence: dict[tuple[str, object, Decimal, int], dict] = {}
     candidate_observations = 0
     candidate_event_ids: list[str | None] = []
     for line_number, record in enumerate(raw_records, 1):
@@ -413,6 +414,42 @@ def load_research_event_report(
                     f"invalid event record at line {line_number}: {exc}"
                 ) from exc
             snapshots[str(record.get("id", event.id))] = event
+        elif record.get("type") == "OUTCOME":
+            try:
+                outcome_key = (
+                    str(record["symbol"]).strip().upper(),
+                    datetime.fromisoformat(record["signal_timestamp"]),
+                    Decimal(record["entry_price"]),
+                    int(record["horizon_minutes"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid outcome record at line {line_number}: {exc}"
+                ) from exc
+            outcome_evidence[outcome_key] = record
+
+    for event in snapshots.values():
+        for horizon in HORIZONS:
+            if getattr(event, f"outcome_{horizon}m") is not None and getattr(
+                event, f"outcome_{horizon}m"
+            ).future_price is not None:
+                continue
+            evidence = outcome_evidence.get(
+                (event.symbol, event.timestamp, event.entry_price, horizon)
+            )
+            if evidence is None:
+                continue
+            exit_price = Decimal(evidence["exit_price"])
+            gross_return = event._gross_return(exit_price)
+            setattr(
+                event,
+                f"outcome_{horizon}m",
+                EventOutcome(
+                    future_price=exit_price,
+                    gross_return=gross_return,
+                    net_return=gross_return - event.estimated_round_trip_cost,
+                ),
+            )
 
     linked_event_ids = {
         event_id for event_id in candidate_event_ids if event_id is not None
