@@ -7,6 +7,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from models.prompt_client import InferenceBackendError, PromptClient
 from ui.atlas_bridge import AtlasUiBridge
 from ui.windows_hotkey import WindowsGlobalHotkey
 from use_cases.ui_state_mapper import OrbVisualState
@@ -358,8 +359,12 @@ class OrbeController:
 
     def open_capability(self, capability_id: str) -> None:
         """Open the chat prepared for one existing Atlas capability domain."""
+        capability_id = str(capability_id)
+        prefix = self._CAPABILITY_PREFIXES.get(capability_id)
+        if capability_id == "ajustes":
+            self._logger.warning("La opcion Ajustes no tiene una ruta operativa")
+            return
         self.show_chat()
-        prefix = self._CAPABILITY_PREFIXES.get(str(capability_id))
         if prefix is not None:
             self._transcript_panel.prefill_input(prefix)
 
@@ -673,20 +678,47 @@ class OrbeController:
         self._transcript_panel.clear_chat()
 
     def submit_attachment_notice(self, prompt: str, attachments) -> None:
-        """Report the exact multimodal limitation without pretending to analyze."""
+        """Analyze images only through explicitly enabled Gemini vision."""
         text = str(prompt).strip()
         if not text:
             return
         if not isinstance(attachments, (tuple, list)):
             attachments = (attachments,)
         self._bridge.on_user_message(text)
-        names = ", ".join(str(item.name) for item in attachments)
-        self._bridge.on_response(
-            f"Imágenes adjuntas: {names}. "
-            "No puedo analizarlas todavía: el proveedor/modelo actual no tiene una ruta "
-            "multimodal habilitada (el adaptador solo acepta mensajes de texto). "
-            "Las imágenes no se han guardado ni enviado al modelo."
+        if (
+            os.getenv("ATLAS_CHAT_PROVIDER_ID", "ollama").strip().casefold() != "gemini"
+            or os.getenv("ATLAS_GEMINI_VISION_ENABLED", "").strip().casefold()
+            not in {"1", "true", "yes", "on", "si", "sí"}
+        ):
+            self._bridge.on_response(_safe_visual_error(text))
+            return
+        worker = threading.Thread(
+            target=self._run_visual_prompt,
+            args=(text, tuple(attachments)),
+            daemon=True,
+            name="atlas-orbe-vision",
         )
+        self._chat_threads.add(worker)
+        worker.start()
+
+    def _run_visual_prompt(self, prompt: str, attachments) -> None:
+        try:
+            client = PromptClient()
+            response = client.ask_messages(
+                model=os.getenv("ATLAS_GEMINI_MODEL", ""),
+                messages=[{"role": "user", "content": prompt}],
+                provider_id="gemini",
+                attachments=attachments,
+            )
+            if _requests_bioimpedance_analysis(prompt):
+                response = (
+                    f"{response}\n\nSi quieres que guarde algún dato, pídemelo explícitamente."
+                )
+            self._bridge.on_response(response)
+        except (InferenceBackendError, ValueError, OSError, RuntimeError):
+            self._bridge.on_response(_safe_visual_error(prompt))
+        finally:
+            self._chat_threads.discard(threading.current_thread())
 
     def join(self, timeout: float = 8.0) -> None:
         if self._session_thread is not None and self._session_thread.is_alive():
@@ -754,7 +786,6 @@ class OrbeController:
             self._bridge.on_error("No se pudo procesar el mensaje textual.")
         finally:
             self._chat_threads.discard(threading.current_thread())
-
     def _on_session_finished(self) -> None:
         self._orb.set_voice_active(False)
         self._set_stage_voice_active(False)
@@ -864,3 +895,22 @@ class OrbeController:
     def _request_escape_hide(self) -> None:
         self._logger.info("Callback de ESC recibido; solicitando ocultar en hilo UI")
         self._escape_hotkey_bridge.activated.emit()
+
+
+def _requests_bioimpedance_analysis(prompt: str) -> bool:
+    text = prompt.casefold()
+    return any(
+        term in text
+        for term in ("bioimped", "inbody", "composicion corporal", "composición corporal")
+    )
+
+
+def _safe_visual_error(prompt: str) -> str:
+    message = (
+        "No puedo analizar las imágenes: Gemini visión no está disponible o la solicitud "
+        "multimodal falló. Las imágenes no se han guardado ni enviado al modelo ni a otro "
+        "proveedor."
+    )
+    if _requests_bioimpedance_analysis(prompt):
+        message += " Si quieres que guarde algún dato, pídemelo explícitamente."
+    return message

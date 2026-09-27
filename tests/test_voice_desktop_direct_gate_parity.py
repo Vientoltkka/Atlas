@@ -166,18 +166,51 @@ def run_voice_turn(utterance: str) -> list[tuple[str, dict]]:
 
 
 @pytest.mark.parametrize(
-    ("utterance", "tool", "arguments"),
+    ("utterance", "tool", "arguments", "voice_arguments"),
     (
-        ("abre la calculadora", "desktop.open_application", {"application": "calculadora"}),
-        ("maximiza la calculadora", "desktop.maximize_window", {"handle": 10}),
-        ("minimiza la calculadora", "desktop.minimize_window", {"handle": 10}),
-        ("restaura la calculadora", "desktop.restore_window", {"handle": 10}),
+        (
+            "abre la calculadora",
+            "desktop.open_application",
+            {"application": "calculadora"},
+            {"application": "calculadora"},
+        ),
+        (
+            "abre VS Code",
+            "desktop.open_application",
+            {"application": "VS Code"},
+            {"application": "Visual Studio Code"},
+        ),
+        (
+            "abre bloc de notas",
+            "desktop.open_application",
+            {"application": "notepad"},
+            {"application": "notepad"},
+        ),
+        (
+            "maximiza la calculadora",
+            "desktop.maximize_window",
+            {"handle": 10},
+            {"handle": 10},
+        ),
+        (
+            "minimiza la calculadora",
+            "desktop.minimize_window",
+            {"handle": 10},
+            {"handle": 10},
+        ),
+        (
+            "restaura la calculadora",
+            "desktop.restore_window",
+            {"handle": 10},
+            {"handle": 10},
+        ),
     ),
 )
 def test_voice_desktop_command_uses_same_operational_routing_as_text(
     utterance: str,
     tool: str,
     arguments: dict,
+    voice_arguments: dict,
 ) -> None:
     executor = RecordingExecutor()
     orchestrator = build_real_wired_orchestrator(executor)
@@ -200,6 +233,4 @@ def test_voice_desktop_command_uses_same_operational_routing_as_text(
     ]
 
     assert text_calls, "text path must execute the desktop tool"
-    assert voice_calls == text_calls, (
-        "voice transcription must follow the same operational routing as text"
-    )
+    assert voice_calls == [(tool, voice_arguments)]

@@ -463,11 +463,124 @@ def test_text_chat_with_two_images_renders_honest_notice_without_calling_backend
     content = panel._view.toPlainText()
     assert atlas.calls == []
     assert "Usuario: revisa esto" in content
-    assert "Imágenes adjuntas: bio-1.jpg, bio-2.png." in content
-    assert "ruta multimodal" in content
+    assert "Gemini visión no está disponible" in content
     assert "no se han guardado ni enviado al modelo" in content
     assert "No se pudo procesar el mensaje textual." not in content
     assert panel._pending_attachment is None
+    orb.close()
+    panel.close()
+
+
+def test_gemini_vision_chat_wires_two_attachments_to_prompt_client(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+    from ui import orbe_controller as orbe_controller_module
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    monkeypatch.setenv("ATLAS_CHAT_PROVIDER_ID", "gemini")
+    monkeypatch.setenv("ATLAS_GEMINI_VISION_ENABLED", "true")
+    files = (tmp_path / "private-first.png", tmp_path / "private-second.jpg")
+    for path, payload in zip(files, (b"PRIVATE_IMAGE_BYTES_ONE", b"PRIVATE_IMAGE_BYTES_TWO")):
+        path.write_bytes(payload)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        lambda *_args, **_kwargs: ([str(path) for path in files], ""),
+    )
+
+    class FakePromptClient:
+        calls: list[dict] = []
+
+        def ask_messages(self, **kwargs):
+            self.calls.append(kwargs)
+            return "respuesta Gemini simulada"
+
+    monkeypatch.setattr(orbe_controller_module, "PromptClient", FakePromptClient)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=SimpleNamespace(start_voice=lambda **_kwargs: None),
+        application=qapp,
+        orb=orb,
+        transcript_panel=panel,
+    )
+    prompt = "Compara exactamente estos dos informes InBody."
+    panel._choose_attachment()
+    panel._input.setText(prompt)
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    assert len(FakePromptClient.calls) == 1
+    call = FakePromptClient.calls[0]
+    assert call["provider_id"] == "gemini"
+    assert call["messages"] == [{"role": "user", "content": prompt}]
+    assert tuple(attachment.name for attachment in call["attachments"]) == (
+        "private-first.png",
+        "private-second.jpg",
+    )
+    assert tuple(attachment.local_reference for attachment in call["attachments"]) == tuple(
+        str(path) for path in files
+    )
+    content = panel._view.toPlainText()
+    assert "Usuario: " + prompt in content
+    assert "Atlas: respuesta Gemini simulada" in content
+    assert "Si quieres que guarde algún dato, pídemelo explícitamente." in content
+    for secret in (str(files[0]), str(files[1]), files[0].name, files[1].name, "PRIVATE_IMAGE_BYTES"):
+        assert secret not in content
+    assert panel._pending_attachments == []
+    assert panel._pending_attachment is None
+    orb.close()
+    panel.close()
+
+
+def test_gemini_bioimpedance_response_adds_explicit_consent_instruction(
+    qapp, tmp_path, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QFileDialog
+    from ui import orbe_controller as orbe_controller_module
+    from ui.orbe_controller import OrbeController
+    from ui.orbe_app import create_transcript_panel
+
+    monkeypatch.setenv("ATLAS_CHAT_PROVIDER_ID", "gemini")
+    monkeypatch.setenv("ATLAS_GEMINI_VISION_ENABLED", "true")
+    files = (tmp_path / "measurement-first.png", tmp_path / "measurement-second.png")
+    for path in files:
+        path.write_bytes(b"image")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        lambda *_args, **_kwargs: ([str(path) for path in files], ""),
+    )
+
+    class FakePromptClient:
+        def ask_messages(self, **_kwargs):
+            return "respuesta Gemini simulada"
+
+    monkeypatch.setattr(orbe_controller_module, "PromptClient", FakePromptClient)
+
+    orb = create_orb_window()
+    panel = create_transcript_panel()
+    controller = OrbeController(
+        atlas=SimpleNamespace(start_voice=lambda **_kwargs: None),
+        application=qapp,
+        orb=orb,
+        transcript_panel=panel,
+    )
+    prompt = "Analiza estas dos mediciones de bioimpedancia. No guardes ningún dato"
+    panel._choose_attachment()
+    panel._input.setText(prompt)
+    panel._send_button.click()
+    controller.join_chat(timeout=2)
+    _drain_events(qapp)
+
+    content = panel._view.toPlainText()
+    response = "Atlas: respuesta Gemini simulada"
+    instruction = "Si quieres que guarde algún dato, pídemelo explícitamente."
+    assert response in content
+    assert instruction in content
+    assert content.index(response) < content.index(instruction)
     orb.close()
     panel.close()
 

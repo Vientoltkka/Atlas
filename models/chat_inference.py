@@ -2,14 +2,43 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+import logging
 import os
 from typing import Any, Protocol
 
 import httpx
 import ollama
 from openai import OpenAI, OpenAIError
+
+
+_BIOIMPEDANCE_VISION_INSTRUCTION = (
+    "Interpreta estas imagenes de bioimpedancia con prudencia. Transcribe los valores "
+    "visibles y marca como estimaciones todos los calculos derivados. Distingue los "
+    "cambios observados de las posibles explicaciones. No concluyas ganancia muscular "
+    "limpia, superavit calorico, causalidad ni calidad del cambio a partir de dos "
+    "mediciones. No atribuyas el peso no explicado a agua, glucogeno u otro componente "
+    "restando peso menos grasa y masa muscular esqueletica. Aclara que la bioimpedancia "
+    "estima la composicion corporal y puede variar por hidratacion, comida, ejercicio y "
+    "condiciones de medicion. Si no se ven fechas o condiciones comparables, indicalo y "
+    "evita afirmar una tendencia temporal fiable. Usa lenguaje informativo: no lo "
+    "presentes como analisis clinico ni diagnostico. No guardes datos; si el usuario pide "
+    "guardar algun dato, requiere su consentimiento explicito."
+)
+
+_operational_logger = logging.getLogger("atlas.operational")
+
+
+def _is_bioimpedance_request(messages: list[dict[str, Any]], attachments: Sequence[Any]) -> bool:
+    if not attachments:
+        return False
+    text = " ".join(
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role", "user") == "user"
+    ).casefold()
+    return any(term in text for term in ("bioimped", "inbody", "composicion corporal", "composición corporal"))
 
 
 class ChatInferenceError(RuntimeError):
@@ -25,8 +54,9 @@ class ChatInferenceProvider(Protocol):
         self,
         *,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         stream: bool,
+        attachments: Sequence[Any] = (),
     ) -> Any: ...
 
     def health(self, *, model: str) -> Any: ...
@@ -192,22 +222,57 @@ class GeminiChatInferenceProvider:
 
     provider_id = "gemini"
 
-    def __init__(self, *, api_key: str, default_model: str = "", client: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        default_model: str = "",
+        client: Any = None,
+        supports_vision: bool = False,
+    ) -> None:
         self._api_key = api_key.strip()
         self._default_model = default_model.strip()
+        self._supports_vision = supports_vision
         if not self._api_key:
             raise ValueError("Gemini api_key is required.")
         self._client = client or _create_gemini_client(self._api_key)
 
-    def chat(self, *, model: str, messages: list[dict[str, str]], stream: bool) -> Any:
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        stream: bool,
+        attachments: Sequence[Any] = (),
+    ) -> Any:
         selected_model = self._select_model(model)
-        contents, config = self._request_parts(messages)
+        if attachments and not self._supports_vision:
+            raise ChatInferenceError(
+                self.provider_id,
+                selected_model,
+                "Gemini vision is not explicitly enabled.",
+            )
+        stage = "image_preparation"
         try:
+            contents, config = self._request_parts(messages, attachments=attachments)
             if stream:
+                stage = "request"
                 response = self._client.models.generate_content_stream(model=selected_model, contents=contents, config=config)
-                return self._stream_response(response, selected_model)
+                return self._stream_response(
+                    response,
+                    selected_model,
+                    multimodal=bool(attachments),
+                )
+            stage = "request"
             response = self._client.models.generate_content(model=selected_model, contents=contents, config=config)
         except Exception as error:
+            if attachments:
+                _log_gemini_vision_failure(stage, error)
+                raise ChatInferenceError(
+                    self.provider_id,
+                    selected_model,
+                    "Gemini multimodal request failed.",
+                ) from None
             raise ChatInferenceError(self.provider_id, selected_model, str(error)) from error
         return self._response_payload(response, selected_model)
 
@@ -220,7 +285,10 @@ class GeminiChatInferenceProvider:
         return self._response_payload(response, selected_model)
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({"chat", "stream", "health", "remote"})
+        capabilities = {"chat", "stream", "health", "remote"}
+        if self._supports_vision:
+            capabilities.add("vision")
+        return frozenset(capabilities)
 
     def _select_model(self, model: str) -> str:
         selected_model = model.strip() or self._default_model
@@ -229,7 +297,11 @@ class GeminiChatInferenceProvider:
         return selected_model
 
     @staticmethod
-    def _request_parts(messages: list[dict[str, str]]) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+    def _request_parts(
+        messages: list[dict[str, Any]],
+        *,
+        attachments: Sequence[Any] = (),
+    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
         contents: list[dict[str, Any]] = []
         system_messages: list[str] = []
         for message in messages:
@@ -239,15 +311,30 @@ class GeminiChatInferenceProvider:
                 system_messages.append(content)
                 continue
             contents.append({"role": "model" if role == "assistant" else "user", "parts": [{"text": content}]})
+        if attachments:
+            if not contents or contents[-1]["role"] != "user":
+                contents.append({"role": "user", "parts": []})
+            contents[-1]["parts"].extend(_gemini_image_parts(attachments))
+        if _is_bioimpedance_request(messages, attachments):
+            system_messages.append(_BIOIMPEDANCE_VISION_INSTRUCTION)
         config = {"system_instruction": "\n\n".join(system_messages)} if system_messages else None
         return contents, config
 
-    def _stream_response(self, response: Iterator[Any], model: str) -> Iterator[dict[str, Any]]:
+    def _stream_response(
+        self,
+        response: Iterator[Any],
+        model: str,
+        *,
+        multimodal: bool = False,
+    ) -> Iterator[dict[str, Any]]:
         try:
             for chunk in response:
                 yield self._response_payload(chunk, model)
         except Exception as error:
-            raise ChatInferenceError(self.provider_id, model, str(error)) from error
+            reason = "Gemini multimodal response failed." if multimodal else str(error)
+            if multimodal:
+                _log_gemini_vision_failure("stream", error)
+            raise ChatInferenceError(self.provider_id, model, reason) from error
 
     @staticmethod
     def _response_payload(response: Any, requested_model: str) -> dict[str, Any]:
@@ -259,8 +346,42 @@ def _create_gemini_client(api_key: str) -> Any:
     try:
         from google import genai
     except ImportError as error:
+        _log_gemini_vision_failure("sdk_client", error)
         raise RuntimeError("google-genai is required for the Gemini provider.") from error
     return genai.Client(api_key=api_key)
+
+
+def _gemini_image_parts(attachments: Sequence[Any]) -> list[Any]:
+    """Build SDK image parts without retaining or exposing attachment metadata."""
+    if len(attachments) > 2:
+        raise ValueError("At most two images can be analyzed.")
+    try:
+        from google.genai import types
+
+        parts = []
+        for attachment in attachments:
+            media_type = str(getattr(attachment, "media_type", "")).strip()
+            local_reference = getattr(attachment, "local_reference", None)
+            if media_type not in {"image/jpeg", "image/png", "image/webp"} or not local_reference:
+                raise ValueError("Invalid image attachment.")
+            with open(local_reference, "rb") as image_file:
+                image_bytes = image_file.read()
+            parts.append(types.Part.from_bytes(data=image_bytes, mime_type=media_type))
+        return parts
+    except Exception as error:
+        if isinstance(error, ValueError):
+            raise
+        raise RuntimeError("Gemini image preparation failed.") from error
+
+
+def _log_gemini_vision_failure(stage: str, error: Exception) -> None:
+    """Record a safe local failure marker without request or exception content."""
+    _operational_logger.warning(
+        "Gemini vision failed | stage=%s | exception_type=%s",
+        stage,
+        type(error).__name__,
+    )
+
 
 def _first_choice(response: Any) -> Any:
     choices = _value(response, "choices")
@@ -307,6 +428,7 @@ def default_provider_registry(
         providers["gemini"] = GeminiChatInferenceProvider(
             api_key=os.getenv("ATLAS_GEMINI_API_KEY", ""),
             default_model=os.getenv("ATLAS_GEMINI_MODEL", ""),
+            supports_vision=_read_bool("ATLAS_GEMINI_VISION_ENABLED", False),
         )
     elif selected_provider_id != "ollama":
         providers[selected_provider_id] = OpenAICompatibleChatInferenceProvider(
@@ -316,3 +438,10 @@ def default_provider_registry(
             default_model=model if model is not None else os.getenv("ATLAS_OPENAI_MODEL", ""),
         )
     return ChatInferenceProviderRegistry(providers)
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "si", "sí"}

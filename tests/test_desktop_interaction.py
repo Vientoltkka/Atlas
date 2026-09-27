@@ -168,6 +168,23 @@ def test_desktop_interaction_resolves_bloc_de_notas_alias() -> None:
     ]
 
 
+def test_desktop_interaction_opens_natural_known_apps_with_atlas_prefix() -> None:
+    executor = FakeToolExecutor()
+    use_case = DesktopInteractionUseCase(executor)
+
+    assert use_case.execute("Atlas, abre VS Code") == "✓ Abriendo VS Code."
+    assert use_case.execute("Atlas, abre Bloc de notas") == "✓ Abriendo notepad."
+
+    assert [call[0] for call in executor.calls] == [
+        "desktop.open_application",
+        "desktop.open_application",
+    ]
+    assert [call[1].parameters for call in executor.calls] == [
+        {"application": "VS Code"},
+        {"application": "notepad"},
+    ]
+
+
 def test_desktop_interaction_routes_powershell_and_explorer_to_open_application() -> None:
     executor = FakeToolExecutor()
     use_case = DesktopInteractionUseCase(executor)

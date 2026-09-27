@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 import os
 from time import perf_counter
 from typing import Any
@@ -71,9 +71,10 @@ class PromptClient:
     def ask_messages(
         self,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         provider_id: str | None = None,
+        attachments: Sequence[Any] = (),
     ) -> str:
         """Send exactly the provided messages to the selected model."""
         started = perf_counter()
@@ -81,11 +82,21 @@ class PromptClient:
         fragments: list[str] = []
         final_chunk: Any = None
         try:
-            stream = self._provider_for(provider_id).chat(
-                model=model,
-                messages=messages,
-                stream=True,
-                            )
+            provider = self._provider_for(provider_id)
+            if attachments:
+                if "vision" not in provider.capabilities():
+                    raise InferenceBackendError(
+                        model,
+                        "El proveedor/modelo configurado no tiene visión habilitada.",
+                    )
+                stream = provider.chat(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    attachments=attachments,
+                )
+            else:
+                stream = provider.chat(model=model, messages=messages, stream=True)
             for chunk in stream:
                 final_chunk = chunk
                 content = self._extract_stream_content(chunk)
