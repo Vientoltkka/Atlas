@@ -502,6 +502,46 @@ def test_risk_gate_rejection_from_confirmed_chat_order_creates_no_fill(
     assert chat.service.fills() == ()
 
 
+def test_confirmed_chat_order_respects_drawdown_and_allows_only_position_reduction(
+    orchestrator,
+) -> None:
+    finance = _finance(orchestrator)
+    chat = finance.paper_chat
+    assert chat is not None
+
+    orchestrator.process_prompt("maximo drawdown paper 1%", confirm=_noop_confirm)
+    orchestrator.process_prompt("Registra precio paper SYNTH 100", confirm=_noop_confirm)
+    orchestrator.process_prompt("Compra paper 5 de SYNTH a mercado", confirm=_noop_confirm)
+    first_fill = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+    assert "FILLED" in first_fill
+
+    # The pending buy is created before the synthetic price move, then rechecked
+    # through ExecutionService after the drawdown limit is reached.
+    orchestrator.process_prompt("Compra paper 1 de SYNTH a mercado", confirm=_noop_confirm)
+    orchestrator.process_prompt("Registra precio paper SYNTH 80", confirm=_noop_confirm)
+    before_blocked = chat.service.portfolio_summary()
+    blocked = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+
+    assert "no ejecutada" in blocked.casefold()
+    assert "max_drawdown_pct" in blocked.casefold()
+    assert chat.service.portfolio_summary() == before_blocked
+
+    reduction = orchestrator.process_prompt(
+        "Vende paper 2 de SYNTH a mercado", confirm=_noop_confirm
+    )
+    assert "Propuesta de orden paper" in reduction
+    reduction_fill = orchestrator.process_prompt("sí", confirm=_noop_confirm)
+    assert "FILLED" in reduction_fill
+    after_reduction = chat.service.portfolio_summary()
+    assert after_reduction["positions"]["SYNTH"]["qty"] == "3"
+
+    oversell = orchestrator.process_prompt(
+        "Vende paper 4 de SYNTH a mercado", confirm=_noop_confirm
+    )
+    assert "no_short" in oversell.casefold()
+    assert chat.service.portfolio_summary() == after_reduction
+
+
 def test_retrying_same_confirmed_proposal_is_idempotent_and_does_not_duplicate_fill(
     orchestrator, monkeypatch
 ) -> None:
