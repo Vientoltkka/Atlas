@@ -215,6 +215,8 @@ def validate_order(
     last_prices: Mapping[str, Decimal],
     commission: Decimal = Decimal("0"),
     slippage_bps: Decimal = Decimal("0"),
+    spread_bps: Decimal = Decimal("0"),
+    fee_bps: Decimal = Decimal("0"),
 ) -> None:
     """Valida una orden paper contra la politica activa.
 
@@ -224,6 +226,7 @@ def validate_order(
     como referencia conservadora; para MARKET el ultimo tick paper.
     """
     slippage = Decimal(slippage_bps)
+    reference = order.limit_price if order.order_type is OrderType.LIMIT else last_prices.get(order.symbol)
     if order.side is Side.SELL:
         position = portfolio.positions.get(order.symbol)
         held = position.qty if position is not None else Decimal("0")
@@ -233,23 +236,30 @@ def validate_order(
                 f"venta de {order.qty} > posicion en cartera {held}; "
                 f"las ventas en corto estan prohibidas",
             )
+        if reference is None:
+            return
+        impact_bps = spread_bps / Decimal("2") + slippage
+        notional = reference * order.qty
+        net_proceeds = (
+            notional * (Decimal("1") - impact_bps / Decimal("10000"))
+            - Decimal(commission)
+            - notional * Decimal(fee_bps) / Decimal("10000")
+        )
+        if portfolio.cash + net_proceeds < 0:
+            raise PolicyViolation(
+                RULE_NO_LEVERAGE,
+                f"costes de salida dejarian efectivo negativo: {portfolio.cash + net_proceeds}",
+            )
         return
 
-    if order.order_type is OrderType.LIMIT:
-        reference = order.limit_price
-    else:
-        tick = last_prices.get(order.symbol)
-        reference = (
-            None
-            if tick is None
-            else tick * (Decimal("1") + slippage / Decimal("10000"))
-        )
     if reference is None:
         # Sin precio de referencia la validacion numerica no aplica; el
         # motor rechazara la orden como "sin precio de referencia".
         return
 
-    cost = reference * order.qty + Decimal(commission)
+    impact_bps = spread_bps / Decimal("2") + slippage
+    notional = reference * order.qty
+    cost = notional * (Decimal("1") + impact_bps / Decimal("10000")) + Decimal(commission) + notional * Decimal(fee_bps) / Decimal("10000")
     if cost > portfolio.cash:
         raise PolicyViolation(
             RULE_NO_LEVERAGE,

@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Mapping
+from typing import Callable, Mapping
 
 from finance.paper.models import (
     EventType,
@@ -69,10 +69,26 @@ class PaperEngine:
         *,
         default_commission: Decimal = Decimal("0"),
         default_slippage_bps: Decimal = Decimal("0"),
+        default_spread_bps: Decimal = Decimal("0"),
+        entry_maker_fee_bps: Decimal = Decimal("0"),
+        entry_taker_fee_bps: Decimal = Decimal("0"),
+        exit_maker_fee_bps: Decimal = Decimal("0"),
+        exit_taker_fee_bps: Decimal = Decimal("0"),
+        default_is_maker: bool = False,
+        fill_validator: Callable[[PaperOrder], None] | None = None,
     ) -> None:
         self._portfolio = portfolio or PaperPortfolio()
         self._default_commission = Decimal(default_commission)
         self._default_slippage_bps = Decimal(default_slippage_bps)
+        self._default_spread_bps = Decimal(default_spread_bps)
+        self._entry_maker_fee_bps = Decimal(entry_maker_fee_bps)
+        self._entry_taker_fee_bps = Decimal(entry_taker_fee_bps)
+        self._exit_maker_fee_bps = Decimal(exit_maker_fee_bps)
+        self._exit_taker_fee_bps = Decimal(exit_taker_fee_bps)
+        self._default_is_maker = bool(default_is_maker)
+        self._fill_validator = fill_validator
+        if any(value < 0 for value in (self._default_commission, self._default_slippage_bps, self._default_spread_bps, self._entry_maker_fee_bps, self._entry_taker_fee_bps, self._exit_maker_fee_bps, self._exit_taker_fee_bps)):
+            raise ValueError("los costes de simulacion no pueden ser negativos")
         self._seen_events: set[str] = set()
         self._orders: dict[str, PaperOrder] = {}
         self._decisions: dict[str, Decision] = {}
@@ -103,12 +119,26 @@ class PaperEngine:
     def last_prices(self) -> dict[str, Decimal]:
         return dict(self._last_prices)
 
-    def defaults(self) -> dict[str, Decimal]:
-        """Read-only execution defaults used to estimate order costs."""
+    def defaults(self) -> dict[str, Decimal | bool]:
+        """Read-only synthetic costs used to estimate paper orders."""
         return {
             "commission": self._default_commission,
             "slippage_bps": self._default_slippage_bps,
+            "spread_bps": self._default_spread_bps,
+            "fee_bps": self._fee_bps(Side.BUY),
+            "is_maker": self._default_is_maker,
         }
+
+    def _fee_bps(self, side: Side) -> Decimal:
+        if side is Side.BUY:
+            return self._entry_maker_fee_bps if self._default_is_maker else self._entry_taker_fee_bps
+        return self._exit_maker_fee_bps if self._default_is_maker else self._exit_taker_fee_bps
+
+    def fee_bps(self, side: Side) -> Decimal:
+        return self._fee_bps(side)
+
+    def set_fill_validator(self, validator: Callable[[PaperOrder], None] | None) -> None:
+        self._fill_validator = validator
 
     def nav(self) -> Decimal:
         return _q_money(self._portfolio.nav(self._last_prices))
@@ -229,6 +259,16 @@ class PaperEngine:
                     f"tick {event.price} no satisface el limite {order.limit_price}",
                     event_id=event.event_id,
                 )
+            if self._fill_validator is not None:
+                try:
+                    self._fill_validator(order)
+                except ValueError as exc:
+                    return Decision(
+                        order.order_id,
+                        OrderStatus.REJECTED,
+                        str(exc),
+                        event_id=event.event_id,
+                    )
             return self._fill(order, event, event.price)
 
         price = self._market_price(order.symbol, event)
@@ -258,12 +298,13 @@ class PaperEngine:
         reference_price: Decimal,
     ) -> Decision:
         slippage_bps = self._default_slippage_bps
+        impact_bps = self._default_spread_bps / Decimal("2") + slippage_bps
         if order.side is Side.BUY:
-            fill_price = reference_price * (Decimal("1") + slippage_bps / Decimal("10000"))
+            fill_price = reference_price * (Decimal("1") + impact_bps / Decimal("10000"))
         else:
-            fill_price = reference_price * (Decimal("1") - slippage_bps / Decimal("10000"))
+            fill_price = reference_price * (Decimal("1") - impact_bps / Decimal("10000"))
         fill_price = _q_price(fill_price)
-        commission = _q_money(self._default_commission)
+        commission = _q_money(self._default_commission + fill_price * order.qty * self._fee_bps(order.side) / Decimal("10000"))
 
         if order.side is Side.BUY:
             cost = fill_price * order.qty + commission
@@ -284,6 +325,14 @@ class PaperEngine:
                     f"posicion insuficiente: {held} < {order.qty}",
                     event_id=event.event_id if event else None,
                 )
+            proceeds = fill_price * order.qty - commission
+            if self._portfolio.cash + proceeds < 0:
+                return Decision(
+                    order.order_id,
+                    OrderStatus.REJECTED,
+                    f"costes de salida invalidos: efectivo tras la venta {self._portfolio.cash + proceeds} < 0",
+                    event_id=event.event_id if event else None,
+                )
 
         fill = PaperFill(
             fill_id=f"fill-{uuid.uuid4().hex}",
@@ -295,6 +344,9 @@ class PaperEngine:
             price=fill_price,
             commission=commission,
             slippage_bps=slippage_bps,
+            spread_bps=self._default_spread_bps,
+            fee_bps=self._fee_bps(order.side),
+            is_maker=self._default_is_maker,
             timestamp=event.timestamp if event is not None else order.timestamp,
         )
         self._apply_fill(fill)
@@ -382,6 +434,9 @@ class PaperEngine:
                     "price": str(fill.price),
                     "commission": str(fill.commission),
                     "slippage_bps": str(fill.slippage_bps),
+                    "spread_bps": str(fill.spread_bps),
+                    "fee_bps": str(fill.fee_bps),
+                    "is_maker": fill.is_maker,
                 },
                 "fill simulado",
             )
@@ -438,6 +493,9 @@ class PaperEngine:
                     "price": str(fill.price),
                     "commission": str(fill.commission),
                     "slippage_bps": str(fill.slippage_bps),
+                    "spread_bps": str(fill.spread_bps),
+                    "fee_bps": str(fill.fee_bps),
+                    "is_maker": fill.is_maker,
                     "timestamp": fill.timestamp.isoformat(),
                 }
                 for fill in self._fills
@@ -448,6 +506,12 @@ class PaperEngine:
             "defaults": {
                 "commission": str(self._default_commission),
                 "slippage_bps": str(self._default_slippage_bps),
+                "spread_bps": str(self._default_spread_bps),
+                "entry_maker_fee_bps": str(self._entry_maker_fee_bps),
+                "entry_taker_fee_bps": str(self._entry_taker_fee_bps),
+                "exit_maker_fee_bps": str(self._exit_maker_fee_bps),
+                "exit_taker_fee_bps": str(self._exit_taker_fee_bps),
+                "default_is_maker": self._default_is_maker,
             },
         }
 
@@ -473,6 +537,12 @@ class PaperEngine:
             portfolio,
             default_commission=Decimal(defaults.get("commission", "0")),
             default_slippage_bps=Decimal(defaults.get("slippage_bps", "0")),
+            default_spread_bps=Decimal(defaults.get("spread_bps", "0")),
+            entry_maker_fee_bps=Decimal(defaults.get("entry_maker_fee_bps", "0")),
+            entry_taker_fee_bps=Decimal(defaults.get("entry_taker_fee_bps", "0")),
+            exit_maker_fee_bps=Decimal(defaults.get("exit_maker_fee_bps", "0")),
+            exit_taker_fee_bps=Decimal(defaults.get("exit_taker_fee_bps", "0")),
+            default_is_maker=bool(defaults.get("default_is_maker", False)),
         )
         engine._seen_events = set(data.get("seen_events", []))
         engine._last_prices = {
@@ -507,6 +577,9 @@ class PaperEngine:
                     price=Decimal(str(fill_data["price"])),
                     commission=Decimal(str(fill_data.get("commission", "0"))),
                     slippage_bps=Decimal(str(fill_data.get("slippage_bps", "0"))),
+                    spread_bps=Decimal(str(fill_data.get("spread_bps", "0"))),
+                    fee_bps=Decimal(str(fill_data.get("fee_bps", "0"))),
+                    is_maker=bool(fill_data.get("is_maker", False)),
                     timestamp=datetime.fromisoformat(str(fill_data["timestamp"])),
                 )
             )

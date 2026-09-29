@@ -23,6 +23,7 @@ from finance.paper.models import (
     Side,
 )
 from finance.paper.service import PaperFinanceService
+from finance.paper.policy import PolicyViolation
 from finance.paper.store import PaperStore, StoreError
 
 
@@ -182,6 +183,71 @@ def test_limit_sell_fills_only_when_tick_reaches_limit() -> None:
     assert engine.pending_orders() == ()
     assert engine.portfolio.cash == Decimal("9000") + Decimal("1200")
     assert engine.portfolio.positions == {}
+
+
+def test_pending_limit_is_revalidated_against_current_policy_before_fill(tmp_path: Path) -> None:
+    service = PaperFinanceService(
+        PaperStore(tmp_path / "finance_paper"), starting_cash=Decimal("1000")
+    )
+    service.record_market_event(_event("e1", "AAPL", "110"))
+    decision = service.execute_confirmed_order(
+        _order("o1", "AAPL", Side.BUY, "5", OrderType.LIMIT, limit="100")
+    )
+    assert decision.pending
+    service.update_policy(max_exposure_per_asset=Decimal("0.10"))
+    before = service.portfolio_summary()
+
+    service.record_market_event(_event("e2", "AAPL", "90", minute=1))
+
+    assert service.pending_orders() == ()
+    final_decision = service.engine.decision_for("o1")
+    assert final_decision is not None
+    assert final_decision.status is OrderStatus.REJECTED
+    assert "MAX_EXPOSURE_PER_ASSET" in final_decision.reason
+    after = service.portfolio_summary()
+    assert after["cash"] == before["cash"]
+    assert after["positions"] == before["positions"]
+    assert after["nav"] == before["nav"]
+
+
+def test_sell_rejects_excessive_exit_cost_without_mutating_portfolio() -> None:
+    engine = _engine(cash="100", exit_taker_fee_bps=Decimal("2000000"))
+    engine.process_event(_event("e1", "AAPL", "100"))
+    assert engine.execute_order(
+        _order("buy", "AAPL", Side.BUY, "1", OrderType.MARKET)
+    ).filled
+    before = engine.portfolio
+
+    decision = engine.execute_order(
+        _order("sell", "AAPL", Side.SELL, "1", OrderType.MARKET)
+    )
+
+    assert decision.status is OrderStatus.REJECTED
+    assert "costes de salida invalidos" in decision.reason
+    assert engine.portfolio == before
+
+
+def test_fill_cost_fields_roundtrip_and_legacy_snapshot_compatibility() -> None:
+    engine = _engine(
+        default_spread_bps=Decimal("20"),
+        entry_taker_fee_bps=Decimal("80"),
+    )
+    engine.process_event(_event("e1", "AAPL", "100"))
+    engine.execute_order(_order("o1", "AAPL", Side.BUY, "1", OrderType.MARKET))
+    snapshot = engine.snapshot()
+    restored = PaperEngine.from_snapshot(snapshot)
+    assert restored.fills[0].spread_bps == Decimal("20")
+    assert restored.fills[0].fee_bps == Decimal("80")
+    assert restored.fills[0].is_maker is False
+
+    legacy = dict(snapshot)
+    legacy["fills"] = [dict(snapshot["fills"][0])]
+    for field in ("spread_bps", "fee_bps", "is_maker"):
+        legacy["fills"][0].pop(field)
+    old_restored = PaperEngine.from_snapshot(legacy)
+    assert old_restored.fills[0].spread_bps == Decimal("0")
+    assert old_restored.fills[0].fee_bps == Decimal("0")
+    assert old_restored.fills[0].is_maker is False
 
 
 def test_commission_and_slippage_are_explicit_in_fill() -> None:
@@ -370,6 +436,66 @@ def test_service_facade_portfolio_events_and_confirmed_orders(tmp_path: Path) ->
     restored = PaperFinanceService(store)
     assert restored.portfolio_summary() == service.portfolio_summary()
     assert restored.engine.snapshot() == service.engine.snapshot()
+
+
+def test_simulated_100_eur_rejects_total_cost_and_preserves_precision(tmp_path: Path) -> None:
+    service = PaperFinanceService(
+        PaperStore(tmp_path / "finance_paper"),
+        starting_cash=Decimal("100"),
+        entry_taker_fee_bps=Decimal("80"),
+        default_spread_bps=Decimal("20"),
+        default_slippage_bps=Decimal("10"),
+    )
+    assert service.portfolio_summary()["cash"] == "100.00"
+    service.record_market_event(_event("e1", "AAPL", "100"))
+    with pytest.raises(PolicyViolation, match="NO_LEVERAGE"):
+        service.execute_confirmed_order(
+            _order("too-expensive", "AAPL", Side.BUY, "1", OrderType.MARKET)
+        )
+    assert service.portfolio_summary()["cash"] == "100.00"
+
+
+@pytest.mark.parametrize(
+    ("is_maker", "expected_fee"),
+    ((True, Decimal("0.40")), (False, Decimal("0.80"))),
+)
+def test_simulation_keeps_entry_and_exit_maker_taker_fees_explicit(
+    is_maker: bool, expected_fee: Decimal
+) -> None:
+    # Synthetic test assumptions only; these are not universal broker tariffs.
+    engine = _engine(
+        cash="1000",
+        default_is_maker=is_maker,
+        entry_maker_fee_bps=Decimal("40"),
+        entry_taker_fee_bps=Decimal("80"),
+        exit_maker_fee_bps=Decimal("40"),
+        exit_taker_fee_bps=Decimal("80"),
+    )
+    engine.process_event(_event("e1", "AAPL", "100"))
+    buy = engine.execute_order(_order("buy", "AAPL", Side.BUY, "1", OrderType.MARKET))
+    assert buy.fill is not None and buy.fill.commission == expected_fee
+    engine.process_event(_event("e2", "AAPL", "100", minute=1))
+    sell = engine.execute_order(_order("sell", "AAPL", Side.SELL, "1", OrderType.MARKET, minute=1))
+    assert sell.fill is not None and sell.fill.commission == expected_fee
+    assert sell.fill.fee_bps == (Decimal("40") if is_maker else Decimal("80"))
+
+
+def test_simulated_spread_and_slippage_make_flat_round_trip_not_winner() -> None:
+    engine = _engine(
+        cash="100",
+        default_spread_bps=Decimal("20"),
+        default_slippage_bps=Decimal("10"),
+        entry_taker_fee_bps=Decimal("80"),
+        exit_taker_fee_bps=Decimal("80"),
+    )
+    engine.process_event(_event("e1", "AAPL", "100"))
+    buy = engine.execute_order(_order("buy", "AAPL", Side.BUY, "0.9", OrderType.MARKET))
+    assert buy.filled
+    engine.process_event(_event("e2", "AAPL", "100", minute=1))
+    sell = engine.execute_order(_order("sell", "AAPL", Side.SELL, "0.9", OrderType.MARKET, minute=1))
+    assert sell.filled
+    assert engine.portfolio.cash < Decimal("100")
+    assert engine.nav() < Decimal("100")
 
 
 def test_service_requires_explicit_confirmation_and_agent_stays_read_only() -> None:

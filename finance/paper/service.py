@@ -49,6 +49,12 @@ class PaperFinanceService:
         starting_cash: Decimal = DEFAULT_STARTING_CASH,
         default_commission: Decimal = Decimal("0"),
         default_slippage_bps: Decimal = Decimal("0"),
+        default_spread_bps: Decimal = Decimal("0"),
+        entry_maker_fee_bps: Decimal = Decimal("0"),
+        entry_taker_fee_bps: Decimal = Decimal("0"),
+        exit_maker_fee_bps: Decimal = Decimal("0"),
+        exit_taker_fee_bps: Decimal = Decimal("0"),
+        default_is_maker: bool = False,
         mode: PaperMode = PaperMode.CORE,
     ) -> None:
         if not isinstance(mode, PaperMode):
@@ -57,6 +63,14 @@ class PaperFinanceService:
         self._starting_cash = starting_cash
         self._default_commission = default_commission
         self._default_slippage_bps = default_slippage_bps
+        self._execution_costs = {
+            "default_spread_bps": default_spread_bps,
+            "entry_maker_fee_bps": entry_maker_fee_bps,
+            "entry_taker_fee_bps": entry_taker_fee_bps,
+            "exit_maker_fee_bps": exit_maker_fee_bps,
+            "exit_taker_fee_bps": exit_taker_fee_bps,
+            "default_is_maker": default_is_maker,
+        }
         self._states: dict[PaperMode, _ModeState] = {}
         self._active_mode = mode
         if self._store.exists():
@@ -68,22 +82,26 @@ class PaperFinanceService:
                 # El capital y las posiciones previas se conservan en CORE;
                 # TACTICAL no recibe capital hasta una asignacion explicita
                 # (nunca se duplica el capital paper inicial).
+                legacy_engine = PaperEngine.from_snapshot(data)
                 self._states[PaperMode.CORE] = _ModeState(
-                    PaperEngine.from_snapshot(data),
+                    legacy_engine,
                     InvestmentPolicy(mode=PaperMode.CORE),
                 )
+                self._bind_fill_validator(PaperMode.CORE, legacy_engine)
                 self._active_mode = PaperMode.CORE
             return
         # Instalacion nueva: el capital paper inicial pertenece a CORE.
         # Cualquier otro modo empieza con efectivo 0 y sin posiciones.
-        self._states[PaperMode.CORE] = _ModeState(
-            PaperEngine(
-                portfolio=PaperPortfolio(cash=self._starting_cash),
-                default_commission=self._default_commission,
-                default_slippage_bps=self._default_slippage_bps,
-            ),
-            InvestmentPolicy(mode=PaperMode.CORE),
+        core_engine = PaperEngine(
+            portfolio=PaperPortfolio(cash=self._starting_cash),
+            default_commission=self._default_commission,
+            default_slippage_bps=self._default_slippage_bps,
+            **self._execution_costs,
         )
+        self._states[PaperMode.CORE] = _ModeState(
+            core_engine, InvestmentPolicy(mode=PaperMode.CORE)
+        )
+        self._bind_fill_validator(PaperMode.CORE, core_engine)
         if self._active_mode is not PaperMode.CORE:
             self._states[self._active_mode] = self._new_state(self._active_mode)
         self._persist()
@@ -244,8 +262,8 @@ class PaperFinanceService:
     def pending_orders(self) -> tuple[PaperOrder, ...]:
         return self._state_for(self._active_mode).engine.pending_orders()
 
-    def execution_defaults(self) -> dict[str, Decimal]:
-        """Read-only commission and slippage defaults for order estimates."""
+    def execution_defaults(self) -> dict[str, Decimal | bool]:
+        """Read-only synthetic costs for paper order estimates."""
         return self._state_for(self._active_mode).engine.defaults()
 
     def ledger(self) -> tuple[dict[str, object], ...]:
@@ -321,6 +339,8 @@ class PaperFinanceService:
             last_prices=state.engine.last_prices(),
             commission=defaults["commission"],
             slippage_bps=defaults["slippage_bps"],
+            spread_bps=defaults["spread_bps"],
+            fee_bps=state.engine.fee_bps(order.side),
         )
 
     def _state_for(self, mode: PaperMode) -> _ModeState:
@@ -342,8 +362,13 @@ class PaperFinanceService:
             portfolio=PaperPortfolio(cash=Decimal("0")),
             default_commission=self._default_commission,
             default_slippage_bps=self._default_slippage_bps,
+            **self._execution_costs,
         )
+        self._bind_fill_validator(mode, engine)
         return _ModeState(engine, InvestmentPolicy(mode=mode))
+
+    def _bind_fill_validator(self, mode: PaperMode, engine: PaperEngine) -> None:
+        engine.set_fill_validator(lambda order: self._validate(self._states[mode], order))
 
     def _load_envelope(self, data: Mapping[str, object]) -> None:
         modes_data = data.get("modes")
@@ -355,10 +380,12 @@ class PaperFinanceService:
             assert isinstance(policy_data, Mapping)
             engine_data = mode_data.get("engine")
             assert isinstance(engine_data, Mapping)
+            engine = PaperEngine.from_snapshot(engine_data)
             self._states[mode] = _ModeState(
-                engine=PaperEngine.from_snapshot(engine_data),
+                engine=engine,
                 policy=InvestmentPolicy.from_dict(policy_data),
             )
+            self._bind_fill_validator(mode, engine)
         stored_active = data.get("active_mode")
         if stored_active is not None:
             self._active_mode = PaperMode(str(stored_active))

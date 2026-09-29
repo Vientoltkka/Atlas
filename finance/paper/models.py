@@ -157,6 +157,9 @@ class PaperFill:
     price: Decimal
     commission: Decimal = Decimal("0")
     slippage_bps: Decimal = Decimal("0")
+    spread_bps: Decimal = Decimal("0")
+    fee_bps: Decimal = Decimal("0")
+    is_maker: bool = False
     timestamp: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -182,6 +185,13 @@ class PaperFill:
         if slippage < 0:
             raise ValueError("slippage_bps no puede ser negativo")
         object.__setattr__(self, "slippage_bps", slippage)
+        for name in ("spread_bps", "fee_bps"):
+            value = _decimal(getattr(self, name), name)
+            if value < 0:
+                raise ValueError(f"{name} no puede ser negativo")
+            object.__setattr__(self, name, value)
+        if not isinstance(self.is_maker, bool):
+            raise ValueError("is_maker invalido")
         object.__setattr__(self, "timestamp", _ensure_utc(self.timestamp))
 
 
