@@ -1,15 +1,15 @@
-"""Politica de riesgo paper de Atlas Finance V2.7 (CORE/TACTICAL).
+"""Politica de riesgo paper de Atlas Finance (CORE/TACTICAL).
 
 InvestmentPolicy es la politica de riesgo versionada de cada modo PAPER:
 - CORE: largo plazo.
 - TACTICAL: corto plazo, con control mas estricto una vez configurado.
 
-Los limites numericos no estan fijados por defecto: los configura el
-usuario mas adelante (nunca se redondean ni se ignoran). Las prohibiciones
-de derivados, apalancamiento y ventas en corto son explicitas y no se
-pueden desactivar. Los limites de perdida y drawdown son configurables e
-informativos: no hay ejecucion automatica. Todo el motor sigue siendo
-PAPER, sin broker, sin scheduler y sin dinero real.
+Los limites numericos no estan fijados por defecto: los configura el usuario
+(nunca se redondean ni se ignoran). Perdida y drawdown bloquean nuevas ordenes
+cuando hay estado de riesgo fiable; permiten reducir o cerrar posiciones, pero
+no liquidan posiciones automaticamente. max_loss_pct mide la perdida realizada
+acumulada respecto a la base NAV persistida del modo, no un limite diario. Todo
+sigue siendo PAPER, sin broker, scheduler ni dinero real.
 """
 
 from __future__ import annotations
@@ -165,14 +165,15 @@ class InvestmentPolicy:
                 else "sin limite total"
             ),
             "max_loss_pct": (
-                f"{pct(self.max_loss_pct)} del NAV (solo informativo)"
+                f"{pct(self.max_loss_pct)} de perdida realizada acumulada sobre "
+                "la base NAV persistida del modo"
                 if self.max_loss_pct is not None
-                else "sin configurar (si se configura, solo informativo)"
+                else "sin configurar (no activo)"
             ),
             "max_drawdown_pct": (
-                f"{pct(self.max_drawdown_pct)} del NAV (solo informativo)"
+                f"{pct(self.max_drawdown_pct)} de drawdown desde el maximo NAV"
                 if self.max_drawdown_pct is not None
-                else "sin configurar (si se configura, solo informativo)"
+                else "sin configurar (no activo)"
             ),
             "derivados": "prohibidos",
             "apalancamiento": "prohibido",
@@ -180,14 +181,10 @@ class InvestmentPolicy:
         }
 
     def describe_rule_status(self) -> dict[str, str]:
-        """Estado de cada regla: 'activa', 'no configurada' o 'no aplicable
-        todavia'.
+        """Estado configurado de cada regla: activa o no configurada.
 
         - activa: la regla bloquea ordenes que la incumplen.
         - no configurada: todavia no limita ninguna orden.
-        - no aplicable todavia: perdida y drawdown no tienen calculos ni
-          bloqueo reales; aunque se configuren son solo informativos y no
-          protegen por si solos.
         """
         return {
             "max_open_positions": (
@@ -199,8 +196,12 @@ class InvestmentPolicy:
             "max_total_exposure": (
                 "activa" if self.max_total_exposure is not None else "no configurada"
             ),
-            "max_loss_pct": "no aplicable todavia",
-            "max_drawdown_pct": "no aplicable todavia",
+            "max_loss_pct": (
+                "activa" if self.max_loss_pct is not None else "no configurada"
+            ),
+            "max_drawdown_pct": (
+                "activa" if self.max_drawdown_pct is not None else "no configurada"
+            ),
             "derivados": "activa",
             "apalancamiento": "activa",
             "cortos": "activa",

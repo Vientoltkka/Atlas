@@ -236,6 +236,8 @@ class PaperFinanceChat:
                 f"- maximo posiciones paper N\n"
                 f"- maximo exposicion por activo paper P%\n"
                 f"- maximo exposicion total paper P%\n"
+                f"- maximo perdida paper P%\n"
+                f"- maximo drawdown paper P%\n"
                 f"- registra precio paper SIMBOLO PRECIO\n"
                 f"- precio paper SIMBOLO PRECIO (forma corta)\n"
                 f"- importa precio mercado SIMBOLO a paper\n"
@@ -399,17 +401,21 @@ class PaperFinanceChat:
         return "\n".join(lines)
 
     def policy_text(self) -> str:
-        """Muestra la politica paper distinguiendo el estado de cada regla:
-        ACTIVA (bloquea ordenes), NO CONFIGURADA (todavia no limita) y NO
-        APLICABLE TODAVIA (perdida y drawdown sin calculos ni bloqueo
-        reales)."""
+        """Muestra limites configurados y su capacidad efectiva de bloqueo."""
         policy = self._service.policy()
         rules = policy.describe_rules()
         status = policy.describe_rule_status()
+        risk = self._service.risk_summary()
+        if policy.max_loss_pct is not None or policy.max_drawdown_pct is not None:
+            effective = "activa" if risk["data_complete"] else "bloqueada por datos insuficientes"
+            if policy.max_loss_pct is not None:
+                status["max_loss_pct"] = effective
+            if policy.max_drawdown_pct is not None:
+                status["max_drawdown_pct"] = effective
         labels = {
             "activa": "ACTIVA",
             "no configurada": "NO CONFIGURADA",
-            "no aplicable todavia": "NO APLICABLE TODAVIA",
+            "bloqueada por datos insuficientes": "BLOQUEO POR DATOS INSUFICIENTES",
         }
 
         def line(name: str, label: str) -> str:
@@ -429,11 +435,14 @@ class PaperFinanceChat:
             f"- Apalancamiento [{labels[status['apalancamiento']]}]: {rules['apalancamiento']}",
             f"- Ventas en corto [{labels[status['cortos']]}]: {rules['cortos']}",
             "",
-            "Significado: ACTIVA bloquea ordenes que la incumplan; "
-            "NO CONFIGURADA todavia no limita ninguna orden; NO APLICABLE "
-            "TODAVIA significa que perdida y drawdown no tienen calculos ni "
-            "bloqueo reales: aunque se configuren son solo informativos y "
-            "no protegen por si solos.",
+            "Base y formulas: perdida = max(0, -P&L realizado) / NAV inicial; "
+            "drawdown = (maximo NAV - NAV actual) / maximo NAV. El P&L "
+            "realizado usa coste medio ponderado e incluye comisiones de "
+            "entrada y salida. El NAV es efectivo mas posiciones a precios "
+            "paper; si falta un dato, el bloqueo es seguro.",
+            "Significado: ACTIVA bloquea al alcanzar el limite; NO CONFIGURADA "
+            "no limita; BLOQUEO POR DATOS INSUFICIENTES rechaza porque no hay "
+            "una evaluacion fiable.",
             "Los limites concretos los configura el usuario con comandos "
             "explicitos: no hay porcentajes ni capital fijados por defecto.",
             "Configurar: \"maximo posiciones paper N\", \"maximo exposicion "
@@ -538,6 +547,16 @@ class PaperFinanceChat:
                 "max_total_exposure",
                 "Exposicion total maxima",
                 total.group("value"),
+            )
+        loss = _CONFIG_LOSS_PATTERN.search(normalized)
+        if loss is not None:
+            return self._apply_exposure_config(
+                "max_loss_pct", "Limite de perdida realizada", loss.group("value")
+            )
+        drawdown = _CONFIG_DRAWDOWN_PATTERN.search(normalized)
+        if drawdown is not None:
+            return self._apply_exposure_config(
+                "max_drawdown_pct", "Limite de drawdown", drawdown.group("value")
             )
         return self._config_help()
 
@@ -1148,7 +1167,7 @@ _FOREIGN_CURRENCY_PATTERN = re.compile(
 )
 
 _CONFIG_PATTERN = re.compile(
-    r"\bmaximo\s+(?:posiciones|exposicion)\b.*\bpaper\b"
+    r"\bmaximo\s+(?:posiciones|exposicion|perdida|drawdown)\b.*\bpaper\b"
 )
 
 _CONFIG_POSITIONS_PATTERN = re.compile(
@@ -1165,11 +1184,22 @@ _CONFIG_TOTAL_EXPOSURE_PATTERN = re.compile(
     r"(?P<value>\d+(?:[.,]\d+)?)\s*(?:%|pct|por\s+ciento)?\s*[?.!]*\s*$"
 )
 
+_CONFIG_LOSS_PATTERN = re.compile(
+    r"\bmaximo\s+perdida\s+paper\s*(?:de|:|=)?\s*"
+    r"(?P<value>\d+(?:[.,]\d+)?)\s*(?:%|pct|por\s+ciento)?\s*[?.!]*\s*$"
+)
+
+_CONFIG_DRAWDOWN_PATTERN = re.compile(
+    r"\bmaximo\s+drawdown\s+paper\s*(?:de|:|=)?\s*"
+    r"(?P<value>\d+(?:[.,]\d+)?)\s*(?:%|pct|por\s+ciento)?\s*[?.!]*\s*$"
+)
+
 _CONFIG_HELP_TEXT = (
     "Comandos de configuracion paper (uno por mensaje, aplican al modo "
     "activo): \"maximo posiciones paper N\" (entero >= 1), \"maximo "
     "exposicion por activo paper P%\", \"maximo exposicion total paper "
-    "P%\" (Decimal positivo, 1-100) y \"capital paper core|tactical "
+    "P%\", \"maximo perdida paper P%\", \"maximo drawdown paper P%\" "
+    "(Decimal positivo, 1-100) y \"capital paper core|tactical "
     "IMPORTE\" (euros; la reasignacion no puede exceder el capital paper "
     "total)."
 )

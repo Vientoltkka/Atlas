@@ -22,10 +22,11 @@ from finance.paper.models import (
     MarketEvent,
     PaperOrder,
     PaperPortfolio,
+    Side,
     _decimal,
     utc_now,
 )
-from finance.paper.policy import InvestmentPolicy, PaperMode, validate_order
+from finance.paper.policy import InvestmentPolicy, PaperMode, PolicyViolation, validate_order
 from finance.paper.store import PaperStore
 
 DEFAULT_STARTING_CASH = Decimal("10000")
@@ -39,6 +40,34 @@ class _ModeState:
 
     engine: PaperEngine
     policy: InvestmentPolicy
+    risk: "_RiskState"
+
+
+@dataclass
+class _RiskState:
+    """Base y maximo NAV observados por una cartera paper aislada."""
+
+    initial_nav: Decimal | None
+    peak_nav: Decimal | None
+    realized_pnl: Decimal = Decimal("0")
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "initial_nav": None if self.initial_nav is None else str(self.initial_nav),
+            "peak_nav": None if self.peak_nav is None else str(self.peak_nav),
+            "realized_pnl": str(self.realized_pnl),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "_RiskState":
+        def decimal_or_none(value: object) -> Decimal | None:
+            return None if value is None else Decimal(str(value))
+
+        return cls(
+            initial_nav=decimal_or_none(data.get("initial_nav")),
+            peak_nav=decimal_or_none(data.get("peak_nav")),
+            realized_pnl=Decimal(str(data.get("realized_pnl", "0"))),
+        )
 
 
 class PaperFinanceService:
@@ -86,6 +115,7 @@ class PaperFinanceService:
                 self._states[PaperMode.CORE] = _ModeState(
                     legacy_engine,
                     InvestmentPolicy(mode=PaperMode.CORE),
+                    _RiskState(None, None),
                 )
                 self._bind_fill_validator(PaperMode.CORE, legacy_engine)
                 self._active_mode = PaperMode.CORE
@@ -99,7 +129,9 @@ class PaperFinanceService:
             **self._execution_costs,
         )
         self._states[PaperMode.CORE] = _ModeState(
-            core_engine, InvestmentPolicy(mode=PaperMode.CORE)
+            core_engine,
+            InvestmentPolicy(mode=PaperMode.CORE),
+            _RiskState(self._starting_cash, self._starting_cash),
         )
         self._bind_fill_validator(PaperMode.CORE, core_engine)
         if self._active_mode is not PaperMode.CORE:
@@ -146,7 +178,7 @@ class PaperFinanceService:
             ),
         )
         self._states[self._active_mode] = _ModeState(
-            engine=state.engine, policy=new_policy
+            engine=state.engine, policy=new_policy, risk=state.risk
         )
         self._persist()
         return new_policy
@@ -183,6 +215,14 @@ class PaperFinanceService:
         target_state.engine.transfer_cash(
             amount, f"capital paper recibido del modo {source.value}"
         )
+        for risk, delta in (
+            (source_state.risk, -amount),
+            (target_state.risk, amount),
+        ):
+            if risk.initial_nav is not None:
+                risk.initial_nav += delta
+            if risk.peak_nav is not None:
+                risk.peak_nav += delta
         self._persist()
         return self.capital_summary()
 
@@ -247,6 +287,7 @@ class PaperFinanceService:
         state = self._state_for(self._active_mode)
         ingested = state.engine.process_event(event)
         if ingested:
+            self._refresh_risk(state)
             self._persist()
         return ingested
 
@@ -256,6 +297,7 @@ class PaperFinanceService:
         state = self._state_for(self._active_mode)
         self._validate(state, order)
         decision = state.engine.execute_order(order, event)
+        self._refresh_risk(state)
         self._persist()
         return decision
 
@@ -330,6 +372,22 @@ class PaperFinanceService:
             daily_realized_loss=realized_loss,
         )
 
+    def risk_summary(self) -> dict[str, object]:
+        """Metricas paper usadas por max_loss_pct y max_drawdown_pct."""
+        state = self._state_for(self._active_mode)
+        self._refresh_risk(state)
+        metrics = self._risk_metrics(state)
+        return {
+            "initial_nav": metrics["initial_nav"],
+            "peak_nav": metrics["peak_nav"],
+            "nav": metrics["nav"],
+            "realized_pnl": metrics["realized_pnl"],
+            "loss_pct": metrics["loss_pct"],
+            "drawdown_pct": metrics["drawdown_pct"],
+            "data_complete": metrics["data_complete"],
+            "missing": metrics["missing"],
+        }
+
     def _validate(self, state: _ModeState, order: PaperOrder) -> None:
         defaults = state.engine.defaults()
         validate_order(
@@ -342,6 +400,113 @@ class PaperFinanceService:
             spread_bps=defaults["spread_bps"],
             fee_bps=state.engine.fee_bps(order.side),
         )
+        position = state.engine.portfolio.positions.get(order.symbol)
+        reducing_sell = (
+            order.side is Side.SELL
+            and position is not None
+            and order.qty <= position.qty
+        )
+        if not reducing_sell:
+            self._validate_loss_and_drawdown(state)
+
+    def _validate_loss_and_drawdown(self, state: _ModeState) -> None:
+        policy = state.policy
+        if policy.max_loss_pct is None and policy.max_drawdown_pct is None:
+            return
+        metrics = self._risk_metrics(state)
+        if not metrics["data_complete"]:
+            missing = ", ".join(metrics["missing"])
+            raise PolicyViolation(
+                "RISK_DATA_UNAVAILABLE",
+                f"no se puede evaluar perdida/drawdown: falta {missing}; "
+                f"bloqueo seguro",
+            )
+        if (
+            policy.max_loss_pct is not None
+            and metrics["loss_pct"] >= policy.max_loss_pct
+        ):
+            raise PolicyViolation(
+                "MAX_LOSS_PCT",
+                f"perdida realizada {metrics['loss_pct']} >= limite "
+                f"{policy.max_loss_pct} (base NAV {metrics['initial_nav']})",
+            )
+        if (
+            policy.max_drawdown_pct is not None
+            and metrics["drawdown_pct"] >= policy.max_drawdown_pct
+        ):
+            raise PolicyViolation(
+                "MAX_DRAWDOWN_PCT",
+                f"drawdown {metrics['drawdown_pct']} >= limite "
+                f"{policy.max_drawdown_pct} (maximo NAV {metrics['peak_nav']})",
+            )
+
+    def _risk_metrics(self, state: _ModeState) -> dict[str, object]:
+        engine = state.engine
+        missing: list[str] = []
+        prices = engine.last_prices()
+        for symbol in engine.portfolio.positions:
+            price = prices.get(symbol)
+            if (
+                price is None
+                or not isinstance(price, Decimal)
+                or not price.is_finite()
+                or price <= 0
+            ):
+                missing.append(f"precio paper valido de {symbol}")
+        if state.risk.initial_nav is None or state.risk.initial_nav <= 0:
+            missing.append("base NAV inicial persistida")
+        if state.risk.peak_nav is None or state.risk.peak_nav <= 0:
+            missing.append("maximo NAV persistido")
+        nav = None if missing else engine.portfolio.nav(prices)
+        peak = state.risk.peak_nav
+        if peak is not None and nav is not None and nav > peak:
+            peak = nav
+        initial = state.risk.initial_nav
+        loss = max(Decimal("0"), -state.risk.realized_pnl)
+        return {
+            "initial_nav": initial,
+            "peak_nav": peak,
+            "nav": nav,
+            "realized_pnl": state.risk.realized_pnl,
+            "loss_pct": None if initial is None or initial <= 0 else loss / initial,
+            "drawdown_pct": (
+                None
+                if peak is None or peak <= 0 or nav is None
+                else max(Decimal("0"), (peak - nav) / peak)
+            ),
+            "data_complete": not missing,
+            "missing": missing,
+        }
+
+    def _refresh_risk(self, state: _ModeState) -> None:
+        if state.risk.initial_nav is None:
+            return
+        metrics = self._risk_metrics(state)
+        if not metrics["data_complete"]:
+            return
+        state.risk.realized_pnl = self._realized_pnl(state.engine)
+        nav = state.engine.portfolio.nav(state.engine.last_prices())
+        if state.risk.peak_nav is None or nav > state.risk.peak_nav:
+            state.risk.peak_nav = nav
+
+    @staticmethod
+    def _realized_pnl(engine: PaperEngine) -> Decimal:
+        quantities: dict[str, Decimal] = {}
+        costs: dict[str, Decimal] = {}
+        realized = Decimal("0")
+        for fill in engine.fills:
+            if fill.side.value == "BUY":
+                quantities[fill.symbol] = quantities.get(fill.symbol, Decimal("0")) + fill.qty
+                costs[fill.symbol] = costs.get(fill.symbol, Decimal("0")) + fill.price * fill.qty + fill.commission
+                continue
+            held = quantities.get(fill.symbol, Decimal("0"))
+            if held < fill.qty or held <= 0:
+                continue
+            average_cost = costs[fill.symbol] / held
+            realized += fill.price * fill.qty - fill.commission - average_cost * fill.qty
+            quantities[fill.symbol] = held - fill.qty
+            costs[fill.symbol] = costs[fill.symbol] - average_cost * fill.qty
+        return realized
 
     def _state_for(self, mode: PaperMode) -> _ModeState:
         state = self._states.get(mode)
@@ -365,7 +530,11 @@ class PaperFinanceService:
             **self._execution_costs,
         )
         self._bind_fill_validator(mode, engine)
-        return _ModeState(engine, InvestmentPolicy(mode=mode))
+        return _ModeState(
+            engine,
+            InvestmentPolicy(mode=mode),
+            _RiskState(Decimal("0"), Decimal("0")),
+        )
 
     def _bind_fill_validator(self, mode: PaperMode, engine: PaperEngine) -> None:
         engine.set_fill_validator(lambda order: self._validate(self._states[mode], order))
@@ -384,6 +553,11 @@ class PaperFinanceService:
             self._states[mode] = _ModeState(
                 engine=engine,
                 policy=InvestmentPolicy.from_dict(policy_data),
+                risk=(
+                    _RiskState.from_dict(risk_data)
+                    if isinstance(risk_data := mode_data.get("risk"), Mapping)
+                    else _RiskState(None, None)
+                ),
             )
             self._bind_fill_validator(mode, engine)
         stored_active = data.get("active_mode")
@@ -400,6 +574,7 @@ class PaperFinanceService:
                 "modes": {
                     mode.value: {
                         "policy": state.policy.to_dict(),
+                        "risk": state.risk.to_dict(),
                         "engine": state.engine.snapshot(),
                     }
                     for mode, state in self._states.items()

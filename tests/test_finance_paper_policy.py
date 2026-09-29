@@ -97,13 +97,13 @@ def test_default_policies_are_paper_with_unconfigured_limits() -> None:
         assert rules["max_open_positions"] == "sin limite de posiciones abiertas"
         assert rules["max_exposure_per_asset"] == "sin limite por activo"
         assert rules["max_total_exposure"] == "sin limite total"
-        assert rules["max_loss_pct"] == "sin configurar (si se configura, solo informativo)"
-        assert rules["max_drawdown_pct"] == "sin configurar (si se configura, solo informativo)"
+        assert rules["max_loss_pct"] == "sin configurar (no activo)"
+        assert rules["max_drawdown_pct"] == "sin configurar (no activo)"
         assert status["max_open_positions"] == "no configurada"
         assert status["max_exposure_per_asset"] == "no configurada"
         assert status["max_total_exposure"] == "no configurada"
-        assert status["max_loss_pct"] == "no aplicable todavia"
-        assert status["max_drawdown_pct"] == "no aplicable todavia"
+        assert status["max_loss_pct"] == "no configurada"
+        assert status["max_drawdown_pct"] == "no configurada"
         assert status["derivados"] == "activa"
         assert rules["derivados"] == "prohibidos"
         assert rules["apalancamiento"] == "prohibido"
@@ -123,13 +123,12 @@ def test_rule_status_distinguishes_active_unconfigured_and_not_yet_applicable() 
     assert status["max_open_positions"] == "activa"
     assert status["max_exposure_per_asset"] == "activa"
     assert status["max_total_exposure"] == "activa"
-    # Aunque esten configurados, perdida y drawdown no protegen todavia:
-    # no hay calculos ni bloqueo reales.
-    assert status["max_loss_pct"] == "no aplicable todavia"
-    assert status["max_drawdown_pct"] == "no aplicable todavia"
+    # Configurados, ambos limites bloquean cuando hay datos de riesgo fiables.
+    assert status["max_loss_pct"] == "activa"
+    assert status["max_drawdown_pct"] == "activa"
     rules = policy.describe_rules()
-    assert "solo informativo" in rules["max_loss_pct"]
-    assert "solo informativo" in rules["max_drawdown_pct"]
+    assert "perdida realizada" in rules["max_loss_pct"]
+    assert "maximo nav" in rules["max_drawdown_pct"].casefold()
 
 
 def test_policy_rejects_disabling_prohibitions_and_invalid_limits() -> None:
@@ -399,11 +398,11 @@ def test_politica_paper_command_shows_rule_states(tmp_path: Path) -> None:
     casefolded = text.casefold()
     assert "politica de riesgo paper del modo core" in casefolded
     assert "no configurada" in casefolded
-    assert "no aplicable todavia" in casefolded
+    assert "no configurada" in casefolded
     assert "no hay porcentajes ni capital fijados por defecto" in casefolded
     assert "derivados [activa]: prohibidos" in casefolded
     assert "ventas en corto [activa]: prohibidas" in casefolded
-    assert "no protegen por si solos" in casefolded
+    assert "bloqueo por datos insuficientes" in casefolded
 
     service.set_mode(PaperMode.TACTICAL)
     tactical_text = chat.handle("politica paper")
@@ -427,10 +426,10 @@ def test_politica_paper_shows_configured_limits(tmp_path: Path) -> None:
     assert "maximo de posiciones abiertas [activa]: maximo 2 posiciones" in casefolded
     assert "exposicion maxima por activo [activa]: 25.00% del nav" in casefolded
     assert "exposicion total maxima [activa]: 50.00% del nav" in casefolded
-    assert "limite de perdida [no aplicable todavia]" in casefolded
-    assert "limite de drawdown [no aplicable todavia]" in casefolded
-    assert "10.00% del nav (solo informativo)" in casefolded
-    assert "20.00% del nav (solo informativo)" in casefolded
+    assert "limite de perdida [activa]" in casefolded
+    assert "limite de drawdown [activa]" in casefolded
+    assert "10.00% de perdida realizada acumulada sobre la base nav persistida" in casefolded
+    assert "20.00% de drawdown desde el maximo nav" in casefolded
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +721,14 @@ def test_chat_config_commands_update_active_mode_policy(tmp_path: Path) -> None:
     assert "exposicion total maxima [activa]: 80% del nav" in total.casefold()
     assert service.policy().max_total_exposure == Decimal("0.80")
 
+    loss = chat.handle("maximo perdida paper 5%")
+    assert "limite de perdida realizada [activa]: 5% del nav" in loss.casefold()
+    assert service.policy().max_loss_pct == Decimal("0.05")
+
+    drawdown = chat.handle("maximo drawdown paper 10%")
+    assert "limite de drawdown [activa]: 10% del nav" in drawdown.casefold()
+    assert service.policy().max_drawdown_pct == Decimal("0.10")
+
     service.set_mode(PaperMode.TACTICAL)
     assert service.policy().max_open_positions is None
     assert service.policy().max_exposure_per_asset is None
@@ -766,3 +773,131 @@ def test_configured_rule_blocks_order_before_proposal(tmp_path: Path) -> None:
     assert "no se ha creado ninguna propuesta" in casefolded
     assert chat.pending_proposal is None
     assert service.portfolio_summary()["cash"] == "10000.00"
+
+
+def test_realized_loss_limit_includes_entry_and_exit_commissions(tmp_path: Path) -> None:
+    service = _service(
+        tmp_path,
+        starting_cash=Decimal("1000"),
+        default_commission=Decimal("5"),
+    )
+    service.update_policy(max_loss_pct=Decimal("0.05"))
+    _register_tick(service, "AAPL", "100")
+    assert service.execute_confirmed_order(_market_order("buy", "AAPL", "5")).filled
+    _register_tick(service, "AAPL", "90")
+    assert service.execute_confirmed_order(
+        _market_order("sell", "AAPL", "5", side=Side.SELL)
+    ).filled
+
+    # P&L realizado = 450 - 5 - (500 + 5) = -60; perdida = 6% de 1000.
+    with pytest.raises(PolicyViolation, match="MAX_LOSS_PCT"):
+        service.execute_confirmed_order(_market_order("next", "AAPL", "1"))
+    assert service.portfolio_summary()["positions"] == {}
+    assert service.portfolio_summary()["cash"] == "940.00"
+
+
+def test_loss_limit_blocks_buys_but_allows_reducing_and_rejects_excess_sell(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, starting_cash=Decimal("1000"))
+    service.update_policy(max_loss_pct=Decimal("0.01"))
+    _register_tick(service, "AAPL", "100")
+    assert service.execute_confirmed_order(_market_order("buy", "AAPL", "5")).filled
+    _register_tick(service, "AAPL", "90")
+    assert service.execute_confirmed_order(
+        _market_order("loss", "AAPL", "2", side=Side.SELL)
+    ).filled
+
+    with pytest.raises(PolicyViolation, match="MAX_LOSS_PCT"):
+        service.execute_confirmed_order(_market_order("blocked-buy", "AAPL", "1"))
+
+    assert service.execute_confirmed_order(
+        _market_order("reduce", "AAPL", "2", side=Side.SELL)
+    ).filled
+    with pytest.raises(PolicyViolation, match="NO_SHORTS"):
+        service.execute_confirmed_order(
+            _market_order("over-sell", "AAPL", "2", side=Side.SELL)
+        )
+    assert service.portfolio_summary()["positions"]["AAPL"]["qty"] == "1"
+
+
+def test_drawdown_limit_blocks_after_synthetic_price_update(tmp_path: Path) -> None:
+    service = _service(tmp_path, starting_cash=Decimal("1000"))
+    service.update_policy(max_drawdown_pct=Decimal("0.05"))
+    _register_tick(service, "AAPL", "100")
+    assert service.execute_confirmed_order(_market_order("buy", "AAPL", "5")).filled
+    _register_tick(service, "AAPL", "80")
+
+    with pytest.raises(PolicyViolation, match="MAX_DRAWDOWN_PCT"):
+        service.execute_confirmed_order(_market_order("next", "AAPL", "1"))
+    assert service.portfolio_summary()["positions"]["AAPL"]["qty"] == "5"
+
+
+def test_pending_limit_sell_can_reduce_after_drawdown_limit(tmp_path: Path) -> None:
+    service = _service(tmp_path, starting_cash=Decimal("1000"))
+    service.update_policy(max_drawdown_pct=Decimal("0.05"))
+    _register_tick(service, "AAPL", "100")
+    assert service.execute_confirmed_order(_market_order("buy", "AAPL", "5")).filled
+    pending = PaperOrder(
+        symbol="AAPL", side=Side.SELL, qty=Decimal("2"), order_type=OrderType.LIMIT,
+        limit_price=Decimal("70"), order_id="limit-reduce",
+    )
+    assert service.execute_confirmed_order(pending).pending
+
+    _register_tick(service, "AAPL", "80")
+
+    decision = service.engine.decision_for("limit-reduce")
+    assert decision is not None and decision.status.value == "FILLED"
+    assert service.portfolio_summary()["positions"]["AAPL"]["qty"] == "3"
+
+
+def test_pending_limit_is_revalidated_when_drawdown_is_reached(tmp_path: Path) -> None:
+    service = _service(tmp_path, starting_cash=Decimal("1000"))
+    _register_tick(service, "AAPL", "100")
+    assert service.execute_confirmed_order(_market_order("buy", "AAPL", "5")).filled
+    pending = PaperOrder(
+        symbol="AAPL", side=Side.BUY, qty=Decimal("1"), order_type=OrderType.LIMIT,
+        limit_price=Decimal("90"), order_id="limit-risk",
+    )
+    assert service.execute_confirmed_order(pending).pending
+    service.update_policy(max_drawdown_pct=Decimal("0.05"))
+    before = service.portfolio_summary()
+    _register_tick(service, "AAPL", "80")
+
+    decision = service.engine.decision_for("limit-risk")
+    assert decision is not None and decision.status.value == "REJECTED"
+    assert "MAX_DRAWDOWN_PCT" in decision.reason
+    assert service.portfolio_summary()["cash"] == before["cash"]
+    assert service.portfolio_summary()["positions"]["AAPL"]["qty"] == before["positions"]["AAPL"]["qty"]
+
+
+def test_risk_state_is_persisted_and_modes_remain_isolated(tmp_path: Path) -> None:
+    store = PaperStore(tmp_path / "finance_paper")
+    service = PaperFinanceService(store, starting_cash=Decimal("1000"))
+    service.update_policy(max_drawdown_pct=Decimal("0.05"))
+    _register_tick(service, "AAPL", "100")
+    service.execute_confirmed_order(_market_order("buy", "AAPL", "5"))
+    _register_tick(service, "AAPL", "80")
+    service.allocate_capital(PaperMode.TACTICAL, Decimal("100"))
+
+    restored = PaperFinanceService(store)
+    with pytest.raises(PolicyViolation, match="MAX_DRAWDOWN_PCT"):
+        restored.execute_confirmed_order(_market_order("blocked", "AAPL", "1"))
+    restored.set_mode(PaperMode.TACTICAL)
+    _register_tick(restored, "MSFT", "10")
+    assert restored.execute_confirmed_order(_market_order("tactical", "MSFT", "1")).filled
+
+
+def test_configured_limit_on_old_snapshot_fails_closed_when_base_is_missing(
+    tmp_path: Path,
+) -> None:
+    store = PaperStore(tmp_path / "finance_paper")
+    first = _service(tmp_path)
+    payload = store.load()
+    for mode_data in payload["modes"].values():
+        mode_data.pop("risk", None)
+    store.save(payload)
+    restored = PaperFinanceService(store)
+    restored.update_policy(max_loss_pct=Decimal("0.05"))
+    with pytest.raises(PolicyViolation, match="RISK_DATA_UNAVAILABLE"):
+        restored.execute_confirmed_order(_market_order("missing-risk", "AAPL", "1"))
