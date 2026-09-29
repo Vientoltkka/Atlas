@@ -257,6 +257,8 @@ class PaperFinanceChat:
             return self._handle_capital(prompt)
         if intent == "config":
             return self._handle_policy_config(prompt)
+        if intent == "report":
+            return self._handle_paper_report(prompt)
         if intent == "price":
             return self._handle_declared_price(prompt)
         if intent == "import":
@@ -757,6 +759,149 @@ class PaperFinanceChat:
             f"de ningun mercado real. {PAPER_LABEL}"
         )
 
+    def _handle_paper_report(self, prompt: str) -> str:
+        match = _REPORT_PATTERN.search(prompt)
+        symbol = match.group("symbol").upper() if match else ""
+        now = utc_now()
+        defaults = self._service.execution_defaults()
+        policy = self._service.policy().describe_rules()
+        lines = [
+            f"{PAPER_LABEL} Informe paper de {symbol} (solo lectura):",
+            "",
+            f"- Activo solicitado: {symbol}",
+            f"- Hora de consulta: {now.isoformat()}",
+        ]
+        provider_error = None
+        try:
+            client = self._resolve_market_client()
+        except AlphaVantageError as error:
+            client = None
+            provider_error = _IMPORT_ERROR_TEXTS.get(
+                error.code,
+                "Error resolviendo el proveedor de mercado. No se puede verificar "
+                "el precio.",
+            )
+        except Exception:
+            # A provider construction failure must not suppress the read-only
+            # report sections that explain costs, risks, and user responsibility.
+            client = None
+            provider_error = (
+                "Error resolviendo el proveedor de mercado. No se puede verificar "
+                "el precio."
+            )
+        if client is None:
+            if provider_error is None:
+                lines.extend(
+                    [
+                        "- Precio: NO DISPONIBLE; no hay proveedor de mercado "
+                        "configurado en esta instalacion.",
+                        "- Moneda: NO VERIFICADA.",
+                        "- Fuente y hora del dato: NO DISPONIBLES; no se ha "
+                        "consultado ningun proveedor.",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"- Precio: NO VERIFICADO. {provider_error}",
+                        "- Moneda: NO VERIFICADA.",
+                        "- Fuente y hora del dato: NO VERIFICADAS.",
+                    ]
+                )
+        else:
+            series = None
+            provider_error = None
+            try:
+                series = client.daily_series(symbol)
+            except AlphaVantageError as error:
+                provider_error = _IMPORT_ERROR_TEXTS.get(
+                    error.code,
+                    "Error consultando Alpha Vantage. No se puede verificar el precio.",
+                )
+            except Exception:
+                provider_error = (
+                    "Error consultando el proveedor de mercado. No se puede "
+                    "verificar el precio."
+                )
+            if provider_error is not None:
+                lines.extend(
+                    [
+                        f"- Precio: NO VERIFICADO. {provider_error}",
+                        "- Moneda: NO VERIFICADA.",
+                        "- Fuente y hora del dato: NO VERIFICADAS.",
+                    ]
+                )
+            else:
+                assert series is not None
+                last = series.last_bar
+                if last is None or last.close <= 0:
+                    lines.extend(
+                        [
+                            "- Precio: NO VERIFICADO; el proveedor no devolvio "
+                            "un cierre diario valido.",
+                            "- Moneda: NO VERIFICADA.",
+                            f"- Fuente: {IMPORT_SOURCE}; sin precio utilizable.",
+                        ]
+                    )
+                else:
+                    currency = "NO PROPORCIONADA por la consulta de serie diaria"
+                    try:
+                        matches = client.search_symbol(symbol)
+                    except AlphaVantageError:
+                        matches = ()
+                    except Exception:
+                        matches = ()
+                    exact = next((item for item in matches if item.symbol == symbol), None)
+                    if exact is not None and exact.currency:
+                        currency = exact.currency
+                    age = now.date() - last.day
+                    freshness = (
+                        "DESACTUALIZADO para esta consulta"
+                        if age.days > 3
+                        else "retrasado; no es tiempo real"
+                    )
+                    refreshed = series.provider_last_refreshed or "no proporcionada"
+                    timezone = series.provider_timezone or "zona horaria no proporcionada"
+                    lines.extend(
+                        [
+                            f"- Precio: {_fmt_price(last.close)}",
+                            f"- Moneda: {currency}",
+                            f"- Fuente: {IMPORT_SOURCE} (respuesta validada por "
+                            f"el adaptador)",
+                            f"- Hora/fecha del proveedor: {refreshed} ({timezone})",
+                            f"- Estado del dato: {freshness}.",
+                        ]
+                    )
+        lines.extend(
+            [
+                "",
+                "COSTES Y SUPUESTOS",
+                f"- Comision paper configurada: {_fmt_money(defaults['commission'])}.",
+                f"- Slippage supuesto: {defaults['slippage_bps']} bps; spread: "
+                f"{defaults['spread_bps']} bps.",
+                f"- Fee efectivo configurado: {defaults['fee_bps']} bps "
+                f"({'maker' if defaults['is_maker'] else 'taker'}; el contrato "
+                "publico no desglosa otros fees por lado).",
+                "- Supuesto: estos costes son del motor paper y no representan "
+                "costes reales, impuestos, liquidez ni ejecucion garantizada.",
+                "",
+                "RIESGOS Y LIMITES",
+                f"- Politica activa: {policy['modo']}; derivados {policy['derivados']}, "
+                f"apalancamiento {policy['apalancamiento']}, ventas en corto "
+                f"{policy['cortos']}.",
+                "- Un cierre diario puede estar retrasado y no equivale a una "
+                "cotizacion ejecutable; si falta precio o moneda, no se han "
+                "verificado.",
+                "- Este informe no promete rentabilidad, no es asesoramiento "
+                "personalizado y no emite ni prepara ordenes.",
+                "- La decision de cualquier uso posterior corresponde "
+                "exclusivamente al usuario.",
+                "",
+                f"No se ha modificado la cartera paper. {PAPER_LABEL}",
+            ]
+        )
+        return "\n".join(lines)
+
     def _handle_market_import(self, prompt: str) -> str:
         match = _match_import(prompt)
         if match is None:
@@ -1058,6 +1203,8 @@ def _classify_single(prompt: str) -> str | None:
     normalized = _normalize(prompt)
     if not any(marker in normalized for marker in _PAPER_MARKERS):
         return None
+    if _REPORT_PATTERN.search(prompt) is not None:
+        return "report"
     if _CAPITAL_PATTERN.search(normalized) is not None:
         return "capital"
     if _CONFIG_PATTERN.search(normalized) is not None:
@@ -1215,6 +1362,12 @@ _PRICE_PATTERN = re.compile(
     r"\b(?:precio|tick)\b(?:\s+paper)?\s*(?:de\s+|para\s+|del\s+|:)?\s*"
     r"(?P<symbol>[a-z][a-z0-9.\-]{0,9})\s*(?:a|en|de|=|:)?\s*"
     r"(?P<price>\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+
+_REPORT_PATTERN = re.compile(
+    r"\binforme\s+paper\b\s*(?:de\s+|para\s+)?"
+    r"(?P<symbol>[a-z][a-z0-9.\-]{0,11})\b",
     re.IGNORECASE,
 )
 
